@@ -112,6 +112,29 @@ After the initial snapshot, the server stays up to date by watching the node's `
 |------|---------|-------------|
 | `--metrics-port` | `9090` | Prometheus metrics port (0 to disable) |
 | `--bbo-only` | `false` | Lightweight BBO-only mode (~100MB RAM instead of ~2-3GB). Disables L2/L4/Trades subscriptions |
+| `--l2book-heartbeat-ms` | `0` | If > 0, resend the last `l2Book` payload for each active subscription every N ms when nothing has changed. See [Heartbeats](#heartbeats) |
+| `--bbo-heartbeat-ms` | `0` | If > 0, resend the last `bbo` payload for each active subscription every N ms when nothing has changed. See [Heartbeats](#heartbeats) |
+
+### Heartbeats
+
+By default, `l2Book` and `bbo` channels are **change-only**: a snapshot is only sent when the underlying book state actually moves. On quiet markets (low-liquidity coins like `Frudo`) this can produce zero messages for minutes at a time, which breaks downstream clients written against the official Hyperliquid API — that API pushes a snapshot every block as an implicit heartbeat, so consumers often treat silence as a dead stream and reconnect.
+
+The `--l2book-heartbeat-ms` and `--bbo-heartbeat-ms` flags add an opt-in periodic resend:
+
+- When set to `0` (default), the original change-only behavior is preserved. No new messages compared to previous versions.
+- When set to e.g. `1000`, every active subscription receives a cached payload at most every 1000 ms even if nothing changed. The `time` field is refreshed to the current server time on every heartbeat so clients can distinguish "fresh-but-unchanged" from "stale".
+
+Each subscription tracks its own `last_sent` timestamp, so a real change resets the heartbeat — you never get a real update and a heartbeat back-to-back. Per-subscription accounting also means many quiet coins do not produce a synchronized burst.
+
+Pick a value that matches your downstream stall timer, typically `1000` ms for clients ported from the official API.
+
+```bash
+# Behave like the official HL l2Book stream
+./target/release/orderbook_server \
+    --l2book-heartbeat-ms 1000 \
+    --bbo-heartbeat-ms 1000 \
+    --data-dir /path/to/data
+```
 
 ## Recommended Configurations
 
