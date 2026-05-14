@@ -8,6 +8,12 @@ use std::collections::HashSet;
 
 const MAX_LEVELS: usize = 100;
 pub(crate) const DEFAULT_LEVELS: usize = 20;
+/// Hard cap on subscriptions per WS connection. The broadcast hot paths iterate
+/// every subscription on every event, and L4Book subscribes also trigger a
+/// listener-lock-held snapshot computation - one client with thousands of subs
+/// can stall every other client. 256 is comfortably above any legitimate use
+/// (every market × every channel × every L2 param-tuple) while bounding the worst case.
+pub(crate) const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 256;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "method")]
@@ -146,13 +152,18 @@ pub(crate) struct SubscriptionManager {
 }
 
 impl SubscriptionManager {
-    pub(crate) fn subscribe(&mut self, sub: Subscription) -> bool {
+    /// Tries to add the subscription. Returns `Err` once the per-connection cap
+    /// is reached, distinguishing "already subscribed" (Ok(false)) from "limit hit".
+    pub(crate) fn subscribe(&mut self, sub: Subscription) -> Result<bool, &'static str> {
+        if self.subscriptions.len() >= MAX_SUBSCRIPTIONS_PER_CONNECTION && !self.subscriptions.contains(&sub) {
+            return Err("subscription limit reached for this connection");
+        }
         let label = sub.type_label().to_owned();
         let inserted = self.subscriptions.insert(sub);
         if inserted {
             WS_SUBSCRIPTIONS_ACTIVE.with_label_values(&[&label]).inc();
         }
-        inserted
+        Ok(inserted)
     }
 
     pub(crate) fn unsubscribe(&mut self, sub: Subscription) -> bool {
@@ -246,6 +257,257 @@ mod test {
         if let ClientMessage::Subscribe { subscription: Subscription::BookDiffs { coin } } = msg {
             assert_eq!(coin, "BTC");
         }
+    }
+
+    // ==================== Subscription Validation Tests ====================
+
+    fn universe() -> std::collections::HashSet<String> {
+        ["BTC", "ETH", "SOL", "@1", "PURR/USDC", "flx:COIN"].iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_validate_trades_valid_coin() {
+        assert!(Subscription::Trades { coin: "BTC".to_string() }.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_trades_invalid_coin() {
+        assert!(!Subscription::Trades { coin: "FAKE".to_string() }.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_bbo_valid() {
+        assert!(Subscription::Bbo { coin: "ETH".to_string() }.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_bbo_invalid_coin() {
+        assert!(!Subscription::Bbo { coin: "NOPE".to_string() }.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_book_diffs_valid() {
+        assert!(Subscription::BookDiffs { coin: "BTC".to_string() }.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_book_diffs_invalid_coin() {
+        assert!(!Subscription::BookDiffs { coin: "FAKE".to_string() }.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_l4book_valid() {
+        assert!(Subscription::L4Book { coin: "SOL".to_string() }.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_l2book_defaults_valid() {
+        let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: None, n_levels: None, mantissa: None };
+        assert!(sub.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_l2book_n_levels_at_default_rejected() {
+        // Setting n_levels to DEFAULT_LEVELS (20) explicitly is rejected
+        let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: None, n_levels: Some(20), mantissa: None };
+        assert!(!sub.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_l2book_n_levels_over_max() {
+        let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: None, n_levels: Some(101), mantissa: None };
+        assert!(!sub.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_l2book_n_levels_at_max() {
+        let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: None, n_levels: Some(100), mantissa: None };
+        assert!(sub.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_l2book_sig_figs_valid_range() {
+        for sf in 2..=5 {
+            let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: Some(sf), n_levels: None, mantissa: None };
+            assert!(sub.validate(&universe()), "sig_figs={sf} should be valid");
+        }
+    }
+
+    #[test]
+    fn test_validate_l2book_sig_figs_out_of_range() {
+        for sf in [0, 1, 6, 10] {
+            let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: Some(sf), n_levels: None, mantissa: None };
+            assert!(!sub.validate(&universe()), "sig_figs={sf} should be invalid");
+        }
+    }
+
+    #[test]
+    fn test_validate_l2book_mantissa_without_sig_figs() {
+        let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: None, n_levels: None, mantissa: Some(5) };
+        assert!(!sub.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_l2book_mantissa_valid_with_sig_figs_5() {
+        for m in [2, 5] {
+            let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: Some(5), n_levels: None, mantissa: Some(m) };
+            assert!(sub.validate(&universe()), "mantissa={m} with sig_figs=5 should be valid");
+        }
+    }
+
+    #[test]
+    fn test_validate_l2book_mantissa_invalid_value() {
+        let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: Some(5), n_levels: None, mantissa: Some(3) };
+        assert!(!sub.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_l2book_mantissa_invalid_with_low_sig_figs() {
+        let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: Some(3), n_levels: None, mantissa: Some(5) };
+        assert!(!sub.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_order_updates_valid_address() {
+        let sub = Subscription::OrderUpdates { user: "0xABcDEF1234567890abcdef1234567890AbCdEf12".to_string() };
+        assert!(sub.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_order_updates_too_short() {
+        let sub = Subscription::OrderUpdates { user: "0xABC".to_string() };
+        assert!(!sub.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_order_updates_no_prefix() {
+        let sub = Subscription::OrderUpdates { user: "ABcDEF1234567890abcdef1234567890AbCdEf1234".to_string() };
+        assert!(!sub.validate(&universe()));
+    }
+
+    #[test]
+    fn test_validate_order_updates_invalid_hex() {
+        let sub = Subscription::OrderUpdates { user: "0xGGGGGG1234567890abcdef1234567890AbCdEf12".to_string() };
+        assert!(!sub.validate(&universe()));
+    }
+
+    // ==================== type_label Tests ====================
+
+    #[test]
+    fn test_type_labels() {
+        assert_eq!(Subscription::Bbo { coin: "".to_string() }.type_label(), "bbo");
+        assert_eq!(Subscription::L2Book { coin: "".to_string(), n_sig_figs: None, n_levels: None, mantissa: None }.type_label(), "l2Book");
+        assert_eq!(Subscription::L4Book { coin: "".to_string() }.type_label(), "l4Book");
+        assert_eq!(Subscription::Trades { coin: "".to_string() }.type_label(), "trades");
+        assert_eq!(Subscription::OrderUpdates { user: "".to_string() }.type_label(), "orderUpdates");
+        assert_eq!(Subscription::BookDiffs { coin: "".to_string() }.type_label(), "bookDiffs");
+    }
+
+    // ==================== SubscriptionManager Tests ====================
+
+    #[test]
+    fn test_subscribe_returns_true_on_new() {
+        let mut mgr = super::SubscriptionManager::default();
+        assert_eq!(mgr.subscribe(Subscription::Bbo { coin: "BTC".to_string() }), Ok(true));
+    }
+
+    #[test]
+    fn test_subscribe_returns_false_on_duplicate() {
+        let mut mgr = super::SubscriptionManager::default();
+        let _ = mgr.subscribe(Subscription::Bbo { coin: "BTC".to_string() });
+        assert_eq!(mgr.subscribe(Subscription::Bbo { coin: "BTC".to_string() }), Ok(false));
+    }
+
+    #[test]
+    fn test_unsubscribe_returns_true_when_exists() {
+        let mut mgr = super::SubscriptionManager::default();
+        let _ = mgr.subscribe(Subscription::Trades { coin: "ETH".to_string() });
+        assert!(mgr.unsubscribe(Subscription::Trades { coin: "ETH".to_string() }));
+    }
+
+    #[test]
+    fn test_unsubscribe_returns_false_when_not_exists() {
+        let mut mgr = super::SubscriptionManager::default();
+        assert!(!mgr.unsubscribe(Subscription::Trades { coin: "ETH".to_string() }));
+    }
+
+    #[test]
+    fn test_subscriptions_list() {
+        let mut mgr = super::SubscriptionManager::default();
+        let _ = mgr.subscribe(Subscription::Bbo { coin: "BTC".to_string() });
+        let _ = mgr.subscribe(Subscription::Trades { coin: "ETH".to_string() });
+        assert_eq!(mgr.subscriptions().len(), 2);
+    }
+
+    #[test]
+    fn test_subscribe_enforces_per_connection_cap() {
+        // C4 regression test: fill the manager up to the cap and verify the next
+        // distinct subscription is rejected, while re-subscribing to something already
+        // present succeeds (idempotent, would otherwise lock people out of resubs).
+        let mut mgr = super::SubscriptionManager::default();
+        for i in 0..super::MAX_SUBSCRIPTIONS_PER_CONNECTION {
+            let res = mgr.subscribe(Subscription::Trades { coin: format!("COIN{i}") });
+            assert_eq!(res, Ok(true), "subscribe #{i} should succeed");
+        }
+        // One more distinct sub - rejected.
+        let res = mgr.subscribe(Subscription::Trades { coin: "OVERFLOW".to_string() });
+        assert!(res.is_err());
+        // Re-subscribing to one we already have is OK (returns Ok(false) = no-op).
+        let res = mgr.subscribe(Subscription::Trades { coin: "COIN0".to_string() });
+        assert_eq!(res, Ok(false));
+    }
+
+    // ==================== ServerResponse Serde Tests ====================
+
+    #[test]
+    fn test_server_response_pong_serialization() {
+        let json = serde_json::to_string(&super::ServerResponse::Pong).unwrap();
+        assert_eq!(json, r#"{"channel":"pong"}"#);
+    }
+
+    #[test]
+    fn test_server_response_error_serialization() {
+        let json = serde_json::to_string(&super::ServerResponse::Error("test error".to_string())).unwrap();
+        assert!(json.contains("test error"));
+        assert!(json.contains("error"));
+    }
+
+    #[test]
+    fn test_server_response_bbo_serialization() {
+        let bbo = crate::types::Bbo {
+            coin: "BTC".to_string(),
+            time: 1000,
+            bid: Some(crate::types::Level::new("100".to_string(), "1.5".to_string(), 2)),
+            ask: None,
+        };
+        let json = serde_json::to_string(&super::ServerResponse::Bbo(bbo)).unwrap();
+        assert!(json.contains("\"channel\":\"bbo\""));
+        assert!(json.contains("BTC"));
+    }
+
+    // ==================== ClientMessage Serde Tests ====================
+
+    #[test]
+    fn test_all_subscription_types_deserialize() {
+        let cases = [
+            (r#"{"method":"subscribe","subscription":{"type":"trades","coin":"BTC"}}"#, "trades"),
+            (r#"{"method":"subscribe","subscription":{"type":"bbo","coin":"BTC"}}"#, "bbo"),
+            (r#"{"method":"subscribe","subscription":{"type":"l4Book","coin":"BTC"}}"#, "l4Book"),
+            (r#"{"method":"subscribe","subscription":{"type":"bookDiffs","coin":"BTC"}}"#, "bookDiffs"),
+            (r#"{"method":"subscribe","subscription":{"type":"l2Book","coin":"BTC"}}"#, "l2Book"),
+            (r#"{"method":"subscribe","subscription":{"type":"orderUpdates","user":"0xABcDEF1234567890abcdef1234567890AbCdEf12"}}"#, "orderUpdates"),
+        ];
+        for (json, label) in cases {
+            let msg: ClientMessage = serde_json::from_str(json).expect(&format!("failed to parse {label}"));
+            assert!(matches!(msg, ClientMessage::Subscribe { .. }), "expected Subscribe for {label}");
+        }
+    }
+
+    #[test]
+    fn test_unsubscribe_deserialization() {
+        let json = r#"{"method":"unsubscribe","subscription":{"type":"trades","coin":"BTC"}}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg, ClientMessage::Unsubscribe { .. }));
     }
 
     #[test]

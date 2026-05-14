@@ -137,3 +137,176 @@ pub(super) fn build_l2_level(
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::order_book::{OrderBook, types::InnerOrder};
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct TestOrder {
+        oid: u64,
+        side: Side,
+        sz: u64,
+        limit_px: u64,
+    }
+
+    impl InnerOrder for TestOrder {
+        fn oid(&self) -> crate::order_book::Oid { crate::order_book::Oid::new(self.oid) }
+        fn side(&self) -> Side { self.side }
+        fn limit_px(&self) -> Px { Px::new(self.limit_px) }
+        fn sz(&self) -> Sz { Sz::new(self.sz) }
+        fn decrement_sz(&mut self, dec: Sz) { self.sz = self.sz.saturating_sub(dec.value()); }
+        fn fill(&mut self, maker: &mut Self) -> Sz {
+            let m = self.sz().min(maker.sz());
+            self.decrement_sz(m);
+            maker.decrement_sz(m);
+            m
+        }
+        fn modify_sz(&mut self, sz: Sz) { self.sz = sz.value(); }
+        fn convert_trigger(&mut self, _: u64) {}
+        fn coin(&self) -> crate::order_book::Coin { crate::order_book::Coin::new("") }
+    }
+
+    fn make_book(bids: &[(u64, u64, u64)], asks: &[(u64, u64, u64)]) -> OrderBook<TestOrder> {
+        let mut book = OrderBook::new();
+        let mut oid = 0u64;
+        for &(px, sz, count) in bids {
+            for _ in 0..count {
+                book.add_order(TestOrder { oid, side: Side::Bid, sz, limit_px: px });
+                oid += 1;
+            }
+        }
+        for &(px, sz, count) in asks {
+            for _ in 0..count {
+                book.add_order(TestOrder { oid, side: Side::Ask, sz, limit_px: px });
+                oid += 1;
+            }
+        }
+        book
+    }
+
+    fn to_levels(snapshot: Snapshot<InnerLevel>) -> [Vec<(u64, u64, usize)>; 2] {
+        snapshot.0.map(|levels| levels.into_iter().map(|l| (l.px.value(), l.sz.value(), l.n)).collect())
+    }
+
+    #[test]
+    fn test_l2_no_aggregation() {
+        let book = make_book(
+            &[(500, 100, 2), (400, 200, 1)],
+            &[(600, 150, 1), (700, 300, 1)],
+        );
+        let snapshot = book.to_l2_snapshot(None, None, None);
+        let [bids, asks] = to_levels(snapshot);
+        assert_eq!(bids, vec![(500, 200, 2), (400, 200, 1)]);
+        assert_eq!(asks, vec![(600, 150, 1), (700, 300, 1)]);
+    }
+
+    #[test]
+    fn test_l2_n_levels_truncation() {
+        let book = make_book(
+            &[(500, 100, 1), (400, 100, 1), (300, 100, 1)],
+            &[(600, 100, 1), (700, 100, 1), (800, 100, 1)],
+        );
+        let snapshot = book.to_l2_snapshot(Some(2), None, None);
+        let [bids, asks] = to_levels(snapshot);
+        assert_eq!(bids.len(), 2);
+        assert_eq!(asks.len(), 2);
+    }
+
+    #[test]
+    fn test_l2_zero_levels() {
+        let book = make_book(&[(500, 100, 1)], &[(600, 100, 1)]);
+        let snapshot = book.to_l2_snapshot(Some(0), None, None);
+        let [bids, asks] = to_levels(snapshot);
+        assert!(bids.is_empty());
+        assert!(asks.is_empty());
+    }
+
+    #[test]
+    fn test_l2_sig_figs_aggregation() {
+        let book = make_book(
+            &[
+                (340_100_000_000, 100, 1), // 3401.0
+                (340_500_000_000, 100, 1), // 3405.0
+            ],
+            &[
+                (341_000_000_000, 100, 1), // 3410.0
+                (342_000_000_000, 100, 1), // 3420.0
+            ],
+        );
+        let snapshot = book.to_l2_snapshot(None, Some(2), None);
+        let [bids, asks] = to_levels(snapshot);
+        // With 2 sig figs, bids at 3401 and 3405 both bucket to 3400
+        assert_eq!(bids.len(), 1);
+        assert_eq!(bids[0].1, 200);
+        assert_eq!(bids[0].2, 2);
+    }
+
+    #[test]
+    fn test_bucket_ask_rounds_up() {
+        let px = Px::new(345_000_000_000);
+        let bucketed = bucket(px, Side::Ask, Some(2), None);
+        assert_eq!(bucketed.value(), 350_000_000_000);
+    }
+
+    #[test]
+    fn test_bucket_bid_rounds_down() {
+        let px = Px::new(345_000_000_000);
+        let bucketed = bucket(px, Side::Bid, Some(2), None);
+        assert_eq!(bucketed.value(), 340_000_000_000);
+    }
+
+    #[test]
+    fn test_bucket_no_sig_figs_passthrough() {
+        let px = Px::new(12345);
+        assert_eq!(bucket(px, Side::Ask, None, None).value(), 12345);
+    }
+
+    #[test]
+    fn test_l2_from_l2_matches_l2_from_l4() {
+        let book = make_book(
+            &[(500, 100, 3), (490, 200, 2), (480, 50, 1)],
+            &[(510, 100, 2), (520, 200, 1), (530, 50, 1)],
+        );
+        let raw_l2 = book.to_l2_snapshot(None, None, None);
+        let from_l4 = book.to_l2_snapshot(Some(2), Some(2), None);
+        let from_l2 = raw_l2.to_l2_snapshot(Some(2), Some(2), None);
+        assert_eq!(to_levels(from_l4), to_levels(from_l2));
+    }
+
+    #[test]
+    fn test_export_inner_snapshot_converts_to_level() {
+        let book = make_book(&[(500, 100, 1)], &[(600, 200, 1)]);
+        let snapshot = book.to_l2_snapshot(None, None, None);
+        let exported = snapshot.export_inner_snapshot();
+        assert_eq!(exported[0].len(), 1);
+        assert_eq!(exported[1].len(), 1);
+        assert_eq!(exported[0][0].px(), Px::new(500).to_str());
+        assert_eq!(exported[1][0].sz(), Sz::new(200).to_str());
+    }
+
+    #[test]
+    fn test_l2_snapshot_performance() {
+        let mut bids = Vec::new();
+        let mut asks = Vec::new();
+        for i in 0..500u64 {
+            bids.push((1000 + i, 100, 1));
+            asks.push((2000 + i, 100, 1));
+        }
+        let book = make_book(&bids, &asks);
+
+        let start = std::time::Instant::now();
+        let iterations = 1000u32;
+        for _ in 0..iterations {
+            let _ = book.to_l2_snapshot(Some(20), Some(3), None);
+        }
+        let elapsed = start.elapsed();
+        let per_call = elapsed / iterations;
+
+        eprintln!(
+            "[PERF] L2 snapshot (500 levels, 20 output, sig_figs=3): {iterations} calls in {:?} ({:?}/call)",
+            elapsed, per_call
+        );
+    }
+}

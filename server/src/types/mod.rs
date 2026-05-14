@@ -43,7 +43,7 @@ impl Level {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct L2Book {
     coin: String,
@@ -64,7 +64,7 @@ pub(crate) enum L4Book {
 }
 
 /// Best Bid/Offer - top of book only
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Bbo {
     pub coin: String,
     pub time: u64,
@@ -82,6 +82,10 @@ impl L2Book {
         n_levels: Option<usize>,
     ) -> Self {
         Self { coin, time, n_sig_figs, mantissa, n_levels, levels: snapshot }
+    }
+
+    pub(crate) const fn set_time(&mut self, time: u64) {
+        self.time = time;
     }
 }
 

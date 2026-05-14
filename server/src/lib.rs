@@ -55,4 +55,11 @@ pub struct ServerConfig {
     /// BBO-only mode: lightweight mode that only tracks best bid/ask per coin
     /// Disables L2/L4/Trades subscriptions but uses ~100MB RAM instead of 2-3GB
     pub bbo_only: bool,
+    /// Resend the last l2Book payload every N ms when nothing has changed.
+    /// 0 = disabled (default). Provides a heartbeat for low-liquidity coins
+    /// whose snapshot hash rarely changes, matching the official HL API behavior.
+    pub l2book_heartbeat_ms: u64,
+    /// Resend the last bbo payload every N ms when nothing has changed.
+    /// 0 = disabled (default).
+    pub bbo_heartbeat_ms: u64,
 }

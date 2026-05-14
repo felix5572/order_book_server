@@ -15,12 +15,13 @@ use crate::{
         subscription::{ClientMessage, DEFAULT_LEVELS, OrderUpdate, ServerResponse, Subscription, SubscriptionManager},
     },
 };
-use axum::{Router, response::IntoResponse, routing::get};
+use axum::{Router, routing::get};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::{Duration, Instant},
 };
 use tokio::select;
 use tokio::{
@@ -33,6 +34,46 @@ use tokio::{
 use yawc::{FrameView, OpCode, WebSocket};
 
 use crate::ServerConfig;
+
+/// Per-(coin, params) cached L2 broadcast. `hash` is used for change-based dedup;
+/// `payload` is resent verbatim (with refreshed `time`) when the heartbeat fires.
+struct L2Entry {
+    hash: u64,
+    last_sent: Instant,
+    payload: L2Book,
+}
+
+/// Per-coin cached BBO broadcast. `tuple` is used for change-based dedup;
+/// `payload` is resent verbatim (with refreshed `time`) when the heartbeat fires.
+struct BboEntry {
+    tuple: (String, String, String, String),
+    last_sent: Instant,
+    payload: Bbo,
+}
+
+fn l2_cache_key(coin: &str, n_sig_figs: Option<u32>, mantissa: Option<u64>) -> String {
+    format!("{}:{}:{}", coin, n_sig_figs.unwrap_or(0), mantissa.unwrap_or(0))
+}
+
+/// Build a tokio interval that fires often enough to drive both heartbeats with
+/// at most half the configured period of drift. Returns None when both heartbeats are disabled.
+fn build_heartbeat_ticker(l2book_heartbeat_ms: u64, bbo_heartbeat_ms: u64) -> Option<tokio::time::Interval> {
+    let enabled = [l2book_heartbeat_ms, bbo_heartbeat_ms].into_iter().filter(|&ms| ms > 0).min()?;
+    let tick_ms = (enabled / 2).max(50).min(500);
+    let mut interval = tokio::time::interval(Duration::from_millis(tick_ms));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    Some(interval)
+}
+
+/// Await the next heartbeat tick, or pend forever when no heartbeat is configured.
+async fn heartbeat_tick(ticker: &mut Option<tokio::time::Interval>) {
+    match ticker {
+        Some(t) => {
+            t.tick().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
 
 pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     // Broadcast channel buffer: larger = less "channel lagged" errors on slower machines
@@ -66,7 +107,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     let websocket_opts =
         yawc::Options::default().with_compression_level(yawc::CompressionLevel::new(compression_level));
 
-    let start_time = std::time::Instant::now();
+    let start_time = Instant::now();
     let listener_for_health = listener.clone();
 
     let app: Router = Router::new()
@@ -75,6 +116,8 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
             get({
                 let internal_message_tx = internal_message_tx.clone();
                 let bbo_only = config.bbo_only;
+                let l2book_heartbeat_ms = config.l2book_heartbeat_ms;
+                let bbo_heartbeat_ms = config.bbo_heartbeat_ms;
                 let listener = listener.clone();
                 move |ws_upgrade| async move {
                     ws_handler(
@@ -83,6 +126,8 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                         listener.clone(),
                         market_filter,
                         bbo_only,
+                        l2book_heartbeat_ms,
+                        bbo_heartbeat_ms,
                         websocket_opts,
                     )
                 }
@@ -121,15 +166,27 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ws_handler(
     incoming: yawc::IncomingUpgrade,
     internal_message_tx: Sender<Arc<InternalMessage>>,
     listener: Arc<Mutex<OrderBookListener>>,
     market_filter: (bool, bool, bool), // (include_perps, include_spot, include_hip3)
     bbo_only: bool,
+    l2book_heartbeat_ms: u64,
+    bbo_heartbeat_ms: u64,
     websocket_opts: yawc::Options,
-) -> impl IntoResponse {
-    let (resp, fut) = incoming.upgrade(websocket_opts).unwrap();
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // Reject malformed WS handshakes cleanly. The previous `.unwrap()` would panic
+    // inside the axum handler task and dump a backtrace per request.
+    let (resp, fut) = match incoming.upgrade(websocket_opts) {
+        Ok(pair) => pair,
+        Err(err) => {
+            log::warn!("rejecting malformed websocket upgrade: {err}");
+            return (axum::http::StatusCode::BAD_REQUEST, "invalid websocket upgrade").into_response();
+        }
+    };
     tokio::spawn(async move {
         let ws = match fut.await {
             Ok(ok) => ok,
@@ -139,18 +196,22 @@ fn ws_handler(
             }
         };
 
-        handle_socket(ws, internal_message_tx, listener, market_filter, bbo_only).await
+        handle_socket(ws, internal_message_tx, listener, market_filter, bbo_only, l2book_heartbeat_ms, bbo_heartbeat_ms)
+            .await
     });
 
-    resp
+    resp.into_response()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_socket(
     mut socket: WebSocket,
     internal_message_tx: Sender<Arc<InternalMessage>>,
     listener: Arc<Mutex<OrderBookListener>>,
     market_filter: (bool, bool, bool), // (include_perps, include_spot, include_hip3)
     bbo_only: bool,
+    l2book_heartbeat_ms: u64,
+    bbo_heartbeat_ms: u64,
 ) {
     // Track connection metrics
     WS_CONNECTIONS_ACTIVE.inc();
@@ -171,16 +232,27 @@ async fn handle_socket(
     let is_ready = listener.lock().await.is_ready();
     let mut manager = SubscriptionManager::default();
     let mut universe = listener.lock().await.universe().into_iter().map(|c| c.value()).collect();
-    // Track last BBO per coin to avoid sending duplicates (bid_px, bid_sz, ask_px, ask_sz)
-    let mut last_bbo: HashMap<String, (String, String, String, String)> = HashMap::new();
-    // Track last L2 hash per (coin, params) to avoid sending duplicates
-    let mut last_l2_hash: HashMap<String, u64> = HashMap::new();
+    // Per-(coin,params) cache for L2 dedup + heartbeat resend (key = "<coin>:<n_sig_figs>:<mantissa>")
+    let mut last_l2: HashMap<String, L2Entry> = HashMap::new();
+    // Per-coin cache for BBO dedup + heartbeat resend
+    let mut last_bbo: HashMap<String, BboEntry> = HashMap::new();
     if !is_ready {
         let msg = ServerResponse::Error("Order book not ready for streaming (waiting for snapshot)".to_string());
-        send_socket_message(&mut socket, msg).await;
+        let _ = send_socket_message(&mut socket, msg).await;
         return;
     }
-    loop {
+
+    // Optional heartbeat ticker. We tick at min(enabled_heartbeats)/2 (clamped to [50, 500] ms)
+    // so each subscription's last-sent timestamp can drift at most half a heartbeat from the configured value.
+    let mut heartbeat_ticker = build_heartbeat_ticker(l2book_heartbeat_ms, bbo_heartbeat_ms);
+    let l2_hb = if l2book_heartbeat_ms > 0 { Some(Duration::from_millis(l2book_heartbeat_ms)) } else { None };
+    let bbo_hb = if bbo_heartbeat_ms > 0 { Some(Duration::from_millis(bbo_heartbeat_ms)) } else { None };
+
+    // `alive` flips to false the moment any `send_socket_message` returns false
+    // (network error or send timeout). The outer loop checks it at every iteration
+    // boundary so a wedged client is dropped instead of looping forever.
+    let mut alive = true;
+    while alive {
         select! {
             recv_result = internal_message_rx.recv() => {
                 match recv_result {
@@ -189,17 +261,19 @@ async fn handle_socket(
                             InternalMessage::Snapshot{ l2_snapshots, time } => {
                                 universe = new_universe(l2_snapshots, market_filter.0, market_filter.1, market_filter.2);
                                 for sub in manager.subscriptions() {
+                                    if !alive { break; }
                                     // Skip BBO subs here - they get fast updates via BboUpdate
                                     if !matches!(sub, Subscription::Bbo { .. }) {
-                                        send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time, &mut last_bbo, &mut last_l2_hash).await;
+                                        alive &= send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time, &mut last_bbo, &mut last_l2).await;
                                     }
                                 }
                             },
                             InternalMessage::BboUpdate{ bbos, time } => {
                                 // Fast path for BBO subscribers only
                                 for sub in manager.subscriptions() {
+                                    if !alive { break; }
                                     if let Subscription::Bbo { coin } = sub {
-                                        send_ws_data_from_bbo(&mut socket, coin, bbos, *time, &mut last_bbo).await;
+                                        alive &= send_ws_data_from_bbo(&mut socket, coin, bbos, *time, &mut last_bbo).await;
                                     }
                                 }
                             },
@@ -208,7 +282,8 @@ async fn handle_socket(
                                 if has_trades {
                                     let mut trades = coin_to_trades(batch);
                                     for sub in manager.subscriptions() {
-                                        send_ws_data_from_trades(&mut socket, sub, &mut trades).await;
+                                        if !alive { break; }
+                                        alive &= send_ws_data_from_trades(&mut socket, sub, &mut trades).await;
                                     }
                                 }
                             },
@@ -219,11 +294,13 @@ async fn handle_socket(
                                     let mut book_updates = if has_l4 { Some(coin_to_book_diffs_only(batch)) } else { None };
                                     let mut raw_diffs = if has_book_diffs { Some(coin_to_book_diffs_raw(batch)) } else { None };
                                     for sub in manager.subscriptions() {
+                                        if !alive { break; }
                                         if let Some(ref mut updates) = book_updates {
-                                            send_ws_data_from_book_updates(&mut socket, sub, updates).await;
+                                            alive &= send_ws_data_from_book_updates(&mut socket, sub, updates).await;
                                         }
+                                        if !alive { break; }
                                         if let Some(ref mut diffs) = raw_diffs {
-                                            send_ws_data_from_book_diffs_raw(&mut socket, sub, diffs).await;
+                                            alive &= send_ws_data_from_book_diffs_raw(&mut socket, sub, diffs).await;
                                         }
                                     }
                                 }
@@ -234,12 +311,14 @@ async fn handle_socket(
                                 if has_l4 {
                                     let mut book_updates = coin_to_book_statuses_only(batch);
                                     for sub in manager.subscriptions() {
-                                        send_ws_data_from_book_updates(&mut socket, sub, &mut book_updates).await;
+                                        if !alive { break; }
+                                        alive &= send_ws_data_from_book_updates(&mut socket, sub, &mut book_updates).await;
                                     }
                                 }
                                 if has_order_updates {
                                     for sub in manager.subscriptions() {
-                                        send_ws_order_updates(&mut socket, sub, batch).await;
+                                        if !alive { break; }
+                                        alive &= send_ws_order_updates(&mut socket, sub, batch).await;
                                     }
                                 }
                             },
@@ -254,6 +333,42 @@ async fn handle_socket(
                     Err(err) => {
                         error!("Receiver error: {err}");
                         return;
+                    }
+                }
+            }
+
+            _ = heartbeat_tick(&mut heartbeat_ticker) => {
+                let now = Instant::now();
+                let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                for sub in manager.subscriptions() {
+                    if !alive { break; }
+                    match sub {
+                        Subscription::L2Book { coin, n_sig_figs, mantissa, .. } => {
+                            let Some(hb) = l2_hb else { continue };
+                            let key = l2_cache_key(coin, *n_sig_figs, *mantissa);
+                            if let Some(entry) = last_l2.get_mut(&key) {
+                                if now.duration_since(entry.last_sent) >= hb {
+                                    entry.payload.set_time(now_ms);
+                                    entry.last_sent = now;
+                                    BROADCASTS_TOTAL.with_label_values(&["l2_heartbeat"]).inc();
+                                    let payload = entry.payload.clone();
+                                    alive &= send_socket_message(&mut socket, ServerResponse::L2Book(payload)).await;
+                                }
+                            }
+                        }
+                        Subscription::Bbo { coin } => {
+                            let Some(hb) = bbo_hb else { continue };
+                            if let Some(entry) = last_bbo.get_mut(coin) {
+                                if now.duration_since(entry.last_sent) >= hb {
+                                    entry.payload.time = now_ms;
+                                    entry.last_sent = now;
+                                    BROADCASTS_TOTAL.with_label_values(&["bbo_heartbeat"]).inc();
+                                    let payload = entry.payload.clone();
+                                    alive &= send_socket_message(&mut socket, ServerResponse::Bbo(payload)).await;
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -276,16 +391,16 @@ async fn handle_socket(
                             if let Ok(value) = serde_json::from_str::<ClientMessage>(text) {
                                 match value {
                                     ClientMessage::Ping => {
-                                        send_socket_message(&mut socket, ServerResponse::Pong).await;
+                                        alive &= send_socket_message(&mut socket, ServerResponse::Pong).await;
                                     }
                                     _ => {
-                                        receive_client_message(&mut socket, &mut manager, value, &universe, listener.clone(), bbo_only).await;
+                                        alive &= receive_client_message(&mut socket, &mut manager, value, &universe, listener.clone(), bbo_only).await;
                                     }
                                 }
                             }
                             else {
                                 let msg = ServerResponse::Error(format!("Error parsing JSON into valid websocket request: {text}"));
-                                send_socket_message(&mut socket, msg).await;
+                                alive &= send_socket_message(&mut socket, msg).await;
                             }
                         }
                         OpCode::Close => {
@@ -301,6 +416,7 @@ async fn handle_socket(
             }
         }
     }
+    info!("Dropping connection: socket write failed or timed out");
 }
 
 async fn receive_client_message(
@@ -310,32 +426,32 @@ async fn receive_client_message(
     universe: &HashSet<String>,
     listener: Arc<Mutex<OrderBookListener>>,
     bbo_only: bool,
-) {
+) -> bool {
     let subscription = match &client_message {
         ClientMessage::Unsubscribe { subscription } | ClientMessage::Subscribe { subscription } => subscription.clone(),
         ClientMessage::Ping => unreachable!("Ping is handled before receive_client_message"),
     };
+    // BBO-only mode rejects non-BBO subs up-front, before validation, so the
+    // operator sees a single clear "denied" message in the log instead of "valid
+    // subscription" then a rejection.
+    if bbo_only && !matches!(&subscription, Subscription::Bbo { .. }) {
+        return send_socket_message(socket, ServerResponse::Error(
+            "BBO-only mode: L2/L4/Trades subscriptions disabled. Only BBO subscriptions allowed.".to_string(),
+        )).await;
+    }
     // this is used for display purposes only, hence unwrap_or_default. It also shouldn't fail
     let sub = serde_json::to_string(&subscription).unwrap_or_default();
     if !subscription.validate(universe) {
-        let msg = ServerResponse::Error(format!("Invalid subscription: {sub}"));
-        send_socket_message(socket, msg).await;
-        return;
+        return send_socket_message(socket, ServerResponse::Error(format!("Invalid subscription: {sub}"))).await;
     }
 
-    // In BBO-only mode, reject non-BBO subscriptions to save RAM
-    if bbo_only {
-        let is_bbo = matches!(&subscription, Subscription::Bbo { .. });
-        if !is_bbo {
-            let msg = ServerResponse::Error(
-                "BBO-only mode: L2/L4/Trades subscriptions disabled. Only BBO subscriptions allowed.".to_string(),
-            );
-            send_socket_message(socket, msg).await;
-            return;
-        }
-    }
     let (word, success) = match &client_message {
-        ClientMessage::Subscribe { .. } => ("", manager.subscribe(subscription)),
+        ClientMessage::Subscribe { .. } => match manager.subscribe(subscription) {
+            Ok(inserted) => ("", inserted),
+            Err(err) => {
+                return send_socket_message(socket, ServerResponse::Error(format!("Rejected subscription: {err}"))).await;
+            }
+        },
         ClientMessage::Unsubscribe { .. } => ("un", manager.unsubscribe(subscription)),
         ClientMessage::Ping => unreachable!(),
     };
@@ -346,33 +462,34 @@ async fn receive_client_message(
                 Ok(msg) => msg,
                 Err(err) => {
                     manager.unsubscribe(subscription.clone());
-                    let msg = ServerResponse::Error(format!("Unable to grab order book snapshot: {err}"));
-                    send_socket_message(socket, msg).await;
-                    return;
+                    return send_socket_message(socket,
+                        ServerResponse::Error(format!("Unable to grab order book snapshot: {err}"))).await;
                 }
             }
         } else {
             None
         };
-        let msg = ServerResponse::SubscriptionResponse(client_message);
-        send_socket_message(socket, msg).await;
-        if let Some(snapshot_msg) = snapshot_msg {
-            send_socket_message(socket, snapshot_msg).await;
+        if !send_socket_message(socket, ServerResponse::SubscriptionResponse(client_message)).await {
+            return false;
         }
+        if let Some(snapshot_msg) = snapshot_msg {
+            return send_socket_message(socket, snapshot_msg).await;
+        }
+        true
     } else {
-        let msg = ServerResponse::Error(format!("Already {word}subscribed: {sub}"));
-        send_socket_message(socket, msg).await;
+        send_socket_message(socket, ServerResponse::Error(format!("Already {word}subscribed: {sub}"))).await
     }
 }
 
-/// Fast BBO broadcast - directly from BBO HashMap without L2 snapshot computation
+/// Fast BBO broadcast - directly from BBO HashMap without L2 snapshot computation.
+/// Returns false if the socket send failed/timed out (caller must drop the connection).
 async fn send_ws_data_from_bbo(
     socket: &mut WebSocket,
     coin: &str,
     bbos: &HashMap<Coin, (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>)>,
     time: u64,
-    last_bbo: &mut HashMap<String, (String, String, String, String)>,
-) {
+    last_bbo: &mut HashMap<String, BboEntry>,
+) -> bool {
     let coin_key = Coin::new(coin);
     if let Some((best_bid, best_ask)) = bbos.get(&coin_key) {
         // Convert to Level format - Px and Sz implement Debug for formatting
@@ -390,30 +507,54 @@ async fn send_ws_data_from_bbo(
         let ask_sz = ask.as_ref().map(|a| a.sz().to_string()).unwrap_or_default();
         let current = (bid_px, bid_sz, ask_px, ask_sz);
 
-        if last_bbo.get(coin) != Some(&current) {
-            last_bbo.insert(coin.to_string(), current);
+        if last_bbo.get(coin).map(|e| &e.tuple) != Some(&current) {
             BBO_CHANGES_TOTAL.with_label_values(&[coin]).inc();
             BROADCASTS_TOTAL.with_label_values(&["bbo"]).inc();
             let bbo = Bbo { coin: coin.to_string(), time, bid, ask };
-            let msg = ServerResponse::Bbo(bbo);
-            send_socket_message(socket, msg).await;
+            last_bbo.insert(
+                coin.to_string(),
+                BboEntry { tuple: current, last_sent: Instant::now(), payload: bbo.clone() },
+            );
+            return send_socket_message(socket, ServerResponse::Bbo(bbo)).await;
         }
     }
+    true
 }
 
-async fn send_socket_message(socket: &mut WebSocket, msg: ServerResponse) {
-    let msg = serde_json::to_string(&msg);
-    match msg {
-        Ok(msg) => {
-            if let Err(err) = socket.send(FrameView::text(msg)).await {
-                error!("Failed to send: {err}");
-                WS_SEND_ERRORS_TOTAL.inc();
-            } else {
-                MESSAGES_SENT_TOTAL.inc();
-            }
-        }
+/// Per-send timeout. A slow or hostile client whose TCP receive window stays full
+/// would otherwise block `socket.send(...).await` indefinitely, freezing this
+/// connection's whole `select!` loop and accumulating broadcast lag.
+const WS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Send a `ServerResponse` to the client. Returns `false` when the underlying
+/// socket failed to write (network error or `WS_SEND_TIMEOUT` elapsed). Callers
+/// in the `select!` loop must bail out on `false` so we drop the doomed
+/// connection instead of looping forever on a wedged write.
+async fn send_socket_message(socket: &mut WebSocket, msg: ServerResponse) -> bool {
+    let payload = match serde_json::to_string(&msg) {
+        Ok(p) => p,
         Err(err) => {
             error!("Server response serialization error: {err}");
+            // Serialization failure is our bug, not the client's; keep the connection.
+            return true;
+        }
+    };
+    match tokio::time::timeout(WS_SEND_TIMEOUT, socket.send(FrameView::text(payload))).await {
+        Ok(Ok(())) => {
+            MESSAGES_SENT_TOTAL.inc();
+            true
+        }
+        Ok(Err(err)) => {
+            error!("Failed to send: {err}");
+            WS_SEND_ERRORS_TOTAL.inc();
+            false
+        }
+        Err(_) => {
+            error!("Send timeout (>{:?}); dropping slow client", WS_SEND_TIMEOUT);
+            WS_SEND_ERRORS_TOTAL.inc();
+            // Best-effort close handshake. If the close itself times out we just drop.
+            let _unused = tokio::time::timeout(Duration::from_secs(1), socket.close()).await;
+            false
         }
     }
 }
@@ -442,9 +583,9 @@ async fn send_ws_data_from_snapshot(
     subscription: &Subscription,
     snapshot: &HashMap<Coin, HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>,
     time: u64,
-    last_bbo: &mut HashMap<String, (String, String, String, String)>,
-    last_l2_hash: &mut HashMap<String, u64>,
-) {
+    last_bbo: &mut HashMap<String, BboEntry>,
+    last_l2: &mut HashMap<String, L2Entry>,
+) -> bool {
     match subscription {
         Subscription::L2Book { coin, n_sig_figs, n_levels, mantissa } => {
             let snapshot = snapshot.get(&Coin::new(coin));
@@ -464,15 +605,17 @@ async fn send_ws_data_from_snapshot(
                 let current_hash = hasher.finish();
 
                 // Create unique key for this subscription (coin + params)
-                let key = format!("{}:{}:{}", coin, n_sig_figs.unwrap_or(0), mantissa.unwrap_or(0));
+                let key = l2_cache_key(coin, *n_sig_figs, *mantissa);
 
-                if last_l2_hash.get(&key) != Some(&current_hash) {
-                    last_l2_hash.insert(key, current_hash);
+                if last_l2.get(&key).map(|e| e.hash) != Some(current_hash) {
                     BROADCASTS_TOTAL.with_label_values(&["l2"]).inc();
                     let l2_book =
                         L2Book::from_l2_snapshot(coin.clone(), snapshot, time, *n_sig_figs, *mantissa, Some(n_levels));
-                    let msg = ServerResponse::L2Book(l2_book);
-                    send_socket_message(socket, msg).await;
+                    last_l2.insert(
+                        key,
+                        L2Entry { hash: current_hash, last_sent: Instant::now(), payload: l2_book.clone() },
+                    );
+                    return send_socket_message(socket, ServerResponse::L2Book(l2_book)).await;
                 }
                 // else: skip, L2 unchanged
             } else {
@@ -494,17 +637,20 @@ async fn send_ws_data_from_snapshot(
                 let ask_sz = ask.as_ref().map(|a| a.sz().to_string()).unwrap_or_default();
                 let current = (bid_px, bid_sz, ask_px, ask_sz);
 
-                if last_bbo.get(coin) != Some(&current) {
-                    last_bbo.insert(coin.clone(), current);
+                if last_bbo.get(coin).map(|e| &e.tuple) != Some(&current) {
                     let bbo = Bbo { coin: coin.clone(), time, bid, ask };
-                    let msg = ServerResponse::Bbo(bbo);
-                    send_socket_message(socket, msg).await;
+                    last_bbo.insert(
+                        coin.clone(),
+                        BboEntry { tuple: current, last_sent: Instant::now(), payload: bbo.clone() },
+                    );
+                    return send_socket_message(socket, ServerResponse::Bbo(bbo)).await;
                 }
                 // else: skip, BBO unchanged
             }
         }
         _ => {}
     }
+    true
 }
 
 fn coin_to_trades(batch: &Batch<NodeDataFill>) -> HashMap<String, Vec<Trade>> {
@@ -561,42 +707,42 @@ async fn send_ws_data_from_book_diffs_raw(
     socket: &mut WebSocket,
     subscription: &Subscription,
     book_diffs: &mut HashMap<String, Vec<NodeDataOrderDiff>>,
-) {
+) -> bool {
     if let Subscription::BookDiffs { coin } = subscription {
         if let Some(diffs) = book_diffs.remove(coin) {
             BROADCASTS_TOTAL.with_label_values(&["bookDiffs"]).inc();
-            let msg = ServerResponse::BookDiffs(diffs);
-            send_socket_message(socket, msg).await;
+            return send_socket_message(socket, ServerResponse::BookDiffs(diffs)).await;
         }
     }
+    true
 }
 
 async fn send_ws_data_from_book_updates(
     socket: &mut WebSocket,
     subscription: &Subscription,
     book_updates: &mut HashMap<String, L4BookUpdates>,
-) {
+) -> bool {
     if let Subscription::L4Book { coin } = subscription {
         if let Some(updates) = book_updates.remove(coin) {
             BROADCASTS_TOTAL.with_label_values(&["l4"]).inc();
-            let msg = ServerResponse::L4Book(L4Book::Updates(updates));
-            send_socket_message(socket, msg).await;
+            return send_socket_message(socket, ServerResponse::L4Book(L4Book::Updates(updates))).await;
         }
     }
+    true
 }
 
 async fn send_ws_data_from_trades(
     socket: &mut WebSocket,
     subscription: &Subscription,
     trades: &mut HashMap<String, Vec<Trade>>,
-) {
+) -> bool {
     if let Subscription::Trades { coin } = subscription {
         if let Some(trades) = trades.remove(coin) {
             BROADCASTS_TOTAL.with_label_values(&["trades"]).inc();
-            let msg = ServerResponse::Trades(trades);
-            send_socket_message(socket, msg).await;
+            return send_socket_message(socket, ServerResponse::Trades(trades)).await;
         }
     }
+    true
 }
 
 impl Subscription {
@@ -633,12 +779,12 @@ async fn send_ws_order_updates(
     socket: &mut WebSocket,
     subscription: &Subscription,
     batch: &Batch<NodeDataOrderStatus>,
-) {
+) -> bool {
     if let Subscription::OrderUpdates { user } = subscription {
         // Parse the user address from the subscription
         let user_addr = match user.parse::<alloy::primitives::Address>() {
             Ok(addr) => addr,
-            Err(_) => return, // Invalid address, skip
+            Err(_) => return true, // Invalid address, skip (validation should already prevent this)
         };
 
         let time = batch.block_time();
@@ -653,8 +799,8 @@ async fn send_ws_order_updates(
             .collect();
 
         if !user_updates.is_empty() {
-            let msg = ServerResponse::OrderUpdates(user_updates);
-            send_socket_message(socket, msg).await;
+            return send_socket_message(socket, ServerResponse::OrderUpdates(user_updates)).await;
         }
     }
+    true
 }

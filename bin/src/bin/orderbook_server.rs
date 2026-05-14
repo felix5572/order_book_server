@@ -84,6 +84,18 @@ struct Args {
     #[arg(long, default_value = "false")]
     bbo_only: bool,
 
+    /// Resend the last l2Book snapshot for each active subscription every N ms
+    /// when nothing has changed. Off by default (0 = disabled). Matches the
+    /// official Hyperliquid API behavior of pushing a heartbeat snapshot per block
+    /// so downstream clients with stall timers don't disconnect on quiet coins.
+    #[arg(long, default_value = "0")]
+    l2book_heartbeat_ms: u64,
+
+    /// Resend the last bbo payload for each active subscription every N ms
+    /// when nothing has changed. Off by default (0 = disabled).
+    #[arg(long, default_value = "0")]
+    bbo_heartbeat_ms: u64,
+
     /// Log level: error, warn, info, debug, trace
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -147,6 +159,8 @@ async fn main() -> Result<()> {
         visor_state_path: args.visor_state_path,
         metrics_port: args.metrics_port,
         bbo_only: args.bbo_only,
+        l2book_heartbeat_ms: args.l2book_heartbeat_ms,
+        bbo_heartbeat_ms: args.bbo_heartbeat_ms,
     };
 
     println!("Orderbook Server v{}", env!("CARGO_PKG_VERSION"));

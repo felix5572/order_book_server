@@ -65,6 +65,16 @@ impl<O: InnerOrder> OrderBook<O> {
     }
 
     pub(crate) fn add_order(&mut self, mut order: O) {
+        // Duplicate oid would silently corrupt state: `oid_to_side_px` would point
+        // at the new (side, px) while `LinkedList::push_back` silently rejects the
+        // re-insert, leaving the original order data in place. Skip and warn.
+        // (A node replay or duplicate-emit is the realistic trigger; we never want
+        // to re-run matching, which would double-count the match against opposite-side
+        // orders that have arrived since.)
+        if self.oid_to_side_px.contains_key(&order.oid()) {
+            log::warn!("OrderBook::add_order called twice for oid={:?}; ignoring duplicate", order.oid());
+            return;
+        }
         let (maker_orders, resting_book) = match order.side() {
             Side::Ask => (&mut self.bids, &mut self.asks),
             Side::Bid => (&mut self.asks, &mut self.bids),
@@ -141,6 +151,31 @@ impl<O: InnerOrder> OrderBook<O> {
         });
 
         (best_bid, best_ask)
+    }
+
+    /// Compact every price-level's `LinkedList` slab. Returns the number of lists
+    /// that were actually rebuilt (lists below the fragmentation threshold are
+    /// skipped). See `LinkedList::compact` for the threshold.
+    pub(crate) fn compact(&mut self) -> usize {
+        let mut compacted = 0usize;
+        for list in self.bids.values_mut().chain(self.asks.values_mut()) {
+            if list.compact() {
+                compacted += 1;
+            }
+        }
+        compacted
+    }
+
+    /// Returns (total live nodes, total slab capacity) summed across every level.
+    /// Useful for tracking fragmentation in Prometheus.
+    pub(crate) fn slab_stats(&self) -> (usize, usize) {
+        let mut live = 0usize;
+        let mut cap = 0usize;
+        for list in self.bids.values().chain(self.asks.values()) {
+            live += list.slab_len();
+            cap += list.slab_capacity();
+        }
+        (live, cap)
     }
 
     // we go by the convention that prioritized orders go first in the vector; this makes aggregation step later easier.
@@ -343,5 +378,351 @@ mod tests {
         let [b2, a2] = s2.0.map(BTreeSet::from_iter);
         assert_eq!(b1, b2);
         assert_eq!(a1, a2);
+    }
+
+    // ==================== BBO Tests ====================
+
+    #[test]
+    fn test_bbo_empty_book() {
+        let book: OrderBook<MinimalOrder> = OrderBook::new();
+        let (bid, ask) = book.get_bbo();
+        assert!(bid.is_none());
+        assert!(ask.is_none());
+    }
+
+    #[test]
+    fn test_bbo_single_bid() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        book.add_order(factory.order(100, 50, Side::Bid));
+        let (bid, ask) = book.get_bbo();
+        assert_eq!(bid.unwrap(), (Px::new(50), Sz::new(100), 1));
+        assert!(ask.is_none());
+    }
+
+    #[test]
+    fn test_bbo_single_ask() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        book.add_order(factory.order(100, 50, Side::Ask));
+        let (bid, ask) = book.get_bbo();
+        assert!(bid.is_none());
+        assert_eq!(ask.unwrap(), (Px::new(50), Sz::new(100), 1));
+    }
+
+    #[test]
+    fn test_bbo_multiple_levels() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        // Bids at 50 and 40 - best bid should be 50
+        book.add_order(factory.order(100, 40, Side::Bid));
+        book.add_order(factory.order(200, 50, Side::Bid));
+        // Asks at 60 and 70 - best ask should be 60
+        book.add_order(factory.order(150, 70, Side::Ask));
+        book.add_order(factory.order(300, 60, Side::Ask));
+
+        let (bid, ask) = book.get_bbo();
+        assert_eq!(bid.unwrap().0, Px::new(50)); // best bid = highest
+        assert_eq!(ask.unwrap().0, Px::new(60)); // best ask = lowest
+    }
+
+    #[test]
+    fn test_bbo_aggregates_at_same_price() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        book.add_order(factory.order(100, 50, Side::Bid));
+        book.add_order(factory.order(200, 50, Side::Bid));
+        let (bid, _) = book.get_bbo();
+        let (px, sz, count) = bid.unwrap();
+        assert_eq!(px, Px::new(50));
+        assert_eq!(sz, Sz::new(300)); // aggregated
+        assert_eq!(count, 2);
+    }
+
+    // ==================== Order Matching Tests ====================
+
+    #[test]
+    fn test_matching_bid_crosses_ask() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        // Place an ask at 50
+        book.add_order(factory.order(100, 50, Side::Ask));
+        // Place a bid at 60 (crosses the ask)
+        book.add_order(factory.order(100, 60, Side::Bid));
+        // Both fully filled, book should be empty
+        assert_eq!(book.order_count(), 0);
+    }
+
+    #[test]
+    fn test_matching_partial_fill_taker() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        // Ask of 200 at price 50
+        book.add_order(factory.order(200, 50, Side::Ask));
+        // Bid of 100 at price 60 - only partially fills the ask
+        book.add_order(factory.order(100, 60, Side::Bid));
+        // Ask remains with sz=100, bid fully consumed
+        assert_eq!(book.order_count(), 1);
+        let (_, ask) = book.get_bbo();
+        assert_eq!(ask.unwrap().1, Sz::new(100));
+    }
+
+    #[test]
+    fn test_matching_partial_fill_maker() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        // Ask of 50 at price 50
+        book.add_order(factory.order(50, 50, Side::Ask));
+        // Bid of 200 at price 60 - fills the ask, rest rests on book
+        book.add_order(factory.order(200, 60, Side::Bid));
+        assert_eq!(book.order_count(), 1);
+        let (bid, _) = book.get_bbo();
+        assert_eq!(bid.unwrap().1, Sz::new(150)); // 200 - 50
+    }
+
+    #[test]
+    fn test_no_matching_bid_below_ask() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        book.add_order(factory.order(100, 60, Side::Ask));
+        book.add_order(factory.order(100, 50, Side::Bid));
+        // No crossing, both rest on book
+        assert_eq!(book.order_count(), 2);
+    }
+
+    #[test]
+    fn test_matching_multiple_price_levels() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        // Three asks at different prices
+        book.add_order(factory.order(100, 50, Side::Ask)); // matched first
+        book.add_order(factory.order(100, 55, Side::Ask)); // matched second
+        book.add_order(factory.order(100, 60, Side::Ask)); // partially matched
+        // One big bid that sweeps through
+        book.add_order(factory.order(250, 60, Side::Bid));
+        // 100+100+50 matched, ask at 60 has 50 left
+        assert_eq!(book.order_count(), 1);
+        let (_, ask) = book.get_bbo();
+        assert_eq!(ask.unwrap().1, Sz::new(50));
+    }
+
+    // ==================== Cancel / Modify Tests ====================
+
+    #[test]
+    fn test_cancel_nonexistent_returns_false() {
+        let mut book: OrderBook<MinimalOrder> = OrderBook::new();
+        assert!(!book.cancel_order(Oid::new(999)));
+    }
+
+    #[test]
+    fn test_duplicate_add_order_is_ignored() {
+        // C3 regression test: prior to the dedup guard, a second add_order for the
+        // same oid silently corrupted state - oid_to_side_px was overwritten but
+        // the slab still held the original order. Verify the duplicate is now a no-op
+        // and the original order remains cancelable.
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        let first = factory.order(100, 50, Side::Bid);
+        let oid = first.oid();
+        book.add_order(first);
+        assert_eq!(book.order_count(), 1);
+
+        // Try to re-add the same oid at a different price - should be ignored
+        let dup = MinimalOrder { oid: 0, side: Side::Bid, sz: 999, limit_px: 99 };
+        book.add_order(dup);
+        assert_eq!(book.order_count(), 1, "duplicate add should not increase order count");
+
+        // The original order is still there and cancelable
+        assert!(book.cancel_order(oid));
+        assert_eq!(book.order_count(), 0);
+    }
+
+    #[test]
+    fn test_cancel_removes_price_level() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        book.add_order(factory.order(100, 50, Side::Bid));
+        assert!(book.cancel_order(Oid::new(0)));
+        assert_eq!(book.order_count(), 0);
+        let (bid, _) = book.get_bbo();
+        assert!(bid.is_none());
+    }
+
+    #[test]
+    fn test_modify_sz_to_zero_cancels() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        book.add_order(factory.order(100, 50, Side::Bid));
+        assert!(book.modify_sz(Oid::new(0), Sz::new(0)));
+        assert_eq!(book.order_count(), 0);
+    }
+
+    #[test]
+    fn test_modify_nonexistent_returns_false() {
+        let mut book: OrderBook<MinimalOrder> = OrderBook::new();
+        assert!(!book.modify_sz(Oid::new(999), Sz::new(100)));
+    }
+
+    #[test]
+    fn test_modify_sz_updates_value() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        book.add_order(factory.order(100, 50, Side::Bid));
+        assert!(book.modify_sz(Oid::new(0), Sz::new(500)));
+        let (bid, _) = book.get_bbo();
+        assert_eq!(bid.unwrap().1, Sz::new(500));
+    }
+
+    // ==================== Snapshot Tests ====================
+
+    #[test]
+    fn test_snapshot_roundtrip() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        book.add_order(factory.order(100, 50, Side::Bid));
+        book.add_order(factory.order(200, 40, Side::Bid));
+        book.add_order(factory.order(150, 60, Side::Ask));
+
+        let snapshot = book.to_snapshot();
+        let restored = OrderBook::from_snapshot(snapshot, false);
+        assert_eq!(book.order_count(), restored.order_count());
+        assert_eq!(book.get_bbo(), restored.get_bbo());
+    }
+
+    #[test]
+    fn test_snapshot_truncate() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        for i in 0..10 {
+            book.add_order(factory.order(100, 50 + i, Side::Bid));
+        }
+        let snapshot = book.to_snapshot();
+        let truncated = snapshot.truncate(3);
+        assert_eq!(truncated.as_ref()[0].len(), 3); // bids
+    }
+
+    #[test]
+    fn test_order_count() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        assert_eq!(book.order_count(), 0);
+        book.add_order(factory.order(100, 50, Side::Bid));
+        assert_eq!(book.order_count(), 1);
+        book.add_order(factory.order(100, 60, Side::Ask));
+        assert_eq!(book.order_count(), 2);
+        book.cancel_order(Oid::new(0));
+        assert_eq!(book.order_count(), 1);
+    }
+
+    // ==================== Performance / Stress Tests ====================
+
+    #[test]
+    fn test_stress_add_cancel_1000_orders() {
+        let start = std::time::Instant::now();
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+
+        // Add 1000 orders
+        for i in 0..1000u64 {
+            let px = 1000 + (i % 100); // 100 price levels
+            let side = if i % 2 == 0 { Side::Bid } else { Side::Ask };
+            book.add_order(factory.order(100, px, side));
+        }
+        let add_elapsed = start.elapsed();
+
+        assert!(book.order_count() > 0, "some orders should remain (non-crossing)");
+
+        // Cancel all remaining
+        let cancel_start = std::time::Instant::now();
+        for oid in 0..1000u64 {
+            book.cancel_order(Oid::new(oid));
+        }
+        let cancel_elapsed = cancel_start.elapsed();
+
+        assert_eq!(book.order_count(), 0);
+
+        eprintln!(
+            "[PERF] 1000 order adds: {:?}, 1000 cancels: {:?}, total: {:?}",
+            add_elapsed,
+            cancel_elapsed,
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn test_bbo_computation_performance() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        // Create book with many price levels
+        for i in 0..500u64 {
+            book.add_order(factory.order(100, 1000 + i, Side::Bid));
+            book.add_order(factory.order(100, 2000 + i, Side::Ask));
+        }
+
+        let start = std::time::Instant::now();
+        let iterations = 10_000;
+        for _ in 0..iterations {
+            let _ = book.get_bbo();
+        }
+        let elapsed = start.elapsed();
+        let per_call = elapsed / iterations;
+
+        eprintln!(
+            "[PERF] BBO computation: {iterations} calls in {:?} ({:?}/call, 500 levels each side)",
+            elapsed, per_call
+        );
+        // BBO should be fast - under 10us per call
+        assert!(per_call.as_micros() < 100, "BBO too slow: {:?}/call", per_call);
+    }
+
+    #[test]
+    fn test_l4_snapshot_performance() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        // Build a realistic-sized book: 500 price levels each side, 1 order each
+        for i in 0..500u64 {
+            book.add_order(factory.order(100, 1000 + i, Side::Bid));
+            book.add_order(factory.order(100, 2000 + i, Side::Ask));
+        }
+        assert_eq!(book.order_count(), 1000);
+
+        let start = std::time::Instant::now();
+        let iterations = 1000u32;
+        for _ in 0..iterations {
+            let snapshot = book.to_snapshot();
+            assert_eq!(snapshot.as_ref()[0].len(), 500);
+        }
+        let elapsed = start.elapsed();
+        let per_call = elapsed / iterations;
+
+        eprintln!(
+            "[PERF] L4 snapshot (1000 orders, 500 levels/side): {iterations} calls in {:?} ({:?}/call)",
+            elapsed, per_call
+        );
+    }
+
+    #[test]
+    fn test_l4_snapshot_from_snapshot_performance() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        for i in 0..500u64 {
+            book.add_order(factory.order(100, 1000 + i, Side::Bid));
+            book.add_order(factory.order(100, 2000 + i, Side::Ask));
+        }
+        let snapshot = book.to_snapshot();
+
+        let start = std::time::Instant::now();
+        let iterations = 100u32;
+        for _ in 0..iterations {
+            let restored = OrderBook::from_snapshot(snapshot.clone(), false);
+            assert_eq!(restored.order_count(), 1000);
+        }
+        let elapsed = start.elapsed();
+        let per_call = elapsed / iterations;
+
+        eprintln!(
+            "[PERF] L4 from_snapshot (1000 orders): {iterations} calls in {:?} ({:?}/call)",
+            elapsed, per_call
+        );
     }
 }

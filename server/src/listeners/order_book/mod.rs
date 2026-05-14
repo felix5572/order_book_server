@@ -46,12 +46,13 @@ fn fetch_snapshot(
     let tx = tx.clone();
     tokio::spawn(async move {
         // CRITICAL: Start caching BEFORE generating snapshot
-        // This ensures we don't miss any events during snapshot generation
-        let _state = {
+        // This ensures we don't miss any events during snapshot generation.
+        // We don't clone the existing state here - it's discarded by init_from_snapshot
+        // below, and cloning the whole BTreeMap/Slab tree temporarily doubles peak RSS.
+        {
             let mut listener = listener.lock().await;
             listener.begin_caching();
-            listener.clone_state()
-        };
+        }
 
         // Now generate snapshot - any events during this time are cached
         let visor_path = get_visor_path(&snapshot_config);
@@ -106,10 +107,6 @@ impl OrderBookListener {
         }
     }
 
-    fn clone_state(&self) -> Option<OrderBookState> {
-        self.order_book_state.clone()
-    }
-
     pub(crate) const fn is_ready(&self) -> bool {
         self.order_book_state.is_some()
     }
@@ -147,6 +144,10 @@ impl OrderBookListener {
 impl OrderBookListener {
     /// HFT version of process_data - doesn't skip first line errors since we're processing complete JSON lines
     pub(crate) fn process_data_hft(&mut self, line: String, event_source: EventSource) -> Result<()> {
+        /// Largest batch we'll process. Each event is a few hundred bytes; a 100k-event
+        /// batch would already block the listener for seconds and pin hundreds of MB.
+        /// In normal operation a single block's batch is tens to low thousands of events.
+        const MAX_EVENTS_PER_BATCH: usize = 100_000;
         // Count events for debugging
         static HFT_EVENT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let count = HFT_EVENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -189,6 +190,26 @@ impl OrderBookListener {
             }
         };
 
+        // Sanity cap on batch size. A malformed/malicious line could otherwise
+        // pin hundreds of MB and freeze the listener for seconds.
+        let events_len = match &event_batch {
+            EventBatch::Orders(b) => b.events_len(),
+            EventBatch::BookDiffs(b) => b.events_len(),
+            EventBatch::Fills(b) => b.events_len(),
+        };
+        if events_len > MAX_EVENTS_PER_BATCH {
+            let source_label = match event_source {
+                EventSource::Fills => "fills",
+                EventSource::OrderStatuses => "orders",
+                EventSource::OrderDiffs => "diffs",
+            };
+            PARSE_ERRORS_TOTAL.with_label_values(&[source_label]).inc();
+            error!(
+                "Dropping oversize batch from {source_label}: {events_len} events (cap {MAX_EVENTS_PER_BATCH}), height={height}"
+            );
+            return Ok(());
+        }
+
         // Log successful parses periodically
         static PARSE_OK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let ok_count = PARSE_OK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -216,46 +237,48 @@ impl OrderBookListener {
         let changed_coins: HashSet<Coin> = if let Some(state) = self.order_book_state.as_mut() {
             let result = match event_batch {
                 EventBatch::Orders(batch) => {
-                    // Broadcast L4 order statuses for L4Book subscribers
+                    // Broadcast L4 order statuses for L4Book subscribers - skip the
+                    // batch clone entirely when nothing is subscribed (the per-conn
+                    // filter inside handle_socket already short-circuits, but the
+                    // clone is what costs us in OOM scenarios).
                     if let Some(tx) = &self.internal_message_tx {
-                        let tx = tx.clone();
-                        let batch_clone = batch.clone();
-                        tokio::spawn(async move {
-                            let msg = Arc::new(InternalMessage::L4OrderStatuses { batch: batch_clone });
+                        if tx.receiver_count() > 0 {
+                            let msg = Arc::new(InternalMessage::L4OrderStatuses { batch: batch.clone() });
                             drop(tx.send(msg));
-                        });
+                        }
                     }
-                    // Count order status events
                     EVENTS_PROCESSED_TOTAL.with_label_values(&["orders"]).inc();
-                    // Apply OrderStatuses directly using HFT method
                     state.apply_order_statuses_hft(batch)
                 }
                 EventBatch::BookDiffs(batch) => {
-                    // Broadcast L4 order diffs for L4Book subscribers
+                    // Broadcast L4 order diffs for L4Book / BookDiffs subscribers.
+                    // Defense-in-depth: when running with `ignore_spot=true`, strip
+                    // spot diffs from the broadcast too. Otherwise `bookDiffs` clients
+                    // would see events for coins whose state we never applied locally.
                     if let Some(tx) = &self.internal_message_tx {
-                        let tx = tx.clone();
-                        let batch_clone = batch.clone();
-                        tokio::spawn(async move {
-                            let msg = Arc::new(InternalMessage::L4OrderDiffs { batch: batch_clone });
-                            drop(tx.send(msg));
-                        });
+                        if tx.receiver_count() > 0 {
+                            let to_broadcast = if state.ignore_spot() {
+                                batch.filter_events(|d| !d.coin().is_spot())
+                            } else {
+                                batch.clone()
+                            };
+                            if to_broadcast.events_len() > 0 {
+                                let msg = Arc::new(InternalMessage::L4OrderDiffs { batch: to_broadcast });
+                                drop(tx.send(msg));
+                            }
+                        }
                     }
-                    // Count book diff events
                     EVENTS_PROCESSED_TOTAL.with_label_values(&["diffs"]).inc();
-                    // Apply OrderDiffs directly using HFT method
                     state.apply_order_diffs_hft(batch)
                 }
                 EventBatch::Fills(batch) => {
-                    // Count fill events
                     EVENTS_PROCESSED_TOTAL.with_label_values(&["fills"]).inc();
-
-                    // Broadcast fills immediately
+                    // Broadcast fills (no clone needed - we own the batch and don't apply it locally)
                     if let Some(tx) = &self.internal_message_tx {
-                        let tx = tx.clone();
-                        tokio::spawn(async move {
+                        if tx.receiver_count() > 0 {
                             let snapshot = Arc::new(InternalMessage::Fills { batch });
                             drop(tx.send(snapshot));
-                        });
+                        }
                     }
                     Ok(HashSet::new())
                 }
@@ -264,8 +287,16 @@ impl OrderBookListener {
             match result {
                 Ok(coins) => coins,
                 Err(err) => {
-                    self.order_book_state = None;
-                    return Err(err);
+                    // Per-event errors (malformed Px/Sz, unrecognized diff variant) are
+                    // recoverable: skip the offending batch and keep serving every other
+                    // coin's state. Discarding `order_book_state` here used to take down
+                    // the entire feed for ~10s on a single malformed line.
+                    PARSE_ERRORS_TOTAL.with_label_values(&[source_label]).inc();
+                    log::warn!(
+                        "Skipping event batch at height={} source={} due to apply error: {err}",
+                        height, source_label
+                    );
+                    HashSet::new()
                 }
             }
         } else {
@@ -325,30 +356,31 @@ impl OrderBookListener {
             }
         }
 
-        // Throttled L2 snapshot broadcast for L2Book subscribers
-        // l2_snapshots_uncached() is expensive, so limit to 100 broadcasts/sec max (10ms interval)
-        let should_broadcast_l2 =
-            self.last_l2_broadcast.map(|t| t.elapsed() >= Duration::from_millis(10)).unwrap_or(true);
+        // Throttled L2 snapshot broadcast for L2Book subscribers.
+        // l2_snapshots_uncached() walks every coin x every aggregation variant, so
+        // limit to 20 broadcasts/sec max (50ms). Skip entirely when no coin changed
+        // - there's nothing new to send and the per-client dedup would drop it anyway.
+        // (Heartbeat resend for quiet coins is handled per-connection in handle_socket.)
+        let should_broadcast_l2 = !changed_coins.is_empty()
+            && self.last_l2_broadcast.map(|t| t.elapsed() >= Duration::from_millis(50)).unwrap_or(true);
 
         if should_broadcast_l2 {
             if let Some(state) = &self.order_book_state {
                 let l2_start = Instant::now();
                 let (time, l2_snapshots) = state.l2_snapshots_uncached();
                 if let Some(tx) = &self.internal_message_tx {
-                    self.last_l2_broadcast = Some(Instant::now());
+                    if tx.receiver_count() > 0 {
+                        self.last_l2_broadcast = Some(Instant::now());
 
-                    // Count L2 broadcasts
-                    static L2_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    let bc = L2_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if bc % 100 == 0 {
-                        info!("L2 broadcast #{} at time {}", bc, time);
-                    }
+                        static L2_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                        let bc = L2_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if bc % 100 == 0 {
+                            info!("L2 broadcast #{} at time {}", bc, time);
+                        }
 
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
                         let msg = Arc::new(InternalMessage::Snapshot { l2_snapshots, time });
                         drop(tx.send(msg));
-                    });
+                    }
                 }
                 L2_BROADCAST_LATENCY.observe(l2_start.elapsed().as_secs_f64());
             }
@@ -412,7 +444,13 @@ pub(crate) struct L2SnapshotParams {
 /// 2. Processes OrderDiffs immediately (doesn't wait for OrderStatuses)
 /// 3. Uses process time instead of block time for lowest latency
 pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, config: crate::ServerConfig) -> Result<()> {
-    let dir = config.data_dir.clone().unwrap_or_else(|| dirs::home_dir().expect("Could not find home directory"));
+    let dir = match config.data_dir.clone() {
+        Some(d) => d,
+        None => dirs::home_dir().ok_or(
+            "Could not resolve a data directory: pass --data-dir explicitly. The default \
+             requires a usable HOME environment variable, which was not set or is invalid.",
+        )?,
+    };
 
     info!("Starting HFT-optimized listener");
     info!("Data directory: {:?}", dir);
@@ -436,8 +474,12 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
     // Start parallel file watchers (crossbeam channel)
     let (crossbeam_rx, _handles, _last_os, _last_fills, _last_diffs) = parallel::start_parallel_file_watchers(dir);
 
-    // Bridge crossbeam to tokio mpsc
-    let (tokio_tx, mut tokio_rx) = unbounded_channel::<parallel::FileEvent>();
+    // Bridge crossbeam to tokio mpsc.
+    // BOUNDED channel: under processing stalls (mutex contention, slow L2 compute),
+    // an unbounded queue accumulates multi-KB JSON strings indefinitely - a primary
+    // OOM vector. A bounded channel applies backpressure into the bridge thread,
+    // which in turn lets the crossbeam buffer absorb the burst.
+    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<parallel::FileEvent>(10_000);
 
     // Spawn a blocking task to bridge crossbeam -> tokio
     tokio::task::spawn_blocking(move || {
@@ -450,7 +492,7 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                     if event_count % 100_000 == 0 {
                         info!("Bridge: received {} events", event_count);
                     }
-                    if tokio_tx.send(event).is_err() {
+                    if tokio_tx.blocking_send(event).is_err() {
                         error!("Bridge: tokio channel closed");
                         break;
                     }

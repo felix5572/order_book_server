@@ -25,6 +25,12 @@ pub(crate) enum FileEvent {
     Fill(String),
 }
 
+/// Hard cap on a single un-terminated JSON line. The streaming files write
+/// newline-delimited JSON; this bound is a safety net against a corrupt/partial
+/// flush from the node that would otherwise let `partial_line` grow without
+/// limit and OOM the host.
+const MAX_PARTIAL_LINE_BYTES: usize = 16 * 1024 * 1024;
+
 /// File reader state for a single source
 struct FileReader {
     current_path: Option<PathBuf>,
@@ -183,6 +189,19 @@ impl FileReader {
                                                     self.partial_line = line.to_string();
                                                 }
                                             }
+                                        }
+
+                                        // Bound the partial-line buffer. If the upstream goes wedged
+                                        // mid-JSON (corrupt flush, mmap weirdness, multi-MB single line),
+                                        // we'd otherwise grow `partial_line` until we OOM. Drop and resync
+                                        // on the next newline.
+                                        if self.partial_line.len() > MAX_PARTIAL_LINE_BYTES {
+                                            error!(
+                                                "partial_line exceeded {} bytes ({} bytes buffered); discarding and resyncing",
+                                                MAX_PARTIAL_LINE_BYTES,
+                                                self.partial_line.len()
+                                            );
+                                            self.partial_line.clear();
                                         }
 
                                         // Log result

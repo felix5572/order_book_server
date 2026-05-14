@@ -81,6 +81,25 @@ impl<O: InnerOrder> OrderBooks<O> {
     ) -> HashMap<Coin, (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>)> {
         coins.iter().filter_map(|coin| self.order_books.get(coin).map(|book| (coin.clone(), book.get_bbo()))).collect()
     }
+
+    /// Compact slab allocators across every coin's orderbook. Returns the number
+    /// of price-level lists that were actually rebuilt. Cheap when nothing is
+    /// fragmented, so safe to call on a slow maintenance cadence.
+    pub(crate) fn compact_all(&mut self) -> usize {
+        self.order_books.values_mut().map(|book| book.compact()).sum()
+    }
+
+    /// Returns (total live nodes, total slab capacity) summed across all coins.
+    pub(crate) fn slab_stats(&self) -> (usize, usize) {
+        let mut live = 0usize;
+        let mut cap = 0usize;
+        for book in self.order_books.values() {
+            let (l, c) = book.slab_stats();
+            live += l;
+            cap += c;
+        }
+        (live, cap)
+    }
 }
 
 impl<O: Send + Sync + InnerOrder> OrderBooks<O> {
