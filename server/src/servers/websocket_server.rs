@@ -76,8 +76,13 @@ async fn heartbeat_tick(ticker: &mut Option<tokio::time::Interval>) {
 }
 
 pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
-    // Broadcast channel buffer: larger = less "channel lagged" errors on slower machines
-    let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(256);
+    // Broadcast channel buffer. Each buffered Snapshot now holds Arc'd inner maps
+    // shared across receivers, so deep cloning is no longer the cost - but a slow
+    // receiver still pins one Arc<InternalMessage> per buffered slot. 32 is well
+    // above the steady-state queue depth and keeps worst-case transient memory bounded.
+    // Slow receivers fall into the existing `RecvError::Lagged` shedding path
+    // (CHANNEL_DROPS_TOTAL is incremented).
+    let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(32);
 
     // Market filter flags from config
     let market_filter = (config.include_perps, config.include_spot, config.include_hip3);
@@ -394,7 +399,7 @@ async fn handle_socket(
                                         alive &= send_socket_message(&mut socket, ServerResponse::Pong).await;
                                     }
                                     _ => {
-                                        alive &= receive_client_message(&mut socket, &mut manager, value, &universe, listener.clone(), bbo_only).await;
+                                        alive &= receive_client_message(&mut socket, &mut manager, value, &universe, listener.clone(), bbo_only, &mut last_l2, &mut last_bbo).await;
                                     }
                                 }
                             }
@@ -419,6 +424,7 @@ async fn handle_socket(
     info!("Dropping connection: socket write failed or timed out");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn receive_client_message(
     socket: &mut WebSocket,
     manager: &mut SubscriptionManager,
@@ -426,6 +432,8 @@ async fn receive_client_message(
     universe: &HashSet<String>,
     listener: Arc<Mutex<OrderBookListener>>,
     bbo_only: bool,
+    last_l2: &mut HashMap<String, L2Entry>,
+    last_bbo: &mut HashMap<String, BboEntry>,
 ) -> bool {
     let subscription = match &client_message {
         ClientMessage::Unsubscribe { subscription } | ClientMessage::Subscribe { subscription } => subscription.clone(),
@@ -446,13 +454,30 @@ async fn receive_client_message(
     }
 
     let (word, success) = match &client_message {
-        ClientMessage::Subscribe { .. } => match manager.subscribe(subscription) {
+        ClientMessage::Subscribe { .. } => match manager.subscribe(subscription.clone()) {
             Ok(inserted) => ("", inserted),
             Err(err) => {
                 return send_socket_message(socket, ServerResponse::Error(format!("Rejected subscription: {err}"))).await;
             }
         },
-        ClientMessage::Unsubscribe { .. } => ("un", manager.unsubscribe(subscription)),
+        ClientMessage::Unsubscribe { .. } => {
+            let removed = manager.unsubscribe(subscription.clone());
+            // Drop the per-connection dedup/heartbeat cache entry for the just-unsubscribed
+            // stream. Without this, a client that sub/unsub-cycles distinct L2 variants on
+            // the same coin (or BBO across coins) leaks one entry per cycle until disconnect.
+            if removed {
+                match &subscription {
+                    Subscription::L2Book { coin, n_sig_figs, mantissa, .. } => {
+                        last_l2.remove(&l2_cache_key(coin, *n_sig_figs, *mantissa));
+                    }
+                    Subscription::Bbo { coin } => {
+                        last_bbo.remove(coin);
+                    }
+                    _ => {}
+                }
+            }
+            ("un", removed)
+        }
         ClientMessage::Ping => unreachable!(),
     };
     if success {
@@ -492,13 +517,15 @@ async fn send_ws_data_from_bbo(
 ) -> bool {
     let coin_key = Coin::new(coin);
     if let Some((best_bid, best_ask)) = bbos.get(&coin_key) {
-        // Convert to Level format - Px and Sz implement Debug for formatting
+        // Use the canonical wire format (Px/Sz::to_str) instead of `format!("{:?}", ...)`.
+        // Debug for Px/Sz happens to produce the same output today, but going through
+        // to_str matches what the L2 path already emits and skips the Formatter machinery.
         let bid = best_bid
             .as_ref()
-            .map(|(px, sz, n)| crate::types::Level::new(format!("{:?}", px), format!("{:?}", sz), *n as usize));
+            .map(|(px, sz, n)| crate::types::Level::new(px.to_str(), sz.to_str(), *n as usize));
         let ask = best_ask
             .as_ref()
-            .map(|(px, sz, n)| crate::types::Level::new(format!("{:?}", px), format!("{:?}", sz), *n as usize));
+            .map(|(px, sz, n)| crate::types::Level::new(px.to_str(), sz.to_str(), *n as usize));
 
         // Deduplication check
         let bid_px = bid.as_ref().map(|b| b.px().to_string()).unwrap_or_default();
@@ -581,7 +608,7 @@ fn new_universe(
 async fn send_ws_data_from_snapshot(
     socket: &mut WebSocket,
     subscription: &Subscription,
-    snapshot: &HashMap<Coin, HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>,
+    snapshot: &HashMap<Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>>,
     time: u64,
     last_bbo: &mut HashMap<String, BboEntry>,
     last_l2: &mut HashMap<String, L2Entry>,
@@ -596,12 +623,14 @@ async fn send_ws_data_from_snapshot(
                 let snapshot = snapshot.truncate(n_levels);
                 let snapshot = snapshot.export_inner_snapshot();
 
-                // Hash the snapshot for dedup comparison
+                // Hash the snapshot for dedup comparison. Level derives Hash, so we
+                // walk the [Vec<Level>; 2] directly - the prior `format!("{:?}", snapshot)`
+                // path allocated a Debug-format string per L2 subscription per broadcast,
+                // saturating glibc/jemalloc under load and dominating allocator pressure.
                 use std::collections::hash_map::DefaultHasher;
                 use std::hash::{Hash, Hasher};
                 let mut hasher = DefaultHasher::new();
-                // Hash bids and asks using their Debug representation (simple but effective)
-                format!("{:?}", snapshot).hash(&mut hasher);
+                snapshot.hash(&mut hasher);
                 let current_hash = hasher.finish();
 
                 // Create unique key for this subscription (coin + params)

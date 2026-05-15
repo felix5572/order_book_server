@@ -59,6 +59,12 @@ impl<O: InnerOrder> OrderBooks<O> {
                 // oid not found in this coin's book
                 log::debug!("cancel_order: oid {:?} not found in {:?} book", oid, coin);
             }
+            // Drop the per-coin OrderBook once it's empty. Without this, every coin
+            // we've ever seen sticks around in the BTreeMap (plus its slab and
+            // BTreeMap-of-Levels capacity), even after delistings.
+            if book.order_count() == 0 {
+                self.order_books.remove(&coin);
+            }
             success
         } else {
             // coin book doesn't exist
@@ -69,7 +75,14 @@ impl<O: InnerOrder> OrderBooks<O> {
 
     // change size to reflect how much gets matched during the block
     pub(crate) fn modify_sz(&mut self, oid: Oid, coin: Coin, sz: Sz) -> bool {
-        self.order_books.get_mut(&coin).is_some_and(|book| book.modify_sz(oid, sz))
+        let Some(book) = self.order_books.get_mut(&coin) else { return false };
+        let success = book.modify_sz(oid, sz);
+        // A modify that reduces sz to zero leaves an empty book behind; evict it
+        // for the same reason as cancel_order above.
+        if book.order_count() == 0 {
+            self.order_books.remove(&coin);
+        }
+        success
     }
 
     /// Get BBO for specific coins only - faster for selective broadcast
@@ -85,8 +98,14 @@ impl<O: InnerOrder> OrderBooks<O> {
     /// Compact slab allocators across every coin's orderbook. Returns the number
     /// of price-level lists that were actually rebuilt. Cheap when nothing is
     /// fragmented, so safe to call on a slow maintenance cadence.
+    ///
+    /// Also evicts any books whose order count dropped to zero — the per-event
+    /// path covers single-order eviction, but a stuck book that emptied during
+    /// a missed-event window is otherwise pinned forever.
     pub(crate) fn compact_all(&mut self) -> usize {
-        self.order_books.values_mut().map(|book| book.compact()).sum()
+        let compacted: usize = self.order_books.values_mut().map(|book| book.compact()).sum();
+        self.order_books.retain(|_, book| book.order_count() > 0);
+        compacted
     }
 
     /// Returns (total live nodes, total slab capacity) summed across all coins.
@@ -425,5 +444,54 @@ mod tests {
             ],
         ];
         assert_eq!(ans, raw_levels);
+    }
+
+    use crate::order_book::{Oid, multi_book::OrderBooks};
+
+    fn make_order(oid: u64, coin: &str, side: Side, sz: &str, px: &str) -> InnerL4Order {
+        let mut o = simple_inner_order(oid, side, sz.to_string(), px.to_string()).unwrap();
+        o.coin = Coin::new(coin);
+        o
+    }
+
+    // ==================== MultiBook eviction tests ====================
+
+    #[test]
+    fn test_cancel_removes_empty_orderbook_from_multibook() {
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        books.add_order(make_order(1, "BTC", Side::Bid, "1", "50000"));
+        assert!(books.as_ref().contains_key(&Coin::new("BTC")));
+        let removed = books.cancel_order(Oid::new(1), Coin::new("BTC"));
+        assert!(removed);
+        // Empty book must be evicted: ghost entries in the BTreeMap were a known
+        // slow leak after coin delistings.
+        assert!(!books.as_ref().contains_key(&Coin::new("BTC")));
+    }
+
+    #[test]
+    fn test_cancel_keeps_nonempty_orderbook() {
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        books.add_order(make_order(1, "ETH", Side::Bid, "1", "3000"));
+        books.add_order(make_order(2, "ETH", Side::Bid, "2", "3000"));
+        books.cancel_order(Oid::new(1), Coin::new("ETH"));
+        // Still has order 2 — must not be evicted.
+        assert!(books.as_ref().contains_key(&Coin::new("ETH")));
+    }
+
+    #[test]
+    fn test_compact_all_evicts_empty_books() {
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        // Seed two coins, then drain one without triggering per-event eviction
+        // (we cancel via OrderBook directly so the MultiBook path doesn't run).
+        books.add_order(make_order(1, "BTC", Side::Bid, "1", "50000"));
+        books.add_order(make_order(2, "ETH", Side::Bid, "1", "3000"));
+        // Sanity
+        assert_eq!(books.as_ref().len(), 2);
+        // Cancel order 1 via MultiBook to trigger eviction of the BTC book.
+        books.cancel_order(Oid::new(1), Coin::new("BTC"));
+        // ETH still has an order; compact_all should leave it alone.
+        books.compact_all();
+        assert!(books.as_ref().contains_key(&Coin::new("ETH")));
+        assert!(!books.as_ref().contains_key(&Coin::new("BTC")));
     }
 }

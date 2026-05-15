@@ -94,16 +94,21 @@ pub(crate) struct OrderBookListener {
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
     // Throttle L2 broadcasts to prevent flooding clients
     last_l2_broadcast: Option<Instant>,
+    // Incremental L2 snapshot cache. Each per-coin entry is Arc'd and shared with
+    // the broadcast Arc, so unchanged coins cost an atomic bump rather than a
+    // full level-vector clone. Invalidated in `init_from_snapshot`.
+    l2_snapshot_cache: HashMap<Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>>,
 }
 
 impl OrderBookListener {
-    pub(crate) const fn new(internal_message_tx: Option<Sender<Arc<InternalMessage>>>, ignore_spot: bool) -> Self {
+    pub(crate) fn new(internal_message_tx: Option<Sender<Arc<InternalMessage>>>, ignore_spot: bool) -> Self {
         Self {
             ignore_spot,
             order_book_state: None,
             fetched_snapshot_cache: None,
             internal_message_tx,
             last_l2_broadcast: None,
+            l2_snapshot_cache: HashMap::new(),
         }
     }
 
@@ -130,6 +135,9 @@ impl OrderBookListener {
         // Don't try to apply cached updates - they may have gaps
         let new_order_book = OrderBookState::from_snapshot(snapshot, height, 0, true, self.ignore_spot);
         self.order_book_state = Some(new_order_book);
+        // The incremental L2 cache references the previous book's coins/levels;
+        // drop it so the next broadcast does a full rebuild against the new state.
+        self.l2_snapshot_cache = HashMap::new();
         // Clear any stale cache
         self.fetched_snapshot_cache = None;
         info!("Order book ready at height {}", height);
@@ -332,27 +340,27 @@ impl OrderBookListener {
             }
         }
 
-        // Fast BBO broadcast - ONLY for coins that changed!
-        // No throttle needed since we only compute BBO for changed coins (usually 1-2)
+        // Fast BBO broadcast - ONLY for coins that changed AND only when someone is
+        // listening. Without the receiver-count gate we'd `get_bbos_for_coins` and
+        // spawn a tokio task per change even with zero subscribers, wasting CPU.
         if !changed_coins.is_empty() {
             if let Some(state) = &self.order_book_state {
-                let bbo_start = Instant::now();
-                let (time, bbos) = state.get_bbos_for_coins(&changed_coins);
                 if let Some(tx) = &self.internal_message_tx {
-                    // Count fast BBO broadcasts
-                    static BBO_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    let bc = BBO_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if bc % 1000 == 0 {
-                        info!("Fast BBO broadcast #{} at time {} for {} coins", bc, time, changed_coins.len());
-                    }
-
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
+                    if tx.receiver_count() > 0 {
+                        let bbo_start = Instant::now();
+                        let (time, bbos) = state.get_bbos_for_coins(&changed_coins);
+                        static BBO_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                        let bc = BBO_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if bc % 1000 == 0 {
+                            info!("Fast BBO broadcast #{} at time {} for {} coins", bc, time, changed_coins.len());
+                        }
+                        // broadcast::Sender::send is non-blocking; the previous
+                        // tokio::spawn wrapper added task overhead with no benefit.
                         let msg = Arc::new(InternalMessage::BboUpdate { bbos, time });
                         drop(tx.send(msg));
-                    });
+                        BBO_BROADCAST_LATENCY.observe(bbo_start.elapsed().as_secs_f64());
+                    }
                 }
-                BBO_BROADCAST_LATENCY.observe(bbo_start.elapsed().as_secs_f64());
             }
         }
 
@@ -361,38 +369,51 @@ impl OrderBookListener {
         // limit to 20 broadcasts/sec max (50ms). Skip entirely when no coin changed
         // - there's nothing new to send and the per-client dedup would drop it anyway.
         // (Heartbeat resend for quiet coins is handled per-connection in handle_socket.)
+        //
+        // CRITICAL: the receiver_count gate must wrap l2_snapshots_uncached(), not
+        // sit between compute and send. A prior version updated last_l2_broadcast
+        // only when receivers existed, so with zero subscribers the throttle reset
+        // never fired and the par_iter ran on every event - tens of GB of allocator
+        // churn per hour and a pinned listener mutex.
         let should_broadcast_l2 = !changed_coins.is_empty()
             && self.last_l2_broadcast.map(|t| t.elapsed() >= Duration::from_millis(50)).unwrap_or(true);
 
         if should_broadcast_l2 {
-            if let Some(state) = &self.order_book_state {
-                let l2_start = Instant::now();
-                let (time, l2_snapshots) = state.l2_snapshots_uncached();
-                if let Some(tx) = &self.internal_message_tx {
-                    if tx.receiver_count() > 0 {
-                        self.last_l2_broadcast = Some(Instant::now());
+            let has_receivers = self.internal_message_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
+            // Mark the throttle as fired regardless of receivers so we don't
+            // re-check on every subsequent event when nobody is listening.
+            self.last_l2_broadcast = Some(Instant::now());
+            if has_receivers {
+                if let Some(state) = &self.order_book_state {
+                    let l2_start = Instant::now();
+                    let (time, l2_snapshots) =
+                        state.l2_snapshots_incremental(&changed_coins, &mut self.l2_snapshot_cache);
 
-                        static L2_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                        let bc = L2_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if bc % 100 == 0 {
-                            info!("L2 broadcast #{} at time {}", bc, time);
-                        }
+                    static L2_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let bc = L2_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if bc % 100 == 0 {
+                        info!("L2 broadcast #{} at time {}", bc, time);
+                    }
 
+                    if let Some(tx) = &self.internal_message_tx {
                         let msg = Arc::new(InternalMessage::Snapshot { l2_snapshots, time });
                         drop(tx.send(msg));
                     }
+                    L2_BROADCAST_LATENCY.observe(l2_start.elapsed().as_secs_f64());
                 }
-                L2_BROADCAST_LATENCY.observe(l2_start.elapsed().as_secs_f64());
             }
         }
         Ok(())
     }
 }
 
-pub(crate) struct L2Snapshots(HashMap<Coin, HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>);
+/// Per-coin L2 snapshots, one inner map per coin holding all aggregation variants.
+/// The inner maps are Arc'd so the listener-side cache and the broadcast Arc can
+/// share unchanged coins' data without deep-cloning their level vectors.
+pub(crate) struct L2Snapshots(HashMap<Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>>);
 
 impl L2Snapshots {
-    pub(crate) const fn as_ref(&self) -> &HashMap<Coin, HashMap<L2SnapshotParams, Snapshot<InnerLevel>>> {
+    pub(crate) const fn as_ref(&self) -> &HashMap<Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>> {
         &self.0
     }
 }

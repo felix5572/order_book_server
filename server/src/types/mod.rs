@@ -22,7 +22,7 @@ pub(crate) struct Trade {
     user: Address,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub(crate) struct Level {
     px: String,
     sz: String,

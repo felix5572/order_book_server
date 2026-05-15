@@ -24,6 +24,26 @@ Real-time orderbook data from a local Hyperliquid node:
 1. **Hyperliquid Node** - Running with streaming enabled (Docker or systemctl)
 2. **Rust** - For building from source
 
+### System Requirements
+
+The server runs co-located with a Hyperliquid node and is memory-light relative to the node itself. Figures below are measured in production with ~630 coins (all markets: perps + spot + HIP-3) and ~440 k live orders.
+
+| Profile | CPU | RAM (steady-state) | Notes |
+|---------|-----|---------------------|-------|
+| **Full (`--markets all`)** | 2 cores minimum, 4+ recommended | ~750 MB – 2 GB | Rises with connected clients and L2 subscription fanout. Reserve **4 GB** for headroom in production. |
+| **Perps only (`--markets perps`)** | 2 cores | ~400 MB – 1 GB | Smaller universe ≈ smaller book and fewer L2 variants to compute. |
+| **BBO-only (`--bbo-only`)** | 1 core | ~100 – 150 MB | Top-of-book only, no L2/L4/trades. |
+
+Other requirements:
+
+- **OS:** Linux with inotify (kernel ≥ 2.6.13). Tested on Ubuntu 22.04 / 24.04.
+- **Architecture:** x86_64 or aarch64.
+- **File descriptors:** raise `LimitNOFILE` in your service unit (the included one sets `1048576`). Each WebSocket client uses one fd.
+- **Disk:** negligible for the server itself (~10 MB binary). The Hyperliquid node's `*_streaming/` directories grow with traffic — size them per the node's documentation, not this server's.
+- **Network:** outbound bandwidth scales with `(connected clients) × (subscription mix)`. L2 snapshots with many `(coin, n_sig_figs, mantissa)` variants are the largest payloads — use `--compression-level 1` and/or `--markets perps` to bound it.
+
+**Sizing rule of thumb.** Memory grows roughly with (a) the universe of coins the node serves, and (b) the number of distinct L2 subscription tuples your clients open. The 256-per-connection subscription cap and the broadcast channel capacity bound the worst case. If you see `channel_drops_total` rising or `broadcast_channel_lag` non-zero, you have a slow consumer — not a server-side leak.
+
 ### Build
 
 ```bash
@@ -111,7 +131,7 @@ After the initial snapshot, the server stays up to date by watching the node's `
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--metrics-port` | `9090` | Prometheus metrics port (0 to disable) |
-| `--bbo-only` | `false` | Lightweight BBO-only mode (~100MB RAM instead of ~2-3GB). Disables L2/L4/Trades subscriptions |
+| `--bbo-only` | `false` | Lightweight BBO-only mode (~100 MB RAM, vs ~1 GB for full markets). Disables L2/L4/Trades subscriptions |
 | `--l2book-heartbeat-ms` | `0` | If > 0, resend the last `l2Book` payload for each active subscription every N ms when nothing has changed. See [Heartbeats](#heartbeats) |
 | `--bbo-heartbeat-ms` | `0` | If > 0, resend the last `bbo` payload for each active subscription every N ms when nothing has changed. See [Heartbeats](#heartbeats) |
 
@@ -162,7 +182,7 @@ Balanced configuration for dashboards, analytics, or multi-market monitoring. Li
 
 ### BBO-Only (Lightweight)
 
-Track only the top-of-book bid/ask for all coins. Uses ~100MB RAM instead of 2-3GB. Ideal for price feeds, alerting, or environments with limited memory.
+Track only the top-of-book bid/ask for all coins. Uses ~100 MB RAM (vs ~1 GB for full markets). Ideal for price feeds, alerting, or environments with limited memory.
 
 ```bash
 ./target/release/orderbook_server \
@@ -493,7 +513,7 @@ This fork deduplicates at the WebSocket level:
 
 ### BBO-Only Lightweight Mode
 
-New `--bbo-only` flag reduces memory from ~2-3GB to ~100MB by only tracking the top-of-book bid/ask per coin. L2/L4/Trades subscriptions are disabled. Useful for price feeds, alerting, or memory-constrained environments.
+New `--bbo-only` flag reduces memory from ~1 GB to ~100 MB by only tracking the top-of-book bid/ask per coin. L2/L4/Trades subscriptions are disabled. Useful for price feeds, alerting, or memory-constrained environments.
 
 ### Snapshot Modes: Docker & Direct
 

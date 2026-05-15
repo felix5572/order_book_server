@@ -2,7 +2,7 @@
 // Each event source runs on its own thread for maximum throughput
 
 use crate::types::node_data::EventSource;
-use crossbeam_channel::{Sender, unbounded};
+use crossbeam_channel::{Sender, bounded};
 use log::{error, info};
 use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
 use std::{
@@ -415,7 +415,11 @@ pub(crate) fn start_parallel_file_watchers(
     data_dir: PathBuf,
 ) -> (crossbeam_channel::Receiver<FileEvent>, Vec<thread::JoinHandle<()>>, Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicU64>)
 {
-    let (tx, rx) = unbounded();
+    // Bounded so a slow downstream actually back-pressures the file readers
+    // (their `tx.send` blocks until a slot frees up). The previous `unbounded()`
+    // would grow forever under sustained processing stalls - the events sit on
+    // disk, no need to also mirror them in memory.
+    let (tx, rx) = bounded(1024);
     let mut handles = Vec::new();
 
     // Health monitoring

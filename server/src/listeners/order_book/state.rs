@@ -1,5 +1,5 @@
 use crate::{
-    listeners::order_book::{L2Snapshots, TimedSnapshots, utils::compute_l2_snapshots},
+    listeners::order_book::{L2Snapshots, TimedSnapshots},
     order_book::{
         Coin, InnerOrder, Oid,
         multi_book::{OrderBooks, Snapshots},
@@ -60,10 +60,20 @@ impl OrderBookState {
         TimedSnapshots { time: self.time, height: self.height, snapshot: self.order_book.to_snapshots_par() }
     }
 
-    // Always returns fresh L2 snapshots (no caching/flag check)
-    // Used for real-time streaming updates to L2/BBO subscribers
-    pub(super) fn l2_snapshots_uncached(&self) -> (u64, L2Snapshots) {
-        (self.time, compute_l2_snapshots(&self.order_book))
+    /// Incremental variant: rebuilds variants only for `changed_coins` and reuses
+    /// cached Arc'd entries for every other coin. The caller owns the cache so
+    /// the borrow on `&self` here only touches the order book.
+    pub(super) fn l2_snapshots_incremental(
+        &self,
+        changed_coins: &HashSet<Coin>,
+        cache: &mut HashMap<Coin, std::sync::Arc<HashMap<crate::listeners::order_book::L2SnapshotParams, crate::order_book::Snapshot<crate::types::inner::InnerLevel>>>>,
+    ) -> (u64, L2Snapshots) {
+        let snapshots = crate::listeners::order_book::utils::compute_l2_snapshots_incremental(
+            &self.order_book,
+            changed_coins,
+            cache,
+        );
+        (self.time, snapshots)
     }
 
     pub(super) fn compute_universe(&self) -> HashSet<Coin> {
