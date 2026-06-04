@@ -305,6 +305,65 @@ mod tests {
     }
 
     #[test]
+    fn test_incremental_rebuilds_full_accumulated_set_not_just_triggering_coin() {
+        // Regression for the L2 conflation bug: when a coin changes during a
+        // throttle-suppressed window, the broadcast must rebuild the FULL accumulated
+        // set of dirty coins, not just the coin in the triggering event. Passing the
+        // accumulated set {A, B} must recompute both - A must NOT be served stale.
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        books.add_order(order(1, "A", Side::Bid, "1", "100"));
+        books.add_order(order(2, "B", Side::Bid, "1", "200"));
+
+        let mut cache = HashMap::new();
+        // Seed both coins.
+        let _ = compute_l2_snapshots_incremental(&books, &HashSet::new(), &mut cache);
+        let a_seed = Arc::clone(cache.get(&Coin::new("A")).unwrap());
+        let b_seed = Arc::clone(cache.get(&Coin::new("B")).unwrap());
+
+        // A changes during a suppressed window; B changes in the triggering event.
+        // The conflation buffer accumulates both.
+        books.add_order(order(3, "A", Side::Bid, "5", "101"));
+        books.add_order(order(4, "B", Side::Bid, "5", "201"));
+
+        let dirty: HashSet<Coin> = ["A", "B"].iter().map(|c| Coin::new(c)).collect();
+        let _ = compute_l2_snapshots_incremental(&books, &dirty, &mut cache);
+
+        assert!(
+            !Arc::ptr_eq(&a_seed, cache.get(&Coin::new("A")).unwrap()),
+            "A changed during the suppressed window and must be rebuilt, not served stale"
+        );
+        assert!(
+            !Arc::ptr_eq(&b_seed, cache.get(&Coin::new("B")).unwrap()),
+            "B changed in the triggering event and must be rebuilt"
+        );
+    }
+
+    #[test]
+    fn test_incremental_serves_stale_when_changed_coin_omitted() {
+        // Documents the pre-fix behavior the conflation buffer eliminates: if a
+        // changed coin (A) is omitted from the passed set (as happened when A's change
+        // landed in a throttle-suppressed event and was discarded), A is served from
+        // its stale cached Arc even though the book changed.
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        books.add_order(order(1, "A", Side::Bid, "1", "100"));
+        books.add_order(order(2, "B", Side::Bid, "1", "200"));
+
+        let mut cache = HashMap::new();
+        let _ = compute_l2_snapshots_incremental(&books, &HashSet::new(), &mut cache);
+        let a_seed = Arc::clone(cache.get(&Coin::new("A")).unwrap());
+
+        // A's book changes, but only B is passed as changed (A's change was dropped).
+        books.add_order(order(3, "A", Side::Bid, "5", "101"));
+        let only_b: HashSet<Coin> = std::iter::once(Coin::new("B")).collect();
+        let _ = compute_l2_snapshots_incremental(&books, &only_b, &mut cache);
+
+        assert!(
+            Arc::ptr_eq(&a_seed, cache.get(&Coin::new("A")).unwrap()),
+            "demonstrates the stale-serve bug: A's change is invisible when omitted from the changed set"
+        );
+    }
+
+    #[test]
     fn test_incremental_evicts_removed_coins() {
         let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
         books.add_order(order(1, "BTC", Side::Bid, "1", "50000"));

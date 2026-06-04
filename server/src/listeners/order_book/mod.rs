@@ -2,8 +2,9 @@ use crate::{
     listeners::order_book::state::OrderBookState,
     metrics::{
         BBO_BROADCAST_LATENCY, EVENT_PROCESSING_LATENCY, EVENTS_PROCESSED_TOTAL, FILE_EVENTS_TOTAL,
-        FILE_LINES_PARSED_TOTAL, L2_BROADCAST_LATENCY, ORDERBOOK_COINS_COUNT, ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL,
-        ORDERBOOK_TIME_MS, PARSE_ERRORS_TOTAL, PENDING_DIFFS_CACHE, PENDING_ORDERS_CACHE,
+        FILE_LINES_PARSED_TOTAL, L2_BROADCAST_LATENCY, L2_CONFLATION_BATCH_SIZE, ORDERBOOK_COINS_COUNT,
+        ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL, ORDERBOOK_TIME_MS, PARSE_ERRORS_TOTAL, PENDING_DIFFS_CACHE,
+        PENDING_ORDERS_CACHE,
     },
     order_book::{
         Coin, Px, Snapshot, Sz,
@@ -98,6 +99,14 @@ pub(crate) struct OrderBookListener {
     // the broadcast Arc, so unchanged coins cost an atomic bump rather than a
     // full level-vector clone. Invalidated in `init_from_snapshot`.
     l2_snapshot_cache: HashMap<Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>>,
+    // Coin-level conflation buffer for throttled L2 broadcasts. Every event unions
+    // its changed_coins here; each L2 broadcast drains the full set so no coin
+    // starves during throttle-suppressed windows. Without this, a coin that changed
+    // during a suppressed 50ms window was never marked for rebuild and served a
+    // stale cached snapshot until a later event for that exact coin happened to land
+    // on an open throttle slot. Mutated only under the listener lock (like
+    // last_l2_broadcast / l2_snapshot_cache). Bounded by the universe size.
+    pending_dirty_l2_coins: HashSet<Coin>,
 }
 
 impl OrderBookListener {
@@ -109,6 +118,7 @@ impl OrderBookListener {
             internal_message_tx,
             last_l2_broadcast: None,
             l2_snapshot_cache: HashMap::new(),
+            pending_dirty_l2_coins: HashSet::new(),
         }
     }
 
@@ -138,6 +148,10 @@ impl OrderBookListener {
         // The incremental L2 cache references the previous book's coins/levels;
         // drop it so the next broadcast does a full rebuild against the new state.
         self.l2_snapshot_cache = HashMap::new();
+        // The conflation buffer references the previous universe; clear it too. The
+        // cache reset above makes every present coin uncached, so the next broadcast
+        // recomputes all of them fresh regardless.
+        self.pending_dirty_l2_coins.clear();
         // Clear any stale cache
         self.fetched_snapshot_cache = None;
         info!("Order book ready at height {}", height);
@@ -365,17 +379,32 @@ impl OrderBookListener {
         }
 
         // Throttled L2 snapshot broadcast for L2Book subscribers.
-        // l2_snapshots_uncached() walks every coin x every aggregation variant, so
-        // limit to 20 broadcasts/sec max (50ms). Skip entirely when no coin changed
-        // - there's nothing new to send and the per-client dedup would drop it anyway.
+        // l2_snapshots_incremental() walks every changed coin x every aggregation
+        // variant, so limit to 20 broadcasts/sec max (50ms).
         // (Heartbeat resend for quiet coins is handled per-connection in handle_socket.)
         //
-        // CRITICAL: the receiver_count gate must wrap l2_snapshots_uncached(), not
-        // sit between compute and send. A prior version updated last_l2_broadcast
-        // only when receivers existed, so with zero subscribers the throttle reset
-        // never fired and the par_iter ran on every event - tens of GB of allocator
-        // churn per hour and a pinned listener mutex.
-        let should_broadcast_l2 = !changed_coins.is_empty()
+        // Conflation: every event accumulates its changed coins into a persistent
+        // buffer. Because L2 is throttled to one broadcast / 50ms, the buffer holds
+        // EVERY coin that changed since the last broadcast - not just the coins in the
+        // triggering event. Without this, a coin that changed during a throttle-
+        // suppressed window was never marked for rebuild and served a stale cached
+        // snapshot until a later event for that exact coin happened to land on an open
+        // throttle slot (165-2260ms L2 update gaps with many active coins, while BBO -
+        // which reads live state every event - stayed fresh).
+        //
+        // CRITICAL: the receiver_count gate must wrap the compute, not sit between
+        // compute and send. A prior version updated last_l2_broadcast only when
+        // receivers existed, so with zero subscribers the throttle reset never fired
+        // and the par_iter ran on every event - tens of GB of allocator churn per hour
+        // and a pinned listener mutex. We still set last_l2_broadcast unconditionally
+        // below. The buffer is only drained inside the has_receivers + Some(state)
+        // branch where we actually rebuild: draining anywhere else would clear the
+        // coins without refreshing the cache, so a later-connecting subscriber would
+        // be served their stale snapshots. With no subscribers the buffer keeps
+        // accumulating (deduped by coin, bounded by the universe size).
+        self.pending_dirty_l2_coins.extend(changed_coins.iter().cloned());
+
+        let should_broadcast_l2 = !self.pending_dirty_l2_coins.is_empty()
             && self.last_l2_broadcast.map(|t| t.elapsed() >= Duration::from_millis(50)).unwrap_or(true);
 
         if should_broadcast_l2 {
@@ -385,14 +414,20 @@ impl OrderBookListener {
             self.last_l2_broadcast = Some(Instant::now());
             if has_receivers {
                 if let Some(state) = &self.order_book_state {
+                    // Drain the conflation buffer only now that we will actually
+                    // rebuild. mem::take yields an owned set, releasing the borrow on
+                    // self.pending_dirty_l2_coins before the disjoint co-borrow of
+                    // order_book_state (&) and l2_snapshot_cache (&mut).
+                    let dirty = std::mem::take(&mut self.pending_dirty_l2_coins);
+                    L2_CONFLATION_BATCH_SIZE.observe(dirty.len() as f64);
                     let l2_start = Instant::now();
                     let (time, l2_snapshots) =
-                        state.l2_snapshots_incremental(&changed_coins, &mut self.l2_snapshot_cache);
+                        state.l2_snapshots_incremental(&dirty, &mut self.l2_snapshot_cache);
 
                     static L2_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                     let bc = L2_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if bc % 100 == 0 {
-                        info!("L2 broadcast #{} at time {}", bc, time);
+                        info!("L2 broadcast #{} at time {} for {} dirty coins", bc, time, dirty.len());
                     }
 
                     if let Some(tx) = &self.internal_message_tx {

@@ -358,6 +358,7 @@ curl http://localhost:9090/metrics
 | | `server_start_time_seconds` | Server start timestamp (unix) |
 | **Latency** | `bbo_broadcast_latency_seconds` | BBO broadcast latency histogram |
 | | `l2_broadcast_latency_seconds` | L2 broadcast latency histogram |
+| | `l2_conflation_batch_size` | Coins rebuilt per L2 broadcast (changed within the 50 ms throttle window) |
 | | `event_processing_latency_seconds{event_type}` | Per-event processing latency |
 | **File Watcher** | `file_events_total{source}` | File events received by source |
 | | `file_lines_parsed_total{source}` | Lines parsed from files by source |
