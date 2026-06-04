@@ -115,10 +115,23 @@ pub(crate) struct OrderBookListener {
     // on an open throttle slot. Mutated only under the listener lock (like
     // last_l2_broadcast / l2_snapshot_cache). Bounded by the universe size.
     pending_dirty_l2_coins: HashSet<Coin>,
+    // Shared registry of L2 variant shapes any live connection wants. Read at flush
+    // time so we compute only subscribed variants per coin instead of all 7.
+    active_l2_params: ActiveL2Params,
+    // The active variant set used for the last L2 build. When it changes (a new
+    // shape is subscribed, or the last subscriber of a shape leaves), the cache holds
+    // the wrong shapes, so we clear it to force a full rebuild against the new set -
+    // this is what lets a brand-new subscriber be served within one throttle window
+    // even on an otherwise-quiet coin.
+    last_active_l2_params: HashSet<L2SnapshotParams>,
 }
 
 impl OrderBookListener {
-    pub(crate) fn new(internal_message_tx: Option<Sender<Arc<InternalMessage>>>, ignore_spot: bool) -> Self {
+    pub(crate) fn new(
+        internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
+        ignore_spot: bool,
+        active_l2_params: ActiveL2Params,
+    ) -> Self {
         Self {
             ignore_spot,
             order_book_state: None,
@@ -127,7 +140,14 @@ impl OrderBookListener {
             last_l2_broadcast: None,
             l2_snapshot_cache: HashMap::new(),
             pending_dirty_l2_coins: HashSet::new(),
+            active_l2_params,
+            last_active_l2_params: HashSet::new(),
         }
+    }
+
+    /// Clone of the shared active-variant registry, for handing to connections.
+    pub(crate) fn active_l2_params(&self) -> ActiveL2Params {
+        self.active_l2_params.clone()
     }
 
     pub(crate) const fn is_ready(&self) -> bool {
@@ -160,6 +180,9 @@ impl OrderBookListener {
         // cache reset above makes every present coin uncached, so the next broadcast
         // recomputes all of them fresh regardless.
         self.pending_dirty_l2_coins.clear();
+        // Force the next flush to treat the active variant set as "changed" so the
+        // empty cache is rebuilt against whatever shapes are currently subscribed.
+        self.last_active_l2_params.clear();
         // Clear any stale cache
         self.fetched_snapshot_cache = None;
         info!("Order book ready at height {}", height);
@@ -441,6 +464,20 @@ impl OrderBookListener {
             return;
         }
 
+        // Compute only the variant shapes some connection currently wants. With no
+        // L2 subscribers there is nothing to build or send.
+        let active = self.active_l2_params.snapshot();
+        if active.is_empty() {
+            return;
+        }
+        // When the requested shape set changes, the cache holds the wrong shapes;
+        // clear it so every present coin is rebuilt with the new set on this flush
+        // (bounds a new subscriber's wait to one throttle window even on quiet coins).
+        if active != self.last_active_l2_params {
+            self.l2_snapshot_cache.clear();
+            self.last_active_l2_params.clone_from(&active);
+        }
+
         if let Some(state) = &self.order_book_state {
             // Drain the conflation buffer only now that we will actually rebuild.
             // mem::take yields an owned set, releasing the borrow on
@@ -449,7 +486,7 @@ impl OrderBookListener {
             let dirty = std::mem::take(&mut self.pending_dirty_l2_coins);
             L2_CONFLATION_BATCH_SIZE.observe(dirty.len() as f64);
             let l2_start = Instant::now();
-            let (time, l2_snapshots) = state.l2_snapshots_incremental(&dirty, &mut self.l2_snapshot_cache);
+            let (time, l2_snapshots) = state.l2_snapshots_incremental(&dirty, &active, &mut self.l2_snapshot_cache);
 
             static L2_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let bc = L2_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -507,10 +544,66 @@ pub(crate) enum InternalMessage {
     },
 }
 
-#[derive(Eq, PartialEq, Hash)]
+#[derive(Eq, PartialEq, Hash, Clone, Copy)]
 pub(crate) struct L2SnapshotParams {
     n_sig_figs: Option<u32>,
     mantissa: Option<u64>,
+}
+
+/// Refcounted set of L2 aggregation variant *shapes* that some live connection
+/// currently wants. The listener reads it at flush time and computes only those
+/// variants (instead of all 7) for every dirty coin. Bounded to the handful of
+/// supported shapes. Shared (Arc) between the listener and every connection.
+///
+/// A plain `std::sync::Mutex` is used deliberately: every access is O(1) and never
+/// spans an `.await`, and the RAII guard's `Drop` (which must run on abnormal
+/// disconnects too) cannot be async.
+#[derive(Clone, Default)]
+pub(crate) struct ActiveL2Params {
+    inner: Arc<std::sync::Mutex<HashMap<L2SnapshotParams, usize>>>,
+}
+
+impl ActiveL2Params {
+    pub(crate) fn new() -> Self {
+        Self { inner: Arc::new(std::sync::Mutex::new(HashMap::new())) }
+    }
+
+    /// Increment the refcount for `params` and return a guard that decrements on
+    /// drop. Holding the guard keeps the shape in the active set.
+    #[must_use]
+    pub(crate) fn acquire(&self, params: L2SnapshotParams) -> L2ParamGuard {
+        if let Ok(mut map) = self.inner.lock() {
+            *map.entry(params).or_insert(0) += 1;
+        }
+        L2ParamGuard { registry: self.inner.clone(), params }
+    }
+
+    /// Snapshot the currently-active variant shapes. Cloned under the lock; the
+    /// lock is released before returning.
+    pub(crate) fn snapshot(&self) -> HashSet<L2SnapshotParams> {
+        self.inner.lock().map(|m| m.keys().copied().collect()).unwrap_or_default()
+    }
+}
+
+/// RAII guard returned by [`ActiveL2Params::acquire`]. Decrements the refcount on
+/// drop and removes the shape at zero. Cleanup is panic/disconnect-safe because
+/// `Drop` runs during normal scope exit, early `return`, and unwinding alike.
+pub(crate) struct L2ParamGuard {
+    registry: Arc<std::sync::Mutex<HashMap<L2SnapshotParams, usize>>>,
+    params: L2SnapshotParams,
+}
+
+impl Drop for L2ParamGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.registry.lock() {
+            if let Some(count) = map.get_mut(&self.params) {
+                *count -= 1;
+                if *count == 0 {
+                    map.remove(&self.params);
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -676,7 +769,7 @@ mod tests {
     /// broadcast receiver so `receiver_count() > 0`.
     fn ready_listener() -> (OrderBookListener, tokio::sync::broadcast::Receiver<Arc<InternalMessage>>) {
         let (tx, rx) = tokio::sync::broadcast::channel(32);
-        let mut listener = OrderBookListener::new(Some(tx), true);
+        let mut listener = OrderBookListener::new(Some(tx), true, ActiveL2Params::new());
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 0);
         (listener, rx)
     }
@@ -684,6 +777,8 @@ mod tests {
     #[test]
     fn test_flush_l2_if_due_broadcasts_and_drains_when_due() {
         let (mut listener, mut rx) = ready_listener();
+        // A subscriber must want at least one variant shape, else flush is skipped.
+        let _guard = listener.active_l2_params().acquire(L2SnapshotParams::new(None, None));
         listener.pending_dirty_l2_coins.insert(Coin::new("BTC"));
         listener.last_l2_broadcast = None; // due (no prior broadcast)
 
@@ -715,5 +810,42 @@ mod tests {
         listener.flush_l2_if_due();
 
         assert!(rx.try_recv().is_err(), "no broadcast when there are no dirty coins");
+    }
+
+    #[test]
+    fn test_flush_l2_if_due_noop_when_no_active_variants() {
+        // Due + dirty + receiver, but no connection wants any L2 variant.
+        let (mut listener, mut rx) = ready_listener();
+        listener.pending_dirty_l2_coins.insert(Coin::new("BTC"));
+        listener.last_l2_broadcast = None;
+
+        listener.flush_l2_if_due();
+
+        assert!(rx.try_recv().is_err(), "no broadcast when no variant shape is subscribed");
+    }
+
+    #[test]
+    fn test_active_l2_params_guard_decrements_on_drop() {
+        let reg = ActiveL2Params::new();
+        let p = L2SnapshotParams::new(Some(5), Some(2));
+        {
+            let _g1 = reg.acquire(p);
+            let _g2 = reg.acquire(p); // refcount 2
+            assert!(reg.snapshot().contains(&p));
+        } // both guards dropped here
+        assert!(reg.snapshot().is_empty(), "shape removed once refcount hits zero");
+    }
+
+    #[test]
+    fn test_active_l2_params_partial_drop_keeps_shape() {
+        let reg = ActiveL2Params::new();
+        let p = L2SnapshotParams::new(None, None);
+        let g1 = reg.acquire(p);
+        {
+            let _g2 = reg.acquire(p);
+        } // one guard dropped, refcount back to 1
+        assert!(reg.snapshot().contains(&p), "shape still referenced by g1");
+        drop(g1);
+        assert!(reg.snapshot().is_empty());
     }
 }

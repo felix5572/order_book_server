@@ -1,6 +1,7 @@
 use crate::{
     listeners::order_book::{
-        InternalMessage, L2SnapshotParams, L2Snapshots, OrderBookListener, TimedSnapshots, hl_listen_hft,
+        ActiveL2Params, InternalMessage, L2ParamGuard, L2SnapshotParams, L2Snapshots, OrderBookListener,
+        TimedSnapshots, hl_listen_hft,
     },
     metrics::{
         BBO_CHANGES_TOTAL, BROADCAST_RECEIVERS, BROADCASTS_TOTAL, CHANNEL_DROPS_TOTAL, CHANNEL_LAG,
@@ -89,11 +90,16 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     let ignore_spot = !config.include_spot; // For OrderBookListener (legacy)
     let compression_level = config.compression_level;
 
+    // Shared registry of L2 variant shapes any live connection wants. Cloned into
+    // the listener (read at flush time) and handed to each connection (which
+    // acquires/releases refcounted guards on subscribe/unsubscribe + disconnect).
+    let active_l2_params = ActiveL2Params::new();
+
     // Resolve data directory
     // Central task: listen to messages and forward them for distribution
     let listener = {
         let internal_message_tx = internal_message_tx.clone();
-        OrderBookListener::new(Some(internal_message_tx), ignore_spot)
+        OrderBookListener::new(Some(internal_message_tx), ignore_spot, active_l2_params.clone())
     };
     let listener = Arc::new(Mutex::new(listener));
     {
@@ -241,6 +247,11 @@ async fn handle_socket(
     let mut last_l2: HashMap<String, L2Entry> = HashMap::new();
     // Per-coin cache for BBO dedup + heartbeat resend
     let mut last_bbo: HashMap<String, BboEntry> = HashMap::new();
+    // Shared L2 variant registry + this connection's refcount guards (one per variant
+    // shape it subscribes to). Dropping the map on disconnect releases every guard,
+    // so cleanup is robust to abnormal disconnects.
+    let active_l2_params = listener.lock().await.active_l2_params();
+    let mut l2_param_guards: HashMap<L2SnapshotParams, L2ParamGuard> = HashMap::new();
     if !is_ready {
         let msg = ServerResponse::Error("Order book not ready for streaming (waiting for snapshot)".to_string());
         let _ = send_socket_message(&mut socket, msg).await;
@@ -399,7 +410,7 @@ async fn handle_socket(
                                         alive &= send_socket_message(&mut socket, ServerResponse::Pong).await;
                                     }
                                     _ => {
-                                        alive &= receive_client_message(&mut socket, &mut manager, value, &universe, listener.clone(), bbo_only, &mut last_l2, &mut last_bbo).await;
+                                        alive &= receive_client_message(&mut socket, &mut manager, value, &universe, listener.clone(), bbo_only, &mut last_l2, &mut last_bbo, &active_l2_params, &mut l2_param_guards).await;
                                     }
                                 }
                             }
@@ -425,6 +436,7 @@ async fn handle_socket(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn receive_client_message(
     socket: &mut WebSocket,
     manager: &mut SubscriptionManager,
@@ -434,6 +446,8 @@ async fn receive_client_message(
     bbo_only: bool,
     last_l2: &mut HashMap<String, L2Entry>,
     last_bbo: &mut HashMap<String, BboEntry>,
+    active_l2_params: &ActiveL2Params,
+    l2_param_guards: &mut HashMap<L2SnapshotParams, L2ParamGuard>,
 ) -> bool {
     let subscription = match &client_message {
         ClientMessage::Unsubscribe { subscription } | ClientMessage::Subscribe { subscription } => subscription.clone(),
@@ -455,7 +469,18 @@ async fn receive_client_message(
 
     let (word, success) = match &client_message {
         ClientMessage::Subscribe { .. } => match manager.subscribe(subscription.clone()) {
-            Ok(inserted) => ("", inserted),
+            Ok(inserted) => {
+                // Register the variant shape so the listener computes it. One guard
+                // per shape per connection (n_levels is a send-time truncation, not
+                // part of the cached shape); the entry API dedups shared shapes.
+                if inserted
+                    && let Subscription::L2Book { n_sig_figs, mantissa, .. } = &subscription
+                {
+                    let params = L2SnapshotParams::new(*n_sig_figs, *mantissa);
+                    l2_param_guards.entry(params).or_insert_with(|| active_l2_params.acquire(params));
+                }
+                ("", inserted)
+            }
             Err(err) => {
                 return send_socket_message(socket, ServerResponse::Error(format!("Rejected subscription: {err}"))).await;
             }
@@ -469,6 +494,17 @@ async fn receive_client_message(
                 match &subscription {
                     Subscription::L2Book { coin, n_sig_figs, mantissa, .. } => {
                         last_l2.remove(&l2_cache_key(coin, *n_sig_figs, *mantissa));
+                        // Release this connection's guard for the shape only if no
+                        // remaining L2 subscription on this connection still uses it
+                        // (e.g. same shape on another coin / different n_levels).
+                        let params = L2SnapshotParams::new(*n_sig_figs, *mantissa);
+                        let still_used = manager.subscriptions().iter().any(|s| {
+                            matches!(s, Subscription::L2Book { n_sig_figs: nsf, mantissa: m, .. }
+                                if L2SnapshotParams::new(*nsf, *m) == params)
+                        });
+                        if !still_used {
+                            l2_param_guards.remove(&params);
+                        }
                     }
                     Subscription::Bbo { coin } => {
                         last_bbo.remove(coin);
