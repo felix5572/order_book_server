@@ -173,12 +173,19 @@ impl L2SnapshotParams {
 fn compute_l2_variants_for_coin<O: InnerOrder>(
     order_book: &crate::order_book::OrderBook<O>,
 ) -> HashMap<L2SnapshotParams, Snapshot<InnerLevel>> {
+    use crate::types::subscription::MAX_LEVELS;
+    // Cap every cached variant at MAX_LEVELS per side. Subscription validation
+    // rejects n_levels > MAX_LEVELS, so deeper levels are pure waste in CPU,
+    // memory, and broadcast Arc size (BTC: ~500 -> 100 levels/side). Aggregation
+    // only ever reduces the level count, so capping the raw base is enough for
+    // every derived variant to also satisfy any client request.
+    let cap = Some(MAX_LEVELS);
     let mut entries = Vec::new();
-    let snapshot = order_book.to_l2_snapshot(None, None, None);
+    let snapshot = order_book.to_l2_snapshot(cap, None, None);
     entries.push((L2SnapshotParams { n_sig_figs: None, mantissa: None }, snapshot));
     let mut add_new_snapshot = |n_sig_figs: Option<u32>, mantissa: Option<u64>, idx: usize| {
         if let Some((_, last_snapshot)) = &entries.get(entries.len() - idx) {
-            let snapshot = last_snapshot.to_l2_snapshot(None, n_sig_figs, mantissa);
+            let snapshot = last_snapshot.to_l2_snapshot(cap, n_sig_figs, mantissa);
             entries.push((L2SnapshotParams { n_sig_figs, mantissa }, snapshot));
         }
     };
@@ -277,6 +284,31 @@ mod tests {
             order_type: String::new(),
             tif: None,
             cloid: None,
+        }
+    }
+
+    #[test]
+    fn test_l2_variants_are_capped_to_max_levels() {
+        use crate::types::subscription::MAX_LEVELS;
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        // Add more than MAX_LEVELS distinct price levels on each side.
+        for i in 0..(MAX_LEVELS + 50) {
+            let bid_px = format!("{}", 1000 + i);
+            let ask_px = format!("{}", 100_000 + i);
+            books.add_order(order(i as u64, "BTC", Side::Bid, "1", &bid_px));
+            books.add_order(order((1_000_000 + i) as u64, "BTC", Side::Ask, "1", &ask_px));
+        }
+
+        let book = books.as_ref().get(&Coin::new("BTC")).unwrap();
+        let variants = compute_l2_variants_for_coin(book);
+        let base = variants.get(&L2SnapshotParams::new(None, None)).unwrap();
+        let [bids, asks] = base.as_ref();
+        assert!(bids.len() <= MAX_LEVELS, "base bids capped: {} <= {}", bids.len(), MAX_LEVELS);
+        assert!(asks.len() <= MAX_LEVELS, "base asks capped: {} <= {}", asks.len(), MAX_LEVELS);
+        // Every aggregated variant is also bounded by the cap.
+        for snap in variants.values() {
+            let [b, a] = snap.as_ref();
+            assert!(b.len() <= MAX_LEVELS && a.len() <= MAX_LEVELS, "an aggregated variant exceeds the cap");
         }
     }
 
