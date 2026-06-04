@@ -30,9 +30,17 @@ use tokio::{
         broadcast::Sender,
         mpsc::{UnboundedSender, unbounded_channel},
     },
-    time::{Instant, sleep},
+    time::{Instant, MissedTickBehavior, interval, sleep},
 };
 use utils::{EventBatch, SnapshotConfig, get_visor_path, process_rmp_file};
+
+/// Minimum interval between L2 broadcasts. Caps the broadcast rate at 20/sec; the
+/// conflation buffer accumulates dirty coins between broadcasts.
+const L2_BROADCAST_THROTTLE_MS: u64 = 50;
+/// How often the main loop polls to flush the conflation buffer. Must be << the
+/// throttle so a quiet node between block flushes can never starve the L2 feed
+/// for more than ~throttle + tick.
+const L2_FLUSH_TICK_MS: u64 = 10;
 
 mod parallel;
 mod state;
@@ -403,42 +411,58 @@ impl OrderBookListener {
         // be served their stale snapshots. With no subscribers the buffer keeps
         // accumulating (deduped by coin, bounded by the universe size).
         self.pending_dirty_l2_coins.extend(changed_coins.iter().cloned());
-
-        let should_broadcast_l2 = !self.pending_dirty_l2_coins.is_empty()
-            && self.last_l2_broadcast.map(|t| t.elapsed() >= Duration::from_millis(50)).unwrap_or(true);
-
-        if should_broadcast_l2 {
-            let has_receivers = self.internal_message_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
-            // Mark the throttle as fired regardless of receivers so we don't
-            // re-check on every subsequent event when nobody is listening.
-            self.last_l2_broadcast = Some(Instant::now());
-            if has_receivers {
-                if let Some(state) = &self.order_book_state {
-                    // Drain the conflation buffer only now that we will actually
-                    // rebuild. mem::take yields an owned set, releasing the borrow on
-                    // self.pending_dirty_l2_coins before the disjoint co-borrow of
-                    // order_book_state (&) and l2_snapshot_cache (&mut).
-                    let dirty = std::mem::take(&mut self.pending_dirty_l2_coins);
-                    L2_CONFLATION_BATCH_SIZE.observe(dirty.len() as f64);
-                    let l2_start = Instant::now();
-                    let (time, l2_snapshots) =
-                        state.l2_snapshots_incremental(&dirty, &mut self.l2_snapshot_cache);
-
-                    static L2_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    let bc = L2_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if bc % 100 == 0 {
-                        info!("L2 broadcast #{} at time {} for {} dirty coins", bc, time, dirty.len());
-                    }
-
-                    if let Some(tx) = &self.internal_message_tx {
-                        let msg = Arc::new(InternalMessage::Snapshot { l2_snapshots, time });
-                        drop(tx.send(msg));
-                    }
-                    L2_BROADCAST_LATENCY.observe(l2_start.elapsed().as_secs_f64());
-                }
-            }
-        }
+        // The L2 broadcast is NOT done inline here. It is driven by the main-loop
+        // flush ticker via flush_l2_if_due(), so a quiet node between block flushes
+        // (or the listener lock being busy draining a burst) can no longer starve
+        // the L2 feed. The event path stays minimal: apply + BBO + accumulate.
         Ok(())
+    }
+
+    /// Flush the L2 conflation buffer if the throttle window has elapsed and there
+    /// are dirty coins. Driven by the main-loop flush ticker so the L2 feed has a
+    /// guaranteed maximum interval (~throttle + tick) regardless of event arrival.
+    /// Safe to call on every tick: O(1) early-return when not due. Runs under the
+    /// listener lock.
+    pub(crate) fn flush_l2_if_due(&mut self) {
+        let should_broadcast_l2 = !self.pending_dirty_l2_coins.is_empty()
+            && self
+                .last_l2_broadcast
+                .map(|t| t.elapsed() >= Duration::from_millis(L2_BROADCAST_THROTTLE_MS))
+                .unwrap_or(true);
+        if !should_broadcast_l2 {
+            return;
+        }
+
+        let has_receivers = self.internal_message_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
+        // Mark the throttle as fired regardless of receivers so we don't re-run the
+        // par_iter path on every subsequent tick when nobody is listening.
+        self.last_l2_broadcast = Some(Instant::now());
+        if !has_receivers {
+            return;
+        }
+
+        if let Some(state) = &self.order_book_state {
+            // Drain the conflation buffer only now that we will actually rebuild.
+            // mem::take yields an owned set, releasing the borrow on
+            // self.pending_dirty_l2_coins before the disjoint co-borrow of
+            // order_book_state (&) and l2_snapshot_cache (&mut).
+            let dirty = std::mem::take(&mut self.pending_dirty_l2_coins);
+            L2_CONFLATION_BATCH_SIZE.observe(dirty.len() as f64);
+            let l2_start = Instant::now();
+            let (time, l2_snapshots) = state.l2_snapshots_incremental(&dirty, &mut self.l2_snapshot_cache);
+
+            static L2_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let bc = L2_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if bc % 100 == 0 {
+                info!("L2 broadcast #{} at time {} for {} dirty coins", bc, time, dirty.len());
+            }
+
+            if let Some(tx) = &self.internal_message_tx {
+                let msg = Arc::new(InternalMessage::Snapshot { l2_snapshots, time });
+                drop(tx.send(msg));
+            }
+            L2_BROADCAST_LATENCY.observe(l2_start.elapsed().as_secs_f64());
+        }
     }
 }
 
@@ -568,11 +592,27 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
     let mut ticker = tokio::time::interval_at(start, Duration::from_secs(10));
     let mut snapshot_fetch_pending = false;
 
+    // Drives L2 broadcasts on a fixed cadence so the feed has a guaranteed maximum
+    // interval even when no events arrive. Skip missed ticks so a busy loop resumes
+    // on the next aligned tick rather than firing a catch-up burst.
+    let mut l2_flush_ticker = interval(Duration::from_millis(L2_FLUSH_TICK_MS));
+    l2_flush_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
     info!("Main event loop starting");
 
     loop {
         tokio::select! {
             biased;
+
+            // L2 flush FIRST under `biased`: guarantees the throttle window is
+            // serviced even under continuous event load. During a burst tokio_rx is
+            // perpetually ready, so a later-placed flush arm would be starved and the
+            // multi-second gaps would return. flush_l2_if_due() is O(1) when not due
+            // and the tick is only Ready every L2_FLUSH_TICK_MS, so it cannot starve
+            // the event arm in return.
+            _ = l2_flush_ticker.tick() => {
+                listener.lock().await.flush_l2_if_due();
+            }
 
             // Process events from file watchers (via bridge)
             Some(event) = tokio_rx.recv() => {
@@ -624,5 +664,56 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Build a ready listener (state initialized from an empty snapshot) with a held
+    /// broadcast receiver so `receiver_count() > 0`.
+    fn ready_listener() -> (OrderBookListener, tokio::sync::broadcast::Receiver<Arc<InternalMessage>>) {
+        let (tx, rx) = tokio::sync::broadcast::channel(32);
+        let mut listener = OrderBookListener::new(Some(tx), true);
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 0);
+        (listener, rx)
+    }
+
+    #[test]
+    fn test_flush_l2_if_due_broadcasts_and_drains_when_due() {
+        let (mut listener, mut rx) = ready_listener();
+        listener.pending_dirty_l2_coins.insert(Coin::new("BTC"));
+        listener.last_l2_broadcast = None; // due (no prior broadcast)
+
+        listener.flush_l2_if_due();
+
+        let msg = rx.try_recv().expect("a Snapshot must be broadcast when due and dirty");
+        assert!(matches!(msg.as_ref(), InternalMessage::Snapshot { .. }));
+        assert!(listener.pending_dirty_l2_coins.is_empty(), "buffer is drained on flush");
+        assert!(listener.last_l2_broadcast.is_some(), "throttle timestamp is set");
+    }
+
+    #[test]
+    fn test_flush_l2_if_due_noop_inside_throttle_window() {
+        let (mut listener, mut rx) = ready_listener();
+        listener.pending_dirty_l2_coins.insert(Coin::new("BTC"));
+        listener.last_l2_broadcast = Some(Instant::now()); // just fired -> not due
+
+        listener.flush_l2_if_due();
+
+        assert!(rx.try_recv().is_err(), "nothing is broadcast inside the throttle window");
+        assert!(!listener.pending_dirty_l2_coins.is_empty(), "buffer is retained when not due");
+    }
+
+    #[test]
+    fn test_flush_l2_if_due_noop_when_buffer_empty() {
+        let (mut listener, mut rx) = ready_listener();
+        listener.last_l2_broadcast = None; // due, but nothing dirty
+
+        listener.flush_l2_if_due();
+
+        assert!(rx.try_recv().is_err(), "no broadcast when there are no dirty coins");
     }
 }
