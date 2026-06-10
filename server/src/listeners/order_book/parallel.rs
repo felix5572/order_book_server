@@ -439,8 +439,18 @@ impl FileReader {
 
     /// Switch to a new file (on create event)
     fn on_create(&mut self, path: &PathBuf) -> Vec<String> {
-        // First, read remaining data from old file
-        let old_lines = self.on_modify();
+        // Drain the old file until it goes quiet: a single read raced the
+        // node's final appends (anything written between the read and the
+        // switch was silently lost). Each pass observes the size at read time,
+        // so the loop ends only after a read that saw no new data.
+        let mut old_lines = self.on_modify();
+        loop {
+            let more = self.on_modify();
+            if more.is_empty() {
+                break;
+            }
+            old_lines.extend(more);
+        }
 
         // Start tracking new file from beginning
         self.current_path = Some(path.clone());

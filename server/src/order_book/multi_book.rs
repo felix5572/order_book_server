@@ -85,13 +85,19 @@ impl<O: InnerOrder> OrderBooks<O> {
     }
 
     /// Get BBO for specific coins only - faster for selective broadcast
-    /// Only computes BBO for coins in the set, avoiding iteration over all coins
+    /// Only computes BBO for coins in the set, avoiding iteration over all coins.
+    /// A coin whose book emptied (and was evicted) yields `(None, None)` rather
+    /// than being skipped - skipping left subscribers holding the last quote
+    /// forever after a delisting, since no further update would ever arrive.
     #[must_use]
     pub(crate) fn get_bbos_for_coins(
         &self,
         coins: &std::collections::HashSet<Coin>,
     ) -> HashMap<Coin, (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>)> {
-        coins.iter().filter_map(|coin| self.order_books.get(coin).map(|book| (coin.clone(), book.get_bbo()))).collect()
+        coins
+            .iter()
+            .map(|coin| (coin.clone(), self.order_books.get(coin).map_or((None, None), OrderBook::get_bbo)))
+            .collect()
     }
 
     /// Compact slab allocators across every coin's orderbook. Returns the number
@@ -478,6 +484,19 @@ mod tests {
         books.cancel_order(Oid::new(1), Coin::new("ETH"));
         // Still has order 2 — must not be evicted.
         assert!(books.as_ref().contains_key(&Coin::new("ETH")));
+    }
+
+    #[test]
+    fn test_get_bbos_for_coins_reports_evicted_coin_as_empty() {
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        books.add_order(make_order(1, "BTC", Side::Bid, "1", "50000"));
+        books.cancel_order(Oid::new(1), Coin::new("BTC")); // book evicted
+
+        let coins: std::collections::HashSet<Coin> = std::iter::once(Coin::new("BTC")).collect();
+        let bbos = books.get_bbos_for_coins(&coins);
+        // The coin must be present with an empty BBO - skipping it left
+        // subscribers holding the last quote forever after a delisting.
+        assert_eq!(bbos.get(&Coin::new("BTC")), Some(&(None, None)));
     }
 
     #[test]

@@ -56,8 +56,21 @@ struct BboEntry {
     payload: Bbo,
 }
 
-fn l2_cache_key(coin: &str, n_sig_figs: Option<u32>, mantissa: Option<u64>) -> String {
-    format!("{}:{}:{}", coin, n_sig_figs.unwrap_or(0), mantissa.unwrap_or(0))
+/// Per-subscription dedup/heartbeat cache key. `n_levels` MUST be part of the
+/// key: two subscriptions on the same (coin, nSigFigs, mantissa) but different
+/// nLevels produce different payloads, and sharing one entry made their hashes
+/// ping-pong (dedup defeated, both resent every broadcast) while unsubscribing
+/// one silently dropped the other's cache. Validation rejects an explicit
+/// `nLevels == DEFAULT_LEVELS`, so `unwrap_or(DEFAULT_LEVELS)` cannot collide
+/// with an explicit value.
+fn l2_cache_key(coin: &str, n_sig_figs: Option<u32>, mantissa: Option<u64>, n_levels: Option<usize>) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        coin,
+        n_sig_figs.unwrap_or(0),
+        mantissa.unwrap_or(0),
+        n_levels.unwrap_or(DEFAULT_LEVELS)
+    )
 }
 
 /// Build a tokio interval that fires often enough to drive both heartbeats with
@@ -374,9 +387,9 @@ async fn handle_socket(
                 for sub in manager.subscriptions() {
                     if !alive { break; }
                     match sub {
-                        Subscription::L2Book { coin, n_sig_figs, mantissa, .. } => {
+                        Subscription::L2Book { coin, n_sig_figs, mantissa, n_levels } => {
                             let Some(hb) = l2_hb else { continue };
-                            let key = l2_cache_key(coin, *n_sig_figs, *mantissa);
+                            let key = l2_cache_key(coin, *n_sig_figs, *mantissa, *n_levels);
                             if let Some(entry) = last_l2.get_mut(&key) {
                                 if now.duration_since(entry.last_sent) >= hb {
                                     entry.payload.set_time(now_ms);
@@ -507,8 +520,8 @@ async fn receive_client_message(
             // the same coin (or BBO across coins) leaks one entry per cycle until disconnect.
             if removed {
                 match &subscription {
-                    Subscription::L2Book { coin, n_sig_figs, mantissa, .. } => {
-                        last_l2.remove(&l2_cache_key(coin, *n_sig_figs, *mantissa));
+                    Subscription::L2Book { coin, n_sig_figs, mantissa, n_levels } => {
+                        last_l2.remove(&l2_cache_key(coin, *n_sig_figs, *mantissa, *n_levels));
                         // Release this connection's guard for the shape only if no
                         // remaining L2 subscription on this connection still uses it
                         // (e.g. same shape on another coin / different n_levels).
@@ -654,40 +667,46 @@ async fn send_ws_data_from_snapshot(
         // why it compares with `&str` (no allocation). `force_full` overrides
         // after a broadcast lag; a missing cache entry means we never sent
         // anything for this subscription (it is brand new) - always process.
-        let key = l2_cache_key(coin, *n_sig_figs, *mantissa);
+        let key = l2_cache_key(coin, *n_sig_figs, *mantissa, *n_levels);
         if !force_full && !dirty.contains(coin.as_str()) && last_l2.contains_key(&key) {
             return true;
         }
 
-        let snapshot = snapshot.get(coin.as_str());
-        if let Some(snapshot) =
-            snapshot.and_then(|snapshot| snapshot.get(&L2SnapshotParams::new(*n_sig_figs, *mantissa)))
-        {
-            let n_levels = n_levels.unwrap_or(DEFAULT_LEVELS);
-            let snapshot = snapshot.truncate(n_levels);
-            let snapshot = snapshot.export_inner_snapshot();
-
-            // Hash the snapshot for dedup comparison. Level derives Hash, so we
-            // walk the [Vec<Level>; 2] directly - the prior `format!("{:?}", snapshot)`
-            // path allocated a Debug-format string per L2 subscription per broadcast,
-            // saturating glibc/jemalloc under load and dominating allocator pressure.
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            snapshot.hash(&mut hasher);
-            let current_hash = hasher.finish();
-
-            if last_l2.get(&key).map(|e| e.hash) != Some(current_hash) {
-                BROADCASTS_TOTAL.with_label_values(&["l2"]).inc();
-                let l2_book =
-                    L2Book::from_l2_snapshot(coin.clone(), snapshot, time, *n_sig_figs, *mantissa, Some(n_levels));
-                last_l2.insert(key, L2Entry { hash: current_hash, last_sent: Instant::now(), payload: l2_book.clone() });
-                return send_socket_message(socket, ServerResponse::L2Book(l2_book)).await;
+        let n_levels = n_levels.unwrap_or(DEFAULT_LEVELS);
+        let exported: [Vec<crate::types::Level>; 2] = match snapshot.get(coin.as_str()) {
+            Some(per_coin) => {
+                let Some(variant) = per_coin.get(&L2SnapshotParams::new(*n_sig_figs, *mantissa)) else {
+                    // Coin present but this variant shape hasn't been built yet
+                    // (subscriber raced the flush); the next flush covers it.
+                    error!("Variant for coin {coin} not found");
+                    return true;
+                };
+                variant.truncate(n_levels).export_inner_snapshot()
             }
-            // else: skip, L2 unchanged
-        } else {
-            error!("Coin {coin} not found");
+            // The coin's book emptied and the multi-book evicted it. Send an
+            // empty snapshot so subscribers learn the book is gone instead of
+            // keeping the last non-empty payload on screen forever.
+            None => [Vec::new(), Vec::new()],
+        };
+
+        // Hash the snapshot for dedup comparison. Level derives Hash, so we
+        // walk the [Vec<Level>; 2] directly - the prior `format!("{:?}", snapshot)`
+        // path allocated a Debug-format string per L2 subscription per broadcast,
+        // saturating glibc/jemalloc under load and dominating allocator pressure.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        exported.hash(&mut hasher);
+        let current_hash = hasher.finish();
+
+        if last_l2.get(&key).map(|e| e.hash) != Some(current_hash) {
+            BROADCASTS_TOTAL.with_label_values(&["l2"]).inc();
+            let l2_book =
+                L2Book::from_l2_snapshot(coin.clone(), exported, time, *n_sig_figs, *mantissa, Some(n_levels));
+            last_l2.insert(key, L2Entry { hash: current_hash, last_sent: Instant::now(), payload: l2_book.clone() });
+            return send_socket_message(socket, ServerResponse::L2Book(l2_book)).await;
         }
+        // else: skip, L2 unchanged
     }
     true
 }
@@ -841,4 +860,24 @@ async fn send_ws_order_updates(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_l2_cache_key_distinguishes_n_levels() {
+        // Two subscriptions differing only in nLevels MUST have distinct keys:
+        // a shared entry made their dedup hashes ping-pong (both resent every
+        // broadcast) and unsubscribing one dropped the other's cache.
+        let a = l2_cache_key("BTC", Some(5), None, None);
+        let b = l2_cache_key("BTC", Some(5), None, Some(50));
+        assert_ne!(a, b);
+        // Validation rejects an explicit nLevels == DEFAULT_LEVELS, so the
+        // None default cannot collide with a permitted explicit value.
+        assert_eq!(l2_cache_key("BTC", Some(5), None, None), l2_cache_key("BTC", Some(5), None, Some(DEFAULT_LEVELS)));
+        assert_ne!(l2_cache_key("BTC", Some(5), None, None), l2_cache_key("ETH", Some(5), None, None));
+        assert_ne!(l2_cache_key("BTC", Some(5), Some(2), None), l2_cache_key("BTC", Some(5), Some(5), None));
+    }
 }

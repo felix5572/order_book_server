@@ -266,6 +266,14 @@ pub(super) fn compute_l2_snapshots_incremental<O: InnerOrder + Send + Sync>(
         recomputed.insert(coin.clone());
         cache.insert(coin, arc);
     }
+    // A dirty coin whose book is GONE (last order cancelled -> multi-book
+    // evicted it) still counts as recomputed: connections must be told the
+    // book is now empty, or they keep the last snapshot forever.
+    for coin in changed_coins {
+        if !order_books.as_ref().contains_key(coin) {
+            recomputed.insert(coin.clone());
+        }
+    }
 
     // Build the outgoing L2Snapshots from the cache. Each entry is an Arc::clone -
     // O(coins) cheap atomic bumps, no level data is copied.
@@ -474,6 +482,23 @@ mod tests {
         let (_, recomputed, changed) = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
         assert!(changed, "eviction must flag a universe change");
         assert!(recomputed.is_empty());
+    }
+
+    #[test]
+    fn test_dirty_evicted_coin_is_reported_recomputed() {
+        // A coin whose last order was cancelled is dirty AND gone from the
+        // book. It must still appear in the recomputed set so connections are
+        // told the book is now empty instead of serving the stale snapshot.
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        books.add_order(order(1, "BTC", Side::Bid, "1", "50000"));
+        let mut cache = HashMap::new();
+        let _ = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+
+        books.cancel_order(crate::order_book::Oid::new(1), Coin::new("BTC")); // book evicted
+        let dirty: HashSet<Coin> = std::iter::once(Coin::new("BTC")).collect();
+        let (snapshots, recomputed, _) = compute_l2_snapshots_incremental(&books, &dirty, &all_params(), &mut cache);
+        assert!(recomputed.contains("BTC"), "evicted dirty coin must be reported so subscribers get an empty book");
+        assert!(!snapshots.as_ref().contains_key(&Coin::new("BTC")), "the snapshot map no longer carries the coin");
     }
 
     #[test]

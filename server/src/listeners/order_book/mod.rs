@@ -111,13 +111,19 @@ pub(crate) struct OrderBookListener {
     // Total events across all cached batches; bounded by cache_event_cap.
     cached_event_count: usize,
     cache_event_cap: usize,
-    // Set when the replay cache had to be dropped (overflow); the next
-    // init_from_snapshot keeps the book marked desynced so another re-sync runs.
-    cache_overflowed: bool,
     // Set whenever events were provably lost (oversize-batch drop, watcher
     // partial-line discard, pending-cache eviction, apply errors). The main loop
     // reacts by re-fetching a snapshot, which rebuilds the book and clears this.
     needs_resync: bool,
+    // Upper bound on the height of any unrecovered data loss (0 = none).
+    // init_from_snapshot may only clear needs_resync when the snapshot height
+    // covers this bound - a loss that occurred DURING a fetch can sit above the
+    // snapshot's height (the snapshot source lags the stream), and clearing the
+    // flag unconditionally would erase the signal and leave permanent drift.
+    max_loss_height: u64,
+    // Highest block height observed on the live stream; the best "now" proxy
+    // for bounding losses whose exact height is unknown (watcher discards).
+    last_seen_height: u64,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
     // Throttle L2 broadcasts to prevent flooding clients
     last_l2_broadcast: Option<Instant>,
@@ -161,8 +167,9 @@ impl OrderBookListener {
             fetched_snapshot_cache: Some(VecDeque::new()),
             cached_event_count: 0,
             cache_event_cap: MAX_CACHED_EVENTS,
-            cache_overflowed: false,
             needs_resync: false,
+            max_loss_height: 0,
+            last_seen_height: 0,
             internal_message_tx,
             last_l2_broadcast: None,
             l2_snapshot_cache: HashMap::new(),
@@ -208,13 +215,26 @@ impl OrderBookListener {
 
     /// Record that the in-memory book may have diverged from the node (events
     /// were dropped or discarded somewhere). The main-loop ticker reacts by
-    /// re-fetching a full snapshot, which rebuilds the book and clears the flag.
+    /// re-fetching a full snapshot; the flag is cleared only by an
+    /// init_from_snapshot whose height covers the recorded loss bound.
     pub(crate) fn mark_desynced(&mut self, reason: &'static str) {
+        /// Slack added to the loss bound: an unknown-height loss (e.g. a
+        /// watcher discard) can be slightly ahead of the last parsed height.
+        /// Costs at most one extra re-fetch cycle; prevents clearing the flag
+        /// on a snapshot that misses the tail of the loss by a few blocks.
+        const LOSS_HEIGHT_MARGIN: u64 = 100;
+
         ORDERBOOK_DESYNCS_TOTAL.with_label_values(&[reason]).inc();
         if !self.needs_resync {
             error!("Order book marked out-of-sync ({reason}); scheduling snapshot re-fetch");
         }
         self.needs_resync = true;
+        let state_height = self.order_book_state.as_ref().map_or(0, OrderBookState::height);
+        let observed = state_height.max(self.last_seen_height);
+        // No height observed yet (loss before any event parsed): conservative
+        // bound - only an informed downgrade in init_from_snapshot can clear it.
+        let bound = if observed == 0 { u64::MAX } else { observed.saturating_add(LOSS_HEIGHT_MARGIN) };
+        self.max_loss_height = self.max_loss_height.max(bound);
     }
 
     pub(crate) const fn needs_resync(&self) -> bool {
@@ -259,17 +279,30 @@ impl OrderBookListener {
             }
         }
         info!("Replayed {replayed} cached events above snapshot height {height}");
+        let prior_loss_height = self.max_loss_height;
         self.order_book_state = Some(new_state);
 
-        // A fresh snapshot plus a complete replay is in sync by construction. If
-        // the cache overflowed or a replayed batch failed to apply, events are
-        // still missing - keep the book marked so the ticker re-syncs again.
-        if self.cache_overflowed || replay_failed {
-            self.cache_overflowed = false;
-            self.needs_resync = false;
-            self.mark_desynced(if replay_failed { "replay_apply_error" } else { "event_cache_overflow" });
-        } else {
-            self.needs_resync = false;
+        // A fresh snapshot plus a complete replay is in sync by construction -
+        // but only for data at or below the snapshot height. A loss recorded
+        // above it (events dropped while the fetch was running) is NOT covered;
+        // clearing the flag in that case would erase the signal permanently.
+        self.needs_resync = false;
+        self.max_loss_height = 0;
+        if replay_failed {
+            self.mark_desynced("replay_apply_error");
+        } else if prior_loss_height > height {
+            error!(
+                "Data loss bounded by height {prior_loss_height} is above snapshot height {height}; \
+                 keeping re-sync scheduled"
+            );
+            self.needs_resync = true;
+            // Downgrade an uninformed (u64::MAX) bound now that real heights
+            // have been observed, so the next fetch can actually clear it.
+            self.max_loss_height = if prior_loss_height == u64::MAX {
+                self.last_seen_height.max(height)
+            } else {
+                prior_loss_height
+            };
         }
 
         // The incremental L2 cache references the previous book's coins/levels;
@@ -374,7 +407,8 @@ impl OrderBookListener {
             );
             self.fetched_snapshot_cache = None;
             self.cached_event_count = 0;
-            self.cache_overflowed = true;
+            // The recorded loss bound (~current height) sits above the pending
+            // snapshot's height, so init_from_snapshot keeps the book marked.
             self.mark_desynced("event_cache_overflow");
             return;
         }
@@ -433,6 +467,10 @@ impl OrderBookListener {
         /// In normal operation a single block's batch is tens to low thousands of events.
         const MAX_EVENTS_PER_BATCH: usize = 100_000;
         let source_label = event_source.metric_label();
+
+        // Track the highest live-stream height: it bounds the height of any
+        // data loss whose exact position is unknown (see mark_desynced).
+        self.last_seen_height = self.last_seen_height.max(height);
 
         // Sanity cap on batch size. A malformed/malicious line could otherwise
         // pin hundreds of MB and freeze the listener for seconds.
@@ -1201,28 +1239,53 @@ mod tests {
         feed_order(&mut listener, "AAA", 1, 10); // 2 single-event batches: second one overflows
         assert!(listener.needs_resync(), "cache overflow must mark the book for re-sync");
 
-        // The snapshot that triggered the (overflowed) caching lands: replay is
-        // incomplete, so the book must stay marked and re-sync again.
+        // The snapshot that triggered the (overflowed) caching lands below the
+        // loss bound: replay is incomplete, the book must stay marked.
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 5);
         assert!(listener.needs_resync(), "incomplete replay must keep the book marked");
 
-        // A later clean fetch finally clears it.
+        // A later clean fetch whose height covers the loss bound clears it.
         listener.set_cache_event_cap(MAX_CACHED_EVENTS);
         listener.begin_caching();
-        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 6);
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1_000);
         assert!(!listener.needs_resync());
     }
 
     #[test]
-    fn test_mark_desynced_cleared_by_clean_resync() {
+    fn test_mark_desynced_cleared_only_by_covering_snapshot() {
         let (mut listener, _rx) = ready_listener();
+        // Establish a known stream height, then lose data at it.
+        feed_order(&mut listener, "BTC", 1, 100);
         assert!(!listener.needs_resync());
         listener.mark_desynced("test_reason");
         assert!(listener.needs_resync());
-        // The re-sync flow: begin caching, then a fresh snapshot lands.
+
+        // A snapshot BELOW the loss bound must not clear the flag: the lost
+        // data is above its height and would stay missing forever.
+        listener.begin_caching();
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 50);
+        assert!(listener.needs_resync(), "a snapshot below the loss height must not clear the desync");
+
+        // A snapshot covering the loss bound (height + margin) clears it.
+        listener.begin_caching();
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1_000);
+        assert!(!listener.needs_resync());
+    }
+
+    #[test]
+    fn test_loss_with_no_observed_height_converges_via_extra_resync() {
+        // A loss before ANY height was observed gets a conservative (unknown)
+        // bound: the first init keeps the flag, downgrades the bound to real
+        // observed heights, and the next covering snapshot clears it.
+        let (mut listener, _rx) = ready_listener(); // ready at height 0, nothing observed
+        listener.mark_desynced("test_reason");
         listener.begin_caching();
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1);
-        assert!(!listener.needs_resync());
+        assert!(listener.needs_resync(), "an unknown-height loss is never cleared by the first snapshot");
+
+        listener.begin_caching();
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 2);
+        assert!(!listener.needs_resync(), "the downgraded bound lets the next snapshot clear it");
     }
 
     #[test]
