@@ -247,6 +247,8 @@ Response:
 ```
 > **Note:** Requires node to run with `--write-order-statuses` flag enabled.
 
+> **Ordering:** within one block, updates for the same coin preserve their original order; updates spanning multiple coins may arrive grouped by coin. `time` and `height` are identical across the whole message.
+
 ### Ping/Pong
 ```json
 { "method": "ping" }
@@ -318,15 +320,17 @@ The in-memory book is kept consistent with the node through three layers:
 
 1. **Startup backfill** - at boot, the watchers read the streaming files from the node's last persisted height (not from end-of-file), so data written before the server started is not skipped.
 2. **Snapshot replay** - every book-affecting event that arrives while a snapshot is being generated is cached and replayed above the snapshot height, making the snapshot-to-stream handoff gapless.
-3. **Desync self-healing** - any provable event loss (parse/apply error on a batch, oversized batch, watcher buffer discard, pending-cache eviction) marks the book out-of-sync and triggers an automatic background snapshot re-fetch. The book keeps serving its current state until the fresh snapshot lands. Each occurrence is counted in `orderbook_desyncs_total{reason}`.
+3. **Desync self-healing** - any provable event loss (parse/apply error on a batch, oversized batch, watcher buffer discard, pending-cache eviction) marks the book out-of-sync and triggers an automatic background snapshot re-fetch. The book keeps serving its current state until the fresh snapshot lands. Each loss is recorded with a block-height bound, and the out-of-sync flag only clears once a snapshot's height actually covers that bound - a snapshot generated from lagging node state cannot mask a newer loss. Each occurrence is counted in `orderbook_desyncs_total{reason}`.
 
 ### Deduplication
 
 | Type | Behavior |
 |------|----------|
-| BBO | Only sends when bid/ask px/sz changes |
-| L2Book | Only sends when snapshot hash changes |
+| BBO | Only sends when bid/ask px/sz changes. When a coin's book empties (e.g. delisting), one final update with `bid`/`ask` absent is sent |
+| L2Book | Only sends when snapshot hash changes. When a coin's book empties, one final snapshot with empty levels is sent |
 | Trades | Only sends on fills |
+
+Dedup state is tracked per `(coin, nSigFigs, mantissa, nLevels)` tuple, so subscriptions that differ only in `nLevels` deduplicate independently.
 
 ### Latency
 
@@ -334,9 +338,13 @@ The in-memory book is kept consistent with the node through three layers:
 |--------|-------|
 | BBO update frequency | ~100+/sec (streaming) |
 | BBO latency | ~100ms |
-| BBO dedup overhead | ~1us |
+| BBO computation | O(1) - each price level maintains a running (size, count) aggregate |
+| L2 base snapshot build | O(price levels), independent of order count per level |
+| BBO dedup overhead | <1us (raw fixed-point comparison, no allocation) |
 | L2 dedup overhead | ~10us |
 | Savings when unchanged | ~500us |
+
+Fan-out payloads (trades, book diffs, L4 updates) are grouped per coin once in the listener and shared across all subscribed connections via `Arc` - per-connection cost is a map lookup, not a copy of the batch.
 
 ## Prometheus Metrics
 
