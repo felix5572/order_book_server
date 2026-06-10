@@ -34,10 +34,13 @@ impl Level {
         Self { px, sz, n }
     }
 
+    // Only exercised by tests since the BBO snapshot path moved to numeric dedup.
+    #[cfg(test)]
     pub(crate) fn px(&self) -> &str {
         &self.px
     }
 
+    #[cfg(test)]
     pub(crate) fn sz(&self) -> &str {
         &self.sz
     }

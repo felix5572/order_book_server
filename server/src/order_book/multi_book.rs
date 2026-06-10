@@ -2,7 +2,6 @@ use crate::{
     order_book::{Coin, InnerOrder, Oid, OrderBook, Px, Snapshot, Sz},
     prelude::*,
 };
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -121,11 +120,14 @@ impl<O: InnerOrder> OrderBooks<O> {
     }
 }
 
-impl<O: Send + Sync + InnerOrder> OrderBooks<O> {
+impl<O: InnerOrder> OrderBooks<O> {
+    /// L4 snapshot of a single coin's book. Cloning one coin is a few hundred
+    /// microseconds; the previous all-coins `to_snapshots_par` cloned the entire
+    /// multi-book (~hundreds of thousands of orders) under the listener lock on
+    /// every l4Book subscribe, stalling event processing for its whole duration.
     #[must_use]
-    pub(crate) fn to_snapshots_par(&self) -> Snapshots<O> {
-        let snapshots = self.order_books.par_iter().map(|(c, book)| (c.clone(), book.to_snapshot())).collect();
-        Snapshots(snapshots)
+    pub(crate) fn snapshot_for_coin(&self, coin: &Coin) -> Option<Snapshot<O>> {
+        self.order_books.get(coin).map(OrderBook::to_snapshot)
     }
 }
 

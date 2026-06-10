@@ -105,7 +105,9 @@ The `--snapshot-mode` flag controls *how* the server invokes `hl-node`:
 
 **`direct`** - Use when your node runs directly on the host via systemctl or bare metal. The server calls the `hl-node` binary directly on the host to generate the snapshot.
 
-After the initial snapshot, the server stays up to date by watching the node's `*_streaming/` directories for real-time order diffs, fills, and status updates via inotify. No further snapshots are needed unless the server restarts.
+After the initial snapshot, the server stays up to date by watching the node's `*_streaming/` directories for real-time order diffs, fills, and status updates via inotify.
+
+The handoff from snapshot to live stream is **gapless**: at startup the server backfills the streaming files from the node's last persisted height, and every event that arrives while the snapshot is being generated is cached and replayed on top of it (filtered by block height, so nothing is double-applied). If the server ever detects that events were provably lost (a corrupt line, an oversized batch, watcher data loss), it marks the book out-of-sync and automatically re-fetches a snapshot in the background while continuing to serve — see `orderbook_desyncs_total` in the metrics.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -310,6 +312,14 @@ The Hyperliquid node must run with **all** of these flags enabled:
 
 ## Performance
 
+### Consistency (no-drift) guarantees
+
+The in-memory book is kept consistent with the node through three layers:
+
+1. **Startup backfill** - at boot, the watchers read the streaming files from the node's last persisted height (not from end-of-file), so data written before the server started is not skipped.
+2. **Snapshot replay** - every book-affecting event that arrives while a snapshot is being generated is cached and replayed above the snapshot height, making the snapshot-to-stream handoff gapless.
+3. **Desync self-healing** - any provable event loss (parse/apply error on a batch, oversized batch, watcher buffer discard, pending-cache eviction) marks the book out-of-sync and triggers an automatic background snapshot re-fetch. The book keeps serving its current state until the fresh snapshot lands. Each occurrence is counted in `orderbook_desyncs_total{reason}`.
+
 ### Deduplication
 
 | Type | Behavior |
@@ -366,6 +376,7 @@ curl http://localhost:9090/metrics
 | | `ws_send_errors_total` | WebSocket send errors |
 | | `channel_drops_total` | Messages dropped due to lag |
 | | `broadcast_channel_lag` | Broadcast channel lag (receivers behind) |
+| | `orderbook_desyncs_total{reason}` | Times the book was marked out-of-sync (each triggers an automatic background snapshot re-fetch). Alert on a sustained rate; occasional self-heals are benign |
 
 ### Disable Metrics
 
@@ -512,6 +523,12 @@ This fork deduplicates at the WebSocket level:
 - **L2Book**: only sends when the snapshot hash changes (~10us overhead)
 - Saves ~500us per unchanged update and significantly reduces client-side bandwidth
 
+### Drift Protection & Self-Healing
+
+The original (and earlier versions of this fork) could silently drift from the node: events arriving during the initial snapshot window were dropped, and any later data loss (corrupt line, oversized batch) corrupted the book permanently until a restart.
+
+This fork makes the snapshot-to-stream handoff gapless (startup backfill from the node's persisted height + height-filtered replay of events cached during snapshot generation) and self-heals from any detected data loss by automatically re-fetching a snapshot in the background. See [Consistency (no-drift) guarantees](#consistency-no-drift-guarantees).
+
 ### BBO-Only Lightweight Mode
 
 New `--bbo-only` flag reduces memory from ~1 GB to ~100 MB by only tracking the top-of-book bid/ask per coin. L2/L4/Trades subscriptions are disabled. Useful for price feeds, alerting, or memory-constrained environments.
@@ -554,6 +571,7 @@ Both use `yawc` with `permessage-deflate`. This fork increases the broadcast cha
 | | Original | This Fork |
 |---|----------|-----------|
 | Event model | Block-batched | Event-by-event |
+| Drift protection | None | Backfill + replay + auto re-sync |
 | File watchers | 1 thread | 3 parallel threads |
 | BBO subscription | No | Yes + dedup |
 | Order updates | No | Yes (per-user) |

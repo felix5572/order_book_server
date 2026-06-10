@@ -1,7 +1,7 @@
 use crate::{
-    listeners::order_book::{L2Snapshots, TimedSnapshots},
+    listeners::order_book::L2Snapshots,
     order_book::{
-        Coin, InnerOrder, Oid,
+        Coin, InnerOrder, Oid, Snapshot,
         multi_book::{OrderBooks, Snapshots},
     },
     prelude::*,
@@ -55,27 +55,31 @@ impl OrderBookState {
         self.time
     }
 
-    // forcibly take snapshot - (time, height, snapshot)
-    pub(super) fn compute_snapshot(&self) -> TimedSnapshots {
-        TimedSnapshots { time: self.time, height: self.height, snapshot: self.order_book.to_snapshots_par() }
+    /// L4 snapshot of a single coin - (time, height, snapshot). Returns None when
+    /// the coin has no book. Cheap enough to run under the listener lock, unlike
+    /// the old all-coins snapshot.
+    pub(super) fn compute_snapshot_for_coin(&self, coin: &Coin) -> Option<(u64, u64, Snapshot<InnerL4Order>)> {
+        self.order_book.snapshot_for_coin(coin).map(|snapshot| (self.time, self.height, snapshot))
     }
 
     /// Incremental variant: rebuilds variants only for `changed_coins` and reuses
     /// cached Arc'd entries for every other coin. The caller owns the cache so
-    /// the borrow on `&self` here only touches the order book.
+    /// the borrow on `&self` here only touches the order book. Returns
+    /// (time, snapshots, recomputed coins, whether the coin set changed).
     pub(super) fn l2_snapshots_incremental(
         &self,
         changed_coins: &HashSet<Coin>,
         active: &HashSet<crate::listeners::order_book::L2SnapshotParams>,
-        cache: &mut HashMap<Coin, std::sync::Arc<HashMap<crate::listeners::order_book::L2SnapshotParams, crate::order_book::Snapshot<crate::types::inner::InnerLevel>>>>,
-    ) -> (u64, L2Snapshots) {
-        let snapshots = crate::listeners::order_book::utils::compute_l2_snapshots_incremental(
-            &self.order_book,
-            changed_coins,
-            active,
-            cache,
-        );
-        (self.time, snapshots)
+        cache: &mut HashMap<Coin, std::sync::Arc<HashMap<crate::listeners::order_book::L2SnapshotParams, Snapshot<crate::types::inner::InnerLevel>>>>,
+    ) -> (u64, L2Snapshots, HashSet<Coin>, bool) {
+        let (snapshots, recomputed, coin_set_changed) =
+            crate::listeners::order_book::utils::compute_l2_snapshots_incremental(
+                &self.order_book,
+                changed_coins,
+                active,
+                cache,
+            );
+        (self.time, snapshots, recomputed, coin_set_changed)
     }
 
     pub(super) fn compute_universe(&self) -> HashSet<Coin> {
@@ -111,21 +115,28 @@ impl OrderBookState {
     /// Also opportunistically compacts the orderbook slab allocators on the same
     /// cadence, since both are unbounded-growth vectors that the maintenance tick
     /// is responsible for bounding.
-    pub(super) fn cleanup_stale_pending(&mut self) {
+    ///
+    /// Returns `true` when a pending cache was force-cleared. Cleared entries may
+    /// include genuinely in-flight order halves, so the caller must treat this as
+    /// potential data loss and mark the book for re-sync.
+    pub(super) fn cleanup_stale_pending(&mut self) -> bool {
         const MAX_PENDING_ORDERS: usize = 10_000;
         const MAX_PENDING_DIFFS: usize = 1_000;
 
+        let mut cleared = false;
         if self.pending_order_statuses.len() > MAX_PENDING_ORDERS {
             log::warn!(
                 "Clearing stale pending_order_statuses cache: {} entries (orphaned orders without matching BookDiffs)",
                 self.pending_order_statuses.len()
             );
             self.pending_order_statuses = HashMap::new();
+            cleared = true;
         }
 
         if self.pending_new_diffs.len() > MAX_PENDING_DIFFS {
             log::warn!("Clearing stale pending_new_diffs cache: {} entries", self.pending_new_diffs.len());
             self.pending_new_diffs = HashMap::new();
+            cleared = true;
         }
 
         let compacted = self.order_book.compact_all();
@@ -133,6 +144,7 @@ impl OrderBookState {
             let (live, cap) = self.order_book.slab_stats();
             log::info!("Compacted {compacted} price-level slabs (live={live}, capacity={cap})");
         }
+        cleared
     }
 
     /// Get BBO for specific coins only - even faster for selective broadcast
@@ -512,7 +524,7 @@ mod tests {
             state.apply_order_statuses_hft(make_status_batch(vec![status])).unwrap();
         }
         assert!(state.pending_order_statuses_count() > 10_000);
-        state.cleanup_stale_pending();
+        assert!(state.cleanup_stale_pending(), "a force-clear must be reported as data loss");
         assert_eq!(state.pending_order_statuses_count(), 0);
     }
 
@@ -525,7 +537,7 @@ mod tests {
             state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
         }
         assert!(state.pending_new_diffs_count() > 1_000);
-        state.cleanup_stale_pending();
+        assert!(state.cleanup_stale_pending(), "a force-clear must be reported as data loss");
         assert_eq!(state.pending_new_diffs_count(), 0);
     }
 
@@ -536,8 +548,29 @@ mod tests {
             let status = make_order_status("BTC", i, "open");
             state.apply_order_statuses_hft(make_status_batch(vec![status])).unwrap();
         }
-        state.cleanup_stale_pending();
+        assert!(!state.cleanup_stale_pending(), "below-threshold cleanup is not data loss");
         assert_eq!(state.pending_order_statuses_count(), 100); // not cleared
+    }
+
+    // ==================== Per-coin L4 snapshot ====================
+
+    #[test]
+    fn test_compute_snapshot_for_coin_returns_only_that_coin() {
+        let mut state = empty_state();
+        for (i, coin) in ["BTC", "ETH"].iter().enumerate() {
+            let status = make_order_status(coin, i as u64, "open");
+            state.apply_order_statuses_hft(make_status_batch(vec![status])).unwrap();
+            let diff = make_order_diff(coin, i as u64, OrderDiff::New { sz: "1.0".to_string() });
+            state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
+        }
+
+        let (_time, height, snapshot) = state.compute_snapshot_for_coin(&Coin::new("BTC")).unwrap();
+        assert_eq!(height, 100); // batch helpers stamp block_number 100
+        let [bids, asks] = snapshot.as_ref();
+        assert_eq!(bids.len(), 1, "only BTC's single bid is included");
+        assert!(asks.is_empty());
+
+        assert!(state.compute_snapshot_for_coin(&Coin::new("DOGE")).is_none(), "unknown coin yields None");
     }
 
     // ==================== Performance Tests ====================

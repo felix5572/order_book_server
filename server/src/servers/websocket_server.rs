@@ -1,7 +1,6 @@
 use crate::{
     listeners::order_book::{
-        ActiveL2Params, InternalMessage, L2ParamGuard, L2SnapshotParams, L2Snapshots, OrderBookListener,
-        TimedSnapshots, hl_listen_hft,
+        ActiveL2Params, InternalMessage, L2ParamGuard, L2SnapshotParams, OrderBookListener, hl_listen_hft,
     },
     metrics::{
         BBO_CHANGES_TOTAL, BROADCAST_RECEIVERS, BROADCASTS_TOTAL, CHANNEL_DROPS_TOTAL, CHANNEL_LAG,
@@ -44,10 +43,15 @@ struct L2Entry {
     payload: L2Book,
 }
 
+/// Raw fixed-point (px, sz) pairs for the best bid and ask. Comparing these
+/// for dedup avoids the four String allocations the old tuple cost per BBO
+/// per connection per change-check.
+type BboKey = (Option<(u64, u64)>, Option<(u64, u64)>);
+
 /// Per-coin cached BBO broadcast. `tuple` is used for change-based dedup;
 /// `payload` is resent verbatim (with refreshed `time`) when the heartbeat fires.
 struct BboEntry {
-    tuple: (String, String, String, String),
+    tuple: BboKey,
     last_sent: Instant,
     payload: Bbo,
 }
@@ -99,7 +103,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     // Central task: listen to messages and forward them for distribution
     let listener = {
         let internal_message_tx = internal_message_tx.clone();
-        OrderBookListener::new(Some(internal_message_tx), ignore_spot, active_l2_params.clone())
+        OrderBookListener::new(Some(internal_message_tx), ignore_spot, active_l2_params.clone(), market_filter)
     };
     let listener = Arc::new(Mutex::new(listener));
     {
@@ -135,7 +139,6 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                         ws_upgrade,
                         internal_message_tx.clone(),
                         listener.clone(),
-                        market_filter,
                         bbo_only,
                         l2book_heartbeat_ms,
                         bbo_heartbeat_ms,
@@ -182,7 +185,6 @@ fn ws_handler(
     incoming: yawc::IncomingUpgrade,
     internal_message_tx: Sender<Arc<InternalMessage>>,
     listener: Arc<Mutex<OrderBookListener>>,
-    market_filter: (bool, bool, bool), // (include_perps, include_spot, include_hip3)
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
@@ -207,8 +209,7 @@ fn ws_handler(
             }
         };
 
-        handle_socket(ws, internal_message_tx, listener, market_filter, bbo_only, l2book_heartbeat_ms, bbo_heartbeat_ms)
-            .await
+        handle_socket(ws, internal_message_tx, listener, bbo_only, l2book_heartbeat_ms, bbo_heartbeat_ms).await;
     });
 
     resp.into_response()
@@ -219,7 +220,6 @@ async fn handle_socket(
     mut socket: WebSocket,
     internal_message_tx: Sender<Arc<InternalMessage>>,
     listener: Arc<Mutex<OrderBookListener>>,
-    market_filter: (bool, bool, bool), // (include_perps, include_spot, include_hip3)
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
@@ -242,7 +242,11 @@ async fn handle_socket(
     BROADCAST_RECEIVERS.set(internal_message_tx.receiver_count() as i64);
     let is_ready = listener.lock().await.is_ready();
     let mut manager = SubscriptionManager::default();
-    let mut universe = listener.lock().await.universe().into_iter().map(|c| c.value()).collect();
+    // Market-filtered universe for subscription validation. Refreshed from
+    // Snapshot broadcasts (Arc-shared, built once in the listener) whenever the
+    // coin set changes - the old code rebuilt the full String set per connection
+    // on every broadcast.
+    let mut universe = listener.lock().await.universe();
     // Per-(coin,params) cache for L2 dedup + heartbeat resend (key = "<coin>:<n_sig_figs>:<mantissa>")
     let mut last_l2: HashMap<String, L2Entry> = HashMap::new();
     // Per-coin cache for BBO dedup + heartbeat resend
@@ -268,21 +272,28 @@ async fn handle_socket(
     // (network error or send timeout). The outer loop checks it at every iteration
     // boundary so a wedged client is dropped instead of looping forever.
     let mut alive = true;
+    // Set after a broadcast-channel lag: a dropped Snapshot message may have
+    // carried dirty coins this connection never saw, so the next Snapshot must
+    // re-evaluate every subscription instead of trusting the dirty-set skip.
+    let mut force_full_l2 = false;
     while alive {
         select! {
             recv_result = internal_message_rx.recv() => {
                 match recv_result {
                     Ok(msg) => {
                         match msg.as_ref() {
-                            InternalMessage::Snapshot{ l2_snapshots, time } => {
-                                universe = new_universe(l2_snapshots, market_filter.0, market_filter.1, market_filter.2);
+                            InternalMessage::Snapshot{ l2_snapshots, time, dirty, universe: new_universe } => {
+                                if let Some(u) = new_universe {
+                                    universe = Arc::clone(u);
+                                }
                                 for sub in manager.subscriptions() {
                                     if !alive { break; }
                                     // Skip BBO subs here - they get fast updates via BboUpdate
                                     if !matches!(sub, Subscription::Bbo { .. }) {
-                                        alive &= send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time, &mut last_bbo, &mut last_l2).await;
+                                        alive &= send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time, &mut last_l2, dirty, force_full_l2).await;
                                     }
                                 }
+                                force_full_l2 = false;
                             },
                             InternalMessage::BboUpdate{ bbos, time } => {
                                 // Fast path for BBO subscribers only
@@ -344,6 +355,10 @@ async fn handle_socket(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         CHANNEL_LAG.set(n as i64);
                         CHANNEL_DROPS_TOTAL.inc();
+                        // A dropped Snapshot may have carried dirty coins we never
+                        // saw - process the next one in full (hash dedup still
+                        // suppresses sends whose payload didn't actually change).
+                        force_full_l2 = true;
                         log::debug!("Receiver lagged: {n} messages");
                     }
                     Err(err) => {
@@ -551,26 +566,25 @@ async fn send_ws_data_from_bbo(
     time: u64,
     last_bbo: &mut HashMap<String, BboEntry>,
 ) -> bool {
-    let coin_key = Coin::new(coin);
-    if let Some((best_bid, best_ask)) = bbos.get(&coin_key) {
-        // Use the canonical wire format (Px/Sz::to_str) instead of `format!("{:?}", ...)`.
-        // Debug for Px/Sz happens to produce the same output today, but going through
-        // to_str matches what the L2 path already emits and skips the Formatter machinery.
-        let bid = best_bid
-            .as_ref()
-            .map(|(px, sz, n)| crate::types::Level::new(px.to_str(), sz.to_str(), *n as usize));
-        let ask = best_ask
-            .as_ref()
-            .map(|(px, sz, n)| crate::types::Level::new(px.to_str(), sz.to_str(), *n as usize));
+    // Borrow<str> lookup - no Coin/String allocation per subscription per update.
+    if let Some((best_bid, best_ask)) = bbos.get(coin) {
+        // Dedup on the raw fixed-point values BEFORE rendering anything: the
+        // strings are only built when the BBO actually changed.
+        let current: BboKey = (
+            best_bid.as_ref().map(|(px, sz, _)| (px.value(), sz.value())),
+            best_ask.as_ref().map(|(px, sz, _)| (px.value(), sz.value())),
+        );
 
-        // Deduplication check
-        let bid_px = bid.as_ref().map(|b| b.px().to_string()).unwrap_or_default();
-        let bid_sz = bid.as_ref().map(|b| b.sz().to_string()).unwrap_or_default();
-        let ask_px = ask.as_ref().map(|a| a.px().to_string()).unwrap_or_default();
-        let ask_sz = ask.as_ref().map(|a| a.sz().to_string()).unwrap_or_default();
-        let current = (bid_px, bid_sz, ask_px, ask_sz);
+        if last_bbo.get(coin).map(|e| e.tuple) != Some(current) {
+            // Use the canonical wire format (Px/Sz::to_str) - matches what the
+            // L2 path emits and skips the Formatter machinery.
+            let bid = best_bid
+                .as_ref()
+                .map(|(px, sz, n)| crate::types::Level::new(px.to_str(), sz.to_str(), *n as usize));
+            let ask = best_ask
+                .as_ref()
+                .map(|(px, sz, n)| crate::types::Level::new(px.to_str(), sz.to_str(), *n as usize));
 
-        if last_bbo.get(coin).map(|e| &e.tuple) != Some(&current) {
             BBO_CHANGES_TOTAL.with_label_values(&[coin]).inc();
             BROADCASTS_TOTAL.with_label_values(&["bbo"]).inc();
             let bbo = Bbo { coin: coin.to_string(), time, bid, ask };
@@ -622,98 +636,58 @@ async fn send_socket_message(socket: &mut WebSocket, msg: ServerResponse) -> boo
     }
 }
 
-// derive it from l2_snapshots because thats convenient
-// Filters coins based on market type flags
-fn new_universe(
-    l2_snapshots: &L2Snapshots,
-    include_perps: bool,
-    include_spot: bool,
-    include_hip3: bool,
-) -> HashSet<String> {
-    l2_snapshots
-        .as_ref()
-        .iter()
-        .filter_map(|(c, _)| {
-            let include =
-                (c.is_perp() && include_perps) || (c.is_spot() && include_spot) || (c.is_hip3() && include_hip3);
-            if include { Some(c.clone().value()) } else { None }
-        })
-        .collect()
-}
-
 async fn send_ws_data_from_snapshot(
     socket: &mut WebSocket,
     subscription: &Subscription,
     snapshot: &HashMap<Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>>,
     time: u64,
-    last_bbo: &mut HashMap<String, BboEntry>,
     last_l2: &mut HashMap<String, L2Entry>,
+    dirty: &HashSet<Coin>,
+    force_full: bool,
 ) -> bool {
-    match subscription {
-        Subscription::L2Book { coin, n_sig_figs, n_levels, mantissa } => {
-            let snapshot = snapshot.get(&Coin::new(coin));
-            if let Some(snapshot) =
-                snapshot.and_then(|snapshot| snapshot.get(&L2SnapshotParams::new(*n_sig_figs, *mantissa)))
-            {
-                let n_levels = n_levels.unwrap_or(DEFAULT_LEVELS);
-                let snapshot = snapshot.truncate(n_levels);
-                let snapshot = snapshot.export_inner_snapshot();
-
-                // Hash the snapshot for dedup comparison. Level derives Hash, so we
-                // walk the [Vec<Level>; 2] directly - the prior `format!("{:?}", snapshot)`
-                // path allocated a Debug-format string per L2 subscription per broadcast,
-                // saturating glibc/jemalloc under load and dominating allocator pressure.
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                snapshot.hash(&mut hasher);
-                let current_hash = hasher.finish();
-
-                // Create unique key for this subscription (coin + params)
-                let key = l2_cache_key(coin, *n_sig_figs, *mantissa);
-
-                if last_l2.get(&key).map(|e| e.hash) != Some(current_hash) {
-                    BROADCASTS_TOTAL.with_label_values(&["l2"]).inc();
-                    let l2_book =
-                        L2Book::from_l2_snapshot(coin.clone(), snapshot, time, *n_sig_figs, *mantissa, Some(n_levels));
-                    last_l2.insert(
-                        key,
-                        L2Entry { hash: current_hash, last_sent: Instant::now(), payload: l2_book.clone() },
-                    );
-                    return send_socket_message(socket, ServerResponse::L2Book(l2_book)).await;
-                }
-                // else: skip, L2 unchanged
-            } else {
-                error!("Coin {coin} not found");
-            }
+    // BBO subscriptions are filtered out by the caller (they are served by the
+    // BboUpdate fast path), so only L2Book needs handling here.
+    if let Subscription::L2Book { coin, n_sig_figs, n_levels, mantissa } = subscription {
+        // Skip coins that were not rebuilt in this flush: the payload we already
+        // sent is still current, so the truncate/export/hash work below would be
+        // pure waste. Runs for every subscription on every broadcast, which is
+        // why it compares with `&str` (no allocation). `force_full` overrides
+        // after a broadcast lag; a missing cache entry means we never sent
+        // anything for this subscription (it is brand new) - always process.
+        let key = l2_cache_key(coin, *n_sig_figs, *mantissa);
+        if !force_full && !dirty.contains(coin.as_str()) && last_l2.contains_key(&key) {
+            return true;
         }
-        Subscription::Bbo { coin } => {
-            // Get default snapshot (no aggregation)
-            let snapshot = snapshot.get(&Coin::new(coin));
-            if let Some(snapshot) = snapshot.and_then(|s| s.get(&L2SnapshotParams::new(None, None))) {
-                let levels = snapshot.truncate(1).export_inner_snapshot();
-                let bid = levels[0].first().cloned();
-                let ask = levels[1].first().cloned();
 
-                // Only send if BBO changed (dedupe identical messages)
-                let bid_px = bid.as_ref().map(|b| b.px().to_string()).unwrap_or_default();
-                let bid_sz = bid.as_ref().map(|b| b.sz().to_string()).unwrap_or_default();
-                let ask_px = ask.as_ref().map(|a| a.px().to_string()).unwrap_or_default();
-                let ask_sz = ask.as_ref().map(|a| a.sz().to_string()).unwrap_or_default();
-                let current = (bid_px, bid_sz, ask_px, ask_sz);
+        let snapshot = snapshot.get(coin.as_str());
+        if let Some(snapshot) =
+            snapshot.and_then(|snapshot| snapshot.get(&L2SnapshotParams::new(*n_sig_figs, *mantissa)))
+        {
+            let n_levels = n_levels.unwrap_or(DEFAULT_LEVELS);
+            let snapshot = snapshot.truncate(n_levels);
+            let snapshot = snapshot.export_inner_snapshot();
 
-                if last_bbo.get(coin).map(|e| &e.tuple) != Some(&current) {
-                    let bbo = Bbo { coin: coin.clone(), time, bid, ask };
-                    last_bbo.insert(
-                        coin.clone(),
-                        BboEntry { tuple: current, last_sent: Instant::now(), payload: bbo.clone() },
-                    );
-                    return send_socket_message(socket, ServerResponse::Bbo(bbo)).await;
-                }
-                // else: skip, BBO unchanged
+            // Hash the snapshot for dedup comparison. Level derives Hash, so we
+            // walk the [Vec<Level>; 2] directly - the prior `format!("{:?}", snapshot)`
+            // path allocated a Debug-format string per L2 subscription per broadcast,
+            // saturating glibc/jemalloc under load and dominating allocator pressure.
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            snapshot.hash(&mut hasher);
+            let current_hash = hasher.finish();
+
+            if last_l2.get(&key).map(|e| e.hash) != Some(current_hash) {
+                BROADCASTS_TOTAL.with_label_values(&["l2"]).inc();
+                let l2_book =
+                    L2Book::from_l2_snapshot(coin.clone(), snapshot, time, *n_sig_figs, *mantissa, Some(n_levels));
+                last_l2.insert(key, L2Entry { hash: current_hash, last_sent: Instant::now(), payload: l2_book.clone() });
+                return send_socket_message(socket, ServerResponse::L2Book(l2_book)).await;
             }
+            // else: skip, L2 unchanged
+        } else {
+            error!("Coin {coin} not found");
         }
-        _ => {}
     }
     true
 }
@@ -817,21 +791,20 @@ impl Subscription {
         listener: Arc<Mutex<OrderBookListener>>,
     ) -> Result<Option<ServerResponse>> {
         if let Self::L4Book { coin } = self {
-            let snapshot = listener.lock().await.compute_snapshot();
-            if let Some(TimedSnapshots { time, height, snapshot }) = snapshot {
-                let requested_coin = Coin::new(coin);
-                let filtered =
-                    snapshot.value().into_iter().filter(|(c, _)| *c == requested_coin).collect::<Vec<_>>().pop();
-                if let Some((found_coin, coin_snapshot)) = filtered {
-                    let levels =
-                        coin_snapshot.as_ref().clone().map(|orders| orders.into_iter().map(L4Order::from).collect());
-                    return Ok(Some(ServerResponse::L4Book(L4Book::Snapshot {
-                        coin: found_coin.value(),
-                        time,
-                        height,
-                        levels,
-                    })));
-                }
+            // Snapshot ONLY the requested coin. The old path cloned the entire
+            // multi-book (every coin, every order) under the listener lock,
+            // stalling event processing for hundreds of milliseconds per
+            // l4Book subscribe.
+            let snapshot = listener.lock().await.compute_snapshot_for_coin(&Coin::new(coin));
+            if let Some((time, height, coin_snapshot)) = snapshot {
+                let levels =
+                    coin_snapshot.as_ref().clone().map(|orders| orders.into_iter().map(L4Order::from).collect());
+                return Ok(Some(ServerResponse::L4Book(L4Book::Snapshot {
+                    coin: coin.clone(),
+                    time,
+                    height,
+                    levels,
+                })));
             }
             return Err("Snapshot Failed".into());
         }

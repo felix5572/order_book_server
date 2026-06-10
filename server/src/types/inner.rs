@@ -192,17 +192,25 @@ pub(crate) enum InnerOrderDiff {
     Remove,
 }
 
+impl TryFrom<&OrderDiff> for InnerOrderDiff {
+    type Error = Error;
+
+    fn try_from(value: &OrderDiff) -> Result<Self> {
+        Ok(match value {
+            OrderDiff::New { sz } => Self::New { sz: Sz::parse_from_str(sz)? },
+            OrderDiff::Update { orig_sz, new_sz } => {
+                Self::Update { _orig_sz: Sz::parse_from_str(orig_sz)?, new_sz: Sz::parse_from_str(new_sz)? }
+            }
+            OrderDiff::Remove => Self::Remove,
+        })
+    }
+}
+
 impl TryFrom<OrderDiff> for InnerOrderDiff {
     type Error = Error;
 
     fn try_from(value: OrderDiff) -> Result<Self> {
-        Ok(match value {
-            OrderDiff::New { sz } => Self::New { sz: Sz::parse_from_str(&sz)? },
-            OrderDiff::Update { orig_sz, new_sz } => {
-                Self::Update { _orig_sz: Sz::parse_from_str(&orig_sz)?, new_sz: Sz::parse_from_str(&new_sz)? }
-            }
-            OrderDiff::Remove => Self::Remove,
-        })
+        (&value).try_into()
     }
 }
 

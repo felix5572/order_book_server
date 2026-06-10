@@ -3,8 +3,8 @@ use crate::{
     metrics::{
         BBO_BROADCAST_LATENCY, EVENT_PROCESSING_LATENCY, EVENTS_PROCESSED_TOTAL, FILE_EVENTS_TOTAL,
         FILE_LINES_PARSED_TOTAL, L2_BROADCAST_LATENCY, L2_CONFLATION_BATCH_SIZE, ORDERBOOK_COINS_COUNT,
-        ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL, ORDERBOOK_TIME_MS, PARSE_ERRORS_TOTAL, PENDING_DIFFS_CACHE,
-        PENDING_ORDERS_CACHE,
+        ORDERBOOK_DESYNCS_TOTAL, ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL, ORDERBOOK_TIME_MS, PARSE_ERRORS_TOTAL,
+        PENDING_DIFFS_CACHE, PENDING_ORDERS_CACHE,
     },
     order_book::{
         Coin, Px, Snapshot, Sz,
@@ -30,9 +30,9 @@ use tokio::{
         broadcast::Sender,
         mpsc::{UnboundedSender, unbounded_channel},
     },
-    time::{Instant, MissedTickBehavior, interval, sleep},
+    time::{Instant, MissedTickBehavior, interval},
 };
-use utils::{EventBatch, SnapshotConfig, get_visor_path, process_rmp_file};
+use utils::{EventBatch, SnapshotConfig, get_visor_path, process_rmp_file, read_visor_height};
 
 /// Minimum interval between L2 broadcasts. Caps the broadcast rate at 20/sec; the
 /// conflation buffer accumulates dirty coins between broadcasts.
@@ -41,6 +41,11 @@ const L2_BROADCAST_THROTTLE_MS: u64 = 50;
 /// throttle so a quiet node between block flushes can never starve the L2 feed
 /// for more than ~throttle + tick.
 const L2_FLUSH_TICK_MS: u64 = 10;
+/// Cap on events cached for replay while a snapshot fetch is in flight. A fetch
+/// normally completes in 10-30s (tens of thousands of events); hitting this cap
+/// means something is pathologically wrong, so we drop the cache and schedule
+/// another re-sync rather than risk OOM.
+const MAX_CACHED_EVENTS: usize = 1_000_000;
 
 mod parallel;
 mod state;
@@ -54,10 +59,12 @@ fn fetch_snapshot(
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
-        // CRITICAL: Start caching BEFORE generating snapshot
-        // This ensures we don't miss any events during snapshot generation.
-        // We don't clone the existing state here - it's discarded by init_from_snapshot
-        // below, and cloning the whole BTreeMap/Slab tree temporarily doubles peak RSS.
+        // CRITICAL: Start caching BEFORE generating the snapshot. Every
+        // book-affecting batch that arrives while hl-node dumps state is cached,
+        // and init_from_snapshot replays the ones above the snapshot height -
+        // so the handoff from snapshot to live stream is gapless. (We don't clone
+        // the existing state here: it's discarded by init_from_snapshot below,
+        // and cloning the whole BTreeMap/Slab tree temporarily doubles peak RSS.)
         {
             let mut listener = listener.lock().await;
             listener.begin_caching();
@@ -70,17 +77,12 @@ fn fetch_snapshot(
                 let snapshot =
                     load_snapshots_from_cli_json::<InnerL4Order, (Address, L4Order)>(&output_fln, &visor_path).await;
                 info!("Snapshot fetched");
-                // sleep to let some updates build up.
-                sleep(Duration::from_secs(1)).await;
-                let _cache = {
-                    let mut listener = listener.lock().await;
-                    listener.take_cache()
-                };
                 match snapshot {
                     Ok((height, expected_snapshot)) => {
                         info!("Snapshot loaded at height {}", height);
-                        // Always reinitialize from snapshot to get fresh, accurate orderbook
-                        // This corrects any drift from missed streaming updates
+                        // Reinitialize from the snapshot and replay the cached
+                        // events above its height in one lock acquisition, so no
+                        // event can slip between the replay and going live.
                         listener.lock().await.init_from_snapshot(expected_snapshot, height);
                         Ok(())
                     }
@@ -96,10 +98,26 @@ fn fetch_snapshot(
 
 pub(crate) struct OrderBookListener {
     ignore_spot: bool,
+    // (include_perps, include_spot, include_hip3) - used to filter the universe
+    // handed to connections for subscription validation.
+    market_filter: (bool, bool, bool),
     // None if we haven't seen a valid snapshot yet
     order_book_state: Option<OrderBookState>,
-    // Only Some when we want it to collect updates
-    fetched_snapshot_cache: Option<VecDeque<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)>>,
+    // Some while a snapshot fetch is in flight (initial startup and re-syncs):
+    // every book-affecting batch is cached here and replayed above the snapshot
+    // height by init_from_snapshot, making the snapshot -> live-stream handoff
+    // gapless. None in steady state (no caching cost per event).
+    fetched_snapshot_cache: Option<VecDeque<EventBatch>>,
+    // Total events across all cached batches; bounded by cache_event_cap.
+    cached_event_count: usize,
+    cache_event_cap: usize,
+    // Set when the replay cache had to be dropped (overflow); the next
+    // init_from_snapshot keeps the book marked desynced so another re-sync runs.
+    cache_overflowed: bool,
+    // Set whenever events were provably lost (oversize-batch drop, watcher
+    // partial-line discard, pending-cache eviction, apply errors). The main loop
+    // reacts by re-fetching a snapshot, which rebuilds the book and clears this.
+    needs_resync: bool,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
     // Throttle L2 broadcasts to prevent flooding clients
     last_l2_broadcast: Option<Instant>,
@@ -131,11 +149,20 @@ impl OrderBookListener {
         internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
         ignore_spot: bool,
         active_l2_params: ActiveL2Params,
+        market_filter: (bool, bool, bool),
     ) -> Self {
         Self {
             ignore_spot,
+            market_filter,
             order_book_state: None,
-            fetched_snapshot_cache: None,
+            // Cache from the very first event: the initial snapshot fetch hasn't
+            // started yet, and anything arriving before it completes must be
+            // replayable or it is lost (the pre-existing startup drift window).
+            fetched_snapshot_cache: Some(VecDeque::new()),
+            cached_event_count: 0,
+            cache_event_cap: MAX_CACHED_EVENTS,
+            cache_overflowed: false,
+            needs_resync: false,
             internal_message_tx,
             last_l2_broadcast: None,
             l2_snapshot_cache: HashMap::new(),
@@ -154,25 +181,97 @@ impl OrderBookListener {
         self.order_book_state.is_some()
     }
 
-    pub(crate) fn universe(&self) -> HashSet<Coin> {
-        self.order_book_state.as_ref().map_or_else(HashSet::new, OrderBookState::compute_universe)
+    /// Coin universe filtered by the configured market types, for subscription
+    /// validation. Connections receive refreshed copies via `Snapshot` broadcasts
+    /// whenever the coin set changes.
+    pub(crate) fn universe(&self) -> Arc<HashSet<String>> {
+        let market_filter = self.market_filter;
+        Arc::new(self.order_book_state.as_ref().map_or_else(HashSet::new, |state| {
+            state
+                .compute_universe()
+                .into_iter()
+                .filter(|coin| coin_in_market_filter(coin, market_filter))
+                .map(|coin| coin.value())
+                .collect()
+        }))
     }
 
+    /// Start caching book-affecting batches for replay. Idempotent: an already
+    /// active cache (e.g. the one running since construction) is kept, so events
+    /// cached before the snapshot fetch was triggered are not thrown away.
     fn begin_caching(&mut self) {
-        self.fetched_snapshot_cache = Some(VecDeque::new());
+        if self.fetched_snapshot_cache.is_none() {
+            self.fetched_snapshot_cache = Some(VecDeque::new());
+            self.cached_event_count = 0;
+        }
     }
 
-    // take the cached updates and stop collecting updates
-    fn take_cache(&mut self) -> VecDeque<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)> {
-        self.fetched_snapshot_cache.take().unwrap_or_default()
+    /// Record that the in-memory book may have diverged from the node (events
+    /// were dropped or discarded somewhere). The main-loop ticker reacts by
+    /// re-fetching a full snapshot, which rebuilds the book and clears the flag.
+    pub(crate) fn mark_desynced(&mut self, reason: &'static str) {
+        ORDERBOOK_DESYNCS_TOTAL.with_label_values(&[reason]).inc();
+        if !self.needs_resync {
+            error!("Order book marked out-of-sync ({reason}); scheduling snapshot re-fetch");
+        }
+        self.needs_resync = true;
+    }
+
+    pub(crate) const fn needs_resync(&self) -> bool {
+        self.needs_resync
+    }
+
+    /// Shrink the replay-cache cap so overflow behavior is testable without
+    /// constructing a million events.
+    #[cfg(test)]
+    const fn set_cache_event_cap(&mut self, cap: usize) {
+        self.cache_event_cap = cap;
     }
 
     fn init_from_snapshot(&mut self, snapshot: Snapshots<InnerL4Order>, height: u64) {
         info!("Initializing from snapshot at height {}", height);
-        // On initial startup, just trust the snapshot and start fresh
-        // Don't try to apply cached updates - they may have gaps
-        let new_order_book = OrderBookState::from_snapshot(snapshot, height, 0, true, self.ignore_spot);
-        self.order_book_state = Some(new_order_book);
+        let mut new_state = OrderBookState::from_snapshot(snapshot, height, 0, true, self.ignore_spot);
+
+        // Replay every cached batch above the snapshot height. Batches at or
+        // below the height are already reflected in the snapshot; newer ones
+        // arrived while hl-node was dumping state and would otherwise be lost
+        // (the old behavior discarded the whole cache, so every add/cancel
+        // during the 10-30s snapshot window silently corrupted the book).
+        let cache = self.fetched_snapshot_cache.take().unwrap_or_default();
+        self.cached_event_count = 0;
+        let mut replayed = 0usize;
+        let mut replay_failed = false;
+        for batch in cache {
+            let res = match batch {
+                EventBatch::Orders(b) if b.block_number() > height => {
+                    replayed += b.events_len();
+                    new_state.apply_order_statuses_hft(b).map(|_| ())
+                }
+                EventBatch::BookDiffs(b) if b.block_number() > height => {
+                    replayed += b.events_len();
+                    new_state.apply_order_diffs_hft(b).map(|_| ())
+                }
+                _ => Ok(()),
+            };
+            if let Err(err) = res {
+                log::warn!("Replay apply error after snapshot at height {height}: {err}");
+                replay_failed = true;
+            }
+        }
+        info!("Replayed {replayed} cached events above snapshot height {height}");
+        self.order_book_state = Some(new_state);
+
+        // A fresh snapshot plus a complete replay is in sync by construction. If
+        // the cache overflowed or a replayed batch failed to apply, events are
+        // still missing - keep the book marked so the ticker re-syncs again.
+        if self.cache_overflowed || replay_failed {
+            self.cache_overflowed = false;
+            self.needs_resync = false;
+            self.mark_desynced(if replay_failed { "replay_apply_error" } else { "event_cache_overflow" });
+        } else {
+            self.needs_resync = false;
+        }
+
         // The incremental L2 cache references the previous book's coins/levels;
         // drop it so the next broadcast does a full rebuild against the new state.
         self.l2_snapshot_cache = HashMap::new();
@@ -183,65 +282,157 @@ impl OrderBookListener {
         // Force the next flush to treat the active variant set as "changed" so the
         // empty cache is rebuilt against whatever shapes are currently subscribed.
         self.last_active_l2_params.clear();
-        // Clear any stale cache
-        self.fetched_snapshot_cache = None;
         info!("Order book ready at height {}", height);
     }
 
-    // forcibly grab current snapshot
-    pub(crate) fn compute_snapshot(&mut self) -> Option<TimedSnapshots> {
-        self.order_book_state.as_mut().map(|o| o.compute_snapshot())
+    /// L4 snapshot of one coin's book - (time, height, snapshot). Replaces the
+    /// old all-coins compute_snapshot, which cloned the entire multi-book under
+    /// the listener lock on every l4Book subscribe and stalled event processing
+    /// for hundreds of milliseconds.
+    pub(crate) fn compute_snapshot_for_coin(&self, coin: &Coin) -> Option<(u64, u64, Snapshot<InnerL4Order>)> {
+        self.order_book_state.as_ref().and_then(|state| state.compute_snapshot_for_coin(coin))
+    }
+}
+
+/// Does `coin` belong to one of the enabled market types?
+fn coin_in_market_filter(coin: &Coin, (include_perps, include_spot, include_hip3): (bool, bool, bool)) -> bool {
+    (coin.is_perp() && include_perps) || (coin.is_spot() && include_spot) || (coin.is_hip3() && include_hip3)
+}
+
+/// Parse one streaming line into (block height, typed event batch). Runs WITHOUT
+/// the listener lock: sonic-rs parsing of a multi-KB block batch is the most
+/// expensive step of the event path, and doing it under the lock serialized it
+/// against everything else that needs the listener (connection setup, L4
+/// snapshots, the L2 flush ticker). Returns None for empty or malformed lines
+/// (counted in `PARSE_ERRORS_TOTAL`).
+fn parse_event_line(line: &str, event_source: EventSource) -> Option<(u64, EventBatch)> {
+    // Count events for debugging
+    static HFT_EVENT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = HFT_EVENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if count % 1000 == 0 {
+        info!("parse_event_line event #{}, source: {}, line_len: {}", count, event_source, line.len());
+    }
+
+    if line.is_empty() {
+        return None;
+    }
+
+    // Parse the batch
+    let res = match event_source {
+        EventSource::Fills => sonic_rs::from_str::<Batch<NodeDataFill>>(line).map(|batch| {
+            let height = batch.block_number();
+            (height, EventBatch::Fills(batch))
+        }),
+        EventSource::OrderStatuses => sonic_rs::from_str(line)
+            .map(|batch: Batch<NodeDataOrderStatus>| (batch.block_number(), EventBatch::Orders(batch))),
+        EventSource::OrderDiffs => sonic_rs::from_str(line)
+            .map(|batch: Batch<NodeDataOrderDiff>| (batch.block_number(), EventBatch::BookDiffs(batch))),
+    };
+
+    match res {
+        Ok((height, event_batch)) => {
+            // Record file watcher metrics
+            FILE_EVENTS_TOTAL.with_label_values(&[event_source.metric_label()]).inc();
+            FILE_LINES_PARSED_TOTAL.with_label_values(&[event_source.metric_label()]).inc_by(line.len() as u64);
+
+            // Log successful parses periodically
+            static PARSE_OK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let ok_count = PARSE_OK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if ok_count % 10_000 == 0 {
+                info!("parse OK #{}: height={}, source={}", ok_count, height, event_source);
+            }
+            Some((height, event_batch))
+        }
+        Err(err) => {
+            // Log ALL parse errors for debugging
+            PARSE_ERRORS_TOTAL.with_label_values(&[event_source.metric_label()]).inc();
+            static PARSE_ERR_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let err_count = PARSE_ERR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if err_count % 1000 == 0 {
+                error!("parse error #{}: {}, source: {}, line_len: {}", err_count, err, event_source, line.len());
+            }
+            None
+        }
     }
 }
 
 impl OrderBookListener {
-    /// HFT version of process_data - doesn't skip first line errors since we're processing complete JSON lines
-    pub(crate) fn process_data_hft(&mut self, line: String, event_source: EventSource) -> Result<()> {
+    /// Append a batch to the replay cache, enforcing the event cap. On overflow
+    /// the cache is dropped and the book is marked for re-sync (the cap means a
+    /// snapshot fetch is taking pathologically long; better to re-sync again
+    /// than to risk OOM).
+    fn push_to_replay_cache(&mut self, event_batch: EventBatch) {
+        let events_len = match &event_batch {
+            EventBatch::Orders(b) => b.events_len(),
+            EventBatch::BookDiffs(b) => b.events_len(),
+            EventBatch::Fills(b) => b.events_len(),
+        };
+        if self.cached_event_count.saturating_add(events_len) > self.cache_event_cap {
+            error!(
+                "Replay cache overflow ({} + {events_len} events > cap {}); dropping cache and scheduling re-sync",
+                self.cached_event_count, self.cache_event_cap
+            );
+            self.fetched_snapshot_cache = None;
+            self.cached_event_count = 0;
+            self.cache_overflowed = true;
+            self.mark_desynced("event_cache_overflow");
+            return;
+        }
+        self.cached_event_count += events_len;
+        if let Some(cache) = self.fetched_snapshot_cache.as_mut() {
+            cache.push_back(event_batch);
+        }
+    }
+
+    /// While a snapshot fetch is pending, cache book-affecting batches for replay.
+    /// Returns the batch to apply live, or None when it was moved into the cache
+    /// (book not ready yet) or must be dropped (not ready and the cache is gone).
+    fn cache_for_replay(&mut self, event_batch: EventBatch) -> Option<EventBatch> {
+        let is_ready = self.order_book_state.is_some();
+        // Fills never mutate the book - nothing to replay. A missing cache means
+        // steady state (no fetch pending) or the post-overflow window where the
+        // book is already marked for re-sync.
+        if matches!(event_batch, EventBatch::Fills(_)) || self.fetched_snapshot_cache.is_none() {
+            return is_ready.then_some(event_batch);
+        }
+        if is_ready {
+            // Applied live by the caller AND replayed onto the incoming snapshot.
+            self.push_to_replay_cache(event_batch.clone());
+            Some(event_batch)
+        } else {
+            self.push_to_replay_cache(event_batch);
+            None
+        }
+    }
+
+    /// Cache a startup-backfill batch for snapshot replay. Backfill batches are
+    /// NEVER applied to a live book: they are older than the live stream by
+    /// construction, and applying e.g. a stale size update on top of newer
+    /// state would corrupt the book. If the replay cache is already gone (the
+    /// snapshot landed before the backfill drained, or the cache overflowed),
+    /// the batch cannot be used safely - mark the book for re-sync instead; the
+    /// re-fetched snapshot's height supersedes everything the backfill carried.
+    fn cache_backfill_batch(&mut self, event_batch: EventBatch) {
+        if matches!(event_batch, EventBatch::Fills(_)) {
+            return;
+        }
+        if self.fetched_snapshot_cache.is_some() {
+            self.push_to_replay_cache(event_batch);
+        } else {
+            self.mark_desynced("late_backfill");
+        }
+    }
+
+    /// Apply a parsed event batch to the book and run the fast broadcast paths.
+    /// HFT mode: events are applied the instant they arrive, without block-level
+    /// synchronization, with order-level caching for status/diff pairing.
+    /// Runs under the listener lock; everything here must stay cheap.
+    fn apply_event_batch(&mut self, height: u64, event_batch: EventBatch, event_source: EventSource) {
         /// Largest batch we'll process. Each event is a few hundred bytes; a 100k-event
         /// batch would already block the listener for seconds and pin hundreds of MB.
         /// In normal operation a single block's batch is tens to low thousands of events.
         const MAX_EVENTS_PER_BATCH: usize = 100_000;
-        // Count events for debugging
-        static HFT_EVENT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let count = HFT_EVENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if count % 1000 == 0 {
-            info!("process_data_hft event #{}, source: {}, line_len: {}", count, event_source, line.len());
-        }
-
-        if line.is_empty() {
-            return Ok(());
-        }
-
-        // Parse the batch
-        let res = match event_source {
-            EventSource::Fills => sonic_rs::from_str::<Batch<NodeDataFill>>(&line).map(|batch| {
-                let height = batch.block_number();
-                (height, EventBatch::Fills(batch))
-            }),
-            EventSource::OrderStatuses => sonic_rs::from_str(&line)
-                .map(|batch: Batch<NodeDataOrderStatus>| (batch.block_number(), EventBatch::Orders(batch))),
-            EventSource::OrderDiffs => sonic_rs::from_str(&line)
-                .map(|batch: Batch<NodeDataOrderDiff>| (batch.block_number(), EventBatch::BookDiffs(batch))),
-        };
-
-        let (height, event_batch) = match res {
-            Ok(data) => data,
-            Err(err) => {
-                // Log ALL parse errors for debugging
-                let err_source_label = match event_source {
-                    EventSource::Fills => "fills",
-                    EventSource::OrderStatuses => "orders",
-                    EventSource::OrderDiffs => "diffs",
-                };
-                PARSE_ERRORS_TOTAL.with_label_values(&[err_source_label]).inc();
-                static PARSE_ERR_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let err_count = PARSE_ERR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if err_count % 1000 == 0 {
-                    error!("parse error #{}: {}, source: {}, line_len: {}", err_count, err, event_source, line.len());
-                }
-                return Ok(()); // Skip this line but don't fail
-            }
-        };
+        let source_label = event_source.metric_label();
 
         // Sanity cap on batch size. A malformed/malicious line could otherwise
         // pin hundreds of MB and freeze the listener for seconds.
@@ -251,42 +442,31 @@ impl OrderBookListener {
             EventBatch::Fills(b) => b.events_len(),
         };
         if events_len > MAX_EVENTS_PER_BATCH {
-            let source_label = match event_source {
-                EventSource::Fills => "fills",
-                EventSource::OrderStatuses => "orders",
-                EventSource::OrderDiffs => "diffs",
-            };
             PARSE_ERRORS_TOTAL.with_label_values(&[source_label]).inc();
             error!(
                 "Dropping oversize batch from {source_label}: {events_len} events (cap {MAX_EVENTS_PER_BATCH}), height={height}"
             );
-            return Ok(());
+            // The dropped events are gone for good; without a re-sync every
+            // affected coin would serve a silently wrong book forever.
+            self.mark_desynced("oversize_batch");
+            return;
         }
 
-        // Log successful parses periodically
-        static PARSE_OK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let ok_count = PARSE_OK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        // Record file watcher metrics
-        let source_label = match event_source {
-            EventSource::Fills => "fills",
-            EventSource::OrderStatuses => "orders",
-            EventSource::OrderDiffs => "diffs",
-        };
-        FILE_EVENTS_TOTAL.with_label_values(&[source_label]).inc();
-        FILE_LINES_PARSED_TOTAL.with_label_values(&[source_label]).inc_by(line.len() as u64);
         let process_start = Instant::now();
-
-        if ok_count % 10_000 == 0 {
-            info!("parse OK #{}: height={}, source={}", ok_count, height, event_source);
-        }
 
         if height % 100 == 0 {
             info!("{event_source} block: {height}");
         }
 
-        // HFT mode: Process events DIRECTLY without block-level synchronization
-        // This is arbor's key insight - process independently with order-level caching
+        // Cache for replay while a snapshot fetch is in flight; bail out when the
+        // batch was consumed by the cache (book not ready to apply it yet).
+        let Some(event_batch) = self.cache_for_replay(event_batch) else {
+            return;
+        };
+
+        // Collected here and applied after the state borrow ends.
+        let mut desync_reason: Option<&'static str> = None;
+
         let changed_coins: HashSet<Coin> = if let Some(state) = self.order_book_state.as_mut() {
             let result = match event_batch {
                 EventBatch::Orders(batch) => {
@@ -343,12 +523,14 @@ impl OrderBookListener {
                     // Per-event errors (malformed Px/Sz, unrecognized diff variant) are
                     // recoverable: skip the offending batch and keep serving every other
                     // coin's state. Discarding `order_book_state` here used to take down
-                    // the entire feed for ~10s on a single malformed line.
+                    // the entire feed for ~10s on a single malformed line. The skipped
+                    // batch is still lost data, so schedule a background re-sync.
                     PARSE_ERRORS_TOTAL.with_label_values(&[source_label]).inc();
                     log::warn!(
                         "Skipping event batch at height={} source={} due to apply error: {err}",
                         height, source_label
                     );
+                    desync_reason = Some("apply_error");
                     HashSet::new()
                 }
             }
@@ -372,8 +554,12 @@ impl OrderBookListener {
                 ORDERBOOK_ORDERS_TOTAL.set(state.order_count() as i64);
                 ORDERBOOK_COINS_COUNT.set(state.coin_count() as i64);
 
-                // Cleanup stale pending entries to prevent unbounded memory growth
-                state.cleanup_stale_pending();
+                // Cleanup stale pending entries to prevent unbounded memory growth.
+                // A force-clear may evict genuinely in-flight order halves, so it
+                // counts as data loss and the book must re-sync.
+                if state.cleanup_stale_pending() {
+                    desync_reason = Some("pending_cache_cleared");
+                }
 
                 info!(
                     "State progress #{}: height={}, pending_statuses={}, pending_diffs={}",
@@ -383,6 +569,9 @@ impl OrderBookListener {
                     state.pending_new_diffs_count()
                 );
             }
+        }
+        if let Some(reason) = desync_reason {
+            self.mark_desynced(reason);
         }
 
         // Fast BBO broadcast - ONLY for coins that changed AND only when someone is
@@ -434,11 +623,11 @@ impl OrderBookListener {
         // be served their stale snapshots. With no subscribers the buffer keeps
         // accumulating (deduped by coin, bounded by the universe size).
         self.pending_dirty_l2_coins.extend(changed_coins.iter().cloned());
-        // The L2 broadcast is NOT done inline here. It is driven by the main-loop
-        // flush ticker via flush_l2_if_due(), so a quiet node between block flushes
-        // (or the listener lock being busy draining a burst) can no longer starve
-        // the L2 feed. The event path stays minimal: apply + BBO + accumulate.
-        Ok(())
+        // The L2 broadcast is NOT done inline here. The main event loop calls
+        // flush_l2_if_due() right after this (and a flush ticker backstops quiet
+        // periods), so the broadcast fires the moment the throttle window expires
+        // instead of waiting for the next tick. The event path stays minimal:
+        // apply + BBO + accumulate.
     }
 
     /// Flush the L2 conflation buffer if the throttle window has elapsed and there
@@ -486,7 +675,8 @@ impl OrderBookListener {
             let dirty = std::mem::take(&mut self.pending_dirty_l2_coins);
             L2_CONFLATION_BATCH_SIZE.observe(dirty.len() as f64);
             let l2_start = Instant::now();
-            let (time, l2_snapshots) = state.l2_snapshots_incremental(&dirty, &active, &mut self.l2_snapshot_cache);
+            let (time, l2_snapshots, recomputed, coin_set_changed) =
+                state.l2_snapshots_incremental(&dirty, &active, &mut self.l2_snapshot_cache);
 
             static L2_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let bc = L2_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -494,8 +684,25 @@ impl OrderBookListener {
                 info!("L2 broadcast #{} at time {} for {} dirty coins", bc, time, dirty.len());
             }
 
+            // Rebuild the shared universe only when the coin set actually changed.
+            // Built once here instead of once per connection per broadcast (the
+            // old per-connection derivation allocated the full coin-name set for
+            // every connection on every flush).
+            let universe = if coin_set_changed {
+                let market_filter = self.market_filter;
+                Some(Arc::new(
+                    self.l2_snapshot_cache
+                        .keys()
+                        .filter(|coin| coin_in_market_filter(coin, market_filter))
+                        .map(Coin::value)
+                        .collect::<HashSet<String>>(),
+                ))
+            } else {
+                None
+            };
+
             if let Some(tx) = &self.internal_message_tx {
-                let msg = Arc::new(InternalMessage::Snapshot { l2_snapshots, time });
+                let msg = Arc::new(InternalMessage::Snapshot { l2_snapshots, time, dirty: recomputed, universe });
                 drop(tx.send(msg));
             }
             L2_BROADCAST_LATENCY.observe(l2_start.elapsed().as_secs_f64());
@@ -514,17 +721,19 @@ impl L2Snapshots {
     }
 }
 
-pub(crate) struct TimedSnapshots {
-    pub(crate) time: u64,
-    pub(crate) height: u64,
-    pub(crate) snapshot: Snapshots<InnerL4Order>,
-}
-
 // Messages sent from node data listener to websocket dispatch to support streaming
 pub(crate) enum InternalMessage {
     Snapshot {
         l2_snapshots: L2Snapshots,
         time: u64,
+        /// Coins whose snapshots were rebuilt in this flush. Connections skip
+        /// L2 subscriptions whose coin is absent (their previously-sent payload
+        /// is still current), avoiding per-coin truncate/export/hash work for
+        /// quiet coins on every broadcast.
+        dirty: HashSet<Coin>,
+        /// Refreshed market-filtered universe; Some only when the coin set
+        /// changed since the previous broadcast.
+        universe: Option<Arc<HashSet<String>>>,
     },
     Fills {
         batch: Batch<NodeDataFill>,
@@ -644,8 +853,18 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
         listener.ignore_spot
     };
 
+    // Startup-backfill floor: the node's currently persisted height. The initial
+    // snapshot is generated after this point, so its height is >= the floor and
+    // every line at or below it is already covered by the snapshot. The watchers
+    // backfill on-disk lines above the floor that the old seek-to-EOF behavior
+    // skipped. 0 (visor unreadable) disables the backfill - the snapshot load
+    // would fail on the same file anyway.
+    let backfill_min_height = read_visor_height(&get_visor_path(&snapshot_config)).unwrap_or(0);
+    info!("Startup backfill floor height: {backfill_min_height}");
+
     // Start parallel file watchers (crossbeam channel)
-    let (crossbeam_rx, _handles, _last_os, _last_fills, _last_diffs) = parallel::start_parallel_file_watchers(dir);
+    let (crossbeam_rx, _handles, _last_os, _last_fills, _last_diffs) =
+        parallel::start_parallel_file_watchers(dir, backfill_min_height);
 
     // Bridge crossbeam to tokio mpsc.
     // BOUNDED channel: under processing stalls (mutex contention, slow L2 compute),
@@ -709,24 +928,35 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
 
             // Process events from file watchers (via bridge)
             Some(event) = tokio_rx.recv() => {
-                match event {
-                    parallel::FileEvent::OrderDiff(line) => {
-                        // Process OrderDiff immediately - this is the BBO-critical path
-                        if let Err(err) = listener.lock().await.process_data_hft(line, EventSource::OrderDiffs) {
-                            error!("OrderDiff error: {err}");
-                        }
+                let (line, source, is_backfill) = match event {
+                    // OrderDiffs are the BBO-critical path; statuses and fills
+                    // are less latency-sensitive but share the same flow.
+                    parallel::FileEvent::OrderDiff(line) => (line, EventSource::OrderDiffs, false),
+                    parallel::FileEvent::OrderStatus(line) => (line, EventSource::OrderStatuses, false),
+                    parallel::FileEvent::Fill(line) => (line, EventSource::Fills, false),
+                    parallel::FileEvent::BackfillOrderDiff(line) => (line, EventSource::OrderDiffs, true),
+                    parallel::FileEvent::BackfillOrderStatus(line) => (line, EventSource::OrderStatuses, true),
+                    parallel::FileEvent::Desync(source) => {
+                        // The watcher discarded data (oversized partial line);
+                        // the book can no longer be trusted - trigger a re-sync.
+                        error!("{source} watcher reported data loss");
+                        listener.lock().await.mark_desynced("watcher_data_loss");
+                        continue;
                     }
-                    parallel::FileEvent::OrderStatus(line) => {
-                        // OrderStatuses are less latency-critical
-                        if let Err(err) = listener.lock().await.process_data_hft(line, EventSource::OrderStatuses) {
-                            error!("OrderStatus error: {err}");
-                        }
-                    }
-                    parallel::FileEvent::Fill(line) => {
-                        // Fills are for trade data, not BBO
-                        if let Err(err) = listener.lock().await.process_data_hft(line, EventSource::Fills) {
-                            error!("Fill error: {err}");
-                        }
+                };
+                // Parse outside the listener lock, apply + flush under one
+                // acquisition. The inline flush broadcasts the instant the L2
+                // throttle window expires (O(1) when not due) instead of waiting
+                // for the next flush tick.
+                if let Some((height, batch)) = parse_event_line(&line, source) {
+                    let mut guard = listener.lock().await;
+                    if is_backfill {
+                        // Backfill lines are cache-only: replayed above the
+                        // snapshot height, never applied to a live book.
+                        guard.cache_backfill_batch(batch);
+                    } else {
+                        guard.apply_event_batch(height, batch, source);
+                        guard.flush_l2_if_due();
                     }
                 }
             }
@@ -739,17 +969,30 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                         return Err("Snapshot fetch task sender dropped".into());
                     }
                     Some(Err(err)) => {
-                        return Err(format!("Abci state reading error: {err}").into());
+                        if listener.lock().await.is_ready() {
+                            // A re-sync fetch failed (e.g. transient docker /
+                            // hl-node hiccup). Keep serving the current book;
+                            // needs_resync is still set so the ticker retries.
+                            error!("Snapshot re-fetch failed; will retry: {err}");
+                        } else {
+                            // Initial snapshot is required to serve anything.
+                            return Err(format!("Abci state reading error: {err}").into());
+                        }
                     }
                     Some(Ok(())) => {}
                 }
             }
 
-            // Periodic snapshot fetch (initial only)
+            // Periodic snapshot fetch: initial startup, plus whenever the book
+            // was marked out-of-sync (events were provably lost). The re-fetch
+            // rebuilds the book from a fresh snapshot + cached-event replay.
             _ = ticker.tick() => {
-                let is_ready = listener.lock().await.is_ready();
-                info!("Ticker: is_ready={}, snapshot_fetch_pending={}", is_ready, snapshot_fetch_pending);
-                if !is_ready && !snapshot_fetch_pending {
+                let (is_ready, needs_resync) = {
+                    let guard = listener.lock().await;
+                    (guard.is_ready(), guard.needs_resync())
+                };
+                info!("Ticker: is_ready={is_ready}, needs_resync={needs_resync}, snapshot_fetch_pending={snapshot_fetch_pending}");
+                if (!is_ready || needs_resync) && !snapshot_fetch_pending {
                     snapshot_fetch_pending = true;
                     let listener = listener.clone();
                     let snapshot_fetch_task_tx = snapshot_fetch_task_tx.clone();
@@ -769,7 +1012,7 @@ mod tests {
     /// broadcast receiver so `receiver_count() > 0`.
     fn ready_listener() -> (OrderBookListener, tokio::sync::broadcast::Receiver<Arc<InternalMessage>>) {
         let (tx, rx) = tokio::sync::broadcast::channel(32);
-        let mut listener = OrderBookListener::new(Some(tx), true, ActiveL2Params::new());
+        let mut listener = OrderBookListener::new(Some(tx), true, ActiveL2Params::new(), (true, true, true));
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 0);
         (listener, rx)
     }
@@ -822,6 +1065,253 @@ mod tests {
         listener.flush_l2_if_due();
 
         assert!(rx.try_recv().is_err(), "no broadcast when no variant shape is subscribed");
+    }
+
+    // ==================== Event helpers ====================
+
+    fn make_l4_order_json(coin: &str, oid: u64) -> serde_json::Value {
+        serde_json::json!({
+            "coin": coin,
+            "side": "B",
+            "limitPx": "100.0",
+            "sz": "1.0",
+            "oid": oid,
+            "timestamp": 1000,
+            "triggerCondition": "N/A",
+            "isTrigger": false,
+            "triggerPx": "0.0",
+            "children": [],
+            "isPositionTpsl": false,
+            "reduceOnly": false,
+            "orderType": "Limit",
+            "origSz": "1.0",
+            "tif": "Gtc",
+            "cloid": null
+        })
+    }
+
+    fn make_status_batch(coin: &str, oid: u64, height: u64) -> Batch<NodeDataOrderStatus> {
+        serde_json::from_value(serde_json::json!({
+            "local_time": "2024-01-15T10:30:00.000000000",
+            "block_time": "2024-01-15T10:30:00.000000000",
+            "block_number": height,
+            "events": [{
+                "time": "2024-01-15T10:30:00.000000000",
+                "user": "0x0000000000000000000000000000000000000000",
+                "hash": "0xabc",
+                "status": "open",
+                "order": make_l4_order_json(coin, oid),
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn make_diff_batch(coin: &str, oid: u64, height: u64, raw_book_diff: serde_json::Value) -> Batch<NodeDataOrderDiff> {
+        serde_json::from_value(serde_json::json!({
+            "local_time": "2024-01-15T10:30:00.000000000",
+            "block_time": "2024-01-15T10:30:00.000000000",
+            "block_number": height,
+            "events": [{
+                "user": "0x0000000000000000000000000000000000000000",
+                "oid": oid,
+                "px": "100.0",
+                "coin": coin,
+                "raw_book_diff": raw_book_diff,
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// Feed a paired status + New diff (both halves of an order add) at `height`.
+    fn feed_order(listener: &mut OrderBookListener, coin: &str, oid: u64, height: u64) {
+        listener.apply_event_batch(
+            height,
+            EventBatch::Orders(make_status_batch(coin, oid, height)),
+            EventSource::OrderStatuses,
+        );
+        listener.apply_event_batch(
+            height,
+            EventBatch::BookDiffs(make_diff_batch(coin, oid, height, serde_json::json!({"new": {"sz": "1.0"}}))),
+            EventSource::OrderDiffs,
+        );
+    }
+
+    /// Drain the broadcast receiver until the next Snapshot message; panics if
+    /// none was sent.
+    fn next_snapshot_msg(
+        rx: &mut tokio::sync::broadcast::Receiver<Arc<InternalMessage>>,
+    ) -> (HashSet<Coin>, Option<Arc<HashSet<String>>>) {
+        while let Ok(msg) = rx.try_recv() {
+            if let InternalMessage::Snapshot { dirty, universe, .. } = msg.as_ref() {
+                return (dirty.clone(), universe.clone());
+            }
+        }
+        panic!("no Snapshot message was broadcast");
+    }
+
+    // ==================== Gapless snapshot handoff (drift fix) ====================
+
+    #[test]
+    fn test_startup_events_cached_and_replayed_above_snapshot_height() {
+        let (tx, _rx) = tokio::sync::broadcast::channel(32);
+        let mut listener = OrderBookListener::new(Some(tx), false, ActiveL2Params::new(), (true, true, true));
+        assert!(!listener.is_ready());
+
+        // Events stream in while the snapshot is being generated (book not ready).
+        feed_order(&mut listener, "NEW", 1, 200);
+        feed_order(&mut listener, "OLD", 2, 100);
+
+        // Snapshot lands at height 150: the height-200 events must be replayed;
+        // the height-100 events are already reflected in the snapshot state.
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 150);
+        assert!(listener.is_ready());
+        let universe = listener.universe();
+        assert!(universe.contains("NEW"), "events above the snapshot height must be replayed");
+        assert!(!universe.contains("OLD"), "events at/below the snapshot height must not be double-applied");
+        assert!(!listener.needs_resync(), "a clean snapshot + replay is in sync");
+    }
+
+    #[test]
+    fn test_resync_caches_while_serving_and_replays_onto_new_snapshot() {
+        let (mut listener, _rx) = ready_listener();
+        // Steady state: applied live, not cached.
+        feed_order(&mut listener, "BTC", 1, 10);
+        assert!(listener.universe().contains("BTC"));
+
+        // A re-sync starts: events keep applying to the live book AND are cached.
+        listener.begin_caching();
+        feed_order(&mut listener, "ETH", 2, 20);
+        assert!(listener.universe().contains("ETH"), "events during a re-sync still apply to the live book");
+
+        // The fresh snapshot (empty, height 15) supersedes the old state; the
+        // cached ETH events (height 20 > 15) are replayed on top of it.
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 15);
+        let universe = listener.universe();
+        assert!(universe.contains("ETH"), "post-snapshot events must survive the re-init");
+        assert!(!universe.contains("BTC"), "pre-snapshot state must come from the snapshot alone");
+        assert!(!listener.needs_resync());
+    }
+
+    #[test]
+    fn test_cache_overflow_keeps_book_desynced_until_clean_resync() {
+        let (tx, _rx) = tokio::sync::broadcast::channel(32);
+        let mut listener = OrderBookListener::new(Some(tx), true, ActiveL2Params::new(), (true, true, true));
+        listener.set_cache_event_cap(1);
+
+        feed_order(&mut listener, "AAA", 1, 10); // 2 single-event batches: second one overflows
+        assert!(listener.needs_resync(), "cache overflow must mark the book for re-sync");
+
+        // The snapshot that triggered the (overflowed) caching lands: replay is
+        // incomplete, so the book must stay marked and re-sync again.
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 5);
+        assert!(listener.needs_resync(), "incomplete replay must keep the book marked");
+
+        // A later clean fetch finally clears it.
+        listener.set_cache_event_cap(MAX_CACHED_EVENTS);
+        listener.begin_caching();
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 6);
+        assert!(!listener.needs_resync());
+    }
+
+    #[test]
+    fn test_mark_desynced_cleared_by_clean_resync() {
+        let (mut listener, _rx) = ready_listener();
+        assert!(!listener.needs_resync());
+        listener.mark_desynced("test_reason");
+        assert!(listener.needs_resync());
+        // The re-sync flow: begin caching, then a fresh snapshot lands.
+        listener.begin_caching();
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1);
+        assert!(!listener.needs_resync());
+    }
+
+    #[test]
+    fn test_backfill_batches_cached_for_replay_never_applied_live() {
+        let (mut listener, _rx) = ready_listener(); // ready at height 0, cache None
+        listener.begin_caching();
+
+        // Backfill arrives for a coin the live book has never seen.
+        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("ZED", 7, 99)));
+        listener.cache_backfill_batch(EventBatch::BookDiffs(make_diff_batch(
+            "ZED",
+            7,
+            99,
+            serde_json::json!({"new": {"sz": "1.0"}}),
+        )));
+        assert!(!listener.universe().contains("ZED"), "backfill must never touch the live book");
+
+        // Snapshot at height 50: the backfilled height-99 events are replayed.
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 50);
+        assert!(listener.universe().contains("ZED"), "backfill above the snapshot height must be replayed");
+        assert!(!listener.needs_resync());
+    }
+
+    #[test]
+    fn test_backfill_below_snapshot_height_not_replayed() {
+        let (mut listener, _rx) = ready_listener();
+        listener.begin_caching();
+        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("ZED", 7, 40)));
+        listener.cache_backfill_batch(EventBatch::BookDiffs(make_diff_batch(
+            "ZED",
+            7,
+            40,
+            serde_json::json!({"new": {"sz": "1.0"}}),
+        )));
+        // Snapshot at height 50 already contains everything at height 40.
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 50);
+        assert!(!listener.universe().contains("ZED"), "backfill at/below the snapshot height is already covered");
+    }
+
+    #[test]
+    fn test_late_backfill_with_no_cache_marks_desync() {
+        let (mut listener, _rx) = ready_listener(); // cache already consumed by init
+        assert!(!listener.needs_resync());
+        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 1, 99)));
+        assert!(
+            listener.needs_resync(),
+            "a backfill batch arriving after the replay cache is gone cannot be applied safely"
+        );
+    }
+
+    // ==================== Parse / apply split ====================
+
+    #[test]
+    fn test_parse_event_line_valid_malformed_empty() {
+        let line = r#"{"local_time":"2024-01-15T10:30:00.000000000","block_time":"2024-01-15T10:30:00.000000000","block_number":7,"events":[]}"#;
+        let parsed = parse_event_line(line, EventSource::OrderDiffs);
+        assert!(matches!(parsed, Some((7, EventBatch::BookDiffs(_)))));
+        let parsed = parse_event_line(line, EventSource::OrderStatuses);
+        assert!(matches!(parsed, Some((7, EventBatch::Orders(_)))));
+        assert!(parse_event_line("", EventSource::OrderDiffs).is_none());
+        assert!(parse_event_line("not json", EventSource::Fills).is_none());
+        assert!(parse_event_line("{\"truncated\":", EventSource::OrderDiffs).is_none());
+    }
+
+    // ==================== Dirty set + universe in Snapshot broadcasts ====================
+
+    #[test]
+    fn test_flush_broadcasts_dirty_set_and_universe_on_coin_set_change() {
+        let (mut listener, mut rx) = ready_listener();
+        let _guard = listener.active_l2_params().acquire(L2SnapshotParams::new(None, None));
+
+        // First flush after BTC appears: dirty contains BTC, universe included.
+        feed_order(&mut listener, "BTC", 1, 1);
+        listener.last_l2_broadcast = None;
+        listener.flush_l2_if_due();
+        let (dirty, universe) = next_snapshot_msg(&mut rx);
+        assert!(dirty.contains("BTC"));
+        let universe = universe.expect("universe must be included when the coin set changes");
+        assert!(universe.contains("BTC"));
+
+        // The same coin changes again: dirty yes, but the coin set is unchanged
+        // so no universe is attached.
+        let update = make_diff_batch("BTC", 1, 2, serde_json::json!({"update": {"origSz": "1.0", "newSz": "2.0"}}));
+        listener.apply_event_batch(2, EventBatch::BookDiffs(update), EventSource::OrderDiffs);
+        listener.last_l2_broadcast = None;
+        listener.flush_l2_if_due();
+        let (dirty, universe) = next_snapshot_msg(&mut rx);
+        assert!(dirty.contains("BTC"));
+        assert!(universe.is_none(), "universe is only rebuilt when the coin set changes");
     }
 
     #[test]

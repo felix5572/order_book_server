@@ -26,7 +26,9 @@ impl<O: Clone> Snapshot<O> {
     }
 
     pub(crate) fn truncate(&self, n: usize) -> Self {
-        Self(self.0.clone().map(|orders| orders.into_iter().take(n).collect_vec()))
+        // Clone only the first n entries per side; the previous full-Vec clone
+        // copied up to MAX_LEVELS entries just to drop most of them.
+        Self(self.0.each_ref().map(|orders| orders.iter().take(n).cloned().collect_vec()))
     }
 }
 
@@ -130,27 +132,24 @@ impl<O: InnerOrder> OrderBook<O> {
         false
     }
 
-    /// Get best bid and best ask in O(1) without computing full L2 snapshot.
-    /// Returns (best_bid, best_ask) where each is (price, total_size, order_count).
+    /// Get best bid and best ask in O(level size) without computing a full L2
+    /// snapshot or allocating. Returns (best_bid, best_ask) where each is
+    /// (price, total_size, order_count).
     #[must_use]
     pub(crate) fn get_bbo(&self) -> (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>) {
-        // Best bid = highest price in bids (last key in BTreeMap)
-        let best_bid = self.bids.last_key_value().map(|(px, list)| {
-            let orders = list.to_vec();
-            let total_sz = orders.iter().map(|o| o.sz().value()).sum::<u64>();
-            let count = orders.len() as u32;
+        fn aggregate<O: InnerOrder>((px, list): (&Px, &LinkedList<Oid, O>)) -> (Px, Sz, u32) {
+            // fold walks the list in place - the previous to_vec() allocated a
+            // Vec of refs per BBO check on the hottest path in the server.
+            let (total_sz, count) = list.fold((0u64, 0u32), |acc, o| {
+                acc.0 = acc.0.saturating_add(o.sz().value());
+                acc.1 += 1;
+            });
             (*px, Sz::new(total_sz), count)
-        });
+        }
 
-        // Best ask = lowest price in asks (first key in BTreeMap)
-        let best_ask = self.asks.first_key_value().map(|(px, list)| {
-            let orders = list.to_vec();
-            let total_sz = orders.iter().map(|o| o.sz().value()).sum::<u64>();
-            let count = orders.len() as u32;
-            (*px, Sz::new(total_sz), count)
-        });
-
-        (best_bid, best_ask)
+        // Best bid = highest price in bids (last key in BTreeMap);
+        // best ask = lowest price in asks (first key in BTreeMap).
+        (self.bids.last_key_value().map(aggregate), self.asks.first_key_value().map(aggregate))
     }
 
     /// Compact every price-level's `LinkedList` slab. Returns the number of lists

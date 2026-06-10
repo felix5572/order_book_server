@@ -19,8 +19,8 @@ pub(crate) struct NodeDataOrderDiff {
 }
 
 impl NodeDataOrderDiff {
-    pub(crate) fn diff(&self) -> OrderDiff {
-        self.raw_book_diff.clone()
+    pub(crate) const fn diff(&self) -> &OrderDiff {
+        &self.raw_book_diff
     }
     pub(crate) const fn oid(&self) -> Oid {
         Oid::new(self.oid)
@@ -53,7 +53,7 @@ impl NodeDataOrderStatus {
     }
 }
 
-#[derive(Clone, Copy, strum_macros::Display)]
+#[derive(Debug, Clone, Copy, strum_macros::Display)]
 pub(crate) enum EventSource {
     Fills,
     OrderStatuses,
@@ -61,6 +61,16 @@ pub(crate) enum EventSource {
 }
 
 impl EventSource {
+    /// Stable label used for Prometheus metric dimensions.
+    #[must_use]
+    pub(crate) const fn metric_label(self) -> &'static str {
+        match self {
+            Self::Fills => "fills",
+            Self::OrderStatuses => "orders",
+            Self::OrderDiffs => "diffs",
+        }
+    }
+
     /// Get streaming directory (for --stream-with-block-info mode)
     #[must_use]
     pub(crate) fn event_source_dir_streaming(self, dir: &Path) -> PathBuf {

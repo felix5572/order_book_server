@@ -150,6 +150,16 @@ pub(super) async fn process_rmp_file(config: &SnapshotConfig) -> Result<PathBuf>
     Err("Snapshot file not created".into())
 }
 
+/// Current node height from `visor_abci_state.json`, or None if unreadable.
+/// Used as the startup-backfill floor: the initial snapshot's height is never
+/// below this value (the snapshot is generated after boot and heights only
+/// advance), so every line at or below it is already covered by the snapshot.
+pub(super) fn read_visor_height(visor_path: &std::path::Path) -> Option<u64> {
+    let contents = fs::read_to_string(visor_path).ok()?;
+    let visor: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    visor["height"].as_u64()
+}
+
 /// Get the visor state path based on config
 /// Get the visor state path based on config
 /// data_dir should be the path containing node_*_by_block directories
@@ -213,6 +223,10 @@ fn compute_l2_variants_for_coin<O: InnerOrder>(
 /// holding `Arc::clone`d entries — the outgoing broadcast message and the
 /// listener-side cache share the underlying inner maps, so unchanged coins
 /// cost a single Arc bump per broadcast instead of a full level-vector clone.
+/// Also returned: the set of coins actually recomputed (connections use it to
+/// skip subscriptions whose cached payload is still current) and whether the
+/// cached coin set changed (a coin appeared or was evicted), which tells the
+/// caller to rebuild the shared universe.
 ///
 /// Also evicts cache entries for coins no longer present in `order_books`
 /// (e.g. when a coin is delisted and the multi-book removes it). Without
@@ -222,19 +236,23 @@ pub(super) fn compute_l2_snapshots_incremental<O: InnerOrder + Send + Sync>(
     changed_coins: &HashSet<Coin>,
     active: &HashSet<L2SnapshotParams>,
     cache: &mut HashMap<Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>>,
-) -> L2Snapshots {
+) -> (L2Snapshots, HashSet<Coin>, bool) {
     // Evict stale entries.
+    let len_before_evict = cache.len();
     cache.retain(|coin, _| order_books.as_ref().contains_key(coin));
+    let mut coin_set_changed = cache.len() != len_before_evict;
 
     // Determine which coins we actually need to (re)compute: anything in
     // `changed_coins` that the book still contains, plus any present-but-uncached
     // coins (first-time broadcast after a snapshot reset).
-    let mut to_compute: Vec<Coin> = changed_coins.iter().filter(|c| order_books.as_ref().contains_key(c)).cloned().collect();
+    let mut to_compute: Vec<Coin> =
+        changed_coins.iter().filter(|c| order_books.as_ref().contains_key(*c)).cloned().collect();
     for coin in order_books.as_ref().keys() {
         if !cache.contains_key(coin) && !changed_coins.contains(coin) {
             to_compute.push(coin.clone());
         }
     }
+    coin_set_changed |= to_compute.iter().any(|coin| !cache.contains_key(coin));
 
     // Parallel recompute for the coins we need, building only the subscribed shapes.
     let updates: Vec<(Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>)> = to_compute
@@ -243,7 +261,9 @@ pub(super) fn compute_l2_snapshots_incremental<O: InnerOrder + Send + Sync>(
             order_books.as_ref().get(&coin).map(|book| (coin, Arc::new(compute_l2_variants_for_coin(book, active))))
         })
         .collect();
+    let mut recomputed = HashSet::with_capacity(updates.len());
     for (coin, arc) in updates {
+        recomputed.insert(coin.clone());
         cache.insert(coin, arc);
     }
 
@@ -251,9 +271,10 @@ pub(super) fn compute_l2_snapshots_incremental<O: InnerOrder + Send + Sync>(
     // O(coins) cheap atomic bumps, no level data is copied.
     let snapshot: HashMap<Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>> =
         cache.iter().map(|(c, arc)| (c.clone(), Arc::clone(arc))).collect();
-    L2Snapshots(snapshot)
+    (L2Snapshots(snapshot), recomputed, coin_set_changed)
 }
 
+#[derive(Clone)]
 pub(super) enum EventBatch {
     Orders(Batch<NodeDataOrderStatus>),
     BookDiffs(Batch<NodeDataOrderDiff>),
@@ -304,6 +325,22 @@ mod tests {
         ]
         .into_iter()
         .collect()
+    }
+
+    #[test]
+    fn test_read_visor_height() {
+        let dir = std::env::temp_dir().join(format!("obs_visor_test_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("visor_abci_state.json");
+
+        fs::write(&path, r#"{"height": 12345, "other": "x"}"#).unwrap();
+        assert_eq!(read_visor_height(&path), Some(12345));
+
+        fs::write(&path, "not json").unwrap();
+        assert_eq!(read_visor_height(&path), None);
+
+        assert_eq!(read_visor_height(&dir.join("missing.json")), None);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -412,6 +449,31 @@ mod tests {
             Arc::ptr_eq(&a_seed, cache.get(&Coin::new("A")).unwrap()),
             "demonstrates the stale-serve bug: A's change is invisible when omitted from the changed set"
         );
+    }
+
+    #[test]
+    fn test_incremental_reports_recomputed_and_coin_set_changes() {
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        books.add_order(order(1, "BTC", Side::Bid, "1", "50000"));
+        books.add_order(order(2, "ETH", Side::Bid, "1", "3000"));
+
+        let mut cache = HashMap::new();
+        let (_, recomputed, changed) = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+        assert!(changed, "first build introduces coins to the cache");
+        assert!(recomputed.contains("BTC") && recomputed.contains("ETH"));
+
+        // Only BTC dirty: recomputed is exactly {BTC}, coin set unchanged.
+        let dirty: HashSet<Coin> = std::iter::once(Coin::new("BTC")).collect();
+        let (_, recomputed, changed) = compute_l2_snapshots_incremental(&books, &dirty, &all_params(), &mut cache);
+        assert!(!changed, "no coin appeared or disappeared");
+        assert_eq!(recomputed.len(), 1);
+        assert!(recomputed.contains("BTC"));
+
+        // Evicting a coin flags a coin-set change (universe must be rebuilt).
+        books.cancel_order(crate::order_book::Oid::new(1), Coin::new("BTC"));
+        let (_, recomputed, changed) = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+        assert!(changed, "eviction must flag a universe change");
+        assert!(recomputed.is_empty());
     }
 
     #[test]

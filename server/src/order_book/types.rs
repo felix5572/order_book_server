@@ -94,6 +94,16 @@ impl Coin {
     }
 }
 
+/// Lets `HashMap<Coin, _>` / `HashSet<Coin>` be queried with a plain `&str`
+/// (`map.get(coin_str)`), avoiding a `String` allocation per lookup on the
+/// broadcast hot paths. Sound because `Coin` hashes/compares exactly like its
+/// inner `String`, which itself hashes/compares like `str`.
+impl std::borrow::Borrow<str> for Coin {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 impl Add<Self> for Sz {
     type Output = Self;
 
@@ -383,6 +393,19 @@ mod tests {
     #[test]
     fn test_coin_ordering() {
         assert!(Coin::new("AAA") < Coin::new("BBB"));
+    }
+
+    #[test]
+    fn test_coin_borrow_str_lookup() {
+        // Borrow<str> lets hot-path maps be queried without allocating a Coin.
+        let mut set = std::collections::HashSet::new();
+        set.insert(Coin::new("BTC"));
+        assert!(set.contains("BTC"));
+        assert!(!set.contains("ETH"));
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(Coin::new("BTC"), 1u8);
+        assert_eq!(map.get("BTC"), Some(&1));
     }
 
     // ==================== Side Tests ====================
