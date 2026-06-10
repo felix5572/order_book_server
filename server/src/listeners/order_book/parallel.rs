@@ -2,7 +2,6 @@
 // Each event source runs on its own thread for maximum throughput
 
 use crate::types::node_data::EventSource;
-use crossbeam_channel::{Sender, bounded};
 use log::{error, info};
 use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
 use std::{
@@ -480,7 +479,7 @@ impl FileReader {
 pub(super) fn spawn_file_watcher(
     source: EventSource,
     dir: PathBuf,
-    tx: Sender<FileEvent>,
+    tx: tokio::sync::mpsc::Sender<FileEvent>,
     last_event: Arc<AtomicU64>,
     backfill_min_height: u64,
 ) -> thread::JoinHandle<()> {
@@ -529,14 +528,14 @@ pub(super) fn spawn_file_watcher(
                     EventSource::Fills => unreachable!("fills are excluded from backfill"),
                 };
                 sent += 1;
-                tx.send(evt).is_ok()
+                tx.blocking_send(evt).is_ok()
             });
             if !channel_open {
                 error!("{source_name} channel closed during backfill, exiting");
                 return;
             }
             info!("{source_name} backfill complete: {sent} lines above height {backfill_min_height}");
-            if reader.take_desynced() && tx.send(FileEvent::Desync(source)).is_err() {
+            if reader.take_desynced() && tx.blocking_send(FileEvent::Desync(source)).is_err() {
                 error!("{source_name} channel closed, exiting");
                 return;
             }
@@ -569,7 +568,7 @@ pub(super) fn spawn_file_watcher(
                                     EventSource::OrderDiffs => FileEvent::OrderDiff(line),
                                     EventSource::Fills => FileEvent::Fill(line),
                                 };
-                                if tx.send(evt).is_err() {
+                                if tx.blocking_send(evt).is_err() {
                                     error!("{} channel closed, exiting", source_name);
                                     return;
                                 }
@@ -589,7 +588,7 @@ pub(super) fn spawn_file_watcher(
                                 EventSource::Fills => FileEvent::Fill(line),
                             };
 
-                            if tx.send(event).is_err() {
+                            if tx.blocking_send(event).is_err() {
                                 error!("{} channel closed, exiting", source_name);
                                 return;
                             }
@@ -613,7 +612,7 @@ pub(super) fn spawn_file_watcher(
                             EventSource::Fills => FileEvent::Fill(line),
                         };
 
-                        if tx.send(event).is_err() {
+                        if tx.blocking_send(event).is_err() {
                             error!("{} channel closed, exiting", source_name);
                             return;
                         }
@@ -629,7 +628,7 @@ pub(super) fn spawn_file_watcher(
 
             // If the reader had to discard buffered data, tell the listener so it
             // can re-sync the book from a fresh snapshot.
-            if reader.take_desynced() && tx.send(FileEvent::Desync(source)).is_err() {
+            if reader.take_desynced() && tx.blocking_send(FileEvent::Desync(source)).is_err() {
                 error!("{source_name} channel closed, exiting");
                 return;
             }
@@ -663,7 +662,7 @@ pub(super) fn spawn_file_watcher(
                             EventSource::OrderDiffs => FileEvent::OrderDiff(line),
                             EventSource::Fills => FileEvent::Fill(line),
                         };
-                        if tx.send(evt).is_err() {
+                        if tx.blocking_send(evt).is_err() {
                             error!("{} channel closed, exiting", source_name);
                             return;
                         }
@@ -678,16 +677,21 @@ pub(super) fn spawn_file_watcher(
 /// Uses *_streaming directories (for --stream-with-block-info mode)
 /// `backfill_min_height` is the startup backfill floor (the node's persisted
 /// height at boot); 0 disables the backfill.
+///
+/// The watcher threads send straight into a tokio mpsc via `blocking_send` -
+/// the old crossbeam channel + spawn_blocking bridge added a thread and a
+/// queue hop per event for nothing.
 pub(crate) fn start_parallel_file_watchers(
     data_dir: PathBuf,
     backfill_min_height: u64,
-) -> (crossbeam_channel::Receiver<FileEvent>, Vec<thread::JoinHandle<()>>, Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicU64>)
+) -> (tokio::sync::mpsc::Receiver<FileEvent>, Vec<thread::JoinHandle<()>>, Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicU64>)
 {
-    // Bounded so a slow downstream actually back-pressures the file readers
-    // (their `tx.send` blocks until a slot frees up). The previous `unbounded()`
-    // would grow forever under sustained processing stalls - the events sit on
-    // disk, no need to also mirror them in memory.
-    let (tx, rx) = bounded(1024);
+    // BOUNDED so a slow downstream actually back-pressures the file readers
+    // (blocking_send parks until a slot frees up). Under processing stalls an
+    // unbounded queue would accumulate multi-KB JSON strings indefinitely - a
+    // primary OOM vector; the events sit on disk, no need to mirror them in
+    // memory.
+    let (tx, rx) = tokio::sync::mpsc::channel(10_000);
     let mut handles = Vec::new();
 
     // Health monitoring

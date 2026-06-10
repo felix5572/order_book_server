@@ -283,7 +283,7 @@ The Hyperliquid node must run with **all** of these flags enabled:
 │    streaming/        │     │  │  - order statuses            │           │
 │  - book_diffs_       │     │  │  - fills                     │           │
 │    streaming/        │     │  └──────────┬───────────────────┘           │
-│                      │     │             │ crossbeam → tokio bridge      │
+│                      │     │             │ bounded tokio channel         │
 │                      │     │  ┌──────────▼───────────────────┐           │
 │  snapshot via:       │     │  │ OrderBook State              │           │
 │  hl-node CLI ◀───────│─────│  │  - L4 in-memory book         │           │
@@ -306,7 +306,7 @@ The Hyperliquid node must run with **all** of these flags enabled:
 **Data flow:**
 1. The Hyperliquid node writes real-time events to `*_streaming/` directories as newline-delimited JSON
 2. Three parallel inotify file watchers detect changes immediately (one per event source)
-3. Events are bridged from crossbeam channels (blocking I/O threads) to the tokio async runtime
+3. Watcher threads send events straight into a bounded tokio channel (backpressure parks the readers; data waits on disk)
 4. The OrderBook State applies diffs/statuses independently (no block-level batching) for lowest latency
 5. Changed BBOs and L2 snapshots are broadcast to subscribed WebSocket clients with deduplication
 
@@ -502,7 +502,7 @@ This fork processes every order diff, status, and fill **the instant it arrives*
 
 The original uses a single file watcher thread that handles all three event sources (order statuses, book diffs, fills) sequentially.
 
-This fork spawns **3 dedicated inotify threads** (one per event source) with independent crossbeam channels bridged to the tokio async runtime. Order diffs (the BBO-critical path) are never blocked by slow fill or status parsing.
+This fork spawns **3 dedicated inotify threads** (one per event source) that feed a bounded tokio channel directly. Order diffs (the BBO-critical path) are never blocked by slow fill or status parsing.
 
 ### New Subscription Types
 

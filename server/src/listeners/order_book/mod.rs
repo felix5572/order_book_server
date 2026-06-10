@@ -953,40 +953,11 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
     let backfill_min_height = read_visor_height(&get_visor_path(&snapshot_config)).unwrap_or(0);
     info!("Startup backfill floor height: {backfill_min_height}");
 
-    // Start parallel file watchers (crossbeam channel)
-    let (crossbeam_rx, _handles, _last_os, _last_fills, _last_diffs) =
+    // Start parallel file watchers. They send straight into the bounded tokio
+    // channel via blocking_send (backpressure parks the reader threads; the
+    // events sit on disk meanwhile).
+    let (mut tokio_rx, _handles, _last_os, _last_fills, _last_diffs) =
         parallel::start_parallel_file_watchers(dir, backfill_min_height);
-
-    // Bridge crossbeam to tokio mpsc.
-    // BOUNDED channel: under processing stalls (mutex contention, slow L2 compute),
-    // an unbounded queue accumulates multi-KB JSON strings indefinitely - a primary
-    // OOM vector. A bounded channel applies backpressure into the bridge thread,
-    // which in turn lets the crossbeam buffer absorb the burst.
-    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<parallel::FileEvent>(10_000);
-
-    // Spawn a blocking task to bridge crossbeam -> tokio
-    tokio::task::spawn_blocking(move || {
-        info!("Bridge task started");
-        let mut event_count = 0u64;
-        loop {
-            match crossbeam_rx.recv() {
-                Ok(event) => {
-                    event_count += 1;
-                    if event_count % 100_000 == 0 {
-                        info!("Bridge: received {} events", event_count);
-                    }
-                    if tokio_tx.blocking_send(event).is_err() {
-                        error!("Bridge: tokio channel closed");
-                        break;
-                    }
-                }
-                Err(_) => {
-                    error!("Bridge: crossbeam channel closed");
-                    break;
-                }
-            }
-        }
-    });
 
     // Snapshot fetch channel
     let (snapshot_fetch_task_tx, mut snapshot_fetch_task_rx) = unbounded_channel::<Result<()>>();
