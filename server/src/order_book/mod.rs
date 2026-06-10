@@ -1,11 +1,12 @@
 use crate::prelude::*;
 use itertools::Itertools;
-use linked_list::LinkedList;
+use price_level::PriceLevel;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub(crate) mod levels;
 mod linked_list;
 pub(crate) mod multi_book;
+mod price_level;
 pub(crate) mod types;
 
 pub(crate) use types::{Coin, InnerOrder, Oid, Px, Side, Sz};
@@ -13,8 +14,8 @@ pub(crate) use types::{Coin, InnerOrder, Oid, Px, Side, Sz};
 #[derive(Clone, Default)]
 pub(crate) struct OrderBook<O> {
     oid_to_side_px: HashMap<Oid, (Side, Px)>,
-    bids: BTreeMap<Px, LinkedList<Oid, O>>,
-    asks: BTreeMap<Px, LinkedList<Oid, O>>,
+    bids: BTreeMap<Px, PriceLevel<O>>,
+    asks: BTreeMap<Px, PriceLevel<O>>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,10 +98,9 @@ impl<O: InnerOrder> OrderBook<O> {
                 Side::Ask => &mut self.asks,
                 Side::Bid => &mut self.bids,
             };
-            let list = map.get_mut(&px);
-            if let Some(list) = list {
-                let success = list.remove_node(oid.clone());
-                if list.is_empty() {
+            if let Some(level) = map.get_mut(&px) {
+                let success = level.remove(oid).is_some();
+                if level.is_empty() {
                     map.remove(&px);
                 }
                 return success;
@@ -119,37 +119,24 @@ impl<O: InnerOrder> OrderBook<O> {
                 Side::Ask => &mut self.asks,
                 Side::Bid => &mut self.bids,
             };
-            let list = map.get_mut(px);
-            if let Some(list) = list {
-                let old_order = list.node_value_mut(&oid);
-                if let Some(old_order) = old_order {
-                    old_order.modify_sz(sz);
-                    return true;
-                }
-                return false;
+            if let Some(level) = map.get_mut(px) {
+                return level.modify_order_sz(&oid, sz);
             }
         }
         false
     }
 
-    /// Get best bid and best ask in O(level size) without computing a full L2
-    /// snapshot or allocating. Returns (best_bid, best_ask) where each is
-    /// (price, total_size, order_count).
+    /// Get best bid and best ask in O(1): each `PriceLevel` maintains its
+    /// (total size, count) aggregate incrementally, so no order is visited.
+    /// Returns (best_bid, best_ask) where each is (price, total_size, count).
     #[must_use]
     pub(crate) fn get_bbo(&self) -> (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>) {
-        fn aggregate<O: InnerOrder>((px, list): (&Px, &LinkedList<Oid, O>)) -> (Px, Sz, u32) {
-            // fold walks the list in place - the previous to_vec() allocated a
-            // Vec of refs per BBO check on the hottest path in the server.
-            let (total_sz, count) = list.fold((0u64, 0u32), |acc, o| {
-                acc.0 = acc.0.saturating_add(o.sz().value());
-                acc.1 += 1;
-            });
-            (*px, Sz::new(total_sz), count)
-        }
-
         // Best bid = highest price in bids (last key in BTreeMap);
         // best ask = lowest price in asks (first key in BTreeMap).
-        (self.bids.last_key_value().map(aggregate), self.asks.first_key_value().map(aggregate))
+        (
+            self.bids.last_key_value().map(price_level::aggregate_entry),
+            self.asks.first_key_value().map(price_level::aggregate_entry),
+        )
     }
 
     /// Compact every price-level's `LinkedList` slab. Returns the number of lists
@@ -157,8 +144,8 @@ impl<O: InnerOrder> OrderBook<O> {
     /// skipped). See `LinkedList::compact` for the threshold.
     pub(crate) fn compact(&mut self) -> usize {
         let mut compacted = 0usize;
-        for list in self.bids.values_mut().chain(self.asks.values_mut()) {
-            if list.compact() {
+        for level in self.bids.values_mut().chain(self.asks.values_mut()) {
+            if level.compact() {
                 compacted += 1;
             }
         }
@@ -170,9 +157,9 @@ impl<O: InnerOrder> OrderBook<O> {
     pub(crate) fn slab_stats(&self) -> (usize, usize) {
         let mut live = 0usize;
         let mut cap = 0usize;
-        for list in self.bids.values().chain(self.asks.values()) {
-            live += list.slab_len();
-            cap += list.slab_capacity();
+        for level in self.bids.values().chain(self.asks.values()) {
+            live += level.slab_len();
+            cap += level.slab_capacity();
         }
         (live, cap)
     }
@@ -199,22 +186,22 @@ impl<O: InnerOrder> OrderBook<O> {
     }
 }
 
-fn add_order_to_book<O: InnerOrder>(map: &mut BTreeMap<Px, LinkedList<Oid, O>>, order: O) {
+fn add_order_to_book<O: InnerOrder>(map: &mut BTreeMap<Px, PriceLevel<O>>, order: O) {
     let oid = order.oid();
     let limit_px = order.limit_px();
-    map.entry(limit_px).or_insert_with(|| LinkedList::new()).push_back(oid, order);
+    map.entry(limit_px).or_insert_with(PriceLevel::new).push_back(oid, order);
 }
 
-fn match_order<O: InnerOrder>(maker_orders: &mut BTreeMap<Px, LinkedList<Oid, O>>, taker_order: &mut O) -> Vec<Oid> {
+fn match_order<O: InnerOrder>(maker_orders: &mut BTreeMap<Px, PriceLevel<O>>, taker_order: &mut O) -> Vec<Oid> {
     let mut filled_oids = Vec::new();
     let mut keys_to_remove = Vec::new();
     let taker_side = taker_order.side();
     let limit_px = taker_order.limit_px();
-    let order_iter: Box<dyn Iterator<Item = (&Px, &mut LinkedList<Oid, O>)>> = match taker_side {
+    let order_iter: Box<dyn Iterator<Item = (&Px, &mut PriceLevel<O>)>> = match taker_side {
         Side::Ask => Box::new(maker_orders.iter_mut().rev()),
         Side::Bid => Box::new(maker_orders.iter_mut()),
     };
-    for (&px, list) in order_iter {
+    for (&px, level) in order_iter {
         let matches = match taker_side {
             Side::Ask => px >= limit_px,
             Side::Bid => px <= limit_px,
@@ -222,17 +209,8 @@ fn match_order<O: InnerOrder>(maker_orders: &mut BTreeMap<Px, LinkedList<Oid, O>
         if !matches {
             break;
         }
-        while let Some(match_order) = list.head_value_ref_mut_unsafe() {
-            taker_order.fill(match_order);
-            if match_order.sz().is_zero() {
-                filled_oids.push(match_order.oid());
-                let _unused = list.remove_front();
-            }
-            if taker_order.sz().is_zero() {
-                break;
-            }
-        }
-        if list.is_empty() {
+        level.match_against(taker_order, &mut filled_oids);
+        if level.is_empty() {
             keys_to_remove.push(px);
         }
         if taker_order.sz().is_zero() {
@@ -611,6 +589,101 @@ mod tests {
         assert_eq!(book.order_count(), 2);
         book.cancel_order(Oid::new(0));
         assert_eq!(book.order_count(), 1);
+    }
+
+    // ==================== Aggregate invariant tests ====================
+
+    /// Reference BBO computed by folding the snapshot - the pre-aggregate
+    /// implementation, kept as ground truth.
+    fn reference_bbo(book: &OrderBook<MinimalOrder>, side: Side) -> Option<(Px, Sz, u32)> {
+        let snapshot = book.to_snapshot();
+        let orders = &snapshot.as_ref()[if side == Side::Bid { 0 } else { 1 }];
+        let first = orders.first()?;
+        let px = first.limit_px();
+        let mut sz = 0u64;
+        let mut n = 0u32;
+        for order in orders.iter().take_while(|o| o.limit_px() == px) {
+            sz += order.sz().value();
+            n += 1;
+        }
+        Some((px, Sz::new(sz), n))
+    }
+
+    #[test]
+    fn test_randomized_ops_keep_level_aggregates_consistent() {
+        // Drives adds (crossing and resting), cancels, and size modifications
+        // (including to zero) and cross-checks the O(1) aggregate-based BBO
+        // against a fold-based reference. PriceLevel::debug_validate also
+        // asserts aggregate == fold after every single mutation in this run.
+        fn xorshift(state: &mut u64) -> u64 {
+            let mut x = *state;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *state = x;
+            x
+        }
+
+        for seed in [0x9E37_79B9_7F4A_7C15_u64, 0xDEAD_BEEF_CAFE_BABE_u64] {
+            let mut rng = seed;
+            let mut book = OrderBook::new();
+            let mut next_oid = 0u64;
+            let mut issued: Vec<u64> = Vec::new();
+            for step in 0..3_000u32 {
+                match xorshift(&mut rng) % 4 {
+                    0 | 1 => {
+                        // Adds around a midpoint so a fraction of them cross
+                        // and exercise the in-place matching decrement path.
+                        let px = 900 + xorshift(&mut rng) % 200;
+                        let side = if xorshift(&mut rng) % 2 == 0 { Side::Bid } else { Side::Ask };
+                        let sz = 1 + xorshift(&mut rng) % 1_000;
+                        book.add_order(MinimalOrder::new(next_oid, sz, px, side));
+                        issued.push(next_oid);
+                        next_oid += 1;
+                    }
+                    2 => {
+                        if !issued.is_empty() {
+                            let i = (xorshift(&mut rng) as usize) % issued.len();
+                            let oid = issued.swap_remove(i);
+                            book.cancel_order(Oid::new(oid)); // may already be matched away
+                        }
+                    }
+                    _ => {
+                        if !issued.is_empty() {
+                            let i = (xorshift(&mut rng) as usize) % issued.len();
+                            let sz = xorshift(&mut rng) % 500; // 0 cancels
+                            book.modify_sz(Oid::new(issued[i]), Sz::new(sz));
+                        }
+                    }
+                }
+                if step % 50 == 0 {
+                    let (bid, ask) = book.get_bbo();
+                    assert_eq!(bid, reference_bbo(&book, Side::Bid), "bid aggregate diverged at step {step}");
+                    assert_eq!(ask, reference_bbo(&book, Side::Ask), "ask aggregate diverged at step {step}");
+                }
+            }
+            // Final full check.
+            let (bid, ask) = book.get_bbo();
+            assert_eq!(bid, reference_bbo(&book, Side::Bid));
+            assert_eq!(ask, reference_bbo(&book, Side::Ask));
+        }
+    }
+
+    #[test]
+    fn test_compact_preserves_level_aggregates() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        // Build a deep level, then drain most of it so the slab is heavily
+        // over-allocated and compaction actually fires.
+        for _ in 0..500u64 {
+            book.add_order(factory.order(100, 50, Side::Bid));
+        }
+        for i in 0..450u64 {
+            book.cancel_order(Oid::new(i));
+        }
+        let before = book.get_bbo();
+        assert!(book.compact() > 0, "the churned level should have been compacted");
+        assert_eq!(book.get_bbo(), before, "compaction must not change level aggregates");
     }
 
     // ==================== Performance / Stress Tests ====================

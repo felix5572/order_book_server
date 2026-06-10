@@ -89,11 +89,13 @@ impl<K: Clone + Eq + Hash, T: Clone> LinkedList<K, T> {
         }
     }
 
-    pub(crate) fn remove_node(&mut self, key: K) -> bool {
+    /// Remove a node by key, returning its value (so callers can read the
+    /// removed order, e.g. to maintain size aggregates, without a second lookup).
+    pub(crate) fn remove_node(&mut self, key: K) -> Option<T> {
         if let Some((_, sid)) = self.key_to_sid.remove_entry(&key) {
-            let (prev, next) = {
+            let (prev, next, value) = {
                 let order = self.slab.remove(sid);
-                (order.prev, order.next)
+                (order.prev, order.next, order.value)
             };
             if let Some(p) = prev {
                 let prev_order = &mut self.slab[p];
@@ -107,10 +109,15 @@ impl<K: Clone + Eq + Hash, T: Clone> LinkedList<K, T> {
             } else {
                 self.tail = prev;
             }
-            true
+            Some(value)
         } else {
-            false
+            None
         }
+    }
+
+    /// Number of live nodes (== order count at this level). O(1).
+    pub(crate) fn len(&self) -> usize {
+        self.key_to_sid.len()
     }
 
     pub(crate) fn node_value_mut(&mut self, key: &K) -> Option<&mut T> {
@@ -232,7 +239,7 @@ mod tests {
 
         assert_vec_deque_list_eq(&deque, &list);
 
-        list.remove_node(keys[4]);
+        list.remove_node(keys[4]).unwrap();
         deque.remove(2);
 
         assert_vec_deque_list_eq(&deque, &list);
@@ -244,7 +251,7 @@ mod tests {
         }
 
         for k in keys.iter().skip(8) {
-            list.remove_node(*k);
+            list.remove_node(*k).unwrap();
             deque.pop_front();
             assert_vec_deque_list_eq(&deque, &list);
         }
@@ -286,7 +293,7 @@ mod tests {
     fn test_remove_node_nonexistent_returns_false() {
         let mut list = LinkedList::new();
         list.push_back(1, "a");
-        assert!(!list.remove_node(999));
+        assert!(list.remove_node(999).is_none());
     }
 
     #[test]
@@ -295,7 +302,7 @@ mod tests {
         list.push_back(1, "a");
         list.push_back(2, "b");
         list.push_back(3, "c");
-        assert!(list.remove_node(1)); // remove head
+        assert_eq!(list.remove_node(1), Some("a")); // remove head, value returned
         assert_eq!(list.to_vec(), vec![&"b", &"c"]);
         assert_eq!(to_rev_vec(&list), vec![&"c", &"b"]);
     }
@@ -306,7 +313,7 @@ mod tests {
         list.push_back(1, "a");
         list.push_back(2, "b");
         list.push_back(3, "c");
-        assert!(list.remove_node(3)); // remove tail
+        assert_eq!(list.remove_node(3), Some("c")); // remove tail
         assert_eq!(list.to_vec(), vec![&"a", &"b"]);
         assert_eq!(to_rev_vec(&list), vec![&"b", &"a"]);
     }
@@ -317,7 +324,7 @@ mod tests {
         list.push_back(1, "a");
         list.push_back(2, "b");
         list.push_back(3, "c");
-        assert!(list.remove_node(2)); // remove middle
+        assert_eq!(list.remove_node(2), Some("b")); // remove middle
         assert_eq!(list.to_vec(), vec![&"a", &"c"]);
         assert_eq!(to_rev_vec(&list), vec![&"c", &"a"]);
     }
@@ -326,7 +333,7 @@ mod tests {
     fn test_remove_only_element() {
         let mut list = LinkedList::new();
         list.push_back(1, "a");
-        assert!(list.remove_node(1));
+        assert!(list.remove_node(1).is_some());
         assert!(list.is_empty());
         assert!(list.to_vec().is_empty());
     }
@@ -392,7 +399,7 @@ mod tests {
         assert_eq!(list.to_vec().len(), 1000);
         // Remove every other element
         for i in (0..1000).step_by(2) {
-            assert!(list.remove_node(i));
+            assert!(list.remove_node(i).is_some());
         }
         assert_eq!(list.to_vec().len(), 500);
     }
@@ -406,7 +413,7 @@ mod tests {
         }
         // Remove 9_900 of them; slab capacity stays at high-water mark
         for i in 0..9_900u32 {
-            list.remove_node(i);
+            list.remove_node(i).unwrap();
         }
         let cap_before = list.slab_capacity();
         let len_before = list.slab_len();

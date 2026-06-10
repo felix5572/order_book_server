@@ -1,4 +1,4 @@
-use crate::order_book::{InnerOrder, Oid, OrderBook, Px, Side, Snapshot, Sz, linked_list::LinkedList};
+use crate::order_book::{InnerOrder, OrderBook, Px, Side, Snapshot, price_level::PriceLevel};
 use crate::types::Level;
 use crate::types::inner::InnerLevel;
 use std::collections::BTreeMap;
@@ -76,7 +76,7 @@ fn l2_levels_to_l2_levels(
 
 #[must_use]
 fn map_to_l2_levels<O: InnerOrder>(
-    orders: &BTreeMap<Px, LinkedList<Oid, O>>,
+    orders: &BTreeMap<Px, PriceLevel<O>>,
     side: Side,
     n_levels: Option<usize>,
     n_sig_figs: Option<u32>,
@@ -87,14 +87,13 @@ fn map_to_l2_levels<O: InnerOrder>(
         return levels;
     }
     let mut cur_level: Option<InnerLevel> = None;
-    let order_iter: Box<dyn Iterator<Item = (&Px, &LinkedList<Oid, O>)>> = match side {
+    let order_iter: Box<dyn Iterator<Item = (&Px, &PriceLevel<O>)>> = match side {
         Side::Ask => Box::new(orders.iter()),
         Side::Bid => Box::new(orders.iter().rev()),
     };
-    for (px, orders) in order_iter {
-        // could be done a bit more efficiently using caching
-        let sz = orders.fold(Sz::new(0), |sz, order| *sz = *sz + order.sz());
-        let n = orders.fold(0, |n, _| *n += 1);
+    for (px, level) in order_iter {
+        // O(1) per level: PriceLevel maintains (total size, count) incrementally,
+        // so the base L2 build is O(levels) instead of O(orders).
         if build_l2_level(
             &mut cur_level,
             &mut levels,
@@ -102,7 +101,7 @@ fn map_to_l2_levels<O: InnerOrder>(
             n_sig_figs,
             mantissa,
             side,
-            InnerLevel { px: *px, sz, n },
+            InnerLevel { px: *px, sz: level.total_sz(), n: level.len() },
         ) {
             break;
         }
@@ -141,7 +140,7 @@ pub(super) fn build_l2_level(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::order_book::{OrderBook, types::InnerOrder};
+    use crate::order_book::{OrderBook, Sz, types::InnerOrder};
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct TestOrder {
