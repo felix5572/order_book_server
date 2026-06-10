@@ -107,27 +107,16 @@ impl<E> Batch<E> {
         self.events
     }
 
+    /// Borrowed view of the events, for grouping without consuming the batch.
+    pub(crate) fn events_ref(&self) -> &[E] {
+        &self.events
+    }
+
     /// Number of events without consuming the batch.
     pub(crate) fn events_len(&self) -> usize {
         self.events.len()
     }
 
-    /// Build a new batch with the same metadata but only events matching `keep`.
-    /// Useful for stripping filtered-out coins (e.g. spot when `--markets perps`)
-    /// before broadcasting so downstream subscribers can't observe events whose
-    /// effects were never applied to the local order book.
-    pub(crate) fn filter_events<F>(&self, mut keep: F) -> Self
-    where
-        E: Clone,
-        F: FnMut(&E) -> bool,
-    {
-        Self {
-            local_time: self.local_time,
-            block_time: self.block_time,
-            block_number: self.block_number,
-            events: self.events.iter().filter(|e| keep(e)).cloned().collect(),
-        }
-    }
 }
 
 #[cfg(test)]

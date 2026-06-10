@@ -113,14 +113,11 @@ impl Trade {
 pub(crate) struct L4BookUpdates {
     pub time: u64,
     pub height: u64,
-    pub order_statuses: Vec<NodeDataOrderStatus>,
-    pub book_diffs: Vec<NodeDataOrderDiff>,
-}
-
-impl L4BookUpdates {
-    pub(crate) const fn new(time: u64, height: u64) -> Self {
-        Self { time, height, order_statuses: Vec::new(), book_diffs: Vec::new() }
-    }
+    // Arc'd so the per-coin groupings built once in the listener are shared
+    // across every subscribed connection instead of deep-cloned per send.
+    // serde's "rc" feature serializes Arc<Vec<T>> exactly like Vec<T>.
+    pub order_statuses: std::sync::Arc<Vec<NodeDataOrderStatus>>,
+    pub book_diffs: std::sync::Arc<Vec<NodeDataOrderDiff>>,
 }
 
 // RawL4Order is the version of a L4Order we want to serialize and deserialize directly

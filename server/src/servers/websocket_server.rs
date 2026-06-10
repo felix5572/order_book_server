@@ -9,9 +9,9 @@ use crate::{
     order_book::{Coin, Px, Snapshot, Sz},
     prelude::*,
     types::{
-        Bbo, L2Book, L4Book, L4BookUpdates, L4Order, Trade,
+        Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
-        node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+        node_data::{NodeDataOrderDiff, NodeDataOrderStatus},
         subscription::{ClientMessage, DEFAULT_LEVELS, OrderUpdate, ServerResponse, Subscription, SubscriptionManager},
     },
 };
@@ -317,48 +317,68 @@ async fn handle_socket(
                                     }
                                 }
                             },
-                            InternalMessage::Fills{ batch } => {
-                                let has_trades = manager.subscriptions().iter().any(|s| matches!(s, Subscription::Trades { .. }));
-                                if has_trades {
-                                    let mut trades = coin_to_trades(batch);
-                                    for sub in manager.subscriptions() {
-                                        if !alive { break; }
-                                        alive &= send_ws_data_from_trades(&mut socket, sub, &mut trades).await;
-                                    }
-                                }
-                            },
-                            InternalMessage::L4OrderDiffs{ batch } => {
-                                let has_l4 = manager.subscriptions().iter().any(|s| matches!(s, Subscription::L4Book { .. }));
-                                let has_book_diffs = manager.subscriptions().iter().any(|s| matches!(s, Subscription::BookDiffs { .. }));
-                                if has_l4 || has_book_diffs {
-                                    let mut book_updates = if has_l4 { Some(coin_to_book_diffs_only(batch)) } else { None };
-                                    let mut raw_diffs = if has_book_diffs { Some(coin_to_book_diffs_raw(batch)) } else { None };
-                                    for sub in manager.subscriptions() {
-                                        if !alive { break; }
-                                        if let Some(ref mut updates) = book_updates {
-                                            alive &= send_ws_data_from_book_updates(&mut socket, sub, updates).await;
-                                        }
-                                        if !alive { break; }
-                                        if let Some(ref mut diffs) = raw_diffs {
-                                            alive &= send_ws_data_from_book_diffs_raw(&mut socket, sub, diffs).await;
+                            InternalMessage::Fills{ trades_by_coin } => {
+                                // Per-coin vectors were grouped once in the listener and are
+                                // Arc-shared: each subscription is a map lookup + Arc bump,
+                                // not a whole-batch deep clone per connection.
+                                for sub in manager.subscriptions() {
+                                    if !alive { break; }
+                                    if let Subscription::Trades { coin } = sub {
+                                        if let Some(trades) = trades_by_coin.get(coin.as_str()) {
+                                            BROADCASTS_TOTAL.with_label_values(&["trades"]).inc();
+                                            alive &= send_socket_message(&mut socket, ServerResponse::Trades(Arc::clone(trades))).await;
                                         }
                                     }
                                 }
                             },
-                            InternalMessage::L4OrderStatuses{ batch } => {
-                                let has_l4 = manager.subscriptions().iter().any(|s| matches!(s, Subscription::L4Book { .. }));
-                                let has_order_updates = manager.subscriptions().iter().any(|s| matches!(s, Subscription::OrderUpdates { .. }));
-                                if has_l4 {
-                                    let mut book_updates = coin_to_book_statuses_only(batch);
-                                    for sub in manager.subscriptions() {
-                                        if !alive { break; }
-                                        alive &= send_ws_data_from_book_updates(&mut socket, sub, &mut book_updates).await;
+                            InternalMessage::L4OrderDiffs{ time, height, diffs_by_coin } => {
+                                let empty_statuses: Arc<Vec<NodeDataOrderStatus>> = Arc::new(Vec::new());
+                                for sub in manager.subscriptions() {
+                                    if !alive { break; }
+                                    match sub {
+                                        Subscription::BookDiffs { coin } => {
+                                            if let Some(diffs) = diffs_by_coin.get(coin.as_str()) {
+                                                BROADCASTS_TOTAL.with_label_values(&["bookDiffs"]).inc();
+                                                alive &= send_socket_message(&mut socket, ServerResponse::BookDiffs(Arc::clone(diffs))).await;
+                                            }
+                                        }
+                                        Subscription::L4Book { coin } => {
+                                            if let Some(diffs) = diffs_by_coin.get(coin.as_str()) {
+                                                BROADCASTS_TOTAL.with_label_values(&["l4"]).inc();
+                                                let updates = L4BookUpdates {
+                                                    time: *time,
+                                                    height: *height,
+                                                    order_statuses: Arc::clone(&empty_statuses),
+                                                    book_diffs: Arc::clone(diffs),
+                                                };
+                                                alive &= send_socket_message(&mut socket, ServerResponse::L4Book(L4Book::Updates(updates))).await;
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
-                                if has_order_updates {
-                                    for sub in manager.subscriptions() {
-                                        if !alive { break; }
-                                        alive &= send_ws_order_updates(&mut socket, sub, batch).await;
+                            },
+                            InternalMessage::L4OrderStatuses{ time, height, statuses_by_coin } => {
+                                let empty_diffs: Arc<Vec<NodeDataOrderDiff>> = Arc::new(Vec::new());
+                                for sub in manager.subscriptions() {
+                                    if !alive { break; }
+                                    match sub {
+                                        Subscription::L4Book { coin } => {
+                                            if let Some(statuses) = statuses_by_coin.get(coin.as_str()) {
+                                                BROADCASTS_TOTAL.with_label_values(&["l4"]).inc();
+                                                let updates = L4BookUpdates {
+                                                    time: *time,
+                                                    height: *height,
+                                                    order_statuses: Arc::clone(statuses),
+                                                    book_diffs: Arc::clone(&empty_diffs),
+                                                };
+                                                alive &= send_socket_message(&mut socket, ServerResponse::L4Book(L4Book::Updates(updates))).await;
+                                            }
+                                        }
+                                        Subscription::OrderUpdates { user } => {
+                                            alive &= send_ws_order_updates(&mut socket, user, *time, *height, statuses_by_coin).await;
+                                        }
+                                        _ => {}
                                     }
                                 }
                             },
@@ -711,98 +731,6 @@ async fn send_ws_data_from_snapshot(
     true
 }
 
-fn coin_to_trades(batch: &Batch<NodeDataFill>) -> HashMap<String, Vec<Trade>> {
-    let fills = batch.clone().events();
-    let mut trades = HashMap::new();
-
-    // Convert each fill directly to a trade (no pairing)
-    for fill in fills {
-        let trade = Trade::from_single_fill(fill);
-        let coin = trade.coin.clone();
-        trades.entry(coin).or_insert_with(Vec::new).push(trade);
-    }
-
-    trades
-}
-
-/// HFT helper: convert order diffs batch to book updates (without statuses)
-fn coin_to_book_diffs_only(diff_batch: &Batch<NodeDataOrderDiff>) -> HashMap<String, L4BookUpdates> {
-    let diffs = diff_batch.clone().events();
-    let time = diff_batch.block_time();
-    let height = diff_batch.block_number();
-    let mut updates = HashMap::new();
-    for diff in diffs {
-        let coin = diff.coin().value();
-        updates.entry(coin).or_insert_with(|| L4BookUpdates::new(time, height)).book_diffs.push(diff);
-    }
-    updates
-}
-
-/// HFT helper: convert order statuses batch to book updates (without diffs)
-fn coin_to_book_statuses_only(status_batch: &Batch<NodeDataOrderStatus>) -> HashMap<String, L4BookUpdates> {
-    let statuses = status_batch.clone().events();
-    let time = status_batch.block_time();
-    let height = status_batch.block_number();
-    let mut updates = HashMap::new();
-    for status in statuses {
-        let coin = status.order.coin.clone();
-        updates.entry(coin).or_insert_with(|| L4BookUpdates::new(time, height)).order_statuses.push(status);
-    }
-    updates
-}
-
-fn coin_to_book_diffs_raw(batch: &Batch<NodeDataOrderDiff>) -> HashMap<String, Vec<NodeDataOrderDiff>> {
-    let diffs = batch.clone().events();
-    let mut grouped = HashMap::new();
-    for diff in diffs {
-        let coin = diff.coin().value();
-        grouped.entry(coin).or_insert_with(Vec::new).push(diff);
-    }
-    grouped
-}
-
-async fn send_ws_data_from_book_diffs_raw(
-    socket: &mut WebSocket,
-    subscription: &Subscription,
-    book_diffs: &mut HashMap<String, Vec<NodeDataOrderDiff>>,
-) -> bool {
-    if let Subscription::BookDiffs { coin } = subscription {
-        if let Some(diffs) = book_diffs.remove(coin) {
-            BROADCASTS_TOTAL.with_label_values(&["bookDiffs"]).inc();
-            return send_socket_message(socket, ServerResponse::BookDiffs(diffs)).await;
-        }
-    }
-    true
-}
-
-async fn send_ws_data_from_book_updates(
-    socket: &mut WebSocket,
-    subscription: &Subscription,
-    book_updates: &mut HashMap<String, L4BookUpdates>,
-) -> bool {
-    if let Subscription::L4Book { coin } = subscription {
-        if let Some(updates) = book_updates.remove(coin) {
-            BROADCASTS_TOTAL.with_label_values(&["l4"]).inc();
-            return send_socket_message(socket, ServerResponse::L4Book(L4Book::Updates(updates))).await;
-        }
-    }
-    true
-}
-
-async fn send_ws_data_from_trades(
-    socket: &mut WebSocket,
-    subscription: &Subscription,
-    trades: &mut HashMap<String, Vec<Trade>>,
-) -> bool {
-    if let Subscription::Trades { coin } = subscription {
-        if let Some(trades) = trades.remove(coin) {
-            BROADCASTS_TOTAL.with_label_values(&["trades"]).inc();
-            return send_socket_message(socket, ServerResponse::Trades(trades)).await;
-        }
-    }
-    true
-}
-
 impl Subscription {
     // snapshots that begin a stream
     async fn handle_immediate_snapshot(
@@ -831,33 +759,32 @@ impl Subscription {
     }
 }
 
-/// Send order updates to OrderUpdates subscribers filtered by user address
+/// Send order updates to an OrderUpdates subscriber, filtered by user address.
+/// Filters by reference over the shared per-coin grouping and clones only the
+/// matching statuses - the old path deep-cloned the whole batch per user
+/// subscription per message. Within a coin the original order is preserved;
+/// across coins (same block, same time/height) the grouping iterates in map
+/// order.
 async fn send_ws_order_updates(
     socket: &mut WebSocket,
-    subscription: &Subscription,
-    batch: &Batch<NodeDataOrderStatus>,
+    user: &str,
+    time: u64,
+    height: u64,
+    statuses_by_coin: &HashMap<String, Arc<Vec<NodeDataOrderStatus>>>,
 ) -> bool {
-    if let Subscription::OrderUpdates { user } = subscription {
-        // Parse the user address from the subscription
-        let user_addr = match user.parse::<alloy::primitives::Address>() {
-            Ok(addr) => addr,
-            Err(_) => return true, // Invalid address, skip (validation should already prevent this)
-        };
+    let Ok(user_addr) = user.parse::<alloy::primitives::Address>() else {
+        return true; // invalid address; validation prevents this at subscribe time
+    };
 
-        let time = batch.block_time();
-        let height = batch.block_number();
-        let statuses = batch.clone().events();
+    let user_updates: Vec<OrderUpdate> = statuses_by_coin
+        .values()
+        .flat_map(|statuses| statuses.iter())
+        .filter(|status| status.user == user_addr)
+        .map(|status| OrderUpdate::new(status.user, time, height, status.clone()))
+        .collect();
 
-        // Filter statuses for this specific user
-        let user_updates: Vec<OrderUpdate> = statuses
-            .into_iter()
-            .filter(|status| status.user == user_addr)
-            .map(|status| OrderUpdate::new(status.user, time, height, status))
-            .collect();
-
-        if !user_updates.is_empty() {
-            return send_socket_message(socket, ServerResponse::OrderUpdates(user_updates)).await;
-        }
+    if !user_updates.is_empty() {
+        return send_socket_message(socket, ServerResponse::OrderUpdates(user_updates)).await;
     }
     true
 }

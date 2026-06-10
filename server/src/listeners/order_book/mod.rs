@@ -12,7 +12,7 @@ use crate::{
     },
     prelude::*,
     types::{
-        L4Order,
+        L4Order, Trade,
         inner::{InnerL4Order, InnerLevel},
         node_data::{Batch, EventSource, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
     },
@@ -389,6 +389,42 @@ fn parse_event_line(line: &str, event_source: EventSource) -> Option<(u64, Event
     }
 }
 
+
+/// Group a fills batch into per-coin trade vectors. Consumes the batch (fills
+/// are never applied to the book), so this is move-only - no event is cloned.
+fn group_fills_by_coin(batch: Batch<NodeDataFill>) -> HashMap<String, Arc<Vec<Trade>>> {
+    let mut by_coin: HashMap<String, Vec<Trade>> = HashMap::new();
+    for fill in batch.events() {
+        let trade = Trade::from_single_fill(fill);
+        by_coin.entry(trade.coin.clone()).or_default().push(trade);
+    }
+    by_coin.into_iter().map(|(coin, trades)| (coin, Arc::new(trades))).collect()
+}
+
+/// Group order diffs per coin (one clone per event - the batch itself is
+/// consumed by the state apply). `skip_spot` folds the `--markets` filtering
+/// in, replacing the old whole-batch `filter_events` clone.
+fn group_diffs_by_coin(events: &[NodeDataOrderDiff], skip_spot: bool) -> HashMap<String, Arc<Vec<NodeDataOrderDiff>>> {
+    let mut by_coin: HashMap<String, Vec<NodeDataOrderDiff>> = HashMap::new();
+    for diff in events {
+        let coin = diff.coin();
+        if skip_spot && coin.is_spot() {
+            continue;
+        }
+        by_coin.entry(coin.value()).or_default().push(diff.clone());
+    }
+    by_coin.into_iter().map(|(coin, diffs)| (coin, Arc::new(diffs))).collect()
+}
+
+/// Group order statuses per coin (one clone per event).
+fn group_statuses_by_coin(events: &[NodeDataOrderStatus]) -> HashMap<String, Arc<Vec<NodeDataOrderStatus>>> {
+    let mut by_coin: HashMap<String, Vec<NodeDataOrderStatus>> = HashMap::new();
+    for status in events {
+        by_coin.entry(status.order.coin.clone()).or_default().push(status.clone());
+    }
+    by_coin.into_iter().map(|(coin, statuses)| (coin, Arc::new(statuses))).collect()
+}
+
 impl OrderBookListener {
     /// Append a batch to the replay cache, enforcing the event cap. On overflow
     /// the cache is dropped and the book is marked for re-sync (the cap means a
@@ -508,13 +544,17 @@ impl OrderBookListener {
         let changed_coins: HashSet<Coin> = if let Some(state) = self.order_book_state.as_mut() {
             let result = match event_batch {
                 EventBatch::Orders(batch) => {
-                    // Broadcast L4 order statuses for L4Book subscribers - skip the
-                    // batch clone entirely when nothing is subscribed (the per-conn
-                    // filter inside handle_socket already short-circuits, but the
-                    // clone is what costs us in OOM scenarios).
+                    // Broadcast L4 order statuses for L4Book / orderUpdates
+                    // subscribers: grouped per coin ONCE here (one clone per
+                    // event), shared via Arc by every connection - the old path
+                    // cloned the whole batch per subscribed connection.
                     if let Some(tx) = &self.internal_message_tx {
-                        if tx.receiver_count() > 0 {
-                            let msg = Arc::new(InternalMessage::L4OrderStatuses { batch: batch.clone() });
+                        if tx.receiver_count() > 0 && batch.events_len() > 0 {
+                            let msg = Arc::new(InternalMessage::L4OrderStatuses {
+                                time: batch.block_time(),
+                                height: batch.block_number(),
+                                statuses_by_coin: group_statuses_by_coin(batch.events_ref()),
+                            });
                             drop(tx.send(msg));
                         }
                     }
@@ -522,19 +562,21 @@ impl OrderBookListener {
                     state.apply_order_statuses_hft(batch)
                 }
                 EventBatch::BookDiffs(batch) => {
-                    // Broadcast L4 order diffs for L4Book / BookDiffs subscribers.
-                    // Defense-in-depth: when running with `ignore_spot=true`, strip
-                    // spot diffs from the broadcast too. Otherwise `bookDiffs` clients
-                    // would see events for coins whose state we never applied locally.
+                    // Broadcast L4 order diffs for L4Book / BookDiffs subscribers,
+                    // grouped per coin once and Arc-shared across connections.
+                    // Defense-in-depth: when running with `ignore_spot=true`, the
+                    // grouping also strips spot diffs - otherwise `bookDiffs`
+                    // clients would see events for coins whose state we never
+                    // applied locally.
                     if let Some(tx) = &self.internal_message_tx {
                         if tx.receiver_count() > 0 {
-                            let to_broadcast = if state.ignore_spot() {
-                                batch.filter_events(|d| !d.coin().is_spot())
-                            } else {
-                                batch.clone()
-                            };
-                            if to_broadcast.events_len() > 0 {
-                                let msg = Arc::new(InternalMessage::L4OrderDiffs { batch: to_broadcast });
+                            let diffs_by_coin = group_diffs_by_coin(batch.events_ref(), state.ignore_spot());
+                            if !diffs_by_coin.is_empty() {
+                                let msg = Arc::new(InternalMessage::L4OrderDiffs {
+                                    time: batch.block_time(),
+                                    height: batch.block_number(),
+                                    diffs_by_coin,
+                                });
                                 drop(tx.send(msg));
                             }
                         }
@@ -544,11 +586,14 @@ impl OrderBookListener {
                 }
                 EventBatch::Fills(batch) => {
                     EVENTS_PROCESSED_TOTAL.with_label_values(&["fills"]).inc();
-                    // Broadcast fills (no clone needed - we own the batch and don't apply it locally)
+                    // Broadcast fills grouped per coin (move-only - the batch is
+                    // never applied to the book, so no event is cloned).
                     if let Some(tx) = &self.internal_message_tx {
                         if tx.receiver_count() > 0 {
-                            let snapshot = Arc::new(InternalMessage::Fills { batch });
-                            drop(tx.send(snapshot));
+                            let trades_by_coin = group_fills_by_coin(batch);
+                            if !trades_by_coin.is_empty() {
+                                drop(tx.send(Arc::new(InternalMessage::Fills { trades_by_coin })));
+                            }
                         }
                     }
                     Ok(HashSet::new())
@@ -773,21 +818,29 @@ pub(crate) enum InternalMessage {
         /// changed since the previous broadcast.
         universe: Option<Arc<HashSet<String>>>,
     },
+    /// Trades grouped per coin ONCE in the listener; connections share the
+    /// Arc'd vectors instead of deep-cloning the whole batch per connection.
     Fills {
-        batch: Batch<NodeDataFill>,
+        trades_by_coin: HashMap<String, Arc<Vec<Trade>>>,
     },
     /// Fast BBO-only broadcast path - bypasses expensive L2 snapshot computation
     BboUpdate {
         bbos: HashMap<Coin, (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>)>,
         time: u64,
     },
-    /// HFT L4 streaming - order diffs without waiting for status pairing
+    /// HFT L4 streaming - order diffs without waiting for status pairing,
+    /// grouped per coin once (shared by l4Book and bookDiffs subscribers).
     L4OrderDiffs {
-        batch: Batch<NodeDataOrderDiff>,
+        time: u64,
+        height: u64,
+        diffs_by_coin: HashMap<String, Arc<Vec<NodeDataOrderDiff>>>,
     },
-    /// HFT L4 streaming - order statuses without waiting for diff pairing
+    /// HFT L4 streaming - order statuses without waiting for diff pairing,
+    /// grouped per coin once (shared by l4Book and orderUpdates subscribers).
     L4OrderStatuses {
-        batch: Batch<NodeDataOrderStatus>,
+        time: u64,
+        height: u64,
+        statuses_by_coin: HashMap<String, Arc<Vec<NodeDataOrderStatus>>>,
     },
 }
 
@@ -1334,6 +1387,125 @@ mod tests {
             listener.needs_resync(),
             "a backfill batch arriving after the replay cache is gone cannot be applied safely"
         );
+    }
+
+    // ==================== Per-coin fan-out grouping ====================
+
+    fn make_fills_batch(coins: &[&str], height: u64) -> Batch<NodeDataFill> {
+        let events: Vec<serde_json::Value> = coins
+            .iter()
+            .enumerate()
+            .map(|(i, coin)| {
+                serde_json::json!([
+                    "0x0000000000000000000000000000000000000001",
+                    {
+                        "coin": coin, "px": "100.0", "sz": "1.0", "side": "A",
+                        "time": 1_700_000_000_000_u64, "startPosition": "0", "dir": "Open Long",
+                        "closedPnl": "0", "hash": "0xabc", "oid": i, "crossed": true,
+                        "fee": "0.5", "tid": i, "feeToken": "USDC"
+                    }
+                ])
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "local_time": "2024-01-15T10:30:00.000000000",
+            "block_time": "2024-01-15T10:30:00.000000000",
+            "block_number": height,
+            "events": events
+        }))
+        .unwrap()
+    }
+
+    fn make_multi_diff_batch(coins: &[&str], height: u64) -> Batch<NodeDataOrderDiff> {
+        let events: Vec<serde_json::Value> = coins
+            .iter()
+            .enumerate()
+            .map(|(i, coin)| {
+                serde_json::json!({
+                    "user": "0x0000000000000000000000000000000000000000",
+                    "oid": i,
+                    "px": "100.0",
+                    "coin": coin,
+                    "raw_book_diff": {"new": {"sz": "1.0"}},
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "local_time": "2024-01-15T10:30:00.000000000",
+            "block_time": "2024-01-15T10:30:00.000000000",
+            "block_number": height,
+            "events": events
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_fills_broadcast_grouped_by_coin() {
+        let (mut listener, mut rx) = ready_listener();
+        listener.apply_event_batch(1, EventBatch::Fills(make_fills_batch(&["BTC", "ETH", "BTC"], 1)), EventSource::Fills);
+
+        let mut found = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let InternalMessage::Fills { trades_by_coin } = msg.as_ref() {
+                assert_eq!(trades_by_coin.len(), 2);
+                assert_eq!(trades_by_coin.get("BTC").map(|t| t.len()), Some(2));
+                assert_eq!(trades_by_coin.get("ETH").map(|t| t.len()), Some(1));
+                found = true;
+            }
+        }
+        assert!(found, "a grouped Fills message must be broadcast");
+    }
+
+    #[test]
+    fn test_diffs_broadcast_grouped_by_coin_with_spot_filter() {
+        // ready_listener runs with ignore_spot=true: the spot coin's diff must
+        // be stripped from the broadcast grouping too.
+        let (mut listener, mut rx) = ready_listener();
+        listener.apply_event_batch(
+            1,
+            EventBatch::BookDiffs(make_multi_diff_batch(&["BTC", "@1", "BTC"], 1)),
+            EventSource::OrderDiffs,
+        );
+
+        let mut found = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let InternalMessage::L4OrderDiffs { time, height, diffs_by_coin } = msg.as_ref() {
+                assert_eq!(*height, 1);
+                assert!(*time > 0);
+                assert_eq!(diffs_by_coin.len(), 1, "spot diffs are filtered out of the broadcast");
+                assert_eq!(diffs_by_coin.get("BTC").map(|d| d.len()), Some(2));
+                found = true;
+            }
+        }
+        assert!(found, "a grouped L4OrderDiffs message must be broadcast");
+    }
+
+    #[test]
+    fn test_all_spot_diff_batch_broadcasts_nothing() {
+        let (mut listener, mut rx) = ready_listener(); // ignore_spot=true
+        listener.apply_event_batch(1, EventBatch::BookDiffs(make_multi_diff_batch(&["@1"], 1)), EventSource::OrderDiffs);
+        while let Ok(msg) = rx.try_recv() {
+            assert!(
+                !matches!(msg.as_ref(), InternalMessage::L4OrderDiffs { .. }),
+                "an entirely-filtered batch must not produce an empty broadcast"
+            );
+        }
+    }
+
+    #[test]
+    fn test_statuses_broadcast_grouped_by_coin() {
+        let (mut listener, mut rx) = ready_listener();
+        listener.apply_event_batch(7, EventBatch::Orders(make_status_batch("BTC", 1, 7)), EventSource::OrderStatuses);
+
+        let mut found = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let InternalMessage::L4OrderStatuses { height, statuses_by_coin, .. } = msg.as_ref() {
+                assert_eq!(*height, 7);
+                assert_eq!(statuses_by_coin.get("BTC").map(|s| s.len()), Some(1));
+                found = true;
+            }
+        }
+        assert!(found, "a grouped L4OrderStatuses message must be broadcast");
     }
 
     // ==================== Parse / apply split ====================
