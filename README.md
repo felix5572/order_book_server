@@ -345,7 +345,7 @@ Dedup state is tracked per `(coin, nSigFigs, mantissa, nLevels)` tuple, so subsc
 | L2 dedup overhead | ~10us |
 | Savings when unchanged | ~500us |
 
-Fan-out payloads (trades, book diffs, L4 updates) are grouped per coin once in the listener and shared across all subscribed connections via `Arc`. The JSON wire frame is also serialized once per coin - the first subscribed connection builds it, every other connection sends the same refcounted bytes zero-copy - so fan-out CPU no longer scales with the subscriber count. `TCP_NODELAY` is set on every accepted socket so small frames (BBO updates) are never delayed by Nagle's algorithm.
+Fan-out payloads (trades, book diffs, L4 updates) are grouped per coin once in the listener and shared across all subscribed connections via `Arc`. The JSON wire frame for every channel - including `l2Book` (per `coin`/`nSigFigs`/`mantissa`/`nLevels` variant, covering the level-export and dedup-hash work too) and `bbo` - is built once per broadcast by the first subscribed connection; every other connection sends the same refcounted bytes zero-copy, so fan-out CPU no longer scales with the subscriber count. `TCP_NODELAY` is set on every accepted socket so small frames (BBO updates) are never delayed by Nagle's algorithm.
 
 ## Prometheus Metrics
 
