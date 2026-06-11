@@ -64,9 +64,14 @@ cargo build --release
 
 **Direct mode** (node running via systemctl / bare metal):
 ```bash
+# IMPORTANT: copy the node binary to a name WITHOUT the string "hl-node" first,
+# or the node's process-detection routine will kill itself when the server
+# fetches a snapshot. See "Direct mode and hl-node's process detection" below.
+cp /path/to/hl-node /usr/local/bin/ob-snapshotter
+
 ./target/release/orderbook_server \
     --snapshot-mode direct \
-    --hlnode-binary /path/to/hl-node \
+    --hlnode-binary /usr/local/bin/ob-snapshotter \
     --data-dir /path/to/volumes/hl/data
 ```
 
@@ -101,9 +106,22 @@ On startup, the server needs a **full L4 orderbook snapshot** to initialize its 
 
 The `--snapshot-mode` flag controls *how* the server invokes `hl-node`:
 
-**`docker` (default)** - Use when your Hyperliquid node runs inside a Docker container (the standard `docker compose` setup). The server runs `docker exec <container> hl-node --dump-abci-state ...` to execute the snapshot command inside the container, where `hl-node` and the state files are accessible.
+**`docker` (default)** - Use when your Hyperliquid node runs inside a Docker container (the standard `docker compose` setup). The server runs `docker exec <container> ./hl-node ... compute-l4-snapshots ...` to execute the snapshot command inside the container, where `hl-node` and the state files are accessible.
 
 **`direct`** - Use when your node runs directly on the host via systemctl or bare metal. The server calls the `hl-node` binary directly on the host to generate the snapshot.
+
+#### Direct mode and hl-node's process detection
+
+> **Warning:** `hl-node` ships with a self-protection routine that panics with `matching procs found for keywords ["hl-node"]` whenever it sees another process whose command line contains the string `hl-node` - the same mechanism that kills the node if you run `journalctl | grep hl-node`. It applies across OS users and takes down **both** the node and the offending process.
+>
+> In direct mode this server spawns `hl-node --chain Mainnet compute-l4-snapshots ...` at startup **and again on every background desync re-fetch**, so a stock setup can run fine for a while and then kill the node the moment a re-sync coincides with the scan.
+>
+> Workaround: copy the node binary to a name that does not contain `hl-node` (e.g. `cp hl-node /usr/local/bin/ob-snapshotter`) and pass that via `--hlnode-binary`. Two extra rules:
+>
+> 1. **Keep the copy fresh** - hl-visor auto-updates the node binary, and a stale copy may eventually fail to read a newer `abci_state.rmp`. Re-copy after upgrades (a cron job or an `ExecStartPre=` in your systemd unit works).
+> 2. **Never put the string `hl-node` in the `--hlnode-binary` value** (or anywhere else in this server's command line / unit file) - it would sit in the server's own argv permanently and trip the same scan.
+>
+> Docker mode is not affected on the host side: the snapshot command runs inside the container.
 
 After the initial snapshot, the server stays up to date by watching the node's `*_streaming/` directories for real-time order diffs, fills, and status updates via inotify.
 
@@ -496,6 +514,7 @@ journalctl -u orderbook-server -f
 
 - **No untriggered orders** - Only shows orders on the book
 - **Snapshot sync time** - Initial snapshot takes ~10-30 seconds
+- **Direct mode requires a renamed node binary** - hl-node's process detection kills the node if it sees the string `hl-node` in any other process's command line, including this server's snapshot invocations. See [Direct mode and hl-node's process detection](#direct-mode-and-hl-nodes-process-detection)
 
 ## Differences from the Hyperliquid Public Release
 
@@ -546,7 +565,7 @@ New `--bbo-only` flag reduces memory from ~1 GB to ~100 MB by only tracking the 
 
 The original fetches snapshots via HTTP POST to `localhost:3001` (the node's local RPC).
 
-This fork calls `hl-node --dump-abci-state` directly, with two modes:
+This fork calls `hl-node compute-l4-snapshots` directly, with two modes:
 - **Docker**: `docker exec <container> hl-node ...` for container-based setups
 - **Direct**: calls the binary on the host for systemctl / bare metal deployments
 
