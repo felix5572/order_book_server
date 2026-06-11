@@ -4,6 +4,12 @@ use std::path::PathBuf;
 use clap::{Parser, ValueEnum};
 use server::{Result, ServerConfig, SnapshotMode, run_websocket_server};
 
+// The fan-out path allocates heavily (per-level price/size strings, per-coin
+// payload groupings, one JSON buffer per send); mimalloc handles that
+// multi-threaded churn with far less contention than glibc malloc.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Markets to include in the orderbook
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum Markets {

@@ -3,6 +3,13 @@ members = ["server", "bin"]
 
 resolver = "3"
 
+# Latency-sensitive server: trade compile time for codegen quality. Thin LTO +
+# a single codegen unit lets cross-module hot paths (parse -> book apply ->
+# fan-out serialization) inline without per-function #[inline] annotations.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [workspace.lints.clippy]
 correctness                    = { level = "warn", priority = -1 }
 suspicious                     = { level = "warn", priority = -1 }

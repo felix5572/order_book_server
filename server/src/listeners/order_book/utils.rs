@@ -237,6 +237,10 @@ pub(super) fn compute_l2_snapshots_incremental<O: InnerOrder + Send + Sync>(
     active: &HashSet<L2SnapshotParams>,
     cache: &mut HashMap<Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>>,
 ) -> (L2Snapshots, HashSet<Coin>, bool) {
+    /// Below this many dirty coins (the common case is 1-3 per 50ms flush),
+    /// rayon's task-dispatch overhead exceeds the rebuild work itself.
+    const PAR_COMPUTE_THRESHOLD: usize = 8;
+
     // Evict stale entries.
     let len_before_evict = cache.len();
     cache.retain(|coin, _| order_books.as_ref().contains_key(coin));
@@ -254,13 +258,17 @@ pub(super) fn compute_l2_snapshots_incremental<O: InnerOrder + Send + Sync>(
     }
     coin_set_changed |= to_compute.iter().any(|coin| !cache.contains_key(coin));
 
-    // Parallel recompute for the coins we need, building only the subscribed shapes.
-    let updates: Vec<(Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>)> = to_compute
-        .into_par_iter()
-        .filter_map(|coin| {
-            order_books.as_ref().get(&coin).map(|book| (coin, Arc::new(compute_l2_variants_for_coin(book, active))))
-        })
-        .collect();
+    // Recompute the coins we need, building only the subscribed shapes; fan
+    // out to rayon only for genuinely large rebuilds (post-snapshot recompute).
+    let build = |coin: Coin| {
+        order_books.as_ref().get(&coin).map(|book| (coin, Arc::new(compute_l2_variants_for_coin(book, active))))
+    };
+    let updates: Vec<(Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>)> =
+        if to_compute.len() < PAR_COMPUTE_THRESHOLD {
+            to_compute.into_iter().filter_map(build).collect()
+        } else {
+            to_compute.into_par_iter().filter_map(build).collect()
+        };
     let mut recomputed = HashSet::with_capacity(updates.len());
     for (coin, arc) in updates {
         recomputed.insert(coin.clone());

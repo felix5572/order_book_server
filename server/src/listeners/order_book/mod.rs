@@ -343,7 +343,7 @@ fn parse_event_line(line: &str, event_source: EventSource) -> Option<(u64, Event
     static HFT_EVENT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let count = HFT_EVENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if count % 1000 == 0 {
-        info!("parse_event_line event #{}, source: {}, line_len: {}", count, event_source, line.len());
+        log::debug!("parse_event_line event #{}, source: {}, line_len: {}", count, event_source, line.len());
     }
 
     if line.is_empty() {
@@ -372,7 +372,7 @@ fn parse_event_line(line: &str, event_source: EventSource) -> Option<(u64, Event
             static PARSE_OK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let ok_count = PARSE_OK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if ok_count % 10_000 == 0 {
-                info!("parse OK #{}: height={}, source={}", ok_count, height, event_source);
+                log::debug!("parse OK #{}: height={}, source={}", ok_count, height, event_source);
             }
             Some((height, event_batch))
         }
@@ -390,21 +390,73 @@ fn parse_event_line(line: &str, event_source: EventSource) -> Option<(u64, Event
 }
 
 
+/// Lazily-serialized wire frame shared by every subscribed connection. The
+/// first connection that needs the frame pays the `serde_json` cost once; every
+/// other connection clones the refcounted bytes. (The old path re-serialized
+/// the identical payload once per subscribed connection per message, so fan-out
+/// CPU scaled with the subscriber count.)
+pub(crate) struct SharedFrame(std::sync::OnceLock<bytes::Bytes>);
+
+impl SharedFrame {
+    const fn new() -> Self {
+        Self(std::sync::OnceLock::new())
+    }
+
+    /// The serialized frame, building it on first use. A serialization failure
+    /// (our bug, not the client's) is logged once and yields an empty frame,
+    /// which the send path skips.
+    pub(crate) fn get_or_serialize<T: serde::Serialize>(&self, build: impl FnOnce() -> T) -> bytes::Bytes {
+        self.0
+            .get_or_init(|| match serde_json::to_string(&build()) {
+                Ok(json) => bytes::Bytes::from(json),
+                Err(err) => {
+                    error!("Server response serialization error: {err}");
+                    bytes::Bytes::new()
+                }
+            })
+            .clone()
+    }
+}
+
+/// One coin's trades plus the shared `trades` wire frame.
+pub(crate) struct CoinTrades {
+    pub(crate) trades: Arc<Vec<Trade>>,
+    pub(crate) frame: SharedFrame,
+}
+
+/// One coin's order diffs plus the shared wire frames derived from them
+/// (`bookDiffs` for `BookDiffs` subscribers, `l4Book` updates for `L4Book` ones).
+pub(crate) struct CoinDiffs {
+    pub(crate) diffs: Arc<Vec<NodeDataOrderDiff>>,
+    pub(crate) book_diffs_frame: SharedFrame,
+    pub(crate) l4_frame: SharedFrame,
+}
+
+/// One coin's order statuses plus the shared `l4Book` updates wire frame.
+/// `OrderUpdates` subscribers filter the raw `statuses` per user instead.
+pub(crate) struct CoinStatuses {
+    pub(crate) statuses: Arc<Vec<NodeDataOrderStatus>>,
+    pub(crate) l4_frame: SharedFrame,
+}
+
 /// Group a fills batch into per-coin trade vectors. Consumes the batch (fills
 /// are never applied to the book), so this is move-only - no event is cloned.
-fn group_fills_by_coin(batch: Batch<NodeDataFill>) -> HashMap<String, Arc<Vec<Trade>>> {
+fn group_fills_by_coin(batch: Batch<NodeDataFill>) -> HashMap<String, CoinTrades> {
     let mut by_coin: HashMap<String, Vec<Trade>> = HashMap::new();
     for fill in batch.events() {
         let trade = Trade::from_single_fill(fill);
         by_coin.entry(trade.coin.clone()).or_default().push(trade);
     }
-    by_coin.into_iter().map(|(coin, trades)| (coin, Arc::new(trades))).collect()
+    by_coin
+        .into_iter()
+        .map(|(coin, trades)| (coin, CoinTrades { trades: Arc::new(trades), frame: SharedFrame::new() }))
+        .collect()
 }
 
 /// Group order diffs per coin (one clone per event - the batch itself is
 /// consumed by the state apply). `skip_spot` folds the `--markets` filtering
 /// in, replacing the old whole-batch `filter_events` clone.
-fn group_diffs_by_coin(events: &[NodeDataOrderDiff], skip_spot: bool) -> HashMap<String, Arc<Vec<NodeDataOrderDiff>>> {
+fn group_diffs_by_coin(events: &[NodeDataOrderDiff], skip_spot: bool) -> HashMap<String, CoinDiffs> {
     let mut by_coin: HashMap<String, Vec<NodeDataOrderDiff>> = HashMap::new();
     for diff in events {
         let coin = diff.coin();
@@ -413,16 +465,27 @@ fn group_diffs_by_coin(events: &[NodeDataOrderDiff], skip_spot: bool) -> HashMap
         }
         by_coin.entry(coin.value()).or_default().push(diff.clone());
     }
-    by_coin.into_iter().map(|(coin, diffs)| (coin, Arc::new(diffs))).collect()
+    by_coin
+        .into_iter()
+        .map(|(coin, diffs)| {
+            (
+                coin,
+                CoinDiffs { diffs: Arc::new(diffs), book_diffs_frame: SharedFrame::new(), l4_frame: SharedFrame::new() },
+            )
+        })
+        .collect()
 }
 
 /// Group order statuses per coin (one clone per event).
-fn group_statuses_by_coin(events: &[NodeDataOrderStatus]) -> HashMap<String, Arc<Vec<NodeDataOrderStatus>>> {
+fn group_statuses_by_coin(events: &[NodeDataOrderStatus]) -> HashMap<String, CoinStatuses> {
     let mut by_coin: HashMap<String, Vec<NodeDataOrderStatus>> = HashMap::new();
     for status in events {
         by_coin.entry(status.order.coin.clone()).or_default().push(status.clone());
     }
-    by_coin.into_iter().map(|(coin, statuses)| (coin, Arc::new(statuses))).collect()
+    by_coin
+        .into_iter()
+        .map(|(coin, statuses)| (coin, CoinStatuses { statuses: Arc::new(statuses), l4_frame: SharedFrame::new() }))
+        .collect()
 }
 
 impl OrderBookListener {
@@ -529,7 +592,7 @@ impl OrderBookListener {
         let process_start = Instant::now();
 
         if height % 100 == 0 {
-            info!("{event_source} block: {height}");
+            log::debug!("{event_source} block: {height}");
         }
 
         // Cache for replay while a snapshot fetch is in flight; bail out when the
@@ -669,7 +732,7 @@ impl OrderBookListener {
                         static BBO_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                         let bc = BBO_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if bc % 1000 == 0 {
-                            info!("Fast BBO broadcast #{} at time {} for {} coins", bc, time, changed_coins.len());
+                            log::debug!("Fast BBO broadcast #{} at time {} for {} coins", bc, time, changed_coins.len());
                         }
                         // broadcast::Sender::send is non-blocking; the previous
                         // tokio::spawn wrapper added task overhead with no benefit.
@@ -764,7 +827,7 @@ impl OrderBookListener {
             static L2_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let bc = L2_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if bc % 100 == 0 {
-                info!("L2 broadcast #{} at time {} for {} dirty coins", bc, time, dirty.len());
+                log::debug!("L2 broadcast #{} at time {} for {} dirty coins", bc, time, dirty.len());
             }
 
             // Rebuild the shared universe only when the coin set actually changed.
@@ -819,9 +882,9 @@ pub(crate) enum InternalMessage {
         universe: Option<Arc<HashSet<String>>>,
     },
     /// Trades grouped per coin ONCE in the listener; connections share the
-    /// Arc'd vectors instead of deep-cloning the whole batch per connection.
+    /// Arc'd vectors AND the lazily-serialized wire frame per coin.
     Fills {
-        trades_by_coin: HashMap<String, Arc<Vec<Trade>>>,
+        trades_by_coin: HashMap<String, CoinTrades>,
     },
     /// Fast BBO-only broadcast path - bypasses expensive L2 snapshot computation
     BboUpdate {
@@ -833,14 +896,14 @@ pub(crate) enum InternalMessage {
     L4OrderDiffs {
         time: u64,
         height: u64,
-        diffs_by_coin: HashMap<String, Arc<Vec<NodeDataOrderDiff>>>,
+        diffs_by_coin: HashMap<String, CoinDiffs>,
     },
     /// HFT L4 streaming - order statuses without waiting for diff pairing,
     /// grouped per coin once (shared by l4Book and orderUpdates subscribers).
     L4OrderStatuses {
         time: u64,
         height: u64,
-        statuses_by_coin: HashMap<String, Arc<Vec<NodeDataOrderStatus>>>,
+        statuses_by_coin: HashMap<String, CoinStatuses>,
     },
 }
 
@@ -955,8 +1018,10 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
 
     // Start parallel file watchers. They send straight into the bounded tokio
     // channel via blocking_send (backpressure parks the reader threads; the
-    // events sit on disk meanwhile).
-    let (mut tokio_rx, _handles, _last_os, _last_fills, _last_diffs) =
+    // events sit on disk meanwhile). The join handles and health timestamps
+    // feed the watchdog in the periodic ticker below - a dead or wedged
+    // watcher must not let the server keep serving a silently frozen book.
+    let (mut tokio_rx, watcher_handles, last_order_statuses, _last_fills, last_order_diffs) =
         parallel::start_parallel_file_watchers(dir, backfill_min_height);
 
     // Snapshot fetch channel
@@ -971,6 +1036,23 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
     // on the next aligned tick rather than firing a catch-up burst.
     let mut l2_flush_ticker = interval(Duration::from_millis(L2_FLUSH_TICK_MS));
     l2_flush_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    // How many watcher events to drain per loop iteration. During block bursts
+    // the old one-line-per-lock pattern paid a listener lock/unlock plus a
+    // task wake per event; draining a batch amortizes that to one acquisition.
+    const EVENT_RECV_BATCH: usize = 64;
+    let mut event_buf: Vec<parallel::FileEvent> = Vec::with_capacity(EVENT_RECV_BATCH);
+
+    // Book-critical watchers (diffs/statuses) stream continuously on mainnet;
+    // silence this long means the node stream or the watcher is wedged.
+    const WATCHER_STALL_ALARM_MS: u64 = 120_000;
+
+    /// One parsed watcher event, ready to apply under the listener lock.
+    enum Action {
+        Apply(u64, EventBatch, EventSource),
+        Backfill(EventBatch),
+        Desync,
+    }
 
     info!("Main event loop starting");
 
@@ -988,38 +1070,59 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                 listener.lock().await.flush_l2_if_due();
             }
 
-            // Process events from file watchers (via bridge)
-            Some(event) = tokio_rx.recv() => {
-                let (line, source, is_backfill) = match event {
-                    // OrderDiffs are the BBO-critical path; statuses and fills
-                    // are less latency-sensitive but share the same flow.
-                    parallel::FileEvent::OrderDiff(line) => (line, EventSource::OrderDiffs, false),
-                    parallel::FileEvent::OrderStatus(line) => (line, EventSource::OrderStatuses, false),
-                    parallel::FileEvent::Fill(line) => (line, EventSource::Fills, false),
-                    parallel::FileEvent::BackfillOrderDiff(line) => (line, EventSource::OrderDiffs, true),
-                    parallel::FileEvent::BackfillOrderStatus(line) => (line, EventSource::OrderStatuses, true),
-                    parallel::FileEvent::Desync(source) => {
-                        // The watcher discarded data (oversized partial line);
-                        // the book can no longer be trusted - trigger a re-sync.
-                        error!("{source} watcher reported data loss");
-                        listener.lock().await.mark_desynced("watcher_data_loss");
-                        continue;
+            // Process events from the file watchers, draining up to
+            // EVENT_RECV_BATCH per iteration (recv_many is cancel-safe).
+            count = tokio_rx.recv_many(&mut event_buf, EVENT_RECV_BATCH) => {
+                if count == 0 {
+                    // Every watcher thread dropped its sender: the book can only
+                    // go stale from here. Exit so the supervisor restarts us.
+                    return Err("file watcher channel closed (all watcher threads exited)".into());
+                }
+                // Parse the whole batch outside the listener lock (sonic-rs
+                // parsing is the most expensive step of the event path), then
+                // apply everything + flush under a single lock acquisition.
+                // Arrival order is preserved across the batch.
+                let mut actions = Vec::with_capacity(count);
+                for event in event_buf.drain(..) {
+                    let (line, source, is_backfill) = match event {
+                        // OrderDiffs are the BBO-critical path; statuses and fills
+                        // are less latency-sensitive but share the same flow.
+                        parallel::FileEvent::OrderDiff(line) => (line, EventSource::OrderDiffs, false),
+                        parallel::FileEvent::OrderStatus(line) => (line, EventSource::OrderStatuses, false),
+                        parallel::FileEvent::Fill(line) => (line, EventSource::Fills, false),
+                        parallel::FileEvent::BackfillOrderDiff(line) => (line, EventSource::OrderDiffs, true),
+                        parallel::FileEvent::BackfillOrderStatus(line) => (line, EventSource::OrderStatuses, true),
+                        parallel::FileEvent::Desync(source) => {
+                            // The watcher discarded data (oversized partial line);
+                            // the book can no longer be trusted - trigger a re-sync.
+                            error!("{source} watcher reported data loss");
+                            actions.push(Action::Desync);
+                            continue;
+                        }
+                    };
+                    if let Some((height, batch)) = parse_event_line(&line, source) {
+                        actions.push(if is_backfill {
+                            // Backfill lines are cache-only: replayed above the
+                            // snapshot height, never applied to a live book.
+                            Action::Backfill(batch)
+                        } else {
+                            Action::Apply(height, batch, source)
+                        });
                     }
-                };
-                // Parse outside the listener lock, apply + flush under one
-                // acquisition. The inline flush broadcasts the instant the L2
-                // throttle window expires (O(1) when not due) instead of waiting
-                // for the next flush tick.
-                if let Some((height, batch)) = parse_event_line(&line, source) {
+                }
+                if !actions.is_empty() {
                     let mut guard = listener.lock().await;
-                    if is_backfill {
-                        // Backfill lines are cache-only: replayed above the
-                        // snapshot height, never applied to a live book.
-                        guard.cache_backfill_batch(batch);
-                    } else {
-                        guard.apply_event_batch(height, batch, source);
-                        guard.flush_l2_if_due();
+                    for action in actions {
+                        match action {
+                            Action::Apply(height, batch, source) => guard.apply_event_batch(height, batch, source),
+                            Action::Backfill(batch) => guard.cache_backfill_batch(batch),
+                            Action::Desync => guard.mark_desynced("watcher_data_loss"),
+                        }
                     }
+                    // The inline flush broadcasts the instant the L2 throttle
+                    // window expires (O(1) when not due) instead of waiting for
+                    // the next flush tick.
+                    guard.flush_l2_if_due();
                 }
             }
 
@@ -1049,6 +1152,25 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
             // was marked out-of-sync (events were provably lost). The re-fetch
             // rebuilds the book from a fresh snapshot + cached-event replay.
             _ = ticker.tick() => {
+                // Watchdog: a dead watcher thread means its stream is gone for
+                // good - exit (the process supervisor restarts us into a clean
+                // re-sync) instead of serving a silently frozen book as ready.
+                if watcher_handles.iter().any(std::thread::JoinHandle::is_finished) {
+                    return Err("a file watcher thread exited; restarting to recover".into());
+                }
+                // A wedged-but-alive stream (node stopped writing) is loud-logged;
+                // restarting us would not fix the node, so don't exit for it.
+                let now_ms = parallel::now_unix_ms();
+                for (name, last) in [("OrderDiffs", &last_order_diffs), ("OrderStatuses", &last_order_statuses)] {
+                    let ts = last.load(std::sync::atomic::Ordering::Relaxed);
+                    if ts > 0 && now_ms.saturating_sub(ts) > WATCHER_STALL_ALARM_MS {
+                        error!(
+                            "{name} watcher has produced no events for {}s - node stream stalled?",
+                            now_ms.saturating_sub(ts) / 1000
+                        );
+                    }
+                }
+
                 let (is_ready, needs_resync) = {
                     let guard = listener.lock().await;
                     (guard.is_ready(), guard.needs_resync())
@@ -1419,12 +1541,27 @@ mod tests {
         while let Ok(msg) = rx.try_recv() {
             if let InternalMessage::Fills { trades_by_coin } = msg.as_ref() {
                 assert_eq!(trades_by_coin.len(), 2);
-                assert_eq!(trades_by_coin.get("BTC").map(|t| t.len()), Some(2));
-                assert_eq!(trades_by_coin.get("ETH").map(|t| t.len()), Some(1));
+                assert_eq!(trades_by_coin.get("BTC").map(|t| t.trades.len()), Some(2));
+                assert_eq!(trades_by_coin.get("ETH").map(|t| t.trades.len()), Some(1));
                 found = true;
             }
         }
         assert!(found, "a grouped Fills message must be broadcast");
+    }
+
+    #[test]
+    fn test_shared_frame_matches_per_connection_serialization() {
+        // The wire format is public API: the shared frame must be byte-identical
+        // to what the old per-connection serde_json::to_string path produced.
+        use crate::types::subscription::ServerResponse;
+        let grouped = group_fills_by_coin(make_fills_batch(&["BTC"], 1));
+        let ct = grouped.get("BTC").unwrap();
+        let expected = serde_json::to_string(&ServerResponse::Trades(Arc::clone(&ct.trades))).unwrap();
+        let frame = ct.frame.get_or_serialize(|| ServerResponse::Trades(Arc::clone(&ct.trades)));
+        assert_eq!(frame.as_ref(), expected.as_bytes());
+        // A second call returns the cached frame without re-serializing.
+        let again = ct.frame.get_or_serialize(|| -> ServerResponse { panic!("frame must be cached") });
+        assert_eq!(again, frame);
     }
 
     #[test]
@@ -1444,7 +1581,7 @@ mod tests {
                 assert_eq!(*height, 1);
                 assert!(*time > 0);
                 assert_eq!(diffs_by_coin.len(), 1, "spot diffs are filtered out of the broadcast");
-                assert_eq!(diffs_by_coin.get("BTC").map(|d| d.len()), Some(2));
+                assert_eq!(diffs_by_coin.get("BTC").map(|d| d.diffs.len()), Some(2));
                 found = true;
             }
         }
@@ -1472,7 +1609,7 @@ mod tests {
         while let Ok(msg) = rx.try_recv() {
             if let InternalMessage::L4OrderStatuses { height, statuses_by_coin, .. } = msg.as_ref() {
                 assert_eq!(*height, 7);
-                assert_eq!(statuses_by_coin.get("BTC").map(|s| s.len()), Some(1));
+                assert_eq!(statuses_by_coin.get("BTC").map(|s| s.statuses.len()), Some(1));
                 found = true;
             }
         }

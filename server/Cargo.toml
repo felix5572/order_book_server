@@ -23,6 +23,8 @@ dirs = "6.0"
 prometheus = "0.14"
 lazy_static = "1.4"
 sonic-rs = "0.3"
+rustc-hash = "2"
+bytes = "1"
 
 [lints]
 workspace = true

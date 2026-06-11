@@ -66,7 +66,7 @@ const MAX_PARTIAL_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// Wall-clock milliseconds since the unix epoch, for the watcher health
 /// timestamps. (The previous `Instant::now().elapsed()` measured elapsed time
 /// since *now* - always ~0 - making the health values meaningless.)
-fn now_unix_ms() -> u64 {
+pub(super) fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -338,7 +338,7 @@ impl FileReader {
                     if file_size > self.file_position {
                         // Log every read attempt
                         if count % 10_000 == 0 {
-                            info!(
+                            log::debug!(
                                 "on_modify #{}: reading {} bytes (pos {} -> {})",
                                 count,
                                 file_size - self.file_position,
@@ -362,40 +362,36 @@ impl FileReader {
                                         let line_count = full_buf.lines().count();
                                         let ends_newline = buf.ends_with('\n');
                                         if count % 10_000 == 0 {
-                                            info!(
+                                            log::debug!(
                                                 "on_modify #{}: read {} bytes, {} lines, ends_newline={}",
                                                 count, bytes_read, line_count, ends_newline
                                             );
                                         }
 
-                                        let mut line_iter = full_buf.lines().peekable();
-
-                                        while let Some(line) = line_iter.next() {
-                                            if line_iter.peek().is_some() {
-                                                // Not the last line
-                                                if !line.is_empty() {
-                                                    // Validate JSON structure - must start with { and end with }
-                                                    if line.starts_with('{') && line.ends_with('}') {
-                                                        lines.push(line.to_string());
-                                                    } else {
-                                                        // Incomplete JSON - store for next read
-                                                        self.partial_line = line.to_string();
-                                                    }
+                                        // Only the unterminated tail may go to `partial_line`.
+                                        // A newline-TERMINATED line that fails the JSON shape
+                                        // check is complete-but-corrupt: buffering it (the old
+                                        // behavior) prepended the garbage to the next read and
+                                        // corrupted the following valid line too. Discard it and
+                                        // flag the data loss so the book re-syncs.
+                                        for segment in full_buf.split_inclusive('\n') {
+                                            if segment.ends_with('\n') {
+                                                let line = segment.trim_end();
+                                                if line.is_empty() {
+                                                    continue;
+                                                }
+                                                if line.starts_with('{') && line.ends_with('}') {
+                                                    lines.push(line.to_string());
+                                                } else {
+                                                    error!(
+                                                        "discarding malformed terminated line ({} bytes); flagging desync",
+                                                        line.len()
+                                                    );
+                                                    self.desynced = true;
                                                 }
                                             } else {
-                                                // Last line - might be partial
-                                                if buf.ends_with('\n') && !line.is_empty() {
-                                                    // Validate JSON structure
-                                                    if line.starts_with('{') && line.ends_with('}') {
-                                                        lines.push(line.to_string());
-                                                    } else {
-                                                        // Incomplete JSON - store for next read
-                                                        self.partial_line = line.to_string();
-                                                    }
-                                                } else if !line.is_empty() {
-                                                    // Partial line without newline
-                                                    self.partial_line = line.to_string();
-                                                }
+                                                // Unterminated tail - buffer until the newline arrives.
+                                                self.partial_line = segment.to_string();
                                             }
                                         }
 
@@ -415,7 +411,7 @@ impl FileReader {
 
                                         // Log result
                                         if count % 10_000 == 0 {
-                                            info!("on_modify #{}: returning {} lines", count, lines.len());
+                                            log::debug!("on_modify #{}: returning {} lines", count, lines.len());
                                         }
                                     }
                                 }
@@ -638,7 +634,7 @@ pub(super) fn spawn_file_watcher(
                 if let Some(ref path) = reader.current_path {
                     if let Ok(file) = File::open(path) {
                         if let Ok(metadata) = file.metadata() {
-                            info!(
+                            log::debug!(
                                 "{} poll {} - pos {} / size {}",
                                 source_name,
                                 poll_count,
@@ -796,6 +792,30 @@ mod tests {
         assert_eq!(old_lines, vec!["{\"tail\":1}".to_string()], "old file's tail is drained before switching");
         // After the switch the new file is read from position 0.
         assert_eq!(reader.on_modify(), vec!["{\"first\":2}".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_malformed_terminated_line_is_discarded_not_buffered() {
+        // Regression: a newline-TERMINATED line failing the JSON shape check
+        // used to be stored into `partial_line` as if it were a partial tail,
+        // then got prepended to the next read - corrupting the next valid line
+        // too. It must be discarded (flagging desync) and later lines kept.
+        let dir = test_dir("malformed_mid");
+        let path = dir.join("0");
+        append(&path, "");
+        let mut reader = FileReader::new(dir.clone());
+        reader.start_tracking(&path);
+
+        append(&path, "{\"a\":1}\ngarbage\n{\"b\":2}\n");
+        let lines = reader.on_modify();
+        assert_eq!(lines, vec!["{\"a\":1}".to_string(), "{\"b\":2}".to_string()]);
+        assert!(reader.take_desynced(), "a discarded complete line is data loss");
+
+        // The garbage must NOT contaminate the next read.
+        append(&path, "{\"c\":3}\n");
+        assert_eq!(reader.on_modify(), vec!["{\"c\":3}".to_string()]);
+        assert!(!reader.take_desynced());
         std::fs::remove_dir_all(&dir).ok();
     }
 

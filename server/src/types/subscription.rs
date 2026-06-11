@@ -2,7 +2,7 @@ use crate::metrics::WS_SUBSCRIPTIONS_ACTIVE;
 use crate::types::node_data::{NodeDataOrderDiff, NodeDataOrderStatus};
 use crate::types::{Bbo, L2Book, L4Book, Trade};
 use alloy::primitives::Address;
-use log::info;
+use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -48,21 +48,21 @@ impl Subscription {
             Self::Trades { coin } => universe.contains(coin),
             Self::L2Book { coin, n_sig_figs, n_levels, mantissa } => {
                 if !universe.contains(coin) {
-                    info!("Invalid subscription: coin not found");
+                    debug!("Invalid subscription: coin not found");
                     return false;
                 }
                 if *n_levels == Some(DEFAULT_LEVELS) {
-                    info!("Invalid subscription: set n_levels to this by using null");
+                    debug!("Invalid subscription: set n_levels to this by using null");
                     return false;
                 }
                 let n_levels = n_levels.unwrap_or(DEFAULT_LEVELS);
                 if n_levels > MAX_LEVELS {
-                    info!("Invalid subscription: n_levels too high");
+                    debug!("Invalid subscription: n_levels too high");
                     return false;
                 }
                 if let Some(n_sig_figs) = *n_sig_figs {
                     if !(2..=5).contains(&n_sig_figs) {
-                        info!("Invalid subscription: sig figs aren't set correctly");
+                        debug!("Invalid subscription: sig figs aren't set correctly");
                         return false;
                     }
                     if let Some(m) = *mantissa {
@@ -71,31 +71,31 @@ impl Subscription {
                         }
                     }
                 } else if mantissa.is_some() {
-                    info!("Invalid subscription: mantissa can not be some if sig figs are not set");
+                    debug!("Invalid subscription: mantissa can not be some if sig figs are not set");
                     return false;
                 }
-                info!("Valid subscription");
+                debug!("Valid subscription");
                 true
             }
             Self::L4Book { coin } | Self::Bbo { coin } | Self::BookDiffs { coin } => {
                 if !universe.contains(coin) {
-                    info!("Invalid subscription: coin not found");
+                    debug!("Invalid subscription: coin not found");
                     return false;
                 }
-                info!("Valid subscription");
+                debug!("Valid subscription");
                 true
             }
             Self::OrderUpdates { user } => {
                 // Validate the user address format (must be valid hex address)
                 if user.len() != 42 || !user.starts_with("0x") {
-                    info!("Invalid subscription: user address must be 42 characters starting with 0x");
+                    debug!("Invalid subscription: user address must be 42 characters starting with 0x");
                     return false;
                 }
                 if user[2..].chars().any(|c| !c.is_ascii_hexdigit()) {
-                    info!("Invalid subscription: user address contains invalid hex characters");
+                    debug!("Invalid subscription: user address contains invalid hex characters");
                     return false;
                 }
-                info!("Valid orderUpdates subscription for user: {}", user);
+                debug!("Valid orderUpdates subscription for user: {}", user);
                 true
             }
         }

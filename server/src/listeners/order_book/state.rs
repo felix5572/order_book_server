@@ -10,7 +10,10 @@ use crate::{
         node_data::{Batch, NodeDataOrderDiff, NodeDataOrderStatus},
     },
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 pub(super) struct OrderBookState {
     order_book: OrderBooks<InnerL4Order>,
@@ -18,11 +21,13 @@ pub(super) struct OrderBookState {
     time: u64,
     ignore_spot: bool,
     // Persistent cache of OrderStatuses waiting for their New diffs
-    // Allows OrderStatus and OrderDiff to arrive in any order (HFT-compatible)
-    pending_order_statuses: HashMap<Oid, NodeDataOrderStatus>,
+    // Allows OrderStatus and OrderDiff to arrive in any order (HFT-compatible).
+    // Entries carry their insertion time so cleanup can evict by age instead of
+    // nuking the whole map (which killed in-flight halves and forced re-syncs).
+    pending_order_statuses: HashMap<Oid, (NodeDataOrderStatus, Instant)>,
     // Persistent cache of New diffs (sz values) waiting for their OrderStatuses
     // This is the other half of bidirectional caching - handles when Diff arrives BEFORE Status
-    pending_new_diffs: HashMap<Oid, crate::order_book::types::Sz>,
+    pending_new_diffs: HashMap<Oid, (crate::order_book::types::Sz, Instant)>,
 }
 
 impl OrderBookState {
@@ -106,24 +111,54 @@ impl OrderBookState {
         self.order_book.as_ref().len()
     }
 
-    /// Cleanup stale pending entries to prevent unbounded memory growth
-    /// Orphaned entries occur when OrderStatuses have is_inserted_into_book() = true
-    /// but their matching BookDiff never arrives (network issues, bugs, etc.)
-    /// This is a simple size-based eviction - when cache exceeds limit, replace
-    /// with a fresh `HashMap::new()` so the high-water-mark bucket capacity is
-    /// actually released (plain `.clear()` keeps the buckets allocated forever).
+    /// Cleanup stale pending entries to prevent unbounded memory growth.
+    ///
+    /// Primary mechanism is AGE-based eviction: a half that has waited longer
+    /// than `PENDING_MAX_AGE` will never pair (the two streams skew by
+    /// milliseconds, not minutes). The old size-only force-clear nuked
+    /// genuinely in-flight young halves whenever a burst pushed the map over
+    /// the cap, forcing an avoidable 10-30s snapshot re-sync.
+    ///
+    /// Loss semantics differ per cache:
+    /// - Aged-out `pending_order_statuses` are expected orphans (statuses with
+    ///   `is_inserted_into_book() == true` whose order never rested, so no New
+    ///   diff ever comes) - evicted silently, NOT data loss.
+    /// - An aged-out `pending_new_diffs` entry means a New diff never got its
+    ///   status: the book is missing that order, which IS data loss.
+    ///
+    /// The size caps remain as an OOM backstop; hitting one still force-clears
+    /// (fresh `HashMap::new()` so the high-water-mark bucket capacity is
+    /// actually released) and counts as data loss.
     /// Also opportunistically compacts the orderbook slab allocators on the same
     /// cadence, since both are unbounded-growth vectors that the maintenance tick
     /// is responsible for bounding.
     ///
-    /// Returns `true` when a pending cache was force-cleared. Cleared entries may
-    /// include genuinely in-flight order halves, so the caller must treat this as
-    /// potential data loss and mark the book for re-sync.
+    /// Returns `true` when potentially-live data was evicted; the caller must
+    /// treat this as data loss and mark the book for re-sync.
     pub(super) fn cleanup_stale_pending(&mut self) -> bool {
-        const MAX_PENDING_ORDERS: usize = 10_000;
-        const MAX_PENDING_DIFFS: usize = 1_000;
+        const MAX_PENDING_ORDERS: usize = 50_000;
+        const MAX_PENDING_DIFFS: usize = 10_000;
+        const PENDING_MAX_AGE: Duration = Duration::from_secs(60);
 
         let mut cleared = false;
+
+        let before = self.pending_order_statuses.len();
+        self.pending_order_statuses.retain(|_, (_, at)| at.elapsed() < PENDING_MAX_AGE);
+        let aged_statuses = before - self.pending_order_statuses.len();
+        if aged_statuses > 0 {
+            // Expected orphans (order never rested -> no New diff): not data loss.
+            log::info!("Evicted {aged_statuses} aged pending_order_statuses entries (no matching BookDiff)");
+        }
+
+        let before = self.pending_new_diffs.len();
+        self.pending_new_diffs.retain(|_, (_, at)| at.elapsed() < PENDING_MAX_AGE);
+        let aged_diffs = before - self.pending_new_diffs.len();
+        if aged_diffs > 0 {
+            // A New diff with no status in 60s: the order is missing from the book.
+            log::warn!("Evicted {aged_diffs} aged pending_new_diffs entries (status never arrived - data loss)");
+            cleared = true;
+        }
+
         if self.pending_order_statuses.len() > MAX_PENDING_ORDERS {
             log::warn!(
                 "Clearing stale pending_order_statuses cache: {} entries (orphaned orders without matching BookDiffs)",
@@ -184,7 +219,7 @@ impl OrderBookState {
             let oid = Oid::new(order_status.order.oid);
 
             // Check if there's a pending New diff for this order
-            if let Some(sz) = self.pending_new_diffs.remove(&oid) {
+            if let Some((sz, _)) = self.pending_new_diffs.remove(&oid) {
                 // Both arrived - add order immediately!
                 let time = order_status.time.and_utc().timestamp_millis();
                 let order_coin = Coin::new(&order_status.order.coin);
@@ -196,7 +231,7 @@ impl OrderBookState {
                 log::debug!("Order added (status arrived after diff): oid={:?} coin={:?}", oid, order_coin);
             } else if order_status.is_inserted_into_book() {
                 // Diff hasn't arrived yet - cache the OrderStatus
-                self.pending_order_statuses.insert(oid, order_status);
+                self.pending_order_statuses.insert(oid, (order_status, Instant::now()));
             }
         }
         Ok(changed_coins)
@@ -205,6 +240,19 @@ impl OrderBookState {
     #[cfg(test)]
     pub(crate) fn pending_order_statuses_has(&self, oid: &Oid) -> bool {
         self.pending_order_statuses.contains_key(oid)
+    }
+
+    /// Backdate every pending entry's insertion time, so tests can exercise
+    /// age-based eviction without sleeping.
+    #[cfg(test)]
+    pub(crate) fn age_pending_entries(&mut self, by: Duration) {
+        let backdated = Instant::now().checked_sub(by).unwrap_or_else(Instant::now);
+        for (_, at) in self.pending_order_statuses.values_mut() {
+            *at = backdated;
+        }
+        for (_, at) in self.pending_new_diffs.values_mut() {
+            *at = backdated;
+        }
     }
 
     #[cfg(test)]
@@ -236,7 +284,7 @@ impl OrderBookState {
             match inner_diff {
                 InnerOrderDiff::New { sz } => {
                     // Check if OrderStatus already arrived
-                    if let Some(order) = self.pending_order_statuses.remove(&oid) {
+                    if let Some((order, _)) = self.pending_order_statuses.remove(&oid) {
                         // Both arrived - add order immediately!
                         let time = order.time.and_utc().timestamp_millis();
                         let order_coin = Coin::new(&order.order.coin);
@@ -249,7 +297,7 @@ impl OrderBookState {
                         log::debug!("Order added (diff arrived after status): oid={:?} coin={:?}", oid, order_coin);
                     } else {
                         // Status hasn't arrived yet - cache the diff size
-                        self.pending_new_diffs.insert(oid.clone(), sz);
+                        self.pending_new_diffs.insert(oid.clone(), (sz, Instant::now()));
                     }
                 }
                 InnerOrderDiff::Update { new_sz, .. } => {
@@ -516,29 +564,45 @@ mod tests {
     // ==================== Cleanup Tests ====================
 
     #[test]
-    fn test_cleanup_stale_pending_orders() {
+    fn test_cleanup_evicts_aged_statuses_silently() {
         let mut state = empty_state();
-        // Insert 10_001 pending statuses
-        for i in 0..10_001u64 {
+        for i in 0..100u64 {
             let status = make_order_status("BTC", i, "open");
             state.apply_order_statuses_hft(make_status_batch(vec![status])).unwrap();
         }
-        assert!(state.pending_order_statuses_count() > 10_000);
-        assert!(state.cleanup_stale_pending(), "a force-clear must be reported as data loss");
+        state.age_pending_entries(std::time::Duration::from_secs(61));
+        // Aged statuses are expected orphans (order never rested) - NOT data loss.
+        assert!(!state.cleanup_stale_pending(), "aged status eviction must not force a re-sync");
         assert_eq!(state.pending_order_statuses_count(), 0);
     }
 
     #[test]
-    fn test_cleanup_stale_pending_diffs() {
+    fn test_cleanup_evicts_aged_diffs_as_data_loss() {
         let mut state = empty_state();
-        // Insert 1_001 pending diffs
-        for i in 0..1_001u64 {
+        for i in 0..100u64 {
             let diff = make_order_diff("BTC", i, OrderDiff::New { sz: "1.0".to_string() });
             state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
         }
-        assert!(state.pending_new_diffs_count() > 1_000);
-        assert!(state.cleanup_stale_pending(), "a force-clear must be reported as data loss");
+        state.age_pending_entries(std::time::Duration::from_secs(61));
+        // A New diff whose status never arrived means the book is missing an order.
+        assert!(state.cleanup_stale_pending(), "aged diff eviction is data loss and must trigger a re-sync");
         assert_eq!(state.pending_new_diffs_count(), 0);
+    }
+
+    #[test]
+    fn test_cleanup_keeps_young_entries() {
+        // Regression for the burst-nuke behavior: young in-flight halves must
+        // survive cleanup so they can still pair with their other half.
+        let mut state = empty_state();
+        for i in 0..100u64 {
+            let status = make_order_status("BTC", i, "open");
+            state.apply_order_statuses_hft(make_status_batch(vec![status])).unwrap();
+            let diff = make_order_diff("ETH", 1_000 + i, OrderDiff::New { sz: "1.0".to_string() });
+            state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
+        }
+        assert!(!state.cleanup_stale_pending());
+        assert_eq!(state.pending_order_statuses_count(), 100);
+        assert_eq!(state.pending_new_diffs_count(), 100);
     }
 
     #[test]

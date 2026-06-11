@@ -11,7 +11,6 @@ use crate::{
     types::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
-        node_data::{NodeDataOrderDiff, NodeDataOrderStatus},
         subscription::{ClientMessage, DEFAULT_LEVELS, OrderUpdate, ServerResponse, Subscription, SubscriptionManager},
     },
 };
@@ -119,7 +118,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         OrderBookListener::new(Some(internal_message_tx), ignore_spot, active_l2_params.clone(), market_filter)
     };
     let listener = Arc::new(Mutex::new(listener));
-    {
+    let listener_task = {
         let listener = listener.clone();
         let config = config.clone();
         tokio::spawn(async move {
@@ -129,8 +128,8 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                 error!("Listener fatal error: {err}");
                 std::process::exit(1);
             }
-        });
-    }
+        })
+    };
 
     let websocket_opts =
         yawc::Options::default().with_compression_level(yawc::CompressionLevel::new(compression_level));
@@ -170,8 +169,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                     let height = ORDERBOOK_HEIGHT.get();
                     let connections = WS_CONNECTIONS_ACTIVE.get();
                     let body = format!(
-                        r#"{{"status":"{}","uptime_seconds":{},"height":{},"connections":{}}}"
-                    "#,
+                        r#"{{"status":"{}","uptime_seconds":{},"height":{},"connections":{}}}"#,
                         if is_ready { "ready" } else { "initializing" },
                         uptime_secs,
                         height,
@@ -185,12 +183,46 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     let tcp_listener = TcpListener::bind(&config.address).await?;
     info!("WebSocket server running at ws://{}", config.address);
 
-    if let Err(err) = axum::serve(tcp_listener, app).await {
-        error!("Server fatal error: {err}");
-        std::process::exit(2);
+    tokio::select! {
+        result = axum::serve(NoDelayListener(tcp_listener), app) => {
+            if let Err(err) = result {
+                error!("Server fatal error: {err}");
+                std::process::exit(2);
+            }
+        }
+        // hl_listen_hft loops forever and exits the process itself on a fatal
+        // Err; reaching this arm means the task panicked or was aborted. The
+        // old fire-and-forget spawn left the server up with a dead feed.
+        join = listener_task => {
+            error!("Listener task exited unexpectedly: {join:?}");
+            std::process::exit(1);
+        }
     }
 
     Ok(())
+}
+
+/// `TcpListener` wrapper that sets `TCP_NODELAY` on every accepted socket.
+/// Without it, Nagle's algorithm can delay small frames (BBO updates are a few
+/// hundred bytes) by up to an RTT while an unacked segment is outstanding.
+struct NoDelayListener(TcpListener);
+
+impl axum::serve::Listener for NoDelayListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        // Delegate to TcpListener's impl (it retries transient accept errors).
+        let (stream, addr) = axum::serve::Listener::accept(&mut self.0).await;
+        if let Err(err) = stream.set_nodelay(true) {
+            log::warn!("failed to set TCP_NODELAY on {addr}: {err}");
+        }
+        (stream, addr)
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.0.local_addr()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -318,40 +350,43 @@ async fn handle_socket(
                                 }
                             },
                             InternalMessage::Fills{ trades_by_coin } => {
-                                // Per-coin vectors were grouped once in the listener and are
-                                // Arc-shared: each subscription is a map lookup + Arc bump,
-                                // not a whole-batch deep clone per connection.
+                                // Per-coin payloads were grouped once in the listener; the
+                                // wire frame is serialized once by the first subscribed
+                                // connection and shared (refcounted bytes) by every other.
                                 for sub in manager.subscriptions() {
                                     if !alive { break; }
                                     if let Subscription::Trades { coin } = sub {
-                                        if let Some(trades) = trades_by_coin.get(coin.as_str()) {
+                                        if let Some(ct) = trades_by_coin.get(coin.as_str()) {
                                             BROADCASTS_TOTAL.with_label_values(&["trades"]).inc();
-                                            alive &= send_socket_message(&mut socket, ServerResponse::Trades(Arc::clone(trades))).await;
+                                            let frame = ct.frame.get_or_serialize(|| ServerResponse::Trades(Arc::clone(&ct.trades)));
+                                            alive &= send_socket_frame(&mut socket, frame).await;
                                         }
                                     }
                                 }
                             },
                             InternalMessage::L4OrderDiffs{ time, height, diffs_by_coin } => {
-                                let empty_statuses: Arc<Vec<NodeDataOrderStatus>> = Arc::new(Vec::new());
                                 for sub in manager.subscriptions() {
                                     if !alive { break; }
                                     match sub {
                                         Subscription::BookDiffs { coin } => {
-                                            if let Some(diffs) = diffs_by_coin.get(coin.as_str()) {
+                                            if let Some(cd) = diffs_by_coin.get(coin.as_str()) {
                                                 BROADCASTS_TOTAL.with_label_values(&["bookDiffs"]).inc();
-                                                alive &= send_socket_message(&mut socket, ServerResponse::BookDiffs(Arc::clone(diffs))).await;
+                                                let frame = cd.book_diffs_frame.get_or_serialize(|| ServerResponse::BookDiffs(Arc::clone(&cd.diffs)));
+                                                alive &= send_socket_frame(&mut socket, frame).await;
                                             }
                                         }
                                         Subscription::L4Book { coin } => {
-                                            if let Some(diffs) = diffs_by_coin.get(coin.as_str()) {
+                                            if let Some(cd) = diffs_by_coin.get(coin.as_str()) {
                                                 BROADCASTS_TOTAL.with_label_values(&["l4"]).inc();
-                                                let updates = L4BookUpdates {
-                                                    time: *time,
-                                                    height: *height,
-                                                    order_statuses: Arc::clone(&empty_statuses),
-                                                    book_diffs: Arc::clone(diffs),
-                                                };
-                                                alive &= send_socket_message(&mut socket, ServerResponse::L4Book(L4Book::Updates(updates))).await;
+                                                let frame = cd.l4_frame.get_or_serialize(|| {
+                                                    ServerResponse::L4Book(L4Book::Updates(L4BookUpdates {
+                                                        time: *time,
+                                                        height: *height,
+                                                        order_statuses: Arc::new(Vec::new()),
+                                                        book_diffs: Arc::clone(&cd.diffs),
+                                                    }))
+                                                });
+                                                alive &= send_socket_frame(&mut socket, frame).await;
                                             }
                                         }
                                         _ => {}
@@ -359,20 +394,21 @@ async fn handle_socket(
                                 }
                             },
                             InternalMessage::L4OrderStatuses{ time, height, statuses_by_coin } => {
-                                let empty_diffs: Arc<Vec<NodeDataOrderDiff>> = Arc::new(Vec::new());
                                 for sub in manager.subscriptions() {
                                     if !alive { break; }
                                     match sub {
                                         Subscription::L4Book { coin } => {
-                                            if let Some(statuses) = statuses_by_coin.get(coin.as_str()) {
+                                            if let Some(cs) = statuses_by_coin.get(coin.as_str()) {
                                                 BROADCASTS_TOTAL.with_label_values(&["l4"]).inc();
-                                                let updates = L4BookUpdates {
-                                                    time: *time,
-                                                    height: *height,
-                                                    order_statuses: Arc::clone(statuses),
-                                                    book_diffs: Arc::clone(&empty_diffs),
-                                                };
-                                                alive &= send_socket_message(&mut socket, ServerResponse::L4Book(L4Book::Updates(updates))).await;
+                                                let frame = cs.l4_frame.get_or_serialize(|| {
+                                                    ServerResponse::L4Book(L4Book::Updates(L4BookUpdates {
+                                                        time: *time,
+                                                        height: *height,
+                                                        order_statuses: Arc::clone(&cs.statuses),
+                                                        book_diffs: Arc::new(Vec::new()),
+                                                    }))
+                                                });
+                                                alive &= send_socket_frame(&mut socket, frame).await;
                                             }
                                         }
                                         Subscription::OrderUpdates { user } => {
@@ -450,7 +486,7 @@ async fn handle_socket(
                                 }
                             };
 
-                            info!("Client message: {text}");
+                            log::debug!("Client message: {text}");
 
                             if let Ok(value) = serde_json::from_str::<ClientMessage>(text) {
                                 match value {
@@ -649,6 +685,21 @@ async fn send_socket_message(socket: &mut WebSocket, msg: ServerResponse) -> boo
             return true;
         }
     };
+    send_socket_payload(socket, bytes::Bytes::from(payload)).await
+}
+
+/// Send a pre-serialized wire frame (built once in/for the listener broadcast
+/// and shared by every subscribed connection). An empty frame means its
+/// serialization failed when it was first built (already logged there) - skip
+/// it and keep the connection, mirroring `send_socket_message`.
+async fn send_socket_frame(socket: &mut WebSocket, frame: bytes::Bytes) -> bool {
+    if frame.is_empty() {
+        return true;
+    }
+    send_socket_payload(socket, frame).await
+}
+
+async fn send_socket_payload(socket: &mut WebSocket, payload: bytes::Bytes) -> bool {
     match tokio::time::timeout(WS_SEND_TIMEOUT, socket.send(FrameView::text(payload))).await {
         Ok(Ok(())) => {
             MESSAGES_SENT_TOTAL.inc();
@@ -713,9 +764,10 @@ async fn send_ws_data_from_snapshot(
         // walk the [Vec<Level>; 2] directly - the prior `format!("{:?}", snapshot)`
         // path allocated a Debug-format string per L2 subscription per broadcast,
         // saturating glibc/jemalloc under load and dominating allocator pressure.
-        use std::collections::hash_map::DefaultHasher;
+        // FxHasher instead of SipHash: this hashes our own payload (no DoS
+        // surface) and runs per subscription per broadcast.
         use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = rustc_hash::FxHasher::default();
         exported.hash(&mut hasher);
         let current_hash = hasher.finish();
 
@@ -770,7 +822,7 @@ async fn send_ws_order_updates(
     user: &str,
     time: u64,
     height: u64,
-    statuses_by_coin: &HashMap<String, Arc<Vec<NodeDataOrderStatus>>>,
+    statuses_by_coin: &HashMap<String, crate::listeners::order_book::CoinStatuses>,
 ) -> bool {
     let Ok(user_addr) = user.parse::<alloy::primitives::Address>() else {
         return true; // invalid address; validation prevents this at subscribe time
@@ -778,7 +830,7 @@ async fn send_ws_order_updates(
 
     let user_updates: Vec<OrderUpdate> = statuses_by_coin
         .values()
-        .flat_map(|statuses| statuses.iter())
+        .flat_map(|cs| cs.statuses.iter())
         .filter(|status| status.user == user_addr)
         .map(|status| OrderUpdate::new(status.user, time, height, status.clone()))
         .collect();
