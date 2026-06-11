@@ -12,7 +12,7 @@ use crate::{
     },
     prelude::*,
     types::{
-        L4Order, Trade,
+        L2Book, L4Order, Trade,
         inner::{InnerL4Order, InnerLevel},
         node_data::{Batch, EventSource, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
     },
@@ -439,6 +439,70 @@ pub(crate) struct CoinStatuses {
     pub(crate) l4_frame: SharedFrame,
 }
 
+/// Raw fixed-point (px, sz, n) for the best bid and ask of one coin.
+pub(crate) type RawBbo = (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>);
+
+/// One coin's BBO: the raw fixed-point values (connections dedup on these
+/// without allocating) plus the shared `bbo` wire frame, rendered/serialized
+/// once per coin per broadcast instead of once per subscribed connection.
+pub(crate) struct CoinBbo {
+    pub(crate) raw: RawBbo,
+    pub(crate) frame: SharedFrame,
+}
+
+/// Cache key for one fully-rendered L2 variant: the aggregation shape plus the
+/// send-time `n_levels` truncation (two subscriptions differing only in
+/// `n_levels` produce different payloads).
+#[derive(Hash, Eq, PartialEq)]
+pub(crate) struct L2FrameKey {
+    coin: String,
+    n_sig_figs: Option<u32>,
+    mantissa: Option<u64>,
+    n_levels: usize,
+}
+
+impl L2FrameKey {
+    pub(crate) fn new(coin: &str, n_sig_figs: Option<u32>, mantissa: Option<u64>, n_levels: usize) -> Self {
+        Self { coin: coin.to_string(), n_sig_figs, mantissa, n_levels }
+    }
+}
+
+/// One rendered L2 variant: (dedup hash over the exported levels, wire frame,
+/// payload struct for heartbeat-enabled connections).
+pub(crate) type L2BuiltFrame = (u64, bytes::Bytes, L2Book);
+
+/// Per-broadcast lazy cache of rendered L2 variants, shared by every connection
+/// through the message `Arc`. The first connection needing a given
+/// (coin, shape, `n_levels`) pays the truncate/export/hash/serialize cost once;
+/// every other connection reuses the dedup hash, the wire frame (refcounted
+/// bytes), and - for heartbeat-enabled connections - the payload struct.
+/// The old path repeated all of that work per subscribed connection.
+pub(crate) struct L2FrameCache(std::sync::Mutex<rustc_hash::FxHashMap<L2FrameKey, Arc<L2BuiltFrame>>>);
+
+impl L2FrameCache {
+    fn new() -> Self {
+        Self(std::sync::Mutex::new(rustc_hash::FxHashMap::default()))
+    }
+
+    /// Cached (dedup hash, frame, payload) for `key`, building on first use.
+    /// `build` runs OUTSIDE the lock so a slow render never blocks other
+    /// connections; on a lost insert race the first entry wins (both builds
+    /// produce identical bytes).
+    pub(crate) fn get_or_build(&self, key: L2FrameKey, build: impl FnOnce() -> L2BuiltFrame) -> Arc<L2BuiltFrame> {
+        if let Ok(map) = self.0.lock()
+            && let Some(hit) = map.get(&key)
+        {
+            return Arc::clone(hit);
+        }
+        let fresh = Arc::new(build());
+        match self.0.lock() {
+            Ok(mut map) => Arc::clone(map.entry(key).or_insert(fresh)),
+            // Poisoned lock (a panicked builder elsewhere): serve the local build.
+            Err(_) => fresh,
+        }
+    }
+}
+
 /// Group a fills batch into per-coin trade vectors. Consumes the batch (fills
 /// are never applied to the book), so this is move-only - no event is cloned.
 fn group_fills_by_coin(batch: Batch<NodeDataFill>) -> HashMap<String, CoinTrades> {
@@ -736,6 +800,10 @@ impl OrderBookListener {
                         }
                         // broadcast::Sender::send is non-blocking; the previous
                         // tokio::spawn wrapper added task overhead with no benefit.
+                        let bbos = bbos
+                            .into_iter()
+                            .map(|(coin, raw)| (coin, CoinBbo { raw, frame: SharedFrame::new() }))
+                            .collect();
                         let msg = Arc::new(InternalMessage::BboUpdate { bbos, time });
                         drop(tx.send(msg));
                         BBO_BROADCAST_LATENCY.observe(bbo_start.elapsed().as_secs_f64());
@@ -848,7 +916,13 @@ impl OrderBookListener {
             };
 
             if let Some(tx) = &self.internal_message_tx {
-                let msg = Arc::new(InternalMessage::Snapshot { l2_snapshots, time, dirty: recomputed, universe });
+                let msg = Arc::new(InternalMessage::Snapshot {
+                    l2_snapshots,
+                    time,
+                    dirty: recomputed,
+                    universe,
+                    l2_frames: L2FrameCache::new(),
+                });
                 drop(tx.send(msg));
             }
             L2_BROADCAST_LATENCY.observe(l2_start.elapsed().as_secs_f64());
@@ -880,15 +954,19 @@ pub(crate) enum InternalMessage {
         /// Refreshed market-filtered universe; Some only when the coin set
         /// changed since the previous broadcast.
         universe: Option<Arc<HashSet<String>>>,
+        /// Lazy per-broadcast cache of rendered L2 frames, shared by every
+        /// connection (see [`L2FrameCache`]).
+        l2_frames: L2FrameCache,
     },
     /// Trades grouped per coin ONCE in the listener; connections share the
     /// Arc'd vectors AND the lazily-serialized wire frame per coin.
     Fills {
         trades_by_coin: HashMap<String, CoinTrades>,
     },
-    /// Fast BBO-only broadcast path - bypasses expensive L2 snapshot computation
+    /// Fast BBO-only broadcast path - bypasses expensive L2 snapshot computation.
+    /// Connections dedup on the raw values and share the per-coin wire frame.
     BboUpdate {
-        bbos: HashMap<Coin, (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>)>,
+        bbos: HashMap<Coin, CoinBbo>,
         time: u64,
     },
     /// HFT L4 streaming - order diffs without waiting for status pairing,
@@ -1562,6 +1640,35 @@ mod tests {
         // A second call returns the cached frame without re-serializing.
         let again = ct.frame.get_or_serialize(|| -> ServerResponse { panic!("frame must be cached") });
         assert_eq!(again, frame);
+    }
+
+    #[test]
+    fn test_l2_frame_cache_builds_once_and_is_byte_identical() {
+        // The wire format is public API: the cached frame must be byte-identical
+        // to what the old per-connection serde_json::to_string path produced,
+        // and a second lookup must NOT re-run the build closure.
+        use crate::types::subscription::ServerResponse;
+        let cache = L2FrameCache::new();
+        let build = || {
+            let levels = [vec![crate::types::Level::new("100.0".to_string(), "1.5".to_string(), 2)], Vec::new()];
+            let l2_book = L2Book::from_l2_snapshot("BTC".to_string(), levels, 1000, Some(5), None, Some(20));
+            let frame = bytes::Bytes::from(serde_json::to_string(&ServerResponse::L2Book(l2_book.clone())).unwrap());
+            (42_u64, frame, l2_book)
+        };
+        let key = || L2FrameKey::new("BTC", Some(5), None, 20);
+
+        let first = cache.get_or_build(key(), build);
+        let (_, expected_frame, expected_payload) = build();
+        assert_eq!(first.1, expected_frame, "cached frame must match direct serialization byte-for-byte");
+        assert_eq!(first.0, 42, "dedup hash is carried through");
+
+        let second = cache.get_or_build(key(), || panic!("the build closure must not run on a cache hit"));
+        assert!(Arc::ptr_eq(&first, &second), "the cached Arc is shared");
+        assert_eq!(serde_json::to_string(&second.2).unwrap(), serde_json::to_string(&expected_payload).unwrap());
+
+        // A different n_levels is a different payload - distinct cache slot.
+        let other = cache.get_or_build(L2FrameKey::new("BTC", Some(5), None, 50), build);
+        assert!(!Arc::ptr_eq(&first, &other));
     }
 
     #[test]

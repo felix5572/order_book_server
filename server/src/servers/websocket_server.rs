@@ -1,12 +1,13 @@
 use crate::{
     listeners::order_book::{
-        ActiveL2Params, InternalMessage, L2ParamGuard, L2SnapshotParams, OrderBookListener, hl_listen_hft,
+        ActiveL2Params, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey, L2ParamGuard, L2SnapshotParams,
+        OrderBookListener, hl_listen_hft,
     },
     metrics::{
         BBO_CHANGES_TOTAL, BROADCAST_RECEIVERS, BROADCASTS_TOTAL, CHANNEL_DROPS_TOTAL, CHANNEL_LAG,
         MESSAGES_SENT_TOTAL, ORDERBOOK_HEIGHT, WS_CONNECTIONS_ACTIVE, WS_CONNECTIONS_TOTAL, WS_SEND_ERRORS_TOTAL,
     },
-    order_book::{Coin, Px, Snapshot, Sz},
+    order_book::{Coin, Snapshot},
     prelude::*,
     types::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
@@ -35,11 +36,13 @@ use yawc::{FrameView, OpCode, WebSocket};
 use crate::ServerConfig;
 
 /// Per-(coin, params) cached L2 broadcast. `hash` is used for change-based dedup;
-/// `payload` is resent verbatim (with refreshed `time`) when the heartbeat fires.
+/// `payload` is resent verbatim (with refreshed `time`) when the heartbeat fires,
+/// and is only stored when the L2 heartbeat is enabled (default off) - the
+/// change-driven sends use the broadcast's shared frames instead.
 struct L2Entry {
     hash: u64,
     last_sent: Instant,
-    payload: L2Book,
+    payload: Option<L2Book>,
 }
 
 /// Raw fixed-point (px, sz) pairs for the best bid and ask. Comparing these
@@ -48,11 +51,13 @@ struct L2Entry {
 type BboKey = (Option<(u64, u64)>, Option<(u64, u64)>);
 
 /// Per-coin cached BBO broadcast. `tuple` is used for change-based dedup;
-/// `payload` is resent verbatim (with refreshed `time`) when the heartbeat fires.
+/// `payload` is resent verbatim (with refreshed `time`) when the heartbeat fires,
+/// and is only stored when the BBO heartbeat is enabled (default off) - the
+/// change-driven sends use the broadcast's shared frames instead.
 struct BboEntry {
     tuple: BboKey,
     last_sent: Instant,
-    payload: Bbo,
+    payload: Option<Bbo>,
 }
 
 /// Per-subscription dedup/heartbeat cache key. `n_levels` MUST be part of the
@@ -296,6 +301,9 @@ async fn handle_socket(
     let mut last_l2: HashMap<String, L2Entry> = HashMap::new();
     // Per-coin cache for BBO dedup + heartbeat resend
     let mut last_bbo: HashMap<String, BboEntry> = HashMap::new();
+    // Parsed orderUpdates user addresses, so the hot broadcast path doesn't
+    // re-parse the hex string per message. Bounded by the subscription cap.
+    let mut user_addrs: HashMap<String, alloy::primitives::Address> = HashMap::new();
     // Shared L2 variant registry + this connection's refcount guards (one per variant
     // shape it subscribes to). Dropping the map on disconnect releases every guard,
     // so cleanup is robust to abnormal disconnects.
@@ -327,7 +335,7 @@ async fn handle_socket(
                 match recv_result {
                     Ok(msg) => {
                         match msg.as_ref() {
-                            InternalMessage::Snapshot{ l2_snapshots, time, dirty, universe: new_universe } => {
+                            InternalMessage::Snapshot{ l2_snapshots, time, dirty, universe: new_universe, l2_frames } => {
                                 if let Some(u) = new_universe {
                                     universe = Arc::clone(u);
                                 }
@@ -335,7 +343,7 @@ async fn handle_socket(
                                     if !alive { break; }
                                     // Skip BBO subs here - they get fast updates via BboUpdate
                                     if !matches!(sub, Subscription::Bbo { .. }) {
-                                        alive &= send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time, &mut last_l2, dirty, force_full_l2).await;
+                                        alive &= send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time, &mut last_l2, dirty, force_full_l2, l2_frames, l2_hb.is_some()).await;
                                     }
                                 }
                                 force_full_l2 = false;
@@ -345,7 +353,7 @@ async fn handle_socket(
                                 for sub in manager.subscriptions() {
                                     if !alive { break; }
                                     if let Subscription::Bbo { coin } = sub {
-                                        alive &= send_ws_data_from_bbo(&mut socket, coin, bbos, *time, &mut last_bbo).await;
+                                        alive &= send_ws_data_from_bbo(&mut socket, coin, bbos, *time, &mut last_bbo, bbo_hb.is_some()).await;
                                     }
                                 }
                             },
@@ -412,7 +420,7 @@ async fn handle_socket(
                                             }
                                         }
                                         Subscription::OrderUpdates { user } => {
-                                            alive &= send_ws_order_updates(&mut socket, user, *time, *height, statuses_by_coin).await;
+                                            alive &= send_ws_order_updates(&mut socket, user, *time, *height, statuses_by_coin, &mut user_addrs).await;
                                         }
                                         _ => {}
                                     }
@@ -447,11 +455,15 @@ async fn handle_socket(
                             let Some(hb) = l2_hb else { continue };
                             let key = l2_cache_key(coin, *n_sig_figs, *mantissa, *n_levels);
                             if let Some(entry) = last_l2.get_mut(&key) {
-                                if now.duration_since(entry.last_sent) >= hb {
-                                    entry.payload.set_time(now_ms);
+                                // payload is always Some when the heartbeat is enabled
+                                // (the change-driven send stores it for exactly this).
+                                if now.duration_since(entry.last_sent) >= hb
+                                    && let Some(payload) = entry.payload.as_mut()
+                                {
+                                    payload.set_time(now_ms);
                                     entry.last_sent = now;
                                     BROADCASTS_TOTAL.with_label_values(&["l2_heartbeat"]).inc();
-                                    let payload = entry.payload.clone();
+                                    let payload = payload.clone();
                                     alive &= send_socket_message(&mut socket, ServerResponse::L2Book(payload)).await;
                                 }
                             }
@@ -459,11 +471,13 @@ async fn handle_socket(
                         Subscription::Bbo { coin } => {
                             let Some(hb) = bbo_hb else { continue };
                             if let Some(entry) = last_bbo.get_mut(coin) {
-                                if now.duration_since(entry.last_sent) >= hb {
-                                    entry.payload.time = now_ms;
+                                if now.duration_since(entry.last_sent) >= hb
+                                    && let Some(payload) = entry.payload.as_mut()
+                                {
+                                    payload.time = now_ms;
                                     entry.last_sent = now;
                                     BROADCASTS_TOTAL.with_label_values(&["bbo_heartbeat"]).inc();
-                                    let payload = entry.payload.clone();
+                                    let payload = payload.clone();
                                     alive &= send_socket_message(&mut socket, ServerResponse::Bbo(payload)).await;
                                 }
                             }
@@ -631,12 +645,14 @@ async fn receive_client_message(
 async fn send_ws_data_from_bbo(
     socket: &mut WebSocket,
     coin: &str,
-    bbos: &HashMap<Coin, (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>)>,
+    bbos: &HashMap<Coin, CoinBbo>,
     time: u64,
     last_bbo: &mut HashMap<String, BboEntry>,
+    store_payload: bool,
 ) -> bool {
     // Borrow<str> lookup - no Coin/String allocation per subscription per update.
-    if let Some((best_bid, best_ask)) = bbos.get(coin) {
+    if let Some(cb) = bbos.get(coin) {
+        let (best_bid, best_ask) = (&cb.raw.0, &cb.raw.1);
         // Dedup on the raw fixed-point values BEFORE rendering anything: the
         // strings are only built when the BBO actually changed.
         let current: BboKey = (
@@ -645,23 +661,24 @@ async fn send_ws_data_from_bbo(
         );
 
         if last_bbo.get(coin).map(|e| e.tuple) != Some(current) {
-            // Use the canonical wire format (Px/Sz::to_str) - matches what the
-            // L2 path emits and skips the Formatter machinery.
-            let bid = best_bid
-                .as_ref()
-                .map(|(px, sz, n)| crate::types::Level::new(px.to_str(), sz.to_str(), *n as usize));
-            let ask = best_ask
-                .as_ref()
-                .map(|(px, sz, n)| crate::types::Level::new(px.to_str(), sz.to_str(), *n as usize));
+            // Canonical wire format (Px/Sz::to_str) - matches what the L2 path
+            // emits. Rendered inside the shared-frame builder, so it runs once
+            // per coin per broadcast (plus once per heartbeat-enabled
+            // connection for the resend payload) instead of per connection.
+            let render = || {
+                let bid =
+                    best_bid.as_ref().map(|(px, sz, n)| crate::types::Level::new(px.to_str(), sz.to_str(), *n as usize));
+                let ask =
+                    best_ask.as_ref().map(|(px, sz, n)| crate::types::Level::new(px.to_str(), sz.to_str(), *n as usize));
+                Bbo { coin: coin.to_string(), time, bid, ask }
+            };
 
             BBO_CHANGES_TOTAL.with_label_values(&[coin]).inc();
             BROADCASTS_TOTAL.with_label_values(&["bbo"]).inc();
-            let bbo = Bbo { coin: coin.to_string(), time, bid, ask };
-            last_bbo.insert(
-                coin.to_string(),
-                BboEntry { tuple: current, last_sent: Instant::now(), payload: bbo.clone() },
-            );
-            return send_socket_message(socket, ServerResponse::Bbo(bbo)).await;
+            let frame = cb.frame.get_or_serialize(|| ServerResponse::Bbo(render()));
+            let payload = store_payload.then(render);
+            last_bbo.insert(coin.to_string(), BboEntry { tuple: current, last_sent: Instant::now(), payload });
+            return send_socket_frame(socket, frame).await;
         }
     }
     true
@@ -720,6 +737,7 @@ async fn send_socket_payload(socket: &mut WebSocket, payload: bytes::Bytes) -> b
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_ws_data_from_snapshot(
     socket: &mut WebSocket,
     subscription: &Subscription,
@@ -728,6 +746,8 @@ async fn send_ws_data_from_snapshot(
     last_l2: &mut HashMap<String, L2Entry>,
     dirty: &HashSet<Coin>,
     force_full: bool,
+    l2_frames: &L2FrameCache,
+    store_payload: bool,
 ) -> bool {
     // BBO subscriptions are filtered out by the caller (they are served by the
     // BboUpdate fast path), so only L2Book needs handling here.
@@ -744,7 +764,9 @@ async fn send_ws_data_from_snapshot(
         }
 
         let n_levels = n_levels.unwrap_or(DEFAULT_LEVELS);
-        let exported: [Vec<crate::types::Level>; 2] = match snapshot.get(coin.as_str()) {
+        // Resolve the data source BEFORE consulting the shared frame cache, so
+        // the raced-variant early-return below doesn't poison the cache.
+        let variant = match snapshot.get(coin.as_str()) {
             Some(per_coin) => {
                 let Some(variant) = per_coin.get(&L2SnapshotParams::new(*n_sig_figs, *mantissa)) else {
                     // Coin present but this variant shape hasn't been built yet
@@ -752,31 +774,46 @@ async fn send_ws_data_from_snapshot(
                     error!("Variant for coin {coin} not found");
                     return true;
                 };
-                variant.truncate(n_levels).export_inner_snapshot()
+                Some(variant)
             }
             // The coin's book emptied and the multi-book evicted it. Send an
             // empty snapshot so subscribers learn the book is gone instead of
             // keeping the last non-empty payload on screen forever.
-            None => [Vec::new(), Vec::new()],
+            None => None,
         };
 
-        // Hash the snapshot for dedup comparison. Level derives Hash, so we
-        // walk the [Vec<Level>; 2] directly - the prior `format!("{:?}", snapshot)`
-        // path allocated a Debug-format string per L2 subscription per broadcast,
-        // saturating glibc/jemalloc under load and dominating allocator pressure.
-        // FxHasher instead of SipHash: this hashes our own payload (no DoS
-        // surface) and runs per subscription per broadcast.
-        use std::hash::{Hash, Hasher};
-        let mut hasher = rustc_hash::FxHasher::default();
-        exported.hash(&mut hasher);
-        let current_hash = hasher.finish();
+        // Truncate/export (one String per level!), hash, and serialize ONCE per
+        // (coin, shape, nLevels) per broadcast via the shared frame cache - the
+        // old path repeated all of it per subscribed connection.
+        let built = l2_frames.get_or_build(L2FrameKey::new(coin, *n_sig_figs, *mantissa, n_levels), || {
+            let exported: [Vec<crate::types::Level>; 2] =
+                variant.map_or_else(|| [Vec::new(), Vec::new()], |v| v.truncate(n_levels).export_inner_snapshot());
+
+            // Hash the exported levels for dedup comparison. Level derives Hash;
+            // FxHasher because this hashes our own payload (no DoS surface).
+            use std::hash::{Hash, Hasher};
+            let mut hasher = rustc_hash::FxHasher::default();
+            exported.hash(&mut hasher);
+            let hash = hasher.finish();
+
+            let l2_book =
+                L2Book::from_l2_snapshot(coin.clone(), exported, time, *n_sig_figs, *mantissa, Some(n_levels));
+            let frame = match serde_json::to_string(&ServerResponse::L2Book(l2_book.clone())) {
+                Ok(json) => bytes::Bytes::from(json),
+                Err(err) => {
+                    error!("Server response serialization error: {err}");
+                    bytes::Bytes::new() // skipped by send_socket_frame
+                }
+            };
+            (hash, frame, l2_book)
+        });
+        let (current_hash, frame, payload) = (built.0, &built.1, &built.2);
 
         if last_l2.get(&key).map(|e| e.hash) != Some(current_hash) {
             BROADCASTS_TOTAL.with_label_values(&["l2"]).inc();
-            let l2_book =
-                L2Book::from_l2_snapshot(coin.clone(), exported, time, *n_sig_figs, *mantissa, Some(n_levels));
-            last_l2.insert(key, L2Entry { hash: current_hash, last_sent: Instant::now(), payload: l2_book.clone() });
-            return send_socket_message(socket, ServerResponse::L2Book(l2_book)).await;
+            let payload = store_payload.then(|| payload.clone());
+            last_l2.insert(key, L2Entry { hash: current_hash, last_sent: Instant::now(), payload });
+            return send_socket_frame(socket, frame.clone()).await;
         }
         // else: skip, L2 unchanged
     }
@@ -823,9 +860,19 @@ async fn send_ws_order_updates(
     time: u64,
     height: u64,
     statuses_by_coin: &HashMap<String, crate::listeners::order_book::CoinStatuses>,
+    user_addrs: &mut HashMap<String, alloy::primitives::Address>,
 ) -> bool {
-    let Ok(user_addr) = user.parse::<alloy::primitives::Address>() else {
-        return true; // invalid address; validation prevents this at subscribe time
+    // Parse each subscription's address once, not once per broadcast.
+    let user_addr = match user_addrs.get(user) {
+        Some(addr) => *addr,
+        None => match user.parse::<alloy::primitives::Address>() {
+            Ok(addr) => {
+                user_addrs.insert(user.to_string(), addr);
+                addr
+            }
+            // invalid address; validation prevents this at subscribe time
+            Err(_) => return true,
+        },
     };
 
     let user_updates: Vec<OrderUpdate> = statuses_by_coin
