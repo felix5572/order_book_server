@@ -320,7 +320,8 @@ The in-memory book is kept consistent with the node through three layers:
 
 1. **Startup backfill** - at boot, the watchers read the streaming files from the node's last persisted height (not from end-of-file), so data written before the server started is not skipped.
 2. **Snapshot replay** - every book-affecting event that arrives while a snapshot is being generated is cached and replayed above the snapshot height, making the snapshot-to-stream handoff gapless.
-3. **Desync self-healing** - any provable event loss (parse/apply error on a batch, oversized batch, watcher buffer discard, pending-cache eviction) marks the book out-of-sync and triggers an automatic background snapshot re-fetch. The book keeps serving its current state until the fresh snapshot lands. Each loss is recorded with a block-height bound, and the out-of-sync flag only clears once a snapshot's height actually covers that bound - a snapshot generated from lagging node state cannot mask a newer loss. Each occurrence is counted in `orderbook_desyncs_total{reason}`.
+3. **Desync self-healing** - any provable event loss (parse/apply error on a batch, oversized batch, watcher buffer discard, pending-cache eviction) marks the book out-of-sync and triggers an automatic background snapshot re-fetch. The book keeps serving its current state until the fresh snapshot lands. Each loss is recorded with a block-height bound, and the out-of-sync flag only clears once a snapshot's height actually covers that bound - a snapshot generated from lagging node state cannot mask a newer loss. Each occurrence is counted in `orderbook_desyncs_total{reason}`. The status/diff pairing caches are evicted by age (60 s): expected orphans are dropped silently, while an unpaired diff aging out counts as data loss and re-syncs the book.
+4. **Watcher watchdog** - if a file watcher thread dies (or every watcher channel closes), the server exits so the process supervisor restarts it into a clean re-sync, instead of serving a silently frozen book that still reports `ready`. A watcher that is alive but has produced no events for 2 minutes is loud-logged (restarting would not fix a stalled node).
 
 ### Deduplication
 
@@ -344,7 +345,7 @@ Dedup state is tracked per `(coin, nSigFigs, mantissa, nLevels)` tuple, so subsc
 | L2 dedup overhead | ~10us |
 | Savings when unchanged | ~500us |
 
-Fan-out payloads (trades, book diffs, L4 updates) are grouped per coin once in the listener and shared across all subscribed connections via `Arc` - per-connection cost is a map lookup, not a copy of the batch.
+Fan-out payloads (trades, book diffs, L4 updates) are grouped per coin once in the listener and shared across all subscribed connections via `Arc`. The JSON wire frame is also serialized once per coin - the first subscribed connection builds it, every other connection sends the same refcounted bytes zero-copy - so fan-out CPU no longer scales with the subscriber count. `TCP_NODELAY` is set on every accepted socket so small frames (BBO updates) are never delayed by Nagle's algorithm.
 
 ## Prometheus Metrics
 
@@ -571,6 +572,10 @@ Both use `yawc` with `permessage-deflate`. This fork increases the broadcast cha
 - **Graceful shutdown** via `Ctrl+C` / `SIGINT` signal handling
 - **Configurable log levels** (`--log-level error|warn|info|debug|trace`)
 - **Faster JSON parsing** with `sonic-rs` on the hot path
+- **Shared fan-out serialization** - trades/bookDiffs/l4Book wire frames are serialized once per coin and shared (refcounted bytes) across all subscribed connections
+- **Batched event draining** - up to 64 watcher events are parsed outside the listener lock and applied under a single acquisition
+- **Latency-tuned build & runtime** - thin-LTO single-codegen-unit release profile, `mimalloc` global allocator, `TCP_NODELAY` on accepted sockets
+- **Watcher watchdog** - dead watcher threads exit the process (supervisor restarts into a clean re-sync) instead of silently freezing the book
 - **Systemd service file** included for production deployment
 - **Comprehensive CLI** with auto-detected defaults and full override support
 
