@@ -107,6 +107,10 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     // depth 32 vs ~1.7% at 16384, in the same conditions. 16384 gives seconds of
     // headroom; each slot is one Arc pointer and a persistently-slow consumer
     // still sheds via Lagged, so memory stays bounded.
+    // TODO: this is a mitigation, not a fix — loss is still cross-channel
+    // (residual ~1.7% above) and every connection is woken for the full L4
+    // firehose. Splitting into per-message-type channels, subscribed per
+    // connection as needed, would decouple loss domains and wakeup cost.
     let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(16384);
 
     // Market filter flags from config
