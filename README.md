@@ -228,9 +228,9 @@ Response:
 ```
 Response:
 ```json
-{ "channel": "trades", "data": [{ "coin": "BTC", "side": "A", "px": "106296.0", "sz": "0.00017", "time": 1751430933565, "hash": "0x...", "tid": 293353986402527, "user": "0x..." }] }
+{ "channel": "trades", "data": [{ "coin": "BTC", "side": "A", "px": "106296.0", "sz": "0.00017", "time": 1751430933565, "hash": "0x...", "tid": 293353986402527, "users": ["0x<buyer>", "0x<seller>"] }] }
 ```
-Trades that are liquidations include an additional `liquidation` field with `liquidatedUser`, `markPx`, and `method`.
+Each trade is one print per match, following the official API schema: `side` is the aggressing (taker) side and `users` is `[buyer, seller]`.
 
 ### Subscribe to Book Diffs
 ```json

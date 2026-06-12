@@ -97,13 +97,17 @@ impl Trade {
     /// public websocket schema: `side` is the aggressing (taker) side — the
     /// leg whose `crossed` flag is set — and `users` is `[buyer, seller]`.
     ///
-    /// Returns `None` if the legs do not belong to the same match (coin or
-    /// trade id mismatch); callers should skip such legs rather than emit
-    /// schema-breaking output.
+    /// Returns `None` if the legs do not form a valid match (coin or trade id
+    /// mismatch, or not one buy leg and one sell leg); callers should skip
+    /// such legs rather than emit schema-breaking output.
     pub(crate) fn from_fills(bid: NodeDataFill, ask: NodeDataFill) -> Option<Self> {
         let NodeDataFill(buyer, bid_fill) = bid;
         let NodeDataFill(seller, ask_fill) = ask;
-        if bid_fill.coin != ask_fill.coin || bid_fill.tid != ask_fill.tid {
+        if bid_fill.coin != ask_fill.coin
+            || bid_fill.tid != ask_fill.tid
+            || bid_fill.side != Side::Bid
+            || ask_fill.side != Side::Ask
+        {
             return None;
         }
         // "Side is aggressing side for trades" (public API notation): the

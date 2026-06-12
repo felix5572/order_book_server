@@ -539,6 +539,10 @@ impl TradePairer {
                     let (bid, ask) = if fill.1.side == Side::Bid { (fill, prev) } else { (prev, fill) };
                     if let Some(trade) = Trade::from_fills(bid, ask) {
                         by_coin.entry(trade.coin.clone()).or_default().push(trade);
+                    } else {
+                        // Same tid but mismatched coin/sides: both legs are
+                        // unpairable, count them so this stays observable.
+                        TRADES_UNPAIRED_FILLS_TOTAL.inc_by(2);
                     }
                 }
                 Some(_) => {
