@@ -154,6 +154,19 @@ The handoff from snapshot to live stream is **gapless**: at startup the server b
 | `--bbo-only` | `false` | Lightweight BBO-only mode (~100 MB RAM, vs ~1 GB for full markets). Disables L2/L4/Trades subscriptions |
 | `--l2book-heartbeat-ms` | `0` | If > 0, resend the last `l2Book` payload for each active subscription every N ms when nothing has changed. See [Heartbeats](#heartbeats) |
 | `--bbo-heartbeat-ms` | `0` | If > 0, resend the last `bbo` payload for each active subscription every N ms when nothing has changed. See [Heartbeats](#heartbeats) |
+| `--no-resync` | `false` | Tolerate drift instead of re-syncing. Data-loss events are still counted in `orderbook_desyncs_total` but never trigger a snapshot re-fetch. See [Drift tolerance](#drift-tolerance) |
+
+### Drift tolerance
+
+By default, whenever the server detects provable data loss (e.g. a node stream stalls and pending order halves are force-evicted, or a backfill batch arrives too late to replay) it marks the book out-of-sync and re-fetches a full snapshot to rebuild from a known-good state.
+
+In rare conditions this re-sync can fail to converge: if loss keeps being recorded at the live stream head faster than a snapshot can be fetched, every snapshot lands at a height *below* the recorded loss bound, so the re-sync flag never clears and the server re-fetches in a loop. `--no-resync` is an operator escape hatch for that case:
+
+- Desyncs are still counted in `orderbook_desyncs_total` (per reason), so drift stays visible in metrics.
+- No snapshot re-fetch is ever scheduled; the book keeps serving live events through the drift.
+- **The book does NOT self-heal** — missing orders stay missing until the process is restarted.
+
+Use it only when a non-converging re-sync loop is worse than serving a knowingly-incomplete book. The startup snapshot still loads normally; only *re*-syncs are suppressed. The right long-term fix is addressing the upstream cause (typically the OrderStatus stream lagging the OrderDiff stream), not leaving this flag on.
 
 ### Heartbeats
 
