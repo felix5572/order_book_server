@@ -105,6 +105,14 @@ struct Args {
     /// Log level: error, warn, info, debug, trace
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Tolerate drift instead of re-syncing. When set, data-loss events are still
+    /// counted in metrics (orderbook_desyncs_total) but never trigger a snapshot
+    /// re-fetch. The book keeps serving live events through drift and does NOT
+    /// self-heal until restarted. Use only when a non-converging re-sync loop is
+    /// worse than a knowingly-incomplete book.
+    #[arg(long, default_value = "false")]
+    no_resync: bool,
 }
 
 /// Start the Prometheus metrics HTTP server
@@ -167,6 +175,7 @@ async fn main() -> Result<()> {
         bbo_only: args.bbo_only,
         l2book_heartbeat_ms: args.l2book_heartbeat_ms,
         bbo_heartbeat_ms: args.bbo_heartbeat_ms,
+        no_resync: args.no_resync,
     };
 
     println!("Orderbook Server v{}", env!("CARGO_PKG_VERSION"));
@@ -198,6 +207,9 @@ async fn main() -> Result<()> {
         println!("  Metrics: http://0.0.0.0:{}/metrics", config.metrics_port);
     }
     println!("  Log level: {}", args.log_level);
+    if config.no_resync {
+        println!("  Re-sync: DISABLED (--no-resync) — drift tolerated, book will NOT self-heal");
+    }
     println!();
 
     // Spawn uptime counter

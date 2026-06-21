@@ -127,7 +127,10 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     // Central task: listen to messages and forward them for distribution
     let listener = {
         let internal_message_tx = internal_message_tx.clone();
-        OrderBookListener::new(Some(internal_message_tx), ignore_spot, active_l2_params.clone(), market_filter)
+        let mut listener =
+            OrderBookListener::new(Some(internal_message_tx), ignore_spot, active_l2_params.clone(), market_filter);
+        listener.set_tolerate_drift(config.no_resync);
+        listener
     };
     let listener = Arc::new(Mutex::new(listener));
     let listener_task = {

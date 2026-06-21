@@ -115,6 +115,12 @@ pub(crate) struct OrderBookListener {
     // partial-line discard, pending-cache eviction, apply errors). The main loop
     // reacts by re-fetching a snapshot, which rebuilds the book and clears this.
     needs_resync: bool,
+    // When true, mark_desynced still counts the desync metric but does NOT set
+    // needs_resync, so the book keeps serving live events through drift instead
+    // of re-fetching a snapshot. Operator opt-in (--no-resync) for environments
+    // where a continuously-non-converging re-sync loop is worse than a knowingly
+    // incomplete book. Drift is NOT self-healed while this is set.
+    tolerate_drift: bool,
     // Upper bound on the height of any unrecovered data loss (0 = none).
     // init_from_snapshot may only clear needs_resync when the snapshot height
     // covers this bound - a loss that occurred DURING a fetch can sit above the
@@ -172,6 +178,7 @@ impl OrderBookListener {
             cached_event_count: 0,
             cache_event_cap: MAX_CACHED_EVENTS,
             needs_resync: false,
+            tolerate_drift: false,
             max_loss_height: 0,
             last_seen_height: 0,
             internal_message_tx,
@@ -187,6 +194,13 @@ impl OrderBookListener {
     /// Clone of the shared active-variant registry, for handing to connections.
     pub(crate) fn active_l2_params(&self) -> ActiveL2Params {
         self.active_l2_params.clone()
+    }
+
+    /// Opt out of snapshot re-fetch on data loss. The book keeps applying live
+    /// events through drift; desyncs are still counted in metrics but never
+    /// trigger a re-sync. See `tolerate_drift`.
+    pub(crate) fn set_tolerate_drift(&mut self, tolerate: bool) {
+        self.tolerate_drift = tolerate;
     }
 
     pub(crate) const fn is_ready(&self) -> bool {
@@ -230,6 +244,12 @@ impl OrderBookListener {
         const LOSS_HEIGHT_MARGIN: u64 = 100;
 
         ORDERBOOK_DESYNCS_TOTAL.with_label_values(&[reason]).inc();
+        // Operator opted to ride out drift: count the desync so it stays visible
+        // in metrics, but do NOT schedule a re-fetch. The book keeps serving live
+        // events and will not self-heal until restarted or the flag is cleared.
+        if self.tolerate_drift {
+            return;
+        }
         if !self.needs_resync {
             error!("Order book marked out-of-sync ({reason}); scheduling snapshot re-fetch");
         }
@@ -1601,6 +1621,21 @@ mod tests {
             listener.needs_resync(),
             "a backfill batch arriving after the replay cache is gone cannot be applied safely"
         );
+    }
+
+    #[test]
+    fn test_tolerate_drift_suppresses_resync() {
+        let (mut listener, _rx) = ready_listener();
+        listener.set_tolerate_drift(true);
+        // A loss that would normally schedule a re-fetch...
+        listener.mark_desynced("pending_cache_cleared");
+        assert!(
+            !listener.needs_resync(),
+            "with tolerate_drift set, a desync must not schedule a snapshot re-fetch"
+        );
+        // ...and the higher-level late-backfill path stays quiet too.
+        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 1, 99)));
+        assert!(!listener.needs_resync(), "tolerate_drift must suppress the late-backfill desync path as well");
     }
 
     // ==================== Per-coin fan-out grouping ====================

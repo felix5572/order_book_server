@@ -62,4 +62,8 @@ pub struct ServerConfig {
     /// Resend the last bbo payload every N ms when nothing has changed.
     /// 0 = disabled (default).
     pub bbo_heartbeat_ms: u64,
+    /// Tolerate drift: when true, data-loss events are counted in metrics but
+    /// never trigger a snapshot re-fetch. The book keeps serving live events
+    /// through drift and does NOT self-heal until restarted. Off by default.
+    pub no_resync: bool,
 }
