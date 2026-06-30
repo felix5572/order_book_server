@@ -133,9 +133,9 @@ The handoff from snapshot to live stream is **gapless**: at startup the server b
 | `--docker-container` | `hyperliquid_hlnode` | Container name for `docker exec` (docker mode only) |
 | `--hlnode-binary` | `hl-node` | Path to hl-node binary on host (direct mode only) |
 | `--data-dir` | `~` | Path to the folder containing `node_fills_streaming/`, `node_order_statuses_streaming/`, and `node_raw_book_diffs_streaming/`. This is where the node writes its real-time event files |
-| `--abci-state-path` | auto | Path to `abci_state.rmp`. Auto-detected at `<data-dir>/hl/hyperliquid_data/abci_state.rmp` in direct mode. Override if your node stores state in a non-standard location |
+| `--abci-state-path` | auto | Path to `abci_state.rmp`. Auto-detected at `<data-dir>/../hyperliquid_data/abci_state.rmp` in direct mode (a sibling of `--data-dir`, alongside `visor_abci_state.json`). Override if your node stores state in a non-standard location |
 | `--snapshot-output-path` | auto | Path where `hl-node` writes its JSON snapshot output. Defaults to `/tmp/hl_snapshot.json`. Override if `/tmp` is not writable or you want snapshots stored elsewhere |
-| `--visor-state-path` | auto | Path to `visor_abci_state.json`, which contains the current block height. Auto-detected relative to `--data-dir`. Override if your visor state is in a non-standard location |
+| `--visor-state-path` | auto | Path to `visor_abci_state.json`, which contains the current block height. Auto-detected at `<data-dir>/../hyperliquid_data/visor_abci_state.json` (the *parent* of `--data-dir`, since `hyperliquid_data/` is a sibling of the `data/` event dir). Override if your visor state is in a non-standard location |
 
 ### Market Types
 
