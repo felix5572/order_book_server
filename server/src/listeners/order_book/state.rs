@@ -1,7 +1,7 @@
 use crate::{
     listeners::order_book::L2Snapshots,
     order_book::{
-        Coin, InnerOrder, Oid, Snapshot,
+        Coin, InnerOrder, Oid, Px, Snapshot,
         multi_book::{OrderBooks, Snapshots},
     },
     prelude::*,
@@ -25,9 +25,11 @@ pub(super) struct OrderBookState {
     // Entries carry their insertion time so cleanup can evict by age instead of
     // nuking the whole map (which killed in-flight halves and forced re-syncs).
     pending_order_statuses: HashMap<Oid, (NodeDataOrderStatus, Instant)>,
-    // Persistent cache of New diffs (sz values) waiting for their OrderStatuses
+    // Persistent cache of New diffs (sz + resting px) waiting for their OrderStatuses
     // This is the other half of bidirectional caching - handles when Diff arrives BEFORE Status
-    pending_new_diffs: HashMap<Oid, (crate::order_book::types::Sz, Instant)>,
+    // px comes from the diff (official PR#9): the diff's px is the true resting price -
+    // trigger/converted orders can carry a different px on the status.
+    pending_new_diffs: HashMap<Oid, (crate::order_book::types::Sz, Px, Instant)>,
 }
 
 impl OrderBookState {
@@ -151,7 +153,7 @@ impl OrderBookState {
         }
 
         let before = self.pending_new_diffs.len();
-        self.pending_new_diffs.retain(|_, (_, at)| at.elapsed() < PENDING_MAX_AGE);
+        self.pending_new_diffs.retain(|_, (_, _, at)| at.elapsed() < PENDING_MAX_AGE);
         let aged_diffs = before - self.pending_new_diffs.len();
         if aged_diffs > 0 {
             // A New diff with no status in 60s: the order is missing from the book.
@@ -192,8 +194,8 @@ impl OrderBookState {
         HashMap<
             Coin,
             (
-                Option<(crate::order_book::Px, crate::order_book::Sz, u32)>,
-                Option<(crate::order_book::Px, crate::order_book::Sz, u32)>,
+                Option<(Px, crate::order_book::Sz, u32)>,
+                Option<(Px, crate::order_book::Sz, u32)>,
             ),
         >,
     ) {
@@ -219,12 +221,14 @@ impl OrderBookState {
             let oid = Oid::new(order_status.order.oid);
 
             // Check if there's a pending New diff for this order
-            if let Some((sz, _)) = self.pending_new_diffs.remove(&oid) {
+            if let Some((sz, px, _)) = self.pending_new_diffs.remove(&oid) {
                 // Both arrived - add order immediately!
                 let time = order_status.time.and_utc().timestamp_millis();
                 let order_coin = Coin::new(&order_status.order.coin);
                 let mut inner_order: InnerL4Order = order_status.try_into()?;
                 inner_order.modify_sz(sz);
+                // Official PR#9: resting px comes from the diff, not the status.
+                inner_order.modify_px(px);
                 inner_order.convert_trigger(time.max(0) as u64);
                 self.order_book.add_order(inner_order);
                 changed_coins.insert(order_coin.clone());
@@ -250,7 +254,7 @@ impl OrderBookState {
         for (_, at) in self.pending_order_statuses.values_mut() {
             *at = backdated;
         }
-        for (_, at) in self.pending_new_diffs.values_mut() {
+        for (_, _, at) in self.pending_new_diffs.values_mut() {
             *at = backdated;
         }
     }
@@ -283,6 +287,10 @@ impl OrderBookState {
             let inner_diff = diff.diff().try_into()?;
             match inner_diff {
                 InnerOrderDiff::New { sz } => {
+                    // Official PR#9: the diff's px is the true resting price. Parse failure =
+                    // schema drift -> fail fast (silently falling back to the status px would
+                    // re-introduce wrong resting prices).
+                    let diff_px = Px::parse_from_str(diff.px())?;
                     // Check if OrderStatus already arrived
                     if let Some((order, _)) = self.pending_order_statuses.remove(&oid) {
                         // Both arrived - add order immediately!
@@ -290,14 +298,40 @@ impl OrderBookState {
                         let order_coin = Coin::new(&order.order.coin);
                         let mut inner_order: InnerL4Order = order.try_into()?;
                         inner_order.modify_sz(sz);
+                        inner_order.modify_px(diff_px);
                         #[allow(clippy::unwrap_used)]
                         inner_order.convert_trigger(time.try_into().unwrap());
                         self.order_book.add_order(inner_order);
                         changed_coins.insert(order_coin.clone());
                         log::debug!("Order added (diff arrived after status): oid={:?} coin={:?}", oid, order_coin);
+                    } else if diff.special_address() {
+                        // Official PR#10: HIP-2 / assistance-fund orders never get an order
+                        // status event. Without this branch the diff would sit in
+                        // pending_new_diffs for 60s, be evicted as data loss (forcing a
+                        // re-sync), and the spot book would permanently miss the system
+                        // market maker's liquidity. Insert directly as an Alo limit order.
+                        let inner_order = InnerL4Order {
+                            user: diff.user(),
+                            coin: coin.clone(),
+                            side: diff.side(),
+                            limit_px: diff_px,
+                            sz,
+                            oid: oid.value(),
+                            timestamp: time,
+                            trigger_condition: "N/A".to_string(),
+                            is_trigger: false,
+                            trigger_px: "0.0".to_string(),
+                            is_position_tpsl: false,
+                            reduce_only: false,
+                            order_type: "Limit".to_string(),
+                            tif: Some("Alo".to_string()),
+                            cloid: None,
+                        };
+                        self.order_book.add_order(inner_order);
+                        changed_coins.insert(coin);
                     } else {
-                        // Status hasn't arrived yet - cache the diff size
-                        self.pending_new_diffs.insert(oid.clone(), (sz, Instant::now()));
+                        // Status hasn't arrived yet - cache the diff size + resting px
+                        self.pending_new_diffs.insert(oid.clone(), (sz, diff_px, Instant::now()));
                     }
                 }
                 InnerOrderDiff::Update { new_sz, .. } => {
@@ -365,6 +399,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "user": "0x0000000000000000000000000000000000000000",
             "oid": oid,
+            "side": "B",
             "px": "100.0",
             "coin": coin,
             "raw_book_diff": diff
@@ -387,6 +422,78 @@ mod tests {
             "block_number": 100,
             "events": diffs
         })).unwrap()
+    }
+
+    /// 自定义 user/px 的 diff fixture(special-address / diff-px 语义测试用)。
+    fn make_order_diff_full(coin: &str, oid: u64, user: &str, px: &str, diff: OrderDiff) -> NodeDataOrderDiff {
+        serde_json::from_value(serde_json::json!({
+            "user": user,
+            "oid": oid,
+            "side": "B",
+            "px": px,
+            "coin": coin,
+            "raw_book_diff": diff
+        })).unwrap()
+    }
+
+    // ==================== 我方移植语义(官方 PR#9 / PR#10)====================
+
+    /// PR#10: HIP-2(0xFF..FF)的 New diff 没有 order status → 直接合成 Alo 单插簿,
+    /// 不进 pending_new_diffs(否则挂 60s 被当 data loss 驱逐并触发 resync)。
+    #[test]
+    fn test_special_address_new_diff_inserts_synthetic_order() {
+        let mut state = empty_state();
+        let hip2 = format!("0x{}", "ff".repeat(20));
+        let diff = make_order_diff_full("@260", 7, &hip2, "325.5", OrderDiff::New { sz: "3.0".to_string() });
+        let changed = state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
+        assert!(changed.contains(&Coin::new("@260")), "合成单应标记 coin 变更");
+        assert_eq!(state.order_count(), 1, "HIP-2 单应直接入簿");
+        assert_eq!(state.pending_new_diffs_count(), 0, "不应进 pending 等永远不来的 status");
+        let (_, _, snap) = state.compute_snapshot_for_coin(&Coin::new("@260")).unwrap();
+        let order = &snap.as_ref()[0][0];
+        assert_eq!(order.limit_px, Px::parse_from_str("325.5").unwrap());
+        assert_eq!(order.tif.as_deref(), Some("Alo"));
+    }
+
+    /// PR#9: 进簿价以 diff 的 px 为准(status px 可能不同, 如 trigger/转化单)。
+    /// 两个到达顺序都要覆盖: diff 先到(px 存 pending)/ status 先到(配对时用 diff px)。
+    #[test]
+    fn test_resting_px_comes_from_diff_not_status() {
+        // status px 固定 100.0(make_l4_order), diff px 用 101.5 → 簿上应是 101.5
+        for diff_first in [true, false] {
+            let mut state = empty_state();
+            let diff = make_order_diff_full(
+                "ETH", 42, "0x0000000000000000000000000000000000000000", "101.5",
+                OrderDiff::New { sz: "1.0".to_string() },
+            );
+            let status = make_order_status("ETH", 42, "open");
+            if diff_first {
+                state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
+                state.apply_order_statuses_hft(make_status_batch(vec![status])).unwrap();
+            } else {
+                state.apply_order_statuses_hft(make_status_batch(vec![status])).unwrap();
+                state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
+            }
+            assert_eq!(state.order_count(), 1);
+            let (_, _, snap) = state.compute_snapshot_for_coin(&Coin::new("ETH")).unwrap();
+            let order = &snap.as_ref()[0][0];
+            assert_eq!(
+                order.limit_px,
+                Px::parse_from_str("101.5").unwrap(),
+                "进簿价必须来自 diff(diff_first={diff_first})"
+            );
+        }
+    }
+
+    /// PR#9 fail-fast: diff px 解析失败 = schema 漂移 → Err, 不静默回退 status px。
+    #[test]
+    fn test_bad_diff_px_fails_fast() {
+        let mut state = empty_state();
+        let diff = make_order_diff_full(
+            "ETH", 43, "0x0000000000000000000000000000000000000000", "not-a-price",
+            OrderDiff::New { sz: "1.0".to_string() },
+        );
+        assert!(state.apply_order_diffs_hft(make_diff_batch(vec![diff])).is_err());
     }
 
     // ==================== Initialization Tests ====================

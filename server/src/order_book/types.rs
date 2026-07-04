@@ -54,6 +54,9 @@ impl Oid {
     pub(crate) const fn new(value: u64) -> Self {
         Self(value)
     }
+    pub(crate) const fn value(self) -> u64 {
+        self.0
+    }
 }
 
 pub(crate) trait InnerOrder: Clone {
@@ -65,6 +68,7 @@ pub(crate) trait InnerOrder: Clone {
     fn decrement_sz(&mut self, dec: Sz);
     fn fill(&mut self, maker_order: &mut Self) -> Sz;
     fn modify_sz(&mut self, sz: Sz);
+    fn modify_px(&mut self, px: Px);
     fn convert_trigger(&mut self, ts: u64);
 }
 

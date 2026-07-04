@@ -17,12 +17,23 @@ per-oid 双向 pending 配对(取代块级对齐)、parallel watchers + 有界 p
 metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、trades WS 带双方地址
 (counterparty 实时流!)、bookDiffs 订阅、--no-resync 漂移容忍、自带 229 测试、含 yawc。
 
-## 待移植的我方独有资产(按步进行)
+## 已移植(2026-07-05, 底座 47ce696 之上)
 
-1. PR#9:新单进簿价用 diff px(imperator 未含;含 pending_new_diffs 存 px)
-2. PR#10:HIP-2/援助基金合成单(imperator 未含;其 pending 模型下这类 diff 会挂 60s
-   被当 data loss 触发 resync —— 修复价值比旧底座更大)
-3. oracle 更新链(EventSource + Subscription::Oracle + SimplifiedOracleUpdate 推送)
+1. **官方 PR#9:新单进簿价用 diff 的 px**(status px 对 trigger/转化单可能不同)。
+   两个到达顺序都覆盖:diff 先到 → `pending_new_diffs` 由 (Sz,Instant) 扩为 (Sz,Px,Instant);
+   status 先到 → 配对时 `modify_px(diff px)`。px 解析失败 = schema 漂移 → Err fail-fast
+   (不静默回退 status px)。`InnerOrder` trait 增 `modify_px`。
+2. **官方 PR#10:HIP-2(0xFF..FF)/援助基金(0xFE..FE)合成单**。这类单永远没有 order
+   status 事件;在 imperator 的 pending 模型下会挂满 60s 被当 data loss 驱逐并**触发
+   resync**,且 spot book 长期缺系统做市商流动性。遇其 New diff 直接构造 Alo 限价单入簿。
+   `NodeDataOrderDiff` 增 `side` 字段(实测 raw diff JSON 自带)。
+   两者均带专属单测(state.rs "我方移植语义"节, 共 3 个);这两个修复适合回馈 PR 给 imperator。
+
+## 待移植
+
+3. oracle 更新链(EventSource + Subscription::Oracle + SimplifiedOracleUpdate 推送;
+   旧实现见 hyperliquid-trade 历史 order_book_server/server/src/{types/node_data.rs,
+   servers/websocket_server.rs} @ 换底座前)
 
 保留的我方文件:docs/(本账本 + HL_DATA_STRUCTURES.md)、analyze/hft_flow_monitor.py、
 tests/test_l4_websocket.py、start-websocket.sh。
