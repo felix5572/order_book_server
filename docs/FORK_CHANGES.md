@@ -43,6 +43,15 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
      不用共享帧机制)。**与旧 fork 的 wire 差异**:block_time 字符串 → time 毫秒 u64。
    - 测试 4 个:实机真实行解析(Mainnet 2026-07-04 样本, 含空 events 行)/三维展平
      合并/订阅校验(空列表拒绝+线上格式)/响应 channel 序列化。
+   - review 修正:oracle 批**不推进 `last_seen_height`**(否则旁路流会抬高 book 的
+     丢失恢复边界, resync 会等一个 book 流从未产出的高度)。
+
+## 部署(nube 节点机)
+
+`./start-server.sh`(direct 快照模式, 参数透传)。前提:节点开
+`--stream-with-block-info`(*_streaming 目录)+ `--write-hip3-oracle-updates`。
+探针:`tests/test_l4_websocket.py`(旧 wire 格式, 待按新订阅面翻新)。
+py 运维入口(install-service/status)后议。
 
 保留的我方文件:docs/(本账本 + HL_DATA_STRUCTURES.md)、analyze/hft_flow_monitor.py、
 tests/test_l4_websocket.py、start-websocket.sh。

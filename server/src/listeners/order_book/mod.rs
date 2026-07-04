@@ -741,8 +741,13 @@ impl OrderBookListener {
         let source_label = event_source.metric_label();
 
         // Track the highest live-stream height: it bounds the height of any
-        // data loss whose exact position is unknown (see mark_desynced).
-        self.last_seen_height = self.last_seen_height.max(height);
+        // data loss whose exact position is unknown (see mark_desynced). Oracle
+        // batches are excluded - a side stream must not raise the book's
+        // loss-recovery bound (it would make a re-sync wait for a height the
+        // book streams never produced).
+        if !matches!(event_batch, EventBatch::OracleUpdates(_)) {
+            self.last_seen_height = self.last_seen_height.max(height);
+        }
 
         // Sanity cap on batch size. A malformed/malicious line could otherwise
         // pin hundreds of MB and freeze the listener for seconds.

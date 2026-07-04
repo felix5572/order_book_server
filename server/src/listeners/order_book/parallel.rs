@@ -677,7 +677,8 @@ pub(super) fn spawn_file_watcher(
     })
 }
 
-/// Start all 3 file watcher threads, returns receiver for events
+/// Start the per-source file watcher threads (order statuses / diffs / fills /
+/// oracle updates), returns receiver for events
 /// Uses *_streaming directories (for --stream-with-block-info mode)
 /// `backfill_min_height` is the startup backfill floor (the node's persisted
 /// height at boot); 0 disables the backfill.
