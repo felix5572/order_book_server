@@ -30,8 +30,11 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
    两者均带专属单测(state.rs "我方移植语义"节, 共 3 个);这两个修复适合回馈 PR 给 imperator。
 
 3. **oracle 更新链(2026-07-05 移植完成)**——我方独有功能, 旧 fork 重写版:
-   - 源:`hip3_oracle_updates_by_block`(oracle 无 *_streaming 形态, by_block 是唯一
-     块级形式, 实机核实)。第四个并行 watcher, 不参与 backfill。
+   - 源:`hip3_oracle_updates_streaming`。**修正记录**:最初接 by_block(当时节点未开
+     streaming, 它是唯一块级形式);节点切 `--stream-with-block-info` 后 *_by_block 全家
+     停更、oracle 改写 streaming 目录 —— 已随之切换, **刻意不做 by_block fallback**
+     (停更目录仍存在, fallback 会静默读旧数据)。信封 schema 两者相同, 解析不变。
+     第四个并行 watcher, 不参与 backfill。
    - **旁路隔离(硬约束)**:oracle 是 side stream, 其 watcher 丢失/超大批/解析失败
      **绝不触发 orderbook resync**——独立计数 `obs_oracle_data_loss_total` +
      PARSE_ERRORS_TOTAL["oracle"], warn + skip(旧 fork 的解析 panic 已弃:panic 会把

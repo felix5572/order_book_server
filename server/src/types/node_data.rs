@@ -108,15 +108,19 @@ impl EventSource {
             Self::Fills => dir.join("node_fills_streaming"),
             Self::OrderStatuses => dir.join("node_order_statuses_streaming"),
             Self::OrderDiffs => dir.join("node_raw_book_diffs_streaming"),
-            // Oracle updates have no *_streaming variant; the by_block form is the
-            // only block-stamped one the node writes (verified on our node 2026-07-05).
-            Self::OracleUpdates => dir.join("hip3_oracle_updates_by_block"),
+            // With --stream-with-block-info (our node's required mode - the three
+            // book watchers above need it too) the node writes oracle updates to
+            // the *_streaming dir and STOPS updating hip3_oracle_updates_by_block.
+            // No fallback to by_block on purpose: the stale dir still exists and
+            // a fallback would silently serve old data (verified 2026-07-05).
+            Self::OracleUpdates => dir.join("hip3_oracle_updates_streaming"),
         }
     }
 }
 
 // ─── HIP-3 deployer oracle updates ──────────────────────────────────────────
-// Directory: ~/hl/data/hip3_oracle_updates_by_block (JSONL, hourly/YYYYMMDD/HH)
+// Directory: ~/hl/data/hip3_oracle_updates_streaming (JSONL, hourly/YYYYMMDD/HH;
+// same envelope schema as the retired by_block form)
 // Each line is a Batch envelope; most blocks have empty `events`. Non-empty
 // sample (Mainnet 2026-07-04): update_class "Deployer"/"Fallback",
 // {mark,spot,external_perp}_px_inputs as [[coin, px], ...], and oracle_pxs
