@@ -41,7 +41,9 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
      L2/BBO 一起带死)。不进 replay cache。
    - 分发:listener 内一次展平 `oracle_updates_by_coin`(spot/mark/oracle 三维按 coin
      合并)→ `InternalMessage::OracleUpdates` 广播;订阅 `{"type":"oracle","coins":[..]}`
-     (空列表/未知 coin 拒绝), 推送 channel="oracleUpdates", per-coin
+     (校验=非空 + HIP-3 `dex:COIN` 形态;**刻意不绑 book universe**——deployer 推价与
+     有无挂单无关, 如 flx:XMR 无簿也有 oracle;无更新的 coin 只是无帧), 推送
+     channel="oracleUpdates", per-coin
      `SimplifiedOracleUpdate{coin,time(ms),height,markPx,oraclePx,spotPx}`(低频,
      不用共享帧机制)。**与旧 fork 的 wire 差异**:block_time 字符串 → time 毫秒 u64。
    - 测试 4 个:实机真实行解析(Mainnet 2026-07-04 样本, 含空 events 行)/三维展平

@@ -54,10 +54,15 @@ impl Subscription {
                     debug!("Invalid oracle subscription: empty coin list");
                     return false;
                 }
+                // Oracle updates are a side stream keyed by HIP-3 dex coins ("dex:COIN").
+                // Deliberately NOT bound to the book universe: a deployer pushes prices
+                // even when the market has no resting orders (e.g. flx:XMR). Validate the
+                // shape only; a coin with no updates simply yields no frames.
                 coins.iter().all(|coin| {
-                    let ok = universe.contains(coin);
+                    let ok = matches!(coin.split_once(':'),
+                        Some((dex, name)) if !dex.is_empty() && !name.is_empty() && !name.contains(':'));
                     if !ok {
-                        debug!("Invalid oracle subscription: coin {coin} not found");
+                        debug!("Invalid oracle subscription: {coin} is not a HIP-3 dex coin (dex:COIN)");
                     }
                     ok
                 })
@@ -519,11 +524,15 @@ mod test {
 
     #[test]
     fn test_oracle_subscription_validate() {
-        let universe: std::collections::HashSet<String> = ["mkts:NVDA".to_string(), "xyz:ZHIPU".to_string()].into();
+        // oracle 订阅不绑 book universe(deployer 推价与挂单无关), 只验 HIP-3 形态。
+        let universe: std::collections::HashSet<String> = std::collections::HashSet::new();
         assert!(Subscription::Oracle { coins: vec!["mkts:NVDA".into()] }.validate(&universe));
-        assert!(Subscription::Oracle { coins: vec!["mkts:NVDA".into(), "xyz:ZHIPU".into()] }.validate(&universe));
+        assert!(Subscription::Oracle { coins: vec!["flx:XMR".into(), "xyz:ZHIPU".into()] }.validate(&universe));
         assert!(!Subscription::Oracle { coins: vec![] }.validate(&universe), "empty coin list must be rejected");
-        assert!(!Subscription::Oracle { coins: vec!["UNKNOWN".into()] }.validate(&universe));
+        assert!(!Subscription::Oracle { coins: vec!["XMR".into()] }.validate(&universe), "non-HIP-3 coin (no colon) rejected");
+        for bad in [":", "a:", ":XMR", "a:b:c"] {
+            assert!(!Subscription::Oracle { coins: vec![bad.into()] }.validate(&universe), "{bad} must be rejected");
+        }
         // 线上订阅格式
         let sub: Subscription =
             serde_json::from_str(r#"{"type":"oracle","coins":["mkts:NVDA"]}"#).unwrap();
