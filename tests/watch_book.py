@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-"""订阅行情, 实时展示订单簿买卖前五档(默认 ETH, USDC 计价)。
+"""订阅行情, 实时展示订单簿买卖前五档(默认 ETH, USDC 计价)。Ctrl-C 退出。
 
-    python watch_book.py [--coin ETH] [--levels 5] [--url ws://localhost:8000/ws]
-
-表头带新鲜度: block_time = 该簿的块时间;book_age = 现在−块时间(订到的簿有多旧);
-node_age = 现在−节点 fast_block_times 尾行块时间(节点落后链多少, 追平期这个大)。
-Ctrl-C 退出。
+    python tests/watch_book.py [--coin ETH] [--levels 5] [--url ws://localhost:8000/ws]
 """
 
 from __future__ import annotations
@@ -21,6 +17,7 @@ from pathlib import Path
 import websockets
 
 FAST_BLOCK_DIR = Path.home() / "hl/data/node_fast_block_times"
+REDRAW_MIN_INTERVAL = 0.25  # 秒。l2Book 帧率高, 限频重画防眼花
 
 
 def node_tip_ms() -> float | None:
@@ -47,25 +44,25 @@ def render(coin: str, data: dict) -> None:
     bids, asks = data["levels"][0], data["levels"][1]
     tip = node_tip_ms()
 
-    fmt_hms = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    hms = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%H:%M:%S.%f")[:-3]
 
-    print("\x1b[2J\x1b[H", end="")  # 清屏回到左上
-    print(f"{coin}(USDC)")
-    print(f"  本地时间   {fmt_hms(now_ms)} UTC")
-    print(f"  簿块时间   {fmt_hms(t)} UTC   ← 现在 {(now_ms - t) / 1000:7.3f}s(订到的簿有多旧)")
-    if tip is not None:
-        print(f"  节点块时间 {fmt_hms(tip)} UTC   ← 现在 {(now_ms - tip) / 1000:7.3f}s(节点落后链多少)"
-              f"   簿落后节点 {(tip - t) / 1000:.3f}s")
-    print()
-    print(f"{'':>14}  {'价格':>12}  {'数量':>12}  档位单数")
+    # 光标回左上角, 每行覆盖写并清行尾(\x1b[K)—— 不整屏闪
+    lines = [
+        f"{coin}/USDC   本地 {hms(now_ms)}   订单簿 {hms(t)}(旧 {(now_ms - t) / 1000:.2f}s)"
+        + ("" if tip is None else f"   节点 {hms(tip)}(旧 {(now_ms - tip) / 1000:.2f}s)"),
+        "",
+        f"{'':>6}  {'价格':>12}  {'数量':>12}  单数",
+    ]
     for lv in reversed(asks):
-        print(f"{'卖':>14}  {lv['px']:>12}  {lv['sz']:>12}  {lv['n']}")
+        lines.append(f"{'卖':>6}  {lv['px']:>12}  {lv['sz']:>12}  {lv['n']}")
     if bids and asks:
         spread = float(asks[0]["px"]) - float(bids[0]["px"])
         mid = (float(asks[0]["px"]) + float(bids[0]["px"])) / 2
-        print(f"{'—— spread':>14}  {spread:>12.4f}  ({spread / mid * 1e4:.2f} bps)")
+        lines.append(f"{'——':>6}  {spread:>12.4f}  ({spread / mid * 1e4:.2f} bps)")
     for lv in bids:
-        print(f"{'买':>14}  {lv['px']:>12}  {lv['sz']:>12}  {lv['n']}")
+        lines.append(f"{'买':>6}  {lv['px']:>12}  {lv['sz']:>12}  {lv['n']}")
+
+    print("\x1b[H" + "\n".join(f"{l}\x1b[K" for l in lines) + "\x1b[J", end="", flush=True)
 
 
 async def main() -> None:
@@ -78,9 +75,14 @@ async def main() -> None:
     sub = {"type": "l2Book", "coin": args.coin, "nSigFigs": None, "nLevels": None, "mantissa": None}
     async with websockets.connect(args.url, open_timeout=10) as ws:
         await ws.send(json.dumps({"method": "subscribe", "subscription": sub}))
+        print("\x1b[2J", end="")  # 只在启动时整屏清一次
+        last_draw = 0.0
         async for raw in ws:
             msg = json.loads(raw)
             if msg.get("channel") == "l2Book":
+                if time.time() - last_draw < REDRAW_MIN_INTERVAL:
+                    continue
+                last_draw = time.time()
                 data = msg["data"]
                 data["levels"] = [side[: args.levels] for side in data["levels"]]
                 render(args.coin, data)
@@ -92,4 +94,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        print()
