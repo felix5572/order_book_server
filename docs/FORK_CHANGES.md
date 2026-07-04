@@ -29,11 +29,20 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
    `NodeDataOrderDiff` 增 `side` 字段(实测 raw diff JSON 自带)。
    两者均带专属单测(state.rs "我方移植语义"节, 共 3 个);这两个修复适合回馈 PR 给 imperator。
 
-## 待移植
-
-3. oracle 更新链(EventSource + Subscription::Oracle + SimplifiedOracleUpdate 推送;
-   旧实现见 hyperliquid-trade 历史 order_book_server/server/src/{types/node_data.rs,
-   servers/websocket_server.rs} @ 换底座前)
+3. **oracle 更新链(2026-07-05 移植完成)**——我方独有功能, 旧 fork 重写版:
+   - 源:`hip3_oracle_updates_by_block`(oracle 无 *_streaming 形态, by_block 是唯一
+     块级形式, 实机核实)。第四个并行 watcher, 不参与 backfill。
+   - **旁路隔离(硬约束)**:oracle 是 side stream, 其 watcher 丢失/超大批/解析失败
+     **绝不触发 orderbook resync**——独立计数 `obs_oracle_data_loss_total` +
+     PARSE_ERRORS_TOTAL["oracle"], warn + skip(旧 fork 的解析 panic 已弃:panic 会把
+     L2/BBO 一起带死)。不进 replay cache。
+   - 分发:listener 内一次展平 `oracle_updates_by_coin`(spot/mark/oracle 三维按 coin
+     合并)→ `InternalMessage::OracleUpdates` 广播;订阅 `{"type":"oracle","coins":[..]}`
+     (空列表/未知 coin 拒绝), 推送 channel="oracleUpdates", per-coin
+     `SimplifiedOracleUpdate{coin,time(ms),height,markPx,oraclePx,spotPx}`(低频,
+     不用共享帧机制)。**与旧 fork 的 wire 差异**:block_time 字符串 → time 毫秒 u64。
+   - 测试 4 个:实机真实行解析(Mainnet 2026-07-04 样本, 含空 events 行)/三维展平
+     合并/订阅校验(空列表拒绝+线上格式)/响应 channel 序列化。
 
 保留的我方文件:docs/(本账本 + HL_DATA_STRUCTURES.md)、analyze/hft_flow_monitor.py、
 tests/test_l4_websocket.py、start-websocket.sh。

@@ -9,10 +9,11 @@ use crate::{
     types::{Fill, L4Order, OrderDiff},
 };
 
-// 上游官方 PR#10: 系统特殊地址的单只出现在 raw_book_diffs, **永远没有 order status 事件**
-// (HIP_2 = spot 系统做市商 0xFF..FF, ASSISTANCE_FUND = 0xFE..FE)。遇其 New diff 按 diff
-// 直接构造 Alo 限价单插簿 —— 否则这类 diff 会在 pending_new_diffs 挂满 60s 被当 data loss
-// 驱逐并触发 resync, 且 spot book 长期缺系统做市商流动性。
+// Orders from system addresses appear in raw_book_diffs but NEVER get an order
+// status event (HIP_2 = the spot system market maker 0xFF..FF, ASSISTANCE_FUND =
+// 0xFE..FE). Their New diffs must be inserted directly as synthetic Alo limit
+// orders - otherwise they sit in pending_new_diffs until aged out as data loss
+// (forcing a re-sync) and the spot book permanently misses HIP-2 liquidity.
 const ASSISTANCE_FUND: Address = Address::repeat_byte(0xFE);
 const HIP_2: Address = Address::repeat_byte(0xFF);
 
@@ -77,11 +78,14 @@ impl NodeDataOrderStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, strum_macros::Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum_macros::Display)]
 pub(crate) enum EventSource {
     Fills,
     OrderStatuses,
     OrderDiffs,
+    /// HIP-3 deployer oracle updates. Side stream: never touches the book, so
+    /// its parse errors / watcher losses must NOT trigger an orderbook re-sync.
+    OracleUpdates,
 }
 
 impl EventSource {
@@ -92,6 +96,7 @@ impl EventSource {
             Self::Fills => "fills",
             Self::OrderStatuses => "orders",
             Self::OrderDiffs => "diffs",
+            Self::OracleUpdates => "oracle",
         }
     }
 
@@ -103,8 +108,41 @@ impl EventSource {
             Self::Fills => dir.join("node_fills_streaming"),
             Self::OrderStatuses => dir.join("node_order_statuses_streaming"),
             Self::OrderDiffs => dir.join("node_raw_book_diffs_streaming"),
+            // Oracle updates have no *_streaming variant; the by_block form is the
+            // only block-stamped one the node writes (verified on our node 2026-07-05).
+            Self::OracleUpdates => dir.join("hip3_oracle_updates_by_block"),
         }
     }
+}
+
+// ─── HIP-3 deployer oracle updates ──────────────────────────────────────────
+// Directory: ~/hl/data/hip3_oracle_updates_by_block (JSONL, hourly/YYYYMMDD/HH)
+// Each line is a Batch envelope; most blocks have empty `events`. Non-empty
+// sample (Mainnet 2026-07-04): update_class "Deployer"/"Fallback",
+// {mark,spot,external_perp}_px_inputs as [[coin, px], ...], and oracle_pxs
+// with per-coin {px, last_update_time, daily_px}.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OracleUpdateEvent {
+    pub update_class: String,
+    pub mark_px_inputs: Vec<(String, String)>,
+    pub spot_px_inputs: Vec<(String, String)>,
+    pub external_perp_px_inputs: Vec<(String, String)>,
+    pub oracle_pxs: OraclePxs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OraclePxs {
+    pub coin_to_mark_px: Vec<(String, OraclePxData)>,
+    pub coin_to_oracle_px: Vec<(String, OraclePxData)>,
+    pub coin_to_external_perp_px: Vec<(String, OraclePxData)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OraclePxData {
+    pub px: String,
+    pub last_update_time: String,
+    pub daily_px: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,6 +287,29 @@ mod tests {
         assert_eq!(EventSource::Fills.event_source_dir_streaming(dir), PathBuf::from("/data/node_fills_streaming"));
         assert_eq!(EventSource::OrderStatuses.event_source_dir_streaming(dir), PathBuf::from("/data/node_order_statuses_streaming"));
         assert_eq!(EventSource::OrderDiffs.event_source_dir_streaming(dir), PathBuf::from("/data/node_raw_book_diffs_streaming"));
+    }
+
+    // ==================== OracleUpdateEvent Tests ====================
+
+    /// Trimmed real line from ~/hl/data/hip3_oracle_updates_by_block (Mainnet 2026-07-04).
+    #[test]
+    fn test_oracle_update_batch_parses_real_line() {
+        let json = r#"{"local_time":"2026-07-04T15:15:35.451937663","block_time":"2026-07-04T15:05:30.772183537","block_number":1060360010,"events":[{"update_class":"Deployer","mark_px_inputs":[["mkts:NVDA","211.07"]],"spot_px_inputs":[["mkts:US500","746.18"]],"external_perp_px_inputs":[["mkts:US500","746.18"]],"oracle_pxs":{"coin_to_mark_px":[["mkts:NVDA",{"px":"211.07","last_update_time":"2026-07-04T15:05:30.772183537","daily_px":"211.07"}]],"coin_to_oracle_px":[["mkts:NVDA",{"px":"211.05","last_update_time":"2026-07-04T15:05:30.772183537","daily_px":"211.05"}]],"coin_to_external_perp_px":[]}}]}"#;
+        let batch: Batch<OracleUpdateEvent> = serde_json::from_str(json).unwrap();
+        assert_eq!(batch.block_number(), 1060360010);
+        let events = batch.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].update_class, "Deployer");
+        assert_eq!(events[0].oracle_pxs.coin_to_mark_px[0].1.px, "211.07");
+        assert_eq!(events[0].oracle_pxs.coin_to_oracle_px[0].1.daily_px, "211.05");
+    }
+
+    /// Most by_block lines carry no events - must parse to an empty batch, not error.
+    #[test]
+    fn test_oracle_update_batch_empty_events() {
+        let json = r#"{"local_time":"2026-07-04T15:15:35.355393675","block_time":"2026-07-04T15:05:30.164329916","block_number":1060360001,"events":[]}"#;
+        let batch: Batch<OracleUpdateEvent> = serde_json::from_str(json).unwrap();
+        assert_eq!(batch.events_len(), 0);
     }
 
     // ==================== NodeDataOrderDiff Tests ====================

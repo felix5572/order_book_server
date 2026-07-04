@@ -424,7 +424,7 @@ mod tests {
         })).unwrap()
     }
 
-    /// 自定义 user/px 的 diff fixture(special-address / diff-px 语义测试用)。
+    /// Diff fixture with custom user/px (for special-address / resting-px tests).
     fn make_order_diff_full(coin: &str, oid: u64, user: &str, px: &str, diff: OrderDiff) -> NodeDataOrderDiff {
         serde_json::from_value(serde_json::json!({
             "user": user,
@@ -436,30 +436,32 @@ mod tests {
         })).unwrap()
     }
 
-    // ==================== 我方移植语义(官方 PR#9 / PR#10)====================
+    // ==================== System-address & resting-px semantics ====================
 
-    /// PR#10: HIP-2(0xFF..FF)的 New diff 没有 order status → 直接合成 Alo 单插簿,
-    /// 不进 pending_new_diffs(否则挂 60s 被当 data loss 驱逐并触发 resync)。
+    /// A New diff from HIP-2 (0xFF..FF) never gets an order status -> it must be
+    /// inserted directly as a synthetic Alo order instead of sitting in
+    /// pending_new_diffs until aged out as data loss (which forces a re-sync).
     #[test]
     fn test_special_address_new_diff_inserts_synthetic_order() {
         let mut state = empty_state();
         let hip2 = format!("0x{}", "ff".repeat(20));
         let diff = make_order_diff_full("@260", 7, &hip2, "325.5", OrderDiff::New { sz: "3.0".to_string() });
         let changed = state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
-        assert!(changed.contains(&Coin::new("@260")), "合成单应标记 coin 变更");
-        assert_eq!(state.order_count(), 1, "HIP-2 单应直接入簿");
-        assert_eq!(state.pending_new_diffs_count(), 0, "不应进 pending 等永远不来的 status");
+        assert!(changed.contains(&Coin::new("@260")), "synthetic insert must mark the coin changed");
+        assert_eq!(state.order_count(), 1, "HIP-2 order must be inserted directly");
+        assert_eq!(state.pending_new_diffs_count(), 0, "must not wait for a status that never comes");
         let (_, _, snap) = state.compute_snapshot_for_coin(&Coin::new("@260")).unwrap();
         let order = &snap.as_ref()[0][0];
         assert_eq!(order.limit_px, Px::parse_from_str("325.5").unwrap());
         assert_eq!(order.tif.as_deref(), Some("Alo"));
     }
 
-    /// PR#9: 进簿价以 diff 的 px 为准(status px 可能不同, 如 trigger/转化单)。
-    /// 两个到达顺序都要覆盖: diff 先到(px 存 pending)/ status 先到(配对时用 diff px)。
+    /// The resting price must come from the diff, not the status (trigger/converted
+    /// orders can carry a different px on the status). Covers both arrival orders:
+    /// diff first (px stored in pending) and status first (px applied on pairing).
     #[test]
     fn test_resting_px_comes_from_diff_not_status() {
-        // status px 固定 100.0(make_l4_order), diff px 用 101.5 → 簿上应是 101.5
+        // status px is fixed at 100.0 (make_l4_order); diff px is 101.5 -> book must show 101.5
         for diff_first in [true, false] {
             let mut state = empty_state();
             let diff = make_order_diff_full(
@@ -480,12 +482,13 @@ mod tests {
             assert_eq!(
                 order.limit_px,
                 Px::parse_from_str("101.5").unwrap(),
-                "进簿价必须来自 diff(diff_first={diff_first})"
+                "resting px must come from the diff (diff_first={diff_first})"
             );
         }
     }
 
-    /// PR#9 fail-fast: diff px 解析失败 = schema 漂移 → Err, 不静默回退 status px。
+    /// Fail fast on unparseable diff px (= schema drift) instead of silently
+    /// falling back to the status px, which would re-introduce wrong resting prices.
     #[test]
     fn test_bad_diff_px_fails_fast() {
         let mut state = empty_state();

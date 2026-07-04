@@ -22,6 +22,8 @@ pub(crate) enum FileEvent {
     OrderStatus(String),
     OrderDiff(String),
     Fill(String),
+    /// HIP-3 deployer oracle update line (side stream, never book-affecting).
+    OracleUpdate(String),
     /// Startup-backfill lines: data that was already on disk when the watcher
     /// started, above the node's persisted height. These are cached for
     /// snapshot replay but NEVER applied to a live book - they are older than
@@ -483,6 +485,7 @@ pub(super) fn spawn_file_watcher(
         EventSource::OrderStatuses => "OrderStatuses",
         EventSource::Fills => "Fills",
         EventSource::OrderDiffs => "OrderDiffs",
+        EventSource::OracleUpdates => "OracleUpdates",
     };
 
     thread::spawn(move || {
@@ -515,13 +518,14 @@ pub(super) fn spawn_file_watcher(
         // watch() so appends racing the backfill are still notified; ordering
         // per source is preserved because backfill lines enter the channel
         // before any live line.
-        if backfill_min_height > 0 && !matches!(source, EventSource::Fills) {
+        if backfill_min_height > 0 && !matches!(source, EventSource::Fills | EventSource::OracleUpdates) {
             let mut sent = 0_usize;
             let channel_open = reader.backfill_and_track(backfill_min_height, &mut |line| {
                 let evt = match source {
                     EventSource::OrderStatuses => FileEvent::BackfillOrderStatus(line),
                     EventSource::OrderDiffs => FileEvent::BackfillOrderDiff(line),
                     EventSource::Fills => unreachable!("fills are excluded from backfill"),
+                    EventSource::OracleUpdates => unreachable!("oracle updates are excluded from backfill"),
                 };
                 sent += 1;
                 tx.blocking_send(evt).is_ok()
@@ -563,6 +567,7 @@ pub(super) fn spawn_file_watcher(
                                     EventSource::OrderStatuses => FileEvent::OrderStatus(line),
                                     EventSource::OrderDiffs => FileEvent::OrderDiff(line),
                                     EventSource::Fills => FileEvent::Fill(line),
+                                    EventSource::OracleUpdates => FileEvent::OracleUpdate(line),
                                 };
                                 if tx.blocking_send(evt).is_err() {
                                     error!("{} channel closed, exiting", source_name);
@@ -582,6 +587,7 @@ pub(super) fn spawn_file_watcher(
                                 EventSource::OrderStatuses => FileEvent::OrderStatus(line),
                                 EventSource::OrderDiffs => FileEvent::OrderDiff(line),
                                 EventSource::Fills => FileEvent::Fill(line),
+                                EventSource::OracleUpdates => FileEvent::OracleUpdate(line),
                             };
 
                             if tx.blocking_send(event).is_err() {
@@ -606,6 +612,7 @@ pub(super) fn spawn_file_watcher(
                             EventSource::OrderStatuses => FileEvent::OrderStatus(line),
                             EventSource::OrderDiffs => FileEvent::OrderDiff(line),
                             EventSource::Fills => FileEvent::Fill(line),
+                            EventSource::OracleUpdates => FileEvent::OracleUpdate(line),
                         };
 
                         if tx.blocking_send(event).is_err() {
@@ -657,6 +664,7 @@ pub(super) fn spawn_file_watcher(
                             EventSource::OrderStatuses => FileEvent::OrderStatus(line),
                             EventSource::OrderDiffs => FileEvent::OrderDiff(line),
                             EventSource::Fills => FileEvent::Fill(line),
+                            EventSource::OracleUpdates => FileEvent::OracleUpdate(line),
                         };
                         if tx.blocking_send(evt).is_err() {
                             error!("{} channel closed, exiting", source_name);
@@ -680,7 +688,14 @@ pub(super) fn spawn_file_watcher(
 pub(crate) fn start_parallel_file_watchers(
     data_dir: PathBuf,
     backfill_min_height: u64,
-) -> (tokio::sync::mpsc::Receiver<FileEvent>, Vec<thread::JoinHandle<()>>, Arc<AtomicU64>, Arc<AtomicU64>, Arc<AtomicU64>)
+) -> (
+    tokio::sync::mpsc::Receiver<FileEvent>,
+    Vec<thread::JoinHandle<()>>,
+    Arc<AtomicU64>,
+    Arc<AtomicU64>,
+    Arc<AtomicU64>,
+    Arc<AtomicU64>,
+)
 {
     // BOUNDED so a slow downstream actually back-pressures the file readers
     // (blocking_send parks until a slot frees up). Under processing stalls an
@@ -718,12 +733,19 @@ pub(crate) fn start_parallel_file_watchers(
     handles.push(spawn_file_watcher(
         EventSource::OrderDiffs,
         order_diffs_dir,
-        tx,
+        tx.clone(),
         last_order_diffs.clone(),
         backfill_min_height,
     ));
 
-    (rx, handles, last_order_status, last_fills, last_order_diffs)
+    // Spawn watcher for HIP-3 oracle updates (side stream: no backfill, and its
+    // losses never mark the book desynced - see the Desync handling in mod.rs).
+    let last_oracle = Arc::new(AtomicU64::new(0));
+    let oracle_dir = EventSource::OracleUpdates.event_source_dir_streaming(&data_dir);
+    info!("OracleUpdates dir: {:?}", oracle_dir);
+    handles.push(spawn_file_watcher(EventSource::OracleUpdates, oracle_dir, tx, last_oracle.clone(), 0));
+
+    (rx, handles, last_order_status, last_fills, last_order_diffs, last_oracle)
 }
 
 #[cfg(test)]

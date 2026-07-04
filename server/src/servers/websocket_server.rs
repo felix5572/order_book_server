@@ -12,7 +12,7 @@ use crate::{
     types::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
-        subscription::{ClientMessage, DEFAULT_LEVELS, OrderUpdate, ServerResponse, Subscription, SubscriptionManager},
+        subscription::{SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, OrderUpdate, ServerResponse, Subscription, SubscriptionManager},
     },
 };
 use axum::{Router, routing::get};
@@ -364,6 +364,26 @@ async fn handle_socket(
                                     if !alive { break; }
                                     if let Subscription::Bbo { coin } = sub {
                                         alive &= send_ws_data_from_bbo(&mut socket, coin, bbos, *time, &mut last_bbo, bbo_hb.is_some()).await;
+                                    }
+                                }
+                            },
+                            InternalMessage::OracleUpdates{ updates_by_coin } => {
+                                // Low-frequency side stream: filter per subscription and
+                                // serialize per connection (no shared-frame machinery).
+                                for sub in manager.subscriptions() {
+                                    if !alive { break; }
+                                    if let Subscription::Oracle { coins } = sub {
+                                        let matched: Vec<SimplifiedOracleUpdate> = coins
+                                            .iter()
+                                            .filter_map(|coin| updates_by_coin.get(coin.as_str()).cloned())
+                                            .collect();
+                                        if !matched.is_empty() {
+                                            BROADCASTS_TOTAL.with_label_values(&["oracleUpdates"]).inc();
+                                            alive &= send_socket_message(
+                                                &mut socket,
+                                                ServerResponse::OracleUpdates(Arc::new(matched)),
+                                            ).await;
+                                        }
                                     }
                                 }
                             },

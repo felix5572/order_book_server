@@ -40,12 +40,28 @@ pub(crate) enum Subscription {
     OrderUpdates { user: String },
     #[serde(rename_all = "camelCase")]
     BookDiffs { coin: String },
+    /// HIP-3 deployer oracle updates for the listed coins.
+    #[serde(rename_all = "camelCase")]
+    Oracle { coins: Vec<String> },
 }
 
 impl Subscription {
     pub(crate) fn validate(&self, universe: &HashSet<String>) -> bool {
         match self {
             Self::Trades { coin } => universe.contains(coin),
+            Self::Oracle { coins } => {
+                if coins.is_empty() {
+                    debug!("Invalid oracle subscription: empty coin list");
+                    return false;
+                }
+                coins.iter().all(|coin| {
+                    let ok = universe.contains(coin);
+                    if !ok {
+                        debug!("Invalid oracle subscription: coin {coin} not found");
+                    }
+                    ok
+                })
+            }
             Self::L2Book { coin, n_sig_figs, n_levels, mantissa } => {
                 if !universe.contains(coin) {
                     debug!("Invalid subscription: coin not found");
@@ -111,8 +127,23 @@ impl Subscription {
             Self::Trades { .. } => "trades",
             Self::OrderUpdates { .. } => "orderUpdates",
             Self::BookDiffs { .. } => "bookDiffs",
+            Self::Oracle { .. } => "oracleUpdates",
         }
     }
+}
+
+/// Per-coin oracle update pushed to `oracle` subscribers. `time`/`height` are
+/// the block that carried the update; px fields absent when the update did not
+/// touch that dimension for the coin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SimplifiedOracleUpdate {
+    pub coin: String,
+    pub time: u64,
+    pub height: u64,
+    pub mark_px: Option<crate::types::node_data::OraclePxData>,
+    pub oracle_px: Option<crate::types::node_data::OraclePxData>,
+    pub spot_px: Option<String>,
 }
 
 /// Order update for a specific user - streams raw order status data
@@ -142,6 +173,7 @@ pub(crate) enum ServerResponse {
     Bbo(Bbo),
     BookDiffs(std::sync::Arc<Vec<NodeDataOrderDiff>>),
     OrderUpdates(Vec<OrderUpdate>),
+    OracleUpdates(std::sync::Arc<Vec<SimplifiedOracleUpdate>>),
     Pong,
     Error(String),
 }
@@ -480,6 +512,22 @@ mod test {
     fn test_server_response_pong_serialization() {
         let json = serde_json::to_string(&super::ServerResponse::Pong).unwrap();
         assert_eq!(json, r#"{"channel":"pong"}"#);
+
+        let oracle = ServerResponse::OracleUpdates(std::sync::Arc::new(vec![]));
+        assert_eq!(serde_json::to_string(&oracle).unwrap(), r#"{"channel":"oracleUpdates","data":[]}"#);
+    }
+
+    #[test]
+    fn test_oracle_subscription_validate() {
+        let universe: std::collections::HashSet<String> = ["mkts:NVDA".to_string(), "xyz:ZHIPU".to_string()].into();
+        assert!(Subscription::Oracle { coins: vec!["mkts:NVDA".into()] }.validate(&universe));
+        assert!(Subscription::Oracle { coins: vec!["mkts:NVDA".into(), "xyz:ZHIPU".into()] }.validate(&universe));
+        assert!(!Subscription::Oracle { coins: vec![] }.validate(&universe), "empty coin list must be rejected");
+        assert!(!Subscription::Oracle { coins: vec!["UNKNOWN".into()] }.validate(&universe));
+        // 线上订阅格式
+        let sub: Subscription =
+            serde_json::from_str(r#"{"type":"oracle","coins":["mkts:NVDA"]}"#).unwrap();
+        assert!(matches!(sub, Subscription::Oracle { .. }));
     }
 
     #[test]

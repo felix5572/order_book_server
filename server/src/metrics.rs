@@ -139,6 +139,14 @@ lazy_static! {
     /// Times the order book was marked out-of-sync (by reason). Every increment
     /// triggers a background snapshot re-fetch that rebuilds the book, so a
     /// non-zero rate here means events were lost but the book self-healed.
+    /// Oracle side-stream data loss (watcher discard / oversize batch). Kept
+    /// separate from ORDERBOOK_DESYNCS_TOTAL on purpose: oracle loss never
+    /// triggers a book re-sync.
+    pub static ref ORACLE_DATA_LOSS_TOTAL: IntCounter = IntCounter::new(
+        "obs_oracle_data_loss_total",
+        "Oracle update lines lost (watcher discard or oversize batch drop)"
+    ).unwrap();
+
     pub static ref ORDERBOOK_DESYNCS_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_desyncs_total", "Times the order book was marked out-of-sync"),
         &["reason"]
@@ -237,6 +245,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(WS_SEND_ERRORS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(CHANNEL_DROPS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ORDERBOOK_DESYNCS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ORACLE_DATA_LOSS_TOTAL.clone())).ok();
 
     // File watcher metrics
     REGISTRY.register(Box::new(FILE_EVENTS_TOTAL.clone())).ok();

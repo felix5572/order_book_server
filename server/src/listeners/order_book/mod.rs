@@ -3,7 +3,8 @@ use crate::{
     metrics::{
         BBO_BROADCAST_LATENCY, EVENT_PROCESSING_LATENCY, EVENTS_PROCESSED_TOTAL, FILE_EVENTS_TOTAL,
         FILE_LINES_PARSED_TOTAL, L2_BROADCAST_LATENCY, L2_CONFLATION_BATCH_SIZE, ORDERBOOK_COINS_COUNT,
-        ORDERBOOK_DESYNCS_TOTAL, ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL, ORDERBOOK_TIME_MS, PARSE_ERRORS_TOTAL,
+        ORACLE_DATA_LOSS_TOTAL, ORDERBOOK_DESYNCS_TOTAL, ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL,
+        ORDERBOOK_TIME_MS, PARSE_ERRORS_TOTAL,
         PENDING_DIFFS_CACHE, PENDING_ORDERS_CACHE, TRADES_UNPAIRED_FILLS_TOTAL,
     },
     order_book::{
@@ -14,11 +15,12 @@ use crate::{
     types::{
         L2Book, L4Order, Trade,
         inner::{InnerL4Order, InnerLevel},
-        node_data::{Batch, EventSource, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+        node_data::{Batch, EventSource, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus, OracleUpdateEvent},
+        subscription::SimplifiedOracleUpdate,
     },
 };
 use alloy::primitives::Address;
-use log::{error, info};
+use log::{error, info, warn};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
@@ -363,6 +365,42 @@ fn coin_in_market_filter(coin: &Coin, (include_perps, include_spot, include_hip3
 /// against everything else that needs the listener (connection setup, L4
 /// snapshots, the L2 flush ticker). Returns None for empty or malformed lines
 /// (counted in `PARSE_ERRORS_TOTAL`).
+/// Flatten one oracle batch into per-coin updates: spot px from `spot_px_inputs`,
+/// mark/oracle px from `oracle_pxs`. Later events in the same batch overwrite
+/// earlier ones per dimension (a batch rarely has more than one event).
+fn oracle_updates_by_coin(batch: &Batch<OracleUpdateEvent>) -> HashMap<String, SimplifiedOracleUpdate> {
+    let time = batch.block_time();
+    let height = batch.block_number();
+    let mut updates: HashMap<String, SimplifiedOracleUpdate> = HashMap::new();
+    fn entry<'a>(
+        updates: &'a mut HashMap<String, SimplifiedOracleUpdate>,
+        coin: &str,
+        time: u64,
+        height: u64,
+    ) -> &'a mut SimplifiedOracleUpdate {
+        updates.entry(coin.to_string()).or_insert_with(|| SimplifiedOracleUpdate {
+            coin: coin.to_string(),
+            time,
+            height,
+            mark_px: None,
+            oracle_px: None,
+            spot_px: None,
+        })
+    }
+    for event in batch.events_ref() {
+        for (coin, px) in &event.spot_px_inputs {
+            entry(&mut updates, coin, time, height).spot_px = Some(px.clone());
+        }
+        for (coin, data) in &event.oracle_pxs.coin_to_mark_px {
+            entry(&mut updates, coin, time, height).mark_px = Some(data.clone());
+        }
+        for (coin, data) in &event.oracle_pxs.coin_to_oracle_px {
+            entry(&mut updates, coin, time, height).oracle_px = Some(data.clone());
+        }
+    }
+    updates
+}
+
 fn parse_event_line(line: &str, event_source: EventSource) -> Option<(u64, EventBatch)> {
     // Count events for debugging
     static HFT_EVENT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -385,6 +423,10 @@ fn parse_event_line(line: &str, event_source: EventSource) -> Option<(u64, Event
             .map(|batch: Batch<NodeDataOrderStatus>| (batch.block_number(), EventBatch::Orders(batch))),
         EventSource::OrderDiffs => sonic_rs::from_str(line)
             .map(|batch: Batch<NodeDataOrderDiff>| (batch.block_number(), EventBatch::BookDiffs(batch))),
+        // Side stream: parse errors land in PARSE_ERRORS_TOTAL["oracle"] like every
+        // other source, and never mark the book desynced.
+        EventSource::OracleUpdates => sonic_rs::from_str(line)
+            .map(|batch: Batch<OracleUpdateEvent>| (batch.block_number(), EventBatch::OracleUpdates(batch))),
     };
 
     match res {
@@ -625,6 +667,8 @@ impl OrderBookListener {
             EventBatch::Orders(b) => b.events_len(),
             EventBatch::BookDiffs(b) => b.events_len(),
             EventBatch::Fills(b) => b.events_len(),
+            // cache_for_replay filters these out before ever calling here.
+            EventBatch::OracleUpdates(_) => unreachable!("oracle updates are never cached for replay"),
         };
         if self.cached_event_count.saturating_add(events_len) > self.cache_event_cap {
             error!(
@@ -652,7 +696,9 @@ impl OrderBookListener {
         // Fills never mutate the book - nothing to replay. A missing cache means
         // steady state (no fetch pending) or the post-overflow window where the
         // book is already marked for re-sync.
-        if matches!(event_batch, EventBatch::Fills(_)) || self.fetched_snapshot_cache.is_none() {
+        if matches!(event_batch, EventBatch::Fills(_) | EventBatch::OracleUpdates(_))
+            || self.fetched_snapshot_cache.is_none()
+        {
             return is_ready.then_some(event_batch);
         }
         if is_ready {
@@ -704,12 +750,18 @@ impl OrderBookListener {
             EventBatch::Orders(b) => b.events_len(),
             EventBatch::BookDiffs(b) => b.events_len(),
             EventBatch::Fills(b) => b.events_len(),
+            EventBatch::OracleUpdates(b) => b.events_len(),
         };
         if events_len > MAX_EVENTS_PER_BATCH {
             PARSE_ERRORS_TOTAL.with_label_values(&[source_label]).inc();
             error!(
                 "Dropping oversize batch from {source_label}: {events_len} events (cap {MAX_EVENTS_PER_BATCH}), height={height}"
             );
+            if matches!(event_batch, EventBatch::OracleUpdates(_)) {
+                // Side stream: a dropped oracle batch never corrupts the book.
+                ORACLE_DATA_LOSS_TOTAL.inc();
+                return;
+            }
             // The dropped events are gone for good; without a re-sync every
             // affected coin would serve a silently wrong book forever.
             self.mark_desynced("oversize_batch");
@@ -773,6 +825,19 @@ impl OrderBookListener {
                     }
                     EVENTS_PROCESSED_TOTAL.with_label_values(&["diffs"]).inc();
                     state.apply_order_diffs_hft(batch)
+                }
+                EventBatch::OracleUpdates(batch) => {
+                    EVENTS_PROCESSED_TOTAL.with_label_values(&["oracle"]).inc();
+                    // Side stream: flatten per coin once and broadcast; never touches the book.
+                    if self.internal_message_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0) {
+                        let updates_by_coin = oracle_updates_by_coin(&batch);
+                        if !updates_by_coin.is_empty() {
+                            if let Some(tx) = &self.internal_message_tx {
+                                drop(tx.send(Arc::new(InternalMessage::OracleUpdates { updates_by_coin })));
+                            }
+                        }
+                    }
+                    Ok(HashSet::new())
                 }
                 EventBatch::Fills(batch) => {
                     EVENTS_PROCESSED_TOTAL.with_label_values(&["fills"]).inc();
@@ -1046,6 +1111,11 @@ pub(crate) enum InternalMessage {
         height: u64,
         statuses_by_coin: HashMap<String, CoinStatuses>,
     },
+    /// HIP-3 deployer oracle updates, flattened per coin once in the listener.
+    /// Low-frequency side stream: no shared-frame machinery needed.
+    OracleUpdates {
+        updates_by_coin: HashMap<String, SimplifiedOracleUpdate>,
+    },
 }
 
 #[derive(Eq, PartialEq, Hash, Clone, Copy)]
@@ -1162,7 +1232,7 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
     // events sit on disk meanwhile). The join handles and health timestamps
     // feed the watchdog in the periodic ticker below - a dead or wedged
     // watcher must not let the server keep serving a silently frozen book.
-    let (mut tokio_rx, watcher_handles, last_order_statuses, _last_fills, last_order_diffs) =
+    let (mut tokio_rx, watcher_handles, last_order_statuses, _last_fills, last_order_diffs, _last_oracle) =
         parallel::start_parallel_file_watchers(dir, backfill_min_height);
 
     // Snapshot fetch channel
@@ -1231,9 +1301,17 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                         parallel::FileEvent::OrderDiff(line) => (line, EventSource::OrderDiffs, false),
                         parallel::FileEvent::OrderStatus(line) => (line, EventSource::OrderStatuses, false),
                         parallel::FileEvent::Fill(line) => (line, EventSource::Fills, false),
+                        parallel::FileEvent::OracleUpdate(line) => (line, EventSource::OracleUpdates, false),
                         parallel::FileEvent::BackfillOrderDiff(line) => (line, EventSource::OrderDiffs, true),
                         parallel::FileEvent::BackfillOrderStatus(line) => (line, EventSource::OrderStatuses, true),
                         parallel::FileEvent::Desync(source) => {
+                            if source == EventSource::OracleUpdates {
+                                // Oracle is a side stream: its loss never corrupts the
+                                // book, so count it separately and do NOT re-sync.
+                                ORACLE_DATA_LOSS_TOTAL.inc();
+                                warn!("oracle watcher reported data loss (side stream - no book re-sync)");
+                                continue;
+                            }
                             // The watcher discarded data (oversized partial line);
                             // the book can no longer be trusted - trigger a re-sync.
                             error!("{source} watcher reported data loss");
@@ -1331,6 +1409,24 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// oracle_updates_by_coin: spot/mark/oracle 三维按 coin 展平合并。
+    #[test]
+    fn test_oracle_updates_by_coin_flattens_dimensions() {
+        let json = r#"{"local_time":"2026-07-04T15:15:35.451937663","block_time":"2026-07-04T15:05:30.772183537","block_number":1060360010,"events":[{"update_class":"Deployer","mark_px_inputs":[],"spot_px_inputs":[["mkts:US500","746.18"]],"external_perp_px_inputs":[],"oracle_pxs":{"coin_to_mark_px":[["mkts:NVDA",{"px":"211.07","last_update_time":"t","daily_px":"211.07"}],["mkts:US500",{"px":"746.19","last_update_time":"t","daily_px":"746.19"}]],"coin_to_oracle_px":[["mkts:NVDA",{"px":"211.05","last_update_time":"t","daily_px":"211.05"}]],"coin_to_external_perp_px":[]}}]}"#;
+        let batch: Batch<OracleUpdateEvent> = serde_json::from_str(json).unwrap();
+        let map = oracle_updates_by_coin(&batch);
+        assert_eq!(map.len(), 2);
+        let nvda = &map["mkts:NVDA"];
+        assert_eq!(nvda.height, 1060360010);
+        assert_eq!(nvda.mark_px.as_ref().unwrap().px, "211.07");
+        assert_eq!(nvda.oracle_px.as_ref().unwrap().px, "211.05");
+        assert!(nvda.spot_px.is_none());
+        let us500 = &map["mkts:US500"];
+        assert_eq!(us500.spot_px.as_deref(), Some("746.18"));
+        assert_eq!(us500.mark_px.as_ref().unwrap().px, "746.19");
+        assert!(us500.oracle_px.is_none());
+    }
     use std::collections::HashMap;
 
     /// Build a ready listener (state initialized from an empty snapshot) with a held

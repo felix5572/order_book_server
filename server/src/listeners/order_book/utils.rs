@@ -287,6 +287,7 @@ pub(super) enum EventBatch {
     Orders(Batch<NodeDataOrderStatus>),
     BookDiffs(Batch<NodeDataOrderDiff>),
     Fills(Batch<NodeDataFill>),
+    OracleUpdates(Batch<crate::types::node_data::OracleUpdateEvent>),
 }
 
 #[cfg(test)]
