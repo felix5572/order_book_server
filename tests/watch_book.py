@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""订阅行情, 实时展示订单簿买卖前五档(默认 ETH, USDC 计价)。Ctrl-C 退出。
+"""订阅行情, 实时展示订单簿买卖前五档(默认 ETH 永续; HL l2Book 的 perp 订阅名就是
+裸 coin 名如 "ETH", 现货才是 "@N"/"PURR/USDC" 形态)。Ctrl-C 退出。
 
     python tests/watch_book.py [--coin ETH] [--levels 5] [--url ws://localhost:8000/ws]
 """
@@ -48,8 +49,8 @@ def render(coin: str, data: dict) -> None:
 
     # 光标回左上角, 每行覆盖写并清行尾(\x1b[K)—— 不整屏闪
     lines = [
-        f"{coin}/USDC   本地 {hms(now_ms)}   订单簿 {hms(t)}(旧 {(now_ms - t) / 1000:.2f}s)"
-        + ("" if tip is None else f"   节点 {hms(tip)}(旧 {(now_ms - tip) / 1000:.2f}s)"),
+        f"{coin}-PERP(USDC计价)   本地 {hms(now_ms)}   订单簿 {hms(t)}(旧 {(now_ms - t) / 1000:.3f}s)"
+        + ("" if tip is None else f"   节点 {hms(tip)}(旧 {(now_ms - tip) / 1000:.3f}s)"),
         "",
         f"{'':>6}  {'价格':>12}  {'数量':>12}  单数",
     ]
