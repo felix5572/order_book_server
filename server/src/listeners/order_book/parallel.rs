@@ -319,8 +319,10 @@ impl FileReader {
             // Same path is NOT the same file after a long stop: node catch-up
             // writes by block time and recreates the very hour file retention
             // pruned. If the inode on disk no longer matches the one our
-            // position refers to, force a switch (on_create drains a held
-            // handle to EOF, so this handoff is gapless when we have one).
+            // position refers to, force a switch. Deliberately NO desync flag
+            // here: on_create makes that call - a held handle is drained to
+            // EOF (gapless, no flag), a handle-less stale file flags desync.
+            // Don't "simplify" this into flagging (or never flagging) here.
             let recreated = latest
                 .metadata()
                 .ok()
