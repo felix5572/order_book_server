@@ -2,11 +2,12 @@
 // Each event source runs on its own thread for maximum throughput
 
 use crate::types::node_data::EventSource;
-use log::{error, info};
+use log::{error, info, warn};
 use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
+    os::unix::fs::MetadataExt,
     path::PathBuf,
     sync::{
         Arc,
@@ -87,6 +88,19 @@ struct FileReader {
     // Set when buffered data had to be discarded (oversized partial line);
     // drained by take_desynced so the watcher can notify the listener.
     desynced: bool,
+    // Last path whose open failed, so the 1ms poll loop logs the failure once
+    // instead of thousands of times per second while the path is unopenable.
+    open_error_path: Option<PathBuf>,
+    // (dev, ino) of the file that file_position refers to. Catches same-path
+    // recreation: node catch-up writes by BLOCK time, so after a long stop it
+    // recreates the very hour file retention pruned - same path, new inode,
+    // where our position is meaningless.
+    open_file_id: Option<(u64, u64)>,
+}
+
+/// (dev, ino) identity of a metadata handle.
+fn file_id(meta: &std::fs::Metadata) -> (u64, u64) {
+    (meta.dev(), meta.ino())
 }
 
 impl FileReader {
@@ -98,6 +112,8 @@ impl FileReader {
             partial_line: String::new(),
             base_dir,
             desynced: false,
+            open_error_path: None,
+            open_file_id: None,
         }
     }
 
@@ -184,8 +200,11 @@ impl FileReader {
 
         // Record the live-tracking cut BEFORE reading the newest file, so lines
         // appended while the backfill runs are picked up by live tracking
-        // rather than read twice.
-        let recorded_len = std::fs::metadata(&newest).map(|m| m.len()).unwrap_or(0);
+        // rather than read twice. The file identity is taken from the SAME
+        // stat: if the file is replaced mid-backfill, the open-time id check
+        // catches it and restarts from the head of the new inode.
+        let newest_meta = std::fs::metadata(&newest).ok();
+        let recorded_len = newest_meta.as_ref().map_or(0, |m| m.len());
         let mut cut_pos = recorded_len;
 
         for path in &included {
@@ -240,6 +259,7 @@ impl FileReader {
         self.file = None;
         self.file_position = cut_pos;
         self.partial_line.clear();
+        self.open_file_id = newest_meta.as_ref().map(file_id);
         true
     }
 
@@ -291,25 +311,44 @@ impl FileReader {
 
     /// Check if there's a newer file than what we're currently tracking
     fn check_for_newer_file(&mut self) -> Option<PathBuf> {
-        if let Some(latest) = self.find_latest_file() {
-            if let Some(ref current) = self.current_path {
-                if latest != *current {
-                    // Check if the new file has data (modification time is newer)
-                    if let (Ok(latest_meta), Ok(current_meta)) = (latest.metadata(), current.metadata()) {
-                        if let (Ok(latest_mtime), Ok(current_mtime)) = (latest_meta.modified(), current_meta.modified())
-                        {
-                            if latest_mtime > current_mtime {
-                                return Some(latest);
-                            }
-                        }
-                    }
-                }
-            } else {
-                // No current file, use the latest
-                return Some(latest);
-            }
+        let latest = self.find_latest_file()?;
+        let Some(current) = self.current_path.clone() else {
+            return Some(latest); // no current file, use the latest
+        };
+        if latest == current {
+            // Same path is NOT the same file after a long stop: node catch-up
+            // writes by block time and recreates the very hour file retention
+            // pruned. If the inode on disk no longer matches the one our
+            // position refers to, force a switch (on_create drains a held
+            // handle to EOF, so this handoff is gapless when we have one).
+            let recreated = latest
+                .metadata()
+                .ok()
+                .zip(self.open_file_id)
+                .is_some_and(|(meta, open_id)| file_id(&meta) != open_id);
+            return recreated.then_some(latest);
         }
-        None
+        let Ok(current_meta) = current.metadata() else {
+            // The tracked file vanished from disk (node down long enough for
+            // retention to prune it). This polling fallback is then the ONLY
+            // re-attach path - modify events don't adopt a file while
+            // current_path is set, and the mtime comparison below could never
+            // run again - so switch unconditionally. Jumping straight to the
+            // latest file may skip intermediate files wholesale; flag the loss
+            // so the book re-syncs from a covering snapshot instead of
+            // continuing with a hole.
+            warn!(
+                "Tracked file {} vanished; force-switching to {} and flagging desync",
+                current.display(),
+                latest.display()
+            );
+            self.desynced = true;
+            return Some(latest);
+        };
+        // Only switch when the new file has data (modification time is newer).
+        let latest_mtime = latest.metadata().and_then(|m| m.modified()).ok()?;
+        let current_mtime = current_meta.modified().ok()?;
+        (latest_mtime > current_mtime).then_some(latest)
     }
 
     /// Process file modification - read new data and return lines
@@ -323,9 +362,32 @@ impl FileReader {
             // still observes appended data (the node only ever appends).
             if self.file.is_none() {
                 match File::open(path) {
-                    Ok(file) => self.file = Some(file),
+                    Ok(file) => {
+                        if let Ok(meta) = file.metadata() {
+                            let id = file_id(&meta);
+                            // Same path recreated under our feet while we held
+                            // no handle: file_position points into the OLD
+                            // inode, whose tail is gone. Read the new file
+                            // from the start and flag the loss.
+                            if self.file_position > 0 && self.open_file_id.is_some_and(|open_id| open_id != id) {
+                                warn!(
+                                    "{} was recreated in place; reading from start and flagging desync",
+                                    path.display()
+                                );
+                                self.desynced = true;
+                                self.file_position = 0;
+                                self.partial_line.clear();
+                            }
+                            self.open_file_id = Some(id);
+                        }
+                        self.file = Some(file);
+                        self.open_error_path = None;
+                    }
                     Err(err) => {
-                        error!("Failed to open {}: {err}", path.display());
+                        if self.open_error_path.as_ref() != Some(path) {
+                            error!("Failed to open {} (retrying silently): {err}", path.display());
+                            self.open_error_path = Some(path.clone());
+                        }
                         return lines;
                     }
                 }
@@ -436,17 +498,41 @@ impl FileReader {
 
     /// Switch to a new file (on create event)
     fn on_create(&mut self, path: &PathBuf) -> Vec<String> {
+        // A handle-less tracked file that vanished OR was recreated in place
+        // (same path, new inode) is unrecoverable: everything past our last
+        // read is gone, and a drain would open the NEW inode at a stale
+        // offset. Flag desync and skip the drain. With a live handle neither
+        // applies - the drain below reads the old (possibly deleted) inode to
+        // EOF, so the old file is provably drained and the handoff is gapless.
+        let open_id = self.open_file_id;
+        let stale_handleless = self.file.is_none()
+            && self.current_path.as_ref().is_some_and(|current| match current.metadata() {
+                Err(_) => true, // vanished
+                Ok(meta) => open_id.is_some_and(|id| id != file_id(&meta)), // recreated in place
+            });
+        if stale_handleless {
+            warn!(
+                "Tracked file {} vanished/recreated with no open handle; switching to {} and flagging desync",
+                self.current_path.as_ref().expect("checked above").display(),
+                path.display()
+            );
+            self.desynced = true;
+        }
+
         // Drain the old file until it goes quiet: a single read raced the
         // node's final appends (anything written between the read and the
         // switch was silently lost). Each pass observes the size at read time,
         // so the loop ends only after a read that saw no new data.
-        let mut old_lines = self.on_modify();
-        loop {
-            let more = self.on_modify();
-            if more.is_empty() {
-                break;
+        let mut old_lines = Vec::new();
+        if !stale_handleless {
+            old_lines = self.on_modify();
+            loop {
+                let more = self.on_modify();
+                if more.is_empty() {
+                    break;
+                }
+                old_lines.extend(more);
             }
-            old_lines.extend(more);
         }
 
         // Start tracking new file from beginning
@@ -454,6 +540,7 @@ impl FileReader {
         self.file = None;
         self.file_position = 0;
         self.partial_line.clear();
+        self.open_file_id = None; // position 0 is valid in any inode; id set on open
 
         old_lines
     }
@@ -463,8 +550,10 @@ impl FileReader {
         // Get current file size to start from end
         if let Ok(metadata) = std::fs::metadata(path) {
             self.file_position = metadata.len();
+            self.open_file_id = Some(file_id(&metadata));
         } else {
             self.file_position = 0;
+            self.open_file_id = None;
         }
         self.current_path = Some(path.clone());
         self.file = None;
@@ -766,6 +855,14 @@ mod tests {
         file.write_all(data.as_bytes()).unwrap();
     }
 
+    /// Replace `path` with a NEW inode holding `data` (write-to-tmp + rename,
+    /// so the test can't be fooled by inode-number reuse).
+    fn replace_file(path: &PathBuf, data: &str) {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, data).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
     #[test]
     fn test_on_modify_reads_appended_lines_and_buffers_partials() {
         let dir = test_dir("appended");
@@ -925,6 +1022,152 @@ mod tests {
         // Live tracking is on the NEWER file, positioned at its end.
         append(&newer, &format!("{}\n", bn_line(31)));
         assert_eq!(reader.on_modify(), vec![bn_line(31)]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_vanished_tracked_file_force_switches_and_flags_desync() {
+        // Node down long enough for retention to prune the tracked file: the
+        // watcher must re-attach to the newest file via the polling fallback
+        // (the old mtime comparison dead-locked on the deleted path forever)
+        // and flag desync so the book re-syncs from a covering snapshot.
+        let dir = test_dir("vanished");
+        let day = dir.join("hourly").join("20240101");
+        std::fs::create_dir_all(&day).unwrap();
+        let old = day.join("0");
+        append(&old, &format!("{}\n", bn_line(10)));
+        let mut reader = FileReader::new(dir.clone());
+        reader.start_tracking(&old);
+
+        std::fs::remove_file(&old).unwrap();
+        // Nothing to switch to yet: no crash, no desync, on_modify stays quiet.
+        assert_eq!(reader.check_for_newer_file(), None);
+        assert!(reader.on_modify().is_empty());
+        assert!(!reader.take_desynced());
+
+        // Node comes back and writes a new file: force-switch + desync flag.
+        let new = day.join("1");
+        append(&new, &format!("{}\n", bn_line(20)));
+        assert_eq!(reader.check_for_newer_file(), Some(new.clone()));
+        assert!(reader.take_desynced(), "skipping over a vanished file is potential data loss");
+
+        // The switch itself works end-to-end: new file is read from the start.
+        reader.on_create(&new);
+        assert_eq!(reader.on_modify(), vec![bn_line(20)]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_create_after_vanish_with_open_handle_drains_tail_without_desync() {
+        // Common recovery: the watcher holds the fd across the deletion, so
+        // the deleted inode is still drained to EOF and the handoff to the
+        // create-event file is gapless - no snapshot re-sync required.
+        let dir = test_dir("vanish_fd_held");
+        let day = dir.join("hourly").join("20240101");
+        std::fs::create_dir_all(&day).unwrap();
+        let old = day.join("0");
+        append(&old, "");
+        let mut reader = FileReader::new(dir.clone());
+        reader.start_tracking(&old);
+        append(&old, &format!("{}\n", bn_line(10)));
+        assert_eq!(reader.on_modify(), vec![bn_line(10)]); // opens + holds the fd
+
+        // A tail lands, then the file is pruned: the held fd still reads it.
+        append(&old, &format!("{}\n", bn_line(11)));
+        std::fs::remove_file(&old).unwrap();
+        let new = day.join("1");
+        append(&new, &format!("{}\n", bn_line(12)));
+        assert_eq!(reader.on_create(&new), vec![bn_line(11)], "tail of the deleted inode is drained");
+        assert!(!reader.take_desynced(), "a provably gapless handoff must not force a re-sync");
+        assert_eq!(reader.on_modify(), vec![bn_line(12)]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_create_after_vanish_without_handle_flags_desync() {
+        // No handle was ever held on the vanished file: whatever sat past
+        // file_position is unrecoverable, so the create-event switch must
+        // flag desync (this was the fast path the polling-only fix missed).
+        let dir = test_dir("vanish_no_fd");
+        let day = dir.join("hourly").join("20240101");
+        std::fs::create_dir_all(&day).unwrap();
+        let old = day.join("0");
+        append(&old, &format!("{}\n", bn_line(10)));
+        let mut reader = FileReader::new(dir.clone());
+        reader.start_tracking(&old); // tracks position, opens no handle
+
+        std::fs::remove_file(&old).unwrap();
+        let new = day.join("1");
+        append(&new, &format!("{}\n", bn_line(20)));
+        assert!(reader.on_create(&new).is_empty(), "nothing to drain from the vanished file");
+        assert!(reader.take_desynced(), "unread tail of the vanished file is unrecoverable");
+        assert_eq!(reader.on_modify(), vec![bn_line(20)]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_same_path_recreate_without_handle_resets_and_flags_desync() {
+        // Node catch-up writes by BLOCK time: after a long stop it recreates
+        // the very hour file retention pruned - same path, new inode. With no
+        // handle held and no create event, on_modify itself must notice the
+        // inode swap, reset to the head of the new file and flag desync
+        // (the old code silently read the new file at the stale offset).
+        let dir = test_dir("recreate_no_fd");
+        let day = dir.join("hourly").join("20240101");
+        std::fs::create_dir_all(&day).unwrap();
+        let path = day.join("12");
+        append(&path, &format!("{}\n", bn_line(10)));
+        let mut reader = FileReader::new(dir.clone());
+        reader.start_tracking(&path); // stale position, no handle
+
+        replace_file(&path, &format!("{}\n", bn_line(20)));
+        assert_eq!(reader.on_modify(), vec![bn_line(20)], "new content is read from the start");
+        assert!(reader.take_desynced(), "the old inode's unread tail is unrecoverable");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_same_path_recreate_with_held_handle_switches_gapless_via_poll() {
+        // Same recreate, but the watcher holds the old fd and the create event
+        // was missed: the polling fallback must detect the inode swap (the old
+        // `latest == current -> None` never did), and the on_create handoff
+        // drains the held fd - provably gapless, so NO desync.
+        let dir = test_dir("recreate_fd_held");
+        let day = dir.join("hourly").join("20240101");
+        std::fs::create_dir_all(&day).unwrap();
+        let path = day.join("12");
+        append(&path, "");
+        let mut reader = FileReader::new(dir.clone());
+        reader.start_tracking(&path);
+        append(&path, &format!("{}\n", bn_line(10)));
+        assert_eq!(reader.on_modify(), vec![bn_line(10)]); // opens + holds the fd
+
+        replace_file(&path, &format!("{}\n", bn_line(20)));
+        assert!(reader.on_modify().is_empty(), "held fd still reads the drained old inode");
+        assert_eq!(reader.check_for_newer_file(), Some(path.clone()), "inode swap must force a switch");
+        assert!(reader.on_create(&path).is_empty(), "old inode was already drained");
+        assert!(!reader.take_desynced(), "a fully drained handoff must not force a re-sync");
+        assert_eq!(reader.on_modify(), vec![bn_line(20)]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_create_event_same_path_recreate_without_handle_flags_desync() {
+        // The create event for the recreated path arrives while no handle is
+        // held: the switch must flag desync and skip the drain (a drain would
+        // read the NEW inode at the stale offset), then read from the start.
+        let dir = test_dir("recreate_create_event");
+        let day = dir.join("hourly").join("20240101");
+        std::fs::create_dir_all(&day).unwrap();
+        let path = day.join("12");
+        append(&path, &format!("{}\n", bn_line(10)));
+        let mut reader = FileReader::new(dir.clone());
+        reader.start_tracking(&path); // stale position, no handle
+
+        replace_file(&path, &format!("{}\n", bn_line(20)));
+        assert!(reader.on_create(&path).is_empty(), "no drain through a stale offset");
+        assert!(reader.take_desynced(), "the old inode's unread tail is unrecoverable");
+        assert_eq!(reader.on_modify(), vec![bn_line(20)]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
