@@ -132,6 +132,12 @@ pub(crate) struct OrderBookListener {
     // Highest block height observed on the live stream; the best "now" proxy
     // for bounding losses whose exact height is unknown (watcher discards).
     last_seen_height: u64,
+    // Once-guard for the late-backfill drop path: metric/log/re-sync scheduling
+    // fire at most once per resolved cycle (the startup backfill is a flood).
+    // A dedicated flag because under tolerate_drift needs_resync stays false
+    // and cannot serve as one. Cleared only when a snapshot actually covers
+    // the recorded loss (see init_from_snapshot).
+    late_backfill_reported: bool,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
     // Pairs fill legs into public-schema trades; holds at most the one leg
     // awaiting its counterpart across Fills batches (single-event batches in
@@ -183,6 +189,7 @@ impl OrderBookListener {
             tolerate_drift: false,
             max_loss_height: 0,
             last_seen_height: 0,
+            late_backfill_reported: false,
             internal_message_tx,
             trade_pairer: TradePairer::default(),
             last_l2_broadcast: None,
@@ -330,6 +337,12 @@ impl OrderBookListener {
             } else {
                 prior_loss_height
             };
+        } else {
+            // This cycle's recorded loss (if any) is covered by the snapshot:
+            // the next late backfill is a new reportable event. NOT reset on a
+            // non-covering snapshot above - that is still the same unresolved
+            // cycle, and re-arming would let the flood spam the counter again.
+            self.late_backfill_reported = false;
         }
 
         // The incremental L2 cache references the previous book's coins/levels;
@@ -716,17 +729,46 @@ impl OrderBookListener {
     /// construction, and applying e.g. a stale size update on top of newer
     /// state would corrupt the book. If the replay cache is already gone (the
     /// snapshot landed before the backfill drained, or the cache overflowed),
-    /// the batch cannot be used safely - mark the book for re-sync instead; the
-    /// re-fetched snapshot's height supersedes everything the backfill carried.
+    /// the batch cannot be used safely and is dropped; a covering snapshot
+    /// supersedes everything it carried.
+    ///
+    /// A dropped batch DOES update the loss bound with its own block height:
+    /// that is CERTAIN loss information, and unlike the live tip it cannot
+    /// ratchet the bound forever - backfill heights are capped by the disk
+    /// tail at startup (the backfill is one-shot), a fixed ceiling the
+    /// periodic abci checkpoint passes within a cycle or two.
+    ///
+    /// Metric / log / re-sync scheduling fire AT MOST ONCE per cycle: the
+    /// startup backfill is a flood (hours of stream lines), and re-marking on
+    /// every late batch (a) spams the desync counter (291k observed on
+    /// 2026-07-06) and (b) ratchets the loss bound to the LIVE stream tip on
+    /// each call - which grows without bound while the covering snapshot's
+    /// height comes from the checkpoint (~10k blocks behind), so the flag
+    /// became unclearable and the re-fetch loop starved the host. The
+    /// once-guard is a dedicated flag (`late_backfill_reported`) because
+    /// under tolerate_drift `needs_resync` stays false and cannot serve as one.
     fn cache_backfill_batch(&mut self, event_batch: EventBatch) {
-        if matches!(event_batch, EventBatch::Fills(_)) {
-            return;
-        }
+        // Backfill only ever wraps statuses/diffs (see the watcher); fills and
+        // oracle updates never mutate the book.
+        let height = match &event_batch {
+            EventBatch::Orders(b) => b.block_number(),
+            EventBatch::BookDiffs(b) => b.block_number(),
+            _ => return,
+        };
         if self.fetched_snapshot_cache.is_some() {
             self.push_to_replay_cache(event_batch);
-        } else {
-            self.mark_desynced("late_backfill");
+            return;
         }
+        // Skipped under tolerate_drift: a nonzero bound would arm a re-fetch at
+        // the next init_from_snapshot, breaking the "ride out drift" contract.
+        if !self.tolerate_drift {
+            self.max_loss_height = self.max_loss_height.max(height);
+        }
+        if self.late_backfill_reported {
+            return;
+        }
+        self.late_backfill_reported = true;
+        self.mark_desynced("late_backfill");
     }
 
     /// Apply a parsed event batch to the book and run the fast broadcast paths.
@@ -1725,6 +1767,53 @@ mod tests {
         );
     }
 
+    /// 2026-07-06 风暴回归: 重打标会把 loss bound 骑到 live 尖端(每次 mark 取当前
+    /// 高度+margin), 让周期 abci 快照永远盖不住 → flag 不可清除。修正后: bound 跟随
+    /// 被丢批**自身**的高度(确定损失信息, 天花板=启动磁盘尾, 固定), 绝不跟随并行
+    /// 上涨的 live tip; mark/metric 每周期至多一次。
+    #[test]
+    fn test_late_backfill_bound_follows_batch_height_not_live_tip() {
+        let (mut listener, _rx) = ready_listener();
+        feed_order(&mut listener, "BTC", 1, 100); // 建立 live 观测高度
+        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 2, 99)));
+        assert!(listener.needs_resync());
+        // 更高的迟到批: bound 跟上它(否则快照会在没覆盖它的情况下清 flag)。
+        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 2, 9_000)));
+        // live tip 冲到 50_000 后再来一个低位迟到批: bound 必须停在 9_000,
+        // 不许被重打标骑到 live 尖端(unclearable ratchet 回归)。
+        feed_order(&mut listener, "BTC", 3, 50_000);
+        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 2, 5_000)));
+        assert_eq!(
+            listener.max_loss_height, 9_000,
+            "loss bound 只跟被丢批自身最大高度, 不跟 live tip"
+        );
+    }
+
+    /// 顾问补充的 reset 时机: reported flag 只在本轮 loss 真被快照覆盖清掉时重置;
+    /// 未覆盖的快照仍属同一轮 unresolved, 重置会让洪水重新刷 metric/mark。
+    #[test]
+    fn test_late_backfill_reported_resets_only_when_loss_resolved() {
+        let (mut listener, _rx) = ready_listener();
+        feed_order(&mut listener, "BTC", 1, 100);
+        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 2, 300)));
+        assert!(listener.needs_resync());
+        assert!(listener.late_backfill_reported);
+
+        // 未覆盖快照(50 < bound 300): 同一轮, flag 不重置。
+        listener.begin_caching();
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 50);
+        assert!(listener.needs_resync(), "非覆盖快照不得清 flag");
+        assert!(listener.late_backfill_reported, "unresolved 周期必须保持 once-guard");
+
+        // 覆盖快照清掉本轮 → flag 重置, 新的迟到批开新一轮(重新 mark)。
+        listener.begin_caching();
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 10_000);
+        assert!(!listener.needs_resync());
+        assert!(!listener.late_backfill_reported, "resolved 周期必须重置 once-guard");
+        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 2, 10_500)));
+        assert!(listener.needs_resync(), "resolved 之后的新迟到批必须重新 mark");
+    }
+
     #[test]
     fn test_tolerate_drift_suppresses_resync() {
         let (mut listener, _rx) = ready_listener();
@@ -1738,6 +1827,13 @@ mod tests {
         // ...and the higher-level late-backfill path stays quiet too.
         listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 1, 99)));
         assert!(!listener.needs_resync(), "tolerate_drift must suppress the late-backfill desync path as well");
+        // drift 模式不许积累 loss bound: 非零 bound 会在下一次 init_from_snapshot
+        // 走 prior > height 分支把 needs_resync 置回 true, 打破 drift 契约。
+        assert_eq!(listener.max_loss_height, 0, "drift 模式不得积累 loss bound");
+        // 洪水第二批: once-guard 生效(P3 — metric 不再每行刷)。
+        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 1, 200)));
+        assert!(listener.late_backfill_reported, "drift 模式下 reported 标志承担 once-guard");
+        assert!(!listener.needs_resync());
     }
 
     // ==================== Per-coin fan-out grouping ====================
