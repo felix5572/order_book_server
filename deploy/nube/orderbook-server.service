@@ -1,0 +1,74 @@
+# orderbook_server @ nube(direct mode)部署 unit。
+#
+# 与上游 orderbook-server.service(docker 模式, root 部署)无关, 这是我们自己的。
+# **定位: 弱云盘(vda)上与 hl-node 共居的临时方案** —— 资源护栏都是为"别挤死主业
+# hl-node"设的, 不是服务本身的需求。**迁裸金属(NVMe)后必须重估**: 限速值放宽或
+# 整段去除, 设备路径必改(见下)。
+#
+# 设计要点(2026-07-06 盘挤兑事故复盘 ×2):
+#   - IOSchedulingClass/Priority = systemd 原生 ionice(BFQ 下管住同步读)。
+#   - IO{Read,Write}BandwidthMax = cgroup v2 io 控制器硬限速。关键是它带
+#     writeback 归因: 脏页记账到本 cgroup, 异步写回也被限 —— 补上 ionice
+#     管不到缓冲写的盲区(重建期 38MB/s 写回挤死 hl-node 的教训)。
+#     ob-snapshotter 子进程同 cgroup, 一并被限。重建会因此拉长(可接受)。
+#   - CPUWeight/MemoryHigh/MemoryMax = CPU/内存护栏(重建与订阅风暴也吃 CPU/RSS;
+#     MemoryMax 兜底保证 OOM 杀的是本服务, 不连坐 hl-node)。
+#   - 限速值依据: 节点自身稳态写 ~8-15MB/s; server 稳态读写很小, 上限只在
+#     重建期起作用。上线后按稳态 iostat 基线校准。
+#   - **不对外服务**: --address 127.0.0.1(消费者只有本机 venue_flow / qos_monitor /
+#     watch 工具)。⚠ metrics 端口(9090)二进制写死绑 0.0.0.0(只有 --metrics-port
+#     参数), 暂靠云防火墙/安全组不放行 9090; 要彻底收口需给上游加 --metrics-address
+#     的小改(待办)。
+#   - Restart=on-failure: 崩了自动拉; 人为 stop 不复活。
+#
+# 前置:
+#   - cgroup v2(Ubuntu 22.04+ 默认; `mount | grep cgroup2` 可验)。
+#   - 限速目标用**数据目录路径**(非设备节点), systemd 自动解析背后块设备
+#     (2026-07-06 实测 nube: /home/ubuntu/hl 在 /dev/vda2 根盘)——换机免改;
+#     但装完必须验限速真挂上了(见 [Service] 段注释), 打空 = 静默无效最危险。
+#   - ~/ob-snapshotter 是 hl-node 二进制的**手动副本**(隔离 hl-visor 进程名扫描
+#     panic 坑)。本 unit 不负责刷新它: hl-visor 升级节点二进制后需手动重拷,
+#     否则 snapshotter 可能因版本漂移解不了新 abci state(待办: 免撞名刷新脚本)。
+#
+# 安装:
+#   sudo cp deploy/nube/orderbook-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now orderbook-server
+# (先 cargo build --release; unit 直接跑编译产物, 不走 cargo run / start-server.sh)
+
+[Unit]
+Description=Hyperliquid Orderbook WebSocket Server (direct mode, localhost-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/home/ubuntu/order_book_server/target/release/orderbook_server \
+    --address 127.0.0.1 \
+    --port 8000 \
+    --snapshot-mode direct \
+    --hlnode-binary /home/ubuntu/ob-snapshotter \
+    --data-dir /home/ubuntu/hl/data \
+    --metrics-port 9090 \
+    --log-level info
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# 用数据目录路径而非设备节点: systemd 自动解析其背后块设备(实测 nube = vda2/根盘),
+# 换裸金属/RAID 不用改路径, 消掉"设备写死打空"的隐患。装完仍要验:
+#   systemctl show orderbook-server -p IOReadBandwidthMax -p IOWriteBandwidthMax
+IOReadBandwidthMax=/home/ubuntu/hl 50M
+IOWriteBandwidthMax=/home/ubuntu/hl 20M
+CPUWeight=20
+MemoryHigh=4G
+MemoryMax=8G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orderbook-server
+
+[Install]
+WantedBy=multi-user.target
