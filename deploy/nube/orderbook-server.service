@@ -13,6 +13,12 @@
 #     ob-snapshotter 子进程同 cgroup, 一并被限。重建会因此拉长(可接受)。
 #   - CPUWeight/MemoryHigh/MemoryMax = CPU/内存护栏(重建与订阅风暴也吃 CPU/RSS;
 #     MemoryMax 兜底保证 OOM 杀的是本服务, 不连坐 hl-node)。
+#     ⚠ MemoryHigh 教训(2026-07-06 首跑): **page cache 记账记在 cgroup 头上** ——
+#     snapshotter 读 3GB abci_state.rmp 的缓存就顶满了 4G High, 触发 reclaim 节流
+#     (memory.events high 4.1万次), 缓存被踢→重读又撞 50M 读限速→颠簸死循环,
+#     快照 50min 跑不完(CPU 才用 4min)。High 必须 ≥ rmp 尺寸 + 计算缓冲。
+#     机器有 32G swapfile(节点冷页常驻其中): 超 High 走 swap 而非硬卡, 且内存压力
+#     只在重建暂态出现(用户拍板接受)→ High 放到 8G, Max=10G 仍守住不连坐节点。
 #   - 限速值依据: 节点自身稳态写 ~8-15MB/s; server 稳态读写很小, 上限只在
 #     重建期起作用。上线后按稳态 iostat 基线校准。
 #   - **不对外服务**: --address 127.0.0.1(消费者只有本机 venue_flow / qos_monitor /
@@ -63,8 +69,8 @@ IOSchedulingPriority=7
 IOReadBandwidthMax=/home/ubuntu/hl 50M
 IOWriteBandwidthMax=/home/ubuntu/hl 20M
 CPUWeight=20
-MemoryHigh=4G
-MemoryMax=8G
+MemoryHigh=8G
+MemoryMax=10G
 
 StandardOutput=journal
 StandardError=journal
