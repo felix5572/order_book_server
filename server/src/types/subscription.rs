@@ -6,7 +6,9 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-pub(crate) const MAX_LEVELS: usize = 100;
+/// Native levels per side. ±100bps spans 100-270 native levels on dense books
+/// (USELESS, ETH, NVDA; measured 2026-10-06); BTC needs ~850 and stays out of reach.
+pub(crate) const MAX_LEVELS: usize = 400;
 pub(crate) const DEFAULT_LEVELS: usize = 20;
 /// Hard cap on subscriptions per WS connection. The broadcast hot paths iterate
 /// every subscription on every event, and L4Book subscribes also trigger a
@@ -228,7 +230,7 @@ impl Drop for SubscriptionManager {
 #[cfg(test)]
 mod test {
     use crate::types::node_data::NodeDataOrderDiff;
-    use crate::types::subscription::Subscription;
+    use crate::types::subscription::{MAX_LEVELS, Subscription};
 
     use super::{ClientMessage, ServerResponse};
 
@@ -369,13 +371,13 @@ mod test {
 
     #[test]
     fn test_validate_l2book_n_levels_over_max() {
-        let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: None, n_levels: Some(101), mantissa: None };
+        let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: None, n_levels: Some(MAX_LEVELS + 1), mantissa: None };
         assert!(!sub.validate(&universe()));
     }
 
     #[test]
     fn test_validate_l2book_n_levels_at_max() {
-        let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: None, n_levels: Some(100), mantissa: None };
+        let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: None, n_levels: Some(MAX_LEVELS), mantissa: None };
         assert!(sub.validate(&universe()));
     }
 

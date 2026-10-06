@@ -175,14 +175,15 @@ impl L2SnapshotParams {
 ///
 /// Every variant is capped at `MAX_LEVELS` per side. Subscription validation
 /// rejects `n_levels > MAX_LEVELS`, so deeper levels are pure waste in CPU,
-/// memory, and broadcast Arc size (BTC: ~500 -> 100 levels/side).
+/// memory, and broadcast Arc size (BTC alone has ~850 levels/side within ±100bps).
 ///
 /// Each requested variant is derived *directly from the raw base* `(None, None)`,
 /// never from a coarser sibling: aggregation is lossy across mantissas (e.g.
-/// `(5, Some(5))` is not derivable from `(5, Some(2))`), and the full-information
-/// base is a correct source for every shape. The base is always included so the
-/// raw `(None, None)` consumers (and the chain) stay correct; it is the parent of
-/// every derived shape and only one extra cheap entry.
+/// `(5, Some(5))` is not derivable from `(5, Some(2))`). The base is capped, so an
+/// aggregated shape only re-buckets the first `MAX_LEVELS` native levels; unlike
+/// the official API it never reaches further out than the raw book. The base is
+/// always included so the raw `(None, None)` consumers (and the chain) stay correct;
+/// it is the parent of every derived shape and only one extra cheap entry.
 fn compute_l2_variants_for_coin<O: InnerOrder>(
     order_book: &crate::order_book::OrderBook<O>,
     active: &HashSet<L2SnapshotParams>,

@@ -259,7 +259,7 @@ Streams raw order book diffs as they arrive. Each diff is one of: `new` (order a
 ```json
 { "method": "subscribe", "subscription": { "type": "l2Book", "coin": "BTC" } }
 ```
-Optional parameters: `nSigFigs` (2-5), `nLevels` (max 100, default 20), `mantissa` (2 or 5)
+Optional parameters: `nSigFigs` (2-5), `nLevels` (max 400, default 20), `mantissa` (2 or 5)
 
 ### Subscribe to L4 Orderbook
 ```json
