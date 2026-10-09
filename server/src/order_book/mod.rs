@@ -1,7 +1,7 @@
 use crate::prelude::*;
 use itertools::Itertools;
 use price_level::PriceLevel;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 pub(crate) mod levels;
 mod linked_list;
@@ -9,11 +9,13 @@ pub(crate) mod multi_book;
 mod price_level;
 pub(crate) mod types;
 
-pub(crate) use types::{Coin, InnerOrder, Oid, Px, Side, Sz};
+pub(crate) use types::{Coin, InnerOrder, Oid, Px, PxBand, Side, Sz};
 
 #[derive(Clone, Default)]
 pub(crate) struct OrderBook<O> {
-    oid_to_side_px: HashMap<Oid, (Side, Px)>,
+    // FxHashMap: hashed per add/cancel/modify with trusted internal keys -
+    // SipHash's DoS resistance buys nothing here and costs on every op.
+    oid_to_side_px: rustc_hash::FxHashMap<Oid, (Side, Px)>,
     bids: BTreeMap<Px, PriceLevel<O>>,
     asks: BTreeMap<Px, PriceLevel<O>>,
 }
@@ -22,8 +24,24 @@ pub(crate) struct OrderBook<O> {
 pub(crate) struct Snapshot<O>([Vec<O>; 2]);
 
 impl<O: Clone> Snapshot<O> {
+    /// Production paths consume snapshots via `into_inner` (no re-clone);
+    /// tests borrow them for assertions.
+    #[cfg(test)]
     pub(crate) const fn as_ref(&self) -> &[Vec<O>; 2] {
         &self.0
+    }
+
+    /// Consume the snapshot, yielding the owned per-side order vectors. Lets
+    /// an already-owned snapshot be converted without re-cloning every order.
+    pub(crate) fn into_inner(self) -> [Vec<O>; 2] {
+        self.0
+    }
+
+    /// Raw per-side constructor for tests outside this module (the field is
+    /// private). Production snapshots are built by `convert_cli_snapshot`.
+    #[cfg(test)]
+    pub(crate) const fn from_sides(bids: Vec<O>, asks: Vec<O>) -> Self {
+        Self([bids, asks])
     }
 
     pub(crate) fn truncate(&self, n: usize) -> Self {
@@ -35,6 +53,14 @@ impl<O: Clone> Snapshot<O> {
 
 impl<O: InnerOrder> Snapshot<O> {
     pub(crate) fn remove_triggers(&mut self) {
+        drop(self.extract_triggers());
+    }
+
+    /// Strips the untriggered trigger orders the hl-node snapshot appends to the
+    /// tail of BOTH sides (same oid in each) and returns the popped copies.
+    /// Callers that keep them should dedupe by oid — every trigger order yields
+    /// two copies, one per side.
+    pub(crate) fn extract_triggers(&mut self) -> Vec<O> {
         #[allow(clippy::unwrap_used)]
         let [bid_oids, ask_oids] = &self
             .0
@@ -43,23 +69,26 @@ impl<O: InnerOrder> Snapshot<O> {
             .collect::<Vec<_>>()
             .try_into()
             .unwrap();
+        let mut triggers = Vec::new();
         for orders in &mut self.0 {
             while let Some(order) = orders.last() {
                 let oid = order.oid();
                 if bid_oids.contains(&oid) && ask_oids.contains(&oid) {
-                    orders.pop();
+                    #[allow(clippy::unwrap_used)]
+                    triggers.push(orders.pop().unwrap());
                 } else {
                     break;
                 }
             }
         }
+        triggers
     }
 }
 
 impl<O: InnerOrder> OrderBook<O> {
     #[must_use]
     pub(crate) fn new() -> Self {
-        Self { oid_to_side_px: HashMap::new(), bids: BTreeMap::new(), asks: BTreeMap::new() }
+        Self { oid_to_side_px: rustc_hash::FxHashMap::default(), bids: BTreeMap::new(), asks: BTreeMap::new() }
     }
 
     /// Number of orders in this orderbook
@@ -67,7 +96,17 @@ impl<O: InnerOrder> OrderBook<O> {
         self.oid_to_side_px.len()
     }
 
-    pub(crate) fn add_order(&mut self, mut order: O) {
+    pub(crate) fn add_order(&mut self, order: O) {
+        let fell_back = self.add_order_before(order, None);
+        debug_assert!(!fell_back);
+    }
+
+    /// Rests the order directly in front of `insert_before` at its price level
+    /// (at the back when None), as dictated by the node's book diff. Returns true
+    /// when a `Some` anchor was not resting at that level and the order was rested
+    /// at the back of the level instead - the book has diverged from the stream
+    /// and the caller should schedule a re-sync.
+    pub(crate) fn add_order_before(&mut self, mut order: O, insert_before: Option<Oid>) -> bool {
         // Duplicate oid would silently corrupt state: `oid_to_side_px` would point
         // at the new (side, px) while `LinkedList::push_back` silently rejects the
         // re-insert, leaving the original order data in place. Skip and warn.
@@ -76,7 +115,7 @@ impl<O: InnerOrder> OrderBook<O> {
         // orders that have arrived since.)
         if self.oid_to_side_px.contains_key(&order.oid()) {
             log::warn!("OrderBook::add_order called twice for oid={:?}; ignoring duplicate", order.oid());
-            return;
+            return false;
         }
         let (maker_orders, resting_book) = match order.side() {
             Side::Ask => (&mut self.bids, &mut self.asks),
@@ -88,8 +127,9 @@ impl<O: InnerOrder> OrderBook<O> {
         }
         if order.sz().is_positive() {
             self.oid_to_side_px.insert(order.oid(), (order.side(), order.limit_px()));
-            add_order_to_book(resting_book, order);
+            return add_order_to_book(resting_book, order, insert_before);
         }
+        false
     }
 
     pub(crate) fn cancel_order(&mut self, oid: Oid) -> bool {
@@ -165,9 +205,27 @@ impl<O: InnerOrder> OrderBook<O> {
     }
 
     // we go by the convention that prioritized orders go first in the vector; this makes aggregation step later easier.
+    // Production always goes through to_snapshot_in_band (an absent band is
+    // unbounded); this full-book shorthand survives for the many round-trip tests.
+    #[cfg(test)]
     pub(crate) fn to_snapshot(&self) -> Snapshot<O> {
-        let bids = self.bids.iter().rev().flat_map(|(_, l)| l.to_vec().into_iter().cloned()).collect_vec();
-        let asks = self.asks.iter().flat_map(|(_, l)| l.to_vec().into_iter().cloned()).collect_vec();
+        self.to_snapshot_in_band(PxBand::default())
+    }
+
+    /// Snapshot restricted to price levels inside the (inclusive) band. Filtering
+    /// happens at the `BTreeMap::range` level so out-of-band levels are never
+    /// visited or cloned — a banded l4Book subscribe on a deep book copies a few
+    /// hundred orders instead of the full ~100k+, all under the listener lock.
+    pub(crate) fn to_snapshot_in_band(&self, band: PxBand) -> Snapshot<O> {
+        if band.is_inverted() {
+            // Validation rejects inverted bands at subscribe time; guard anyway
+            // because BTreeMap::range panics on start > end.
+            return Snapshot([Vec::new(), Vec::new()]);
+        }
+        let bids =
+            self.bids.range(band.range_bounds()).rev().flat_map(|(_, l)| l.to_vec().into_iter().cloned()).collect_vec();
+        let asks =
+            self.asks.range(band.range_bounds()).flat_map(|(_, l)| l.to_vec().into_iter().cloned()).collect_vec();
         Snapshot([bids, asks])
     }
 
@@ -186,10 +244,36 @@ impl<O: InnerOrder> OrderBook<O> {
     }
 }
 
-fn add_order_to_book<O: InnerOrder>(map: &mut BTreeMap<Px, PriceLevel<O>>, order: O) {
+// Rests the order at its price level, in front of `insert_before` when given.
+// The order ALWAYS rests: a `Some` anchor that is not at the level (book diverged
+// from the stream, e.g. after a pending-cache eviction) degrades to the back of
+// the level and returns true so the caller can flag the divergence, instead of
+// dropping the order or leaving a phantom empty level behind.
+fn add_order_to_book<O: InnerOrder>(
+    map: &mut BTreeMap<Px, PriceLevel<O>>,
+    order: O,
+    insert_before: Option<Oid>,
+) -> bool {
     let oid = order.oid();
     let limit_px = order.limit_px();
-    map.entry(limit_px).or_insert_with(PriceLevel::new).push_back(oid, order);
+    let level = map.entry(limit_px).or_insert_with(PriceLevel::new);
+    match insert_before {
+        None => {
+            level.push_back(oid, order);
+            false
+        }
+        Some(before) if level.contains(&before) => {
+            // Duplicate oids never reach here (the add_order_before guard rejects
+            // any oid already in oid_to_side_px), so the splice cannot fail.
+            let inserted = level.insert_before(&before, oid, order);
+            debug_assert!(inserted);
+            false
+        }
+        Some(_) => {
+            level.push_back(oid, order);
+            true
+        }
+    }
 }
 
 fn match_order<O: InnerOrder>(maker_orders: &mut BTreeMap<Px, PriceLevel<O>>, taker_order: &mut O) -> Vec<Oid> {
@@ -359,6 +443,147 @@ mod tests {
         let [b2, a2] = s2.0.map(BTreeSet::from_iter);
         assert_eq!(b1, b2);
         assert_eq!(a1, a2);
+    }
+
+    // ==================== extract_triggers Tests ====================
+
+    #[test]
+    fn test_extract_triggers_pops_tail_duplicates_and_returns_them() {
+        let mut factory = OrderFactory::default();
+        let bid = factory.order(100, 5, Side::Bid); // oid 0, bids only
+        let ask = factory.order(100, 6, Side::Ask); // oid 1, asks only
+        let trig_a = factory.order(50, 7, Side::Bid); // oid 2, appended to BOTH tails
+        let trig_b = factory.order(60, 8, Side::Ask); // oid 3, appended to BOTH tails
+
+        let mut snapshot = Snapshot([
+            vec![bid.clone(), trig_a.clone(), trig_b.clone()],
+            vec![ask.clone(), trig_a.clone(), trig_b.clone()],
+        ]);
+        let extracted = snapshot.extract_triggers();
+
+        // Two copies per trigger order (one per side).
+        let extracted_oids = extracted.iter().map(InnerOrder::oid).collect_vec();
+        assert_eq!(extracted_oids.len(), 4);
+        assert_eq!(extracted_oids.iter().filter(|oid| **oid == Oid::new(2)).count(), 2);
+        assert_eq!(extracted_oids.iter().filter(|oid| **oid == Oid::new(3)).count(), 2);
+
+        // The book orders survive untouched.
+        let [bids, asks] = snapshot.0;
+        assert_eq!(bids, vec![bid]);
+        assert_eq!(asks, vec![ask]);
+    }
+
+    #[test]
+    fn test_extract_triggers_stops_at_first_single_sided_tail_order() {
+        // A book order sitting at the tail (oid on one side only) must stop the
+        // pop loop even if an earlier entry would qualify - only the trailing
+        // trigger block is stripped, matching hl-node's snapshot layout.
+        let mut factory = OrderFactory::default();
+        let trig = factory.order(50, 7, Side::Bid); // oid 0, on both sides
+        let bid_tail = factory.order(100, 5, Side::Bid); // oid 1, bids only, AFTER the trigger
+        let ask = factory.order(100, 6, Side::Ask); // oid 2, asks only
+
+        let mut snapshot = Snapshot([vec![trig.clone(), bid_tail.clone()], vec![ask.clone(), trig.clone()]]);
+        let extracted = snapshot.extract_triggers();
+
+        // Only the ask-side copy is reachable; the bid-side copy is shielded by
+        // bid_tail. (Production snapshots never interleave like this - the
+        // trigger block is strictly trailing - but the guard must not scan past
+        // a non-trigger tail.)
+        assert_eq!(extracted.iter().map(InnerOrder::oid).collect_vec(), vec![Oid::new(0)]);
+        let [bids, _asks] = snapshot.0;
+        assert_eq!(bids, vec![trig, bid_tail]);
+    }
+
+    #[test]
+    fn test_remove_triggers_matches_extract_semantics() {
+        let mut factory = OrderFactory::default();
+        let bid = factory.order(100, 5, Side::Bid);
+        let trig = factory.order(50, 7, Side::Bid);
+
+        let mut removed = Snapshot([vec![bid.clone(), trig.clone()], vec![trig.clone()]]);
+        removed.remove_triggers();
+        let mut extracted = Snapshot([vec![bid.clone(), trig.clone()], vec![trig.clone()]]);
+        drop(extracted.extract_triggers());
+
+        assert_same_book(
+            Snapshot([removed.0[0].clone(), removed.0[1].clone()]),
+            Snapshot([extracted.0[0].clone(), extracted.0[1].clone()]),
+        );
+        assert_eq!(removed.0[0], vec![bid]);
+        assert!(removed.0[1].is_empty());
+    }
+
+    // ==================== insertBefore (ALO priority) Tests ====================
+
+    #[test]
+    fn insert_before_book_test() {
+        let mut factory = OrderFactory::default();
+        let mut book = OrderBook::new();
+        // oids 0..=2 rest at the same level in arrival order
+        let orders = factory.batch_order(100, 5, Side::Bid, 3);
+        for order in orders.clone() {
+            book.add_order(order);
+        }
+
+        // A priority order jumps to the front of the level
+        let front = factory.order(100, 5, Side::Bid);
+        assert!(!book.add_order_before(front.clone(), Some(Oid::new(0))));
+        // Another lands in the middle
+        let middle = factory.order(100, 5, Side::Bid);
+        assert!(!book.add_order_before(middle.clone(), Some(Oid::new(1))));
+        let expected = vec![front, orders[0].clone(), middle.clone(), orders[1].clone(), orders[2].clone()];
+        assert_eq!(book.to_snapshot().0[0], expected);
+
+        // Unknown anchor: the order still rests, at the back of the level, and
+        // the fallback is reported
+        let back = factory.order(100, 5, Side::Bid);
+        assert!(book.add_order_before(back.clone(), Some(Oid::new(99))));
+        // Anchor resting at a different price level falls back as well
+        let other_level = factory.order(100, 4, Side::Bid);
+        let other_oid = other_level.oid();
+        book.add_order(other_level.clone());
+        let back2 = factory.order(100, 5, Side::Bid);
+        assert!(book.add_order_before(back2.clone(), Some(other_oid.clone())));
+        let expected = [expected, vec![back.clone(), back2.clone()]].concat();
+        assert_eq!(book.to_snapshot().0[0], [expected.clone(), vec![other_level.clone()]].concat());
+
+        // A duplicate add is ignored and must NOT report a fallback, even with a
+        // bogus anchor - a replayed event is not book divergence
+        assert!(!book.add_order_before(orders[1].clone(), Some(Oid::new(99))));
+
+        // The jumped-to-front order is the first maker filled; oid 0 is filled
+        // partially - queue priority now drives fill attribution
+        book.add_order(factory.order(150, 5, Side::Ask));
+        let snapshot = book.to_snapshot();
+        let bids = &snapshot.0[0];
+        assert_eq!(bids[0].oid(), orders[0].oid());
+        assert_eq!(bids[0].sz, 50);
+
+        // Canceling around inserted orders keeps the level consistent
+        assert!(book.cancel_order(middle.oid()));
+        assert!(book.cancel_order(orders[0].oid()));
+        let bids = book.to_snapshot().0[0].iter().map(InnerOrder::oid).collect_vec();
+        assert_eq!(bids, vec![orders[1].oid(), orders[2].oid(), back.oid(), back2.oid(), other_oid]);
+    }
+
+    #[test]
+    fn insert_before_fallback_level_test() {
+        let mut factory = OrderFactory::default();
+        let mut book = OrderBook::new();
+        let resting = factory.order(100, 5, Side::Bid);
+        book.add_order(resting.clone());
+        // A missing anchor at a fresh price level rests the order there anyway -
+        // no dropped order and no phantom empty level
+        let fresh = factory.order(100, 6, Side::Bid);
+        assert!(book.add_order_before(fresh.clone(), Some(Oid::new(42))));
+        // Bids are price-descending, so the fallen-back order's level comes first
+        assert_eq!(book.to_snapshot().0[0], vec![fresh.clone(), resting.clone()]);
+        // The BBO aggregate includes the fallen-back order (exercises the
+        // PriceLevel total_sz bump on the fallback path)
+        let (bid, ask) = book.get_bbo();
+        assert_eq!(bid, Some((Px::new(6), Sz::new(100), 1)));
+        assert!(ask.is_none());
     }
 
     // ==================== BBO Tests ====================
@@ -580,6 +805,95 @@ mod tests {
         let snapshot = book.to_snapshot();
         let truncated = snapshot.truncate(3);
         assert_eq!(truncated.as_ref()[0].len(), 3); // bids
+    }
+
+    // ==================== Banded Snapshot Tests ====================
+
+    /// Bids at px 4/5/6, asks at px 7/8/9, one order each (oids 0..=5 in that order).
+    fn banded_test_book() -> OrderBook<MinimalOrder> {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        for px in [4, 5, 6] {
+            book.add_order(factory.order(100, px, Side::Bid));
+        }
+        for px in [7, 8, 9] {
+            book.add_order(factory.order(100, px, Side::Ask));
+        }
+        book
+    }
+
+    fn pxs(orders: &[MinimalOrder]) -> Vec<u64> {
+        orders.iter().map(|o| o.limit_px).collect_vec()
+    }
+
+    fn band(min: Option<u64>, max: Option<u64>) -> PxBand {
+        PxBand { min: min.map(Px::new), max: max.map(Px::new) }
+    }
+
+    #[test]
+    fn test_to_snapshot_in_band_inclusive_bounds() {
+        let book = banded_test_book();
+        let [bids, asks] = book.to_snapshot_in_band(band(Some(5), Some(8))).0;
+        assert_eq!(pxs(&bids), vec![6, 5], "bids stay descending, boundary px 5 included");
+        assert_eq!(pxs(&asks), vec![7, 8], "asks stay ascending, boundary px 8 included");
+    }
+
+    #[test]
+    fn test_to_snapshot_in_band_one_sided_min() {
+        let book = banded_test_book();
+        let [bids, asks] = book.to_snapshot_in_band(band(Some(6), None)).0;
+        assert_eq!(pxs(&bids), vec![6]);
+        assert_eq!(pxs(&asks), vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn test_to_snapshot_in_band_one_sided_max() {
+        let book = banded_test_book();
+        let [bids, asks] = book.to_snapshot_in_band(band(None, Some(7))).0;
+        assert_eq!(pxs(&bids), vec![6, 5, 4]);
+        assert_eq!(pxs(&asks), vec![7]);
+    }
+
+    #[test]
+    fn test_to_snapshot_in_band_min_equals_max() {
+        let book = banded_test_book();
+        let [bids, asks] = book.to_snapshot_in_band(band(Some(5), Some(5))).0;
+        assert_eq!(pxs(&bids), vec![5]);
+        assert!(asks.is_empty());
+        let [bids, asks] = book.to_snapshot_in_band(band(Some(8), Some(8))).0;
+        assert!(bids.is_empty());
+        assert_eq!(pxs(&asks), vec![8]);
+    }
+
+    #[test]
+    fn test_to_snapshot_in_band_outside_book() {
+        let book = banded_test_book();
+        let [bids, asks] = book.to_snapshot_in_band(band(Some(100), Some(200))).0;
+        assert!(bids.is_empty());
+        assert!(asks.is_empty());
+    }
+
+    #[test]
+    fn test_to_snapshot_in_band_inverted_returns_empty() {
+        // PxBand::parse rejects inverted bands; construct one directly to prove
+        // the snapshot path returns empty instead of hitting BTreeMap::range's panic.
+        let book = banded_test_book();
+        let [bids, asks] = book.to_snapshot_in_band(band(Some(8), Some(5))).0;
+        assert!(bids.is_empty());
+        assert!(asks.is_empty());
+    }
+
+    #[test]
+    fn test_to_snapshot_unbounded_band_matches_to_snapshot() {
+        let mut book = banded_test_book();
+        let mut factory = OrderFactory { next_oid: 100 };
+        // A second order on the px-5 level to check intra-level FIFO below.
+        book.add_order(factory.order(300, 5, Side::Bid));
+        assert_same_book(book.to_snapshot(), book.to_snapshot_in_band(PxBand::default()));
+
+        // Within a banded level, queue order (FIFO by insertion) is preserved.
+        let [bids, _] = book.to_snapshot_in_band(band(Some(5), Some(5))).0;
+        assert_eq!(bids.iter().map(|o| o.oid).collect_vec(), vec![1, 100]);
     }
 
     #[test]

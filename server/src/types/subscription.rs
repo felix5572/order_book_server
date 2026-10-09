@@ -357,6 +357,18 @@ mod test {
     }
 
     #[test]
+    fn test_l4book_echo_shape() {
+        // The l4Book subscriptionResponse echo carries only the coin; banded
+        // one-shot reads live on GET /l4Book, not on the subscription.
+        let msg = ClientMessage::Subscribe { subscription: Subscription::L4Book { coin: "BTC".to_string() } };
+        let json = serde_json::to_string(&ServerResponse::SubscriptionResponse(msg)).unwrap();
+        assert_eq!(
+            json,
+            r#"{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"l4Book","coin":"BTC"}}}"#
+        );
+    }
+
+    #[test]
     fn test_validate_l2book_defaults_valid() {
         let sub = Subscription::L2Book { coin: "BTC".to_string(), n_sig_figs: None, n_levels: None, mantissa: None };
         assert!(sub.validate(&universe()));
@@ -549,16 +561,15 @@ mod test {
     }
 
     #[test]
-    fn test_server_response_bbo_serialization() {
+    fn test_server_response_bbo_serialization_matches_the_official_wire() {
         let bbo = crate::types::Bbo {
             coin: "BTC".to_string(),
             time: 1000,
-            bid: Some(crate::types::Level::new("100".to_string(), "1.5".to_string(), 2)),
-            ask: None,
+            bbo: [Some(crate::types::Level::new("100".to_string(), "1.5".to_string(), 2)), None],
         };
         let json = serde_json::to_string(&super::ServerResponse::Bbo(bbo)).unwrap();
-        assert!(json.contains("\"channel\":\"bbo\""));
-        assert!(json.contains("BTC"));
+        // Same shape as api.hyperliquid.xyz `bbo` frames (an empty side is null).
+        assert_eq!(json, r#"{"channel":"bbo","data":{"coin":"BTC","time":1000,"bbo":[{"px":"100","sz":"1.5","n":2},null]}}"#);
     }
 
     // ==================== ClientMessage Serde Tests ====================

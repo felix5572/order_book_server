@@ -18,6 +18,7 @@ rayon = "1.10"
 alloy = { version = "1.0.22", default-features = false, features = ["std", "serde", "reqwest-rustls-tls", "full"] }
 strum_macros = "0.27.2"
 yawc = { version = "0.2.6", features = ["axum"] }
+flate2 = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6.0"
 prometheus = "0.14"
@@ -25,6 +26,11 @@ lazy_static = "1.4"
 sonic-rs = "0.3"
 rustc-hash = "2"
 bytes = "1"
+
+[dev-dependencies]
+# test-util enables tokio::test(start_paused) so timeout-path tests (writer
+# wedged on a never-ready sink) run instantly instead of real-time 5s waits.
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [lints]
 workspace = true

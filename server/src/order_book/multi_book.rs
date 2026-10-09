@@ -1,5 +1,5 @@
 use crate::{
-    order_book::{Coin, InnerOrder, Oid, OrderBook, Px, Snapshot, Sz},
+    order_book::{Coin, InnerOrder, Oid, OrderBook, Px, PxBand, Snapshot, Sz},
     prelude::*,
 };
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,6 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::Path,
 };
-use tokio::fs::read_to_string;
 
 pub(crate) struct Snapshots<O>(HashMap<Coin, Snapshot<O>>);
 
@@ -18,6 +17,15 @@ impl<O> Snapshots<O> {
 
     pub(crate) fn value(self) -> HashMap<Coin, Snapshot<O>> {
         self.0
+    }
+}
+
+impl<O: InnerOrder> Snapshots<O> {
+    /// Strip the untriggered trigger orders from every coin's snapshot and
+    /// return them flattened. Each trigger order appears twice (once per side)
+    /// — callers dedupe by oid. See [`Snapshot::extract_triggers`].
+    pub(crate) fn extract_triggers(&mut self) -> Vec<O> {
+        self.0.values_mut().flat_map(Snapshot::extract_triggers).collect()
     }
 }
 
@@ -46,9 +54,19 @@ impl<O: InnerOrder> OrderBooks<O> {
         }
     }
 
+    // Production always threads the diff's queue anchor through add_order_before;
+    // this anchor-less shorthand survives for the many round-trip tests.
+    #[cfg(test)]
     pub(crate) fn add_order(&mut self, order: O) {
+        let fell_back = self.add_order_before(order, None);
+        debug_assert!(!fell_back);
+    }
+
+    // Returns true when `insert_before` could not be honored and the order was
+    // rested at the back of its level instead; see OrderBook::add_order_before.
+    pub(crate) fn add_order_before(&mut self, order: O, insert_before: Option<Oid>) -> bool {
         let coin = &order.coin();
-        self.order_books.entry(coin.clone()).or_insert_with(OrderBook::new).add_order(order);
+        self.order_books.entry(coin.clone()).or_insert_with(OrderBook::new).add_order_before(order, insert_before)
     }
 
     pub(crate) fn cancel_order(&mut self, oid: Oid, coin: Coin) -> bool {
@@ -132,52 +150,141 @@ impl<O: InnerOrder> OrderBooks<O> {
     /// multi-book (~hundreds of thousands of orders) under the listener lock on
     /// every l4Book subscribe, stalling event processing for its whole duration.
     #[must_use]
-    pub(crate) fn snapshot_for_coin(&self, coin: &Coin) -> Option<Snapshot<O>> {
-        self.order_books.get(coin).map(OrderBook::to_snapshot)
+    pub(crate) fn snapshot_for_coin(&self, coin: &Coin, band: PxBand) -> Option<Snapshot<O>> {
+        self.order_books.get(coin).map(|book| book.to_snapshot_in_band(band))
     }
 }
 
-/// Load snapshots from CLI-generated JSON (without height prefix)
-/// Height is read separately from visor_abci_state.json
-pub(crate) fn load_snapshots_from_cli_str<O, R>(str: &str, height: u64) -> Result<(u64, Snapshots<O>)>
-where
-    O: TryFrom<R, Error = Error>,
-    R: Serialize + for<'a> Deserialize<'a>,
-{
-    #[allow(clippy::type_complexity)]
-    let snapshot: Vec<(String, [Vec<R>; 2])> = serde_json::from_str(str)?;
-    Ok((
-        height,
-        Snapshots::new(
-            snapshot
-                .into_iter()
-                .map(|(coin, [bids, asks])| {
-                    let bids: Vec<O> = bids.into_iter().map(O::try_from).collect::<Result<Vec<O>>>()?;
-                    let asks: Vec<O> = asks.into_iter().map(O::try_from).collect::<Result<Vec<O>>>()?;
-                    Ok((Coin::new(&coin), Snapshot([bids, asks])))
-                })
-                .collect::<Result<HashMap<Coin, Snapshot<O>>>>()?,
-        ),
-    ))
+/// One market's entry in the hl-node CLI dump. Without `--include-trigger-orders`
+/// the value is a bare `[bids, asks]` pair; with it, an object that also carries
+/// the pending trigger orders (`{"book_orders": [[bids],[asks]],
+/// "untriggered_orders": [...]}`).
+enum CliMarket<R> {
+    Sides([Vec<R>; 2]),
+    WithTriggers { book_orders: [Vec<R>; 2], untriggered_orders: Vec<R> },
 }
 
-/// Load snapshots from CLI-generated JSON file + height from visor state
-pub(crate) async fn load_snapshots_from_cli_json<O, R>(
-    snapshot_path: &Path,
-    visor_state_path: &Path,
-) -> Result<(u64, Snapshots<O>)>
+/// Hand-written instead of `#[serde(untagged)]`: untagged enums buffer every
+/// element into serde's intermediate `Content` tree before trying variants -
+/// on a 400MB dump that cost ~2-2.5x parse CPU plus a multi-MB transient
+/// allocation per market, and reduced any inner parse error to an unusable
+/// "data did not match any variant". A seq/map visitor dispatches on the
+/// JSON shape in a single streaming pass and keeps precise error positions.
+impl<'de, R: Deserialize<'de>> Deserialize<'de> for CliMarket<R> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct MarketVisitor<R>(std::marker::PhantomData<R>);
+
+        impl<'de, R: Deserialize<'de>> serde::de::Visitor<'de> for MarketVisitor<R> {
+            type Value = CliMarket<R>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a [bids, asks] pair or an object with book_orders/untriggered_orders")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let bids = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                let asks = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+                Ok(CliMarket::Sides([bids, asks]))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut book_orders: Option<[Vec<R>; 2]> = None;
+                let mut untriggered_orders: Option<Vec<R>> = None;
+                while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
+                    match key.as_ref() {
+                        "book_orders" => book_orders = Some(map.next_value()?),
+                        "untriggered_orders" => untriggered_orders = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(CliMarket::WithTriggers {
+                    book_orders: book_orders.ok_or_else(|| serde::de::Error::missing_field("book_orders"))?,
+                    untriggered_orders: untriggered_orders.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_any(MarketVisitor(std::marker::PhantomData))
+    }
+}
+
+/// Convert the CLI's parsed per-coin list into typed snapshots plus the flat
+/// untriggered trigger-order list. Book conversion stays strict (a corrupt
+/// book order poisons the install); untriggered conversion is lenient - a bad
+/// entry is skipped and counted, since it only degrades the side table, and
+/// failing the whole snapshot for it would wedge every re-sync.
+#[allow(clippy::type_complexity)]
+fn convert_cli_snapshot<O, R>(snapshot: Vec<(String, CliMarket<R>)>, height: u64) -> Result<(u64, Snapshots<O>, Vec<O>)>
 where
     O: TryFrom<R, Error = Error>,
-    R: Serialize + for<'a> Deserialize<'a>,
 {
-    // Read height from visor_abci_state.json
-    let visor_state = read_to_string(visor_state_path).await?;
-    let visor: serde_json::Value = serde_json::from_str(&visor_state)?;
-    let height = visor["height"].as_u64().ok_or("Missing height in visor state")?;
+    let mut untriggered: Vec<O> = Vec::new();
+    let mut untriggered_skipped = 0usize;
+    let books = snapshot
+        .into_iter()
+        .map(|(coin, market)| {
+            let ([bids, asks], pending) = match market {
+                CliMarket::Sides(sides) => (sides, Vec::new()),
+                CliMarket::WithTriggers { book_orders, untriggered_orders } => (book_orders, untriggered_orders),
+            };
+            for raw in pending {
+                match O::try_from(raw) {
+                    Ok(order) => untriggered.push(order),
+                    Err(_) => untriggered_skipped += 1,
+                }
+            }
+            let bids: Vec<O> = bids.into_iter().map(O::try_from).collect::<Result<Vec<O>>>()?;
+            let asks: Vec<O> = asks.into_iter().map(O::try_from).collect::<Result<Vec<O>>>()?;
+            Ok((Coin::new(&coin), Snapshot([bids, asks])))
+        })
+        .collect::<Result<HashMap<Coin, Snapshot<O>>>>()?;
+    if untriggered_skipped > 0 {
+        crate::metrics::PARSE_ERRORS_TOTAL.with_label_values(&["untriggered"]).inc_by(untriggered_skipped as u64);
+        log::warn!("Skipped {untriggered_skipped} unparseable untriggered orders in snapshot");
+    }
+    Ok((height, Snapshots::new(books), untriggered))
+}
 
-    // Read snapshot
-    let file_contents = read_to_string(snapshot_path).await?;
-    load_snapshots_from_cli_str(&file_contents, height)
+/// Load snapshots from a CLI-generated JSON file. `height` is the caller's
+/// replay cutoff - it MUST be a lower bound of the dump's content height
+/// (read the visor state BEFORE invoking the dump), so replay above it can
+/// only over-apply idempotently, never skip events the snapshot lacks.
+/// Returns the typed books plus the flat untriggered trigger-order list
+/// (empty for dumps made without `--include-trigger-orders`).
+pub(crate) async fn load_snapshots_from_cli_json<O, R>(
+    snapshot_path: &Path,
+    height: u64,
+) -> Result<(u64, Snapshots<O>, Vec<O>)>
+where
+    O: TryFrom<R, Error = Error> + Send + 'static,
+    R: Serialize + for<'a> Deserialize<'a> + Send + 'static,
+{
+    // The snapshot file is hundreds of MB; deserialize + convert is seconds of
+    // pure CPU, so it runs on a blocking thread instead of pinning a runtime
+    // worker for the duration. Streaming from the file (instead of reading it
+    // into a String first) keeps one full copy of the file out of peak RSS
+    // while both the old and new books are alive during the install.
+    let snapshot_path = snapshot_path.to_path_buf();
+    let parse_start = std::time::Instant::now();
+    let parsed = tokio::task::spawn_blocking(move || -> Result<(u64, Snapshots<O>, Vec<O>)> {
+        let file = fs::File::open(&snapshot_path)?;
+        let reader = std::io::BufReader::with_capacity(1 << 20, file);
+        let snapshot: Vec<(String, CliMarket<R>)> = serde_json::from_reader(reader)?;
+        convert_cli_snapshot(snapshot, height)
+    })
+    .await??;
+    let parse_elapsed = parse_start.elapsed();
+    crate::metrics::RESYNC_PHASE_DURATION.with_label_values(&["parse"]).observe(parse_elapsed.as_secs_f64());
+    log::info!("Snapshot parsed in {}ms", parse_elapsed.as_millis());
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -402,6 +509,35 @@ mod tests {
         Ok(())
     }
 
+    /// The --include-trigger-orders dump format: per-coin objects with
+    /// `book_orders` + `untriggered_orders`. Both this and the legacy bare
+    /// `[bids, asks]` form must parse via the untagged CliMarket enum, and the
+    /// untriggered list must come through typed.
+    #[test]
+    fn test_cli_snapshot_with_trigger_orders_format() -> Result<()> {
+        let order = |oid: u64, is_trigger: bool| {
+            serde_json::json!(["0x0000000000000000000000000000000000000001", {
+                "coin": "BTC", "side": "B", "limitPx": "100.0", "sz": "1.0", "oid": oid,
+                "timestamp": 1000, "triggerCondition": if is_trigger {"Price above 110"} else {"N/A"},
+                "isTrigger": is_trigger, "triggerPx": if is_trigger {"110.0"} else {"0.0"},
+                "children": [], "isPositionTpsl": false, "reduceOnly": false,
+                "orderType": if is_trigger {"Stop Market"} else {"Limit"},
+                "origSz": "1.0", "tif": null, "cloid": null
+            }])
+        };
+        let json = serde_json::json!([
+            ["BTC", { "book_orders": [[order(1, false)], []], "untriggered_orders": [order(100, true), order(101, true)] }],
+            ["ETH", [[order(2, false)], []]]
+        ]);
+        let parsed: Vec<(String, super::CliMarket<(Address, L4Order)>)> = serde_json::from_value(json)?;
+        let (height, snapshots, untriggered) = super::convert_cli_snapshot::<InnerL4Order, _>(parsed, 42)?;
+        assert_eq!(height, 42);
+        assert_eq!(snapshots.value().len(), 2, "both formats must yield books");
+        assert_eq!(untriggered.len(), 2);
+        assert!(untriggered.iter().all(|o| o.is_trigger && o.trigger_px == "110.0"));
+        Ok(())
+    }
+
     #[test]
     fn test_l4_snapshot_to_l2_snapshot() {
         let mut book = OrderBook::new();
@@ -454,7 +590,7 @@ mod tests {
         assert_eq!(ans, raw_levels);
     }
 
-    use crate::order_book::{Oid, multi_book::OrderBooks};
+    use crate::order_book::{Oid, PxBand, multi_book::OrderBooks};
 
     fn make_order(oid: u64, coin: &str, side: Side, sz: &str, px: &str) -> InnerL4Order {
         let mut o = simple_inner_order(oid, side, sz.to_string(), px.to_string()).unwrap();
@@ -514,5 +650,28 @@ mod tests {
         books.compact_all();
         assert!(books.as_ref().contains_key(&Coin::new("ETH")));
         assert!(!books.as_ref().contains_key(&Coin::new("BTC")));
+    }
+
+    #[test]
+    fn test_snapshot_for_coin_with_band() {
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        books.add_order(make_order(1, "BTC", Side::Bid, "1", "50000"));
+        books.add_order(make_order(2, "BTC", Side::Bid, "1", "60000"));
+        books.add_order(make_order(3, "BTC", Side::Ask, "1", "70000"));
+        books.add_order(make_order(4, "ETH", Side::Bid, "1", "60000"));
+
+        let band = PxBand::parse(Some("55000"), Some("75000")).unwrap();
+        let [bids, asks] = books.snapshot_for_coin(&Coin::new("BTC"), band).unwrap().as_ref().clone();
+        assert_eq!(bids.iter().map(|o| o.oid).collect_vec(), vec![2], "px 50000 bid is out of band");
+        assert_eq!(asks.iter().map(|o| o.oid).collect_vec(), vec![3]);
+
+        // Other coins are untouched by a BTC band query, and the unbounded
+        // default band still returns the full book.
+        let [bids, _] = books.snapshot_for_coin(&Coin::new("ETH"), PxBand::default()).unwrap().as_ref().clone();
+        assert_eq!(bids.iter().map(|o| o.oid).collect_vec(), vec![4]);
+        let [bids, asks] = books.snapshot_for_coin(&Coin::new("BTC"), PxBand::default()).unwrap().as_ref().clone();
+        assert_eq!(bids.len() + asks.len(), 3);
+
+        assert!(books.snapshot_for_coin(&Coin::new("DOGE"), band).is_none(), "unknown coin yields None");
     }
 }

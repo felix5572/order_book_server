@@ -158,6 +158,22 @@ lazy_static! {
         "Messages dropped due to channel lag"
     ).expect("metric can be created");
 
+    /// New diffs whose insertBefore anchor was not resting at the level; the
+    /// order was rested at the back of the level instead and a re-sync was
+    /// scheduled, since queue priority may be wrong until then.
+    /// Anchored adds whose insertBefore was honored (spliced at the anchor).
+    /// Denominator for the fallback rate: fallback/(honored+fallback) tells
+    /// whether a storm is a hole set or normal pairing-race noise.
+    pub static ref INSERT_BEFORE_HONORED_TOTAL: IntCounter = IntCounter::new(
+        "insert_before_honored_total",
+        "Anchored adds whose insertBefore anchor was honored"
+    ).expect("metric can be created");
+
+    pub static ref INSERT_BEFORE_FALLBACK_TOTAL: IntCounter = IntCounter::new(
+        "insert_before_fallback_total",
+        "New diffs whose insertBefore anchor was missing; order rested at back of level"
+    ).expect("metric can be created");
+
     // ==================== FILE WATCHER METRICS ====================
 
     /// File events received per source (orders, diffs, fills)
@@ -186,10 +202,67 @@ lazy_static! {
         "Number of coins tracked in orderbook"
     ).expect("metric can be created");
 
+    /// Untriggered trigger orders (stops / TP-SL pending their trigger price)
+    pub static ref ORDERBOOK_UNTRIGGERED_TOTAL: IntGauge = IntGauge::new(
+        "orderbook_untriggered_orders_total",
+        "Untriggered trigger orders currently tracked (stops / TP-SL waiting for trigger price)"
+    ).expect("metric can be created");
+
+    /// Untriggered-order evictions by the status string that caused them.
+    /// Today's node vocabulary is all terminal-for-the-oid; a novel status
+    /// showing up here flags a possible wrong eviction after a node upgrade.
+    pub static ref UNTRIGGERED_EVICTIONS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_untriggered_evictions_total", "Untriggered trigger order evictions by causing status"),
+        &["status"]
+    ).expect("metric can be created");
+
     /// BBO changes per coin (top 5 tracked individually)
     pub static ref BBO_CHANGES_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("bbo_changes_total", "BBO changes by coin"),
         &["coin"]
+    ).expect("metric can be created");
+
+    // ==================== RESYNC & LOCK METRICS ====================
+
+    /// Wall-clock duration of each re-sync phase. `fetch_dump` is the hl-node
+    /// CLI dump, `parse` the snapshot JSON deserialize, `build` the replacement
+    /// book construction, `chase` the off-lock replay loop, `commit` the final
+    /// under-lock swap, and `total` the whole fetch-to-install cycle.
+    pub static ref RESYNC_PHASE_DURATION: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("resync_phase_duration_seconds", "Duration of snapshot re-sync phases")
+            .buckets(vec![0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]),
+        &["phase"]
+    ).expect("metric can be created");
+
+    /// Time the ingest loop spends waiting to acquire the listener lock. The
+    /// lock is shared with connection setup and l4Book snapshot builds, so
+    /// sustained waits here mean ingest (and everything queued behind it) is
+    /// being convoyed by other lock holders.
+    pub static ref LISTENER_LOCK_WAIT: Histogram = Histogram::with_opts(
+        HistogramOpts::new("listener_lock_wait_seconds", "Ingest-loop wait to acquire the listener lock")
+            .buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
+    ).expect("metric can be created");
+
+    /// 1 once the first snapshot install completed and the book is serving.
+    /// Read by /health so the endpoint never has to take the listener lock.
+    pub static ref ORDERBOOK_READY: IntGauge = IntGauge::new(
+        "orderbook_ready",
+        "1 when the order book has installed a snapshot and is serving"
+    ).expect("metric can be created");
+
+    /// Unix epoch ms of the last event batch applied to the live book. /health
+    /// derives a staleness signal from this so consumers can tell "connected
+    /// but not receiving data" apart from a healthy quiet market.
+    pub static ref LAST_EVENT_APPLIED_MS: IntGauge = IntGauge::new(
+        "last_event_applied_ms",
+        "Unix epoch ms of the last event batch applied to the live book"
+    ).expect("metric can be created");
+
+    /// 1 while a snapshot fetch + install cycle is in flight, so stalls can be
+    /// correlated with re-syncs from the metrics alone.
+    pub static ref ORDERBOOK_RESYNC_IN_FLIGHT: IntGauge = IntGauge::new(
+        "orderbook_resync_in_flight",
+        "1 while a snapshot fetch/install cycle is running"
     ).expect("metric can be created");
 
     // ==================== UPTIME & SYSTEM ====================
@@ -246,6 +319,8 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(CHANNEL_DROPS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ORDERBOOK_DESYNCS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ORACLE_DATA_LOSS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(INSERT_BEFORE_FALLBACK_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(INSERT_BEFORE_HONORED_TOTAL.clone())).ok();
 
     // File watcher metrics
     REGISTRY.register(Box::new(FILE_EVENTS_TOTAL.clone())).ok();
@@ -254,7 +329,16 @@ pub fn register_metrics() {
     // Orderbook stats
     REGISTRY.register(Box::new(ORDERBOOK_ORDERS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ORDERBOOK_COINS_COUNT.clone())).ok();
+    REGISTRY.register(Box::new(ORDERBOOK_UNTRIGGERED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(UNTRIGGERED_EVICTIONS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(BBO_CHANGES_TOTAL.clone())).ok();
+
+    // Resync & lock metrics
+    REGISTRY.register(Box::new(RESYNC_PHASE_DURATION.clone())).ok();
+    REGISTRY.register(Box::new(LISTENER_LOCK_WAIT.clone())).ok();
+    REGISTRY.register(Box::new(ORDERBOOK_READY.clone())).ok();
+    REGISTRY.register(Box::new(LAST_EVENT_APPLIED_MS.clone())).ok();
+    REGISTRY.register(Box::new(ORDERBOOK_RESYNC_IN_FLIGHT.clone())).ok();
 
     // Uptime & system
     REGISTRY.register(Box::new(UPTIME_SECONDS.clone())).ok();

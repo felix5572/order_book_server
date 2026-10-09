@@ -73,7 +73,9 @@ pub(crate) struct NodeDataOrderStatus {
 
 impl NodeDataOrderStatus {
     pub(crate) fn is_inserted_into_book(&self) -> bool {
-        (self.status == "open" && !self.order.is_trigger && (self.order.tif != Some("Ioc".to_string())))
+        // as_deref: this runs per order-status event on the apply path; the
+        // old Some("Ioc".to_string()) comparison heap-allocated per call.
+        (self.status == "open" && !self.order.is_trigger && (self.order.tif.as_deref() != Some("Ioc")))
             || (self.order.is_trigger && self.status == "triggered")
     }
 }
@@ -324,7 +326,7 @@ mod tests {
         let diff: NodeDataOrderDiff = serde_json::from_str(json).unwrap();
         assert_eq!(diff.oid(), Oid::new(123));
         assert_eq!(diff.coin(), Coin::new("BTC"));
-        assert!(matches!(diff.diff(), OrderDiff::New { sz } if sz == "1.5"));
+        assert!(matches!(diff.diff(), OrderDiff::New { sz, insert_before: None } if sz == "1.5"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use crate::{
     listeners::order_book::{L2SnapshotParams, L2Snapshots},
+    metrics::RESYNC_PHASE_DURATION,
     order_book::{Coin, Snapshot, multi_book::OrderBooks, types::InnerOrder},
     prelude::*,
     types::{
@@ -13,6 +14,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
+    time::Instant,
 };
 use tokio::process::Command;
 
@@ -33,6 +35,10 @@ pub(super) struct SnapshotConfig {
 pub(super) async fn process_rmp_file(config: &SnapshotConfig) -> Result<PathBuf> {
     info!("Triggering L4 snapshot via hl-node CLI (mode: {:?})...", config.mode);
 
+    // The dump runs on the same host that produces and parses the stream, so
+    // its wall-clock duration is the first thing to check when a re-sync
+    // correlates with a latency incident.
+    let dump_start = Instant::now();
     let output_path = match config.mode {
         SnapshotMode::Docker => {
             // Docker mode: run command inside container
@@ -50,6 +56,7 @@ pub(super) async fn process_rmp_file(config: &SnapshotConfig) -> Result<PathBuf>
                     "Mainnet",
                     "compute-l4-snapshots",
                     "--include-users",
+                    "--include-trigger-orders",
                     "hl/hyperliquid_data/abci_state.rmp",
                     "hl/snapshot.json",
                 ])
@@ -82,7 +89,7 @@ pub(super) async fn process_rmp_file(config: &SnapshotConfig) -> Result<PathBuf>
                 config.snapshot_output_path.clone().unwrap_or_else(|| PathBuf::from("/tmp/hl_snapshot.json"));
 
             info!(
-                "Running: {} --chain Mainnet compute-l4-snapshots --include-users {} {}",
+                "Running: {} --chain Mainnet compute-l4-snapshots --include-users --include-trigger-orders {} {}",
                 &config.hlnode_binary,
                 abci_path.display(),
                 output_path.display()
@@ -94,6 +101,7 @@ pub(super) async fn process_rmp_file(config: &SnapshotConfig) -> Result<PathBuf>
                     "Mainnet",
                     "compute-l4-snapshots",
                     "--include-users",
+                    "--include-trigger-orders",
                     abci_path.to_str().unwrap_or(""),
                     output_path.to_str().unwrap_or(""),
                 ])
@@ -119,6 +127,10 @@ pub(super) async fn process_rmp_file(config: &SnapshotConfig) -> Result<PathBuf>
         }
     };
 
+    let dump_elapsed = dump_start.elapsed();
+    RESYNC_PHASE_DURATION.with_label_values(&["fetch_dump"]).observe(dump_elapsed.as_secs_f64());
+    info!("hl-node compute-l4-snapshots completed in {}ms (mode: {:?})", dump_elapsed.as_millis(), config.mode);
+
     // Verify file exists
     if output_path.exists() {
         info!("Snapshot file found at: {:?}", output_path);
@@ -143,9 +155,12 @@ pub(super) async fn process_rmp_file(config: &SnapshotConfig) -> Result<PathBuf>
 }
 
 /// Current node height from `visor_abci_state.json`, or None if unreadable.
-/// Used as the startup-backfill floor: the initial snapshot's height is never
-/// below this value (the snapshot is generated after boot and heights only
-/// advance), so every line at or below it is already covered by the snapshot.
+/// Read BEFORE a dump is generated, it is a lower bound of the dump's content
+/// height (heights only advance), which makes it safe for both of its uses:
+/// as the startup-backfill floor (every line at or below it is covered by the
+/// snapshot) and as the replay cutoff (replaying events above it can only
+/// over-apply idempotently, never skip events the snapshot lacks). Reading it
+/// AFTER the dump would over-state the cutoff by the whole dump window.
 pub(super) fn read_visor_height(visor_path: &std::path::Path) -> Option<u64> {
     let contents = fs::read_to_string(visor_path).ok()?;
     let visor: serde_json::Value = serde_json::from_str(&contents).ok()?;
@@ -177,13 +192,15 @@ impl L2SnapshotParams {
 /// rejects `n_levels > MAX_LEVELS`, so deeper levels are pure waste in CPU,
 /// memory, and broadcast Arc size (BTC alone has ~850 levels/side within ±100bps).
 ///
-/// Each requested variant is derived *directly from the raw base* `(None, None)`,
-/// never from a coarser sibling: aggregation is lossy across mantissas (e.g.
-/// `(5, Some(5))` is not derivable from `(5, Some(2))`). The base is capped, so an
-/// aggregated shape only re-buckets the first `MAX_LEVELS` native levels; unlike
-/// the official API it never reaches further out than the raw book. The base is
-/// always included so the raw `(None, None)` consumers (and the chain) stay correct;
-/// it is the parent of every derived shape and only one extra cheap entry.
+/// Each variant MUST aggregate the full book and only then truncate to the cap
+/// (the cap counts aggregated *buckets*, not raw levels). Deriving aggregated
+/// variants from the truncated raw base is NOT equivalent: the top-`MAX_LEVELS`
+/// raw levels cluster within a few dollars of the mid, so at coarse groupings
+/// (e.g. `nSigFigs=2`, $1000-wide buckets on BTC) they all collapse into ~1
+/// bucket — while HL's public API serves 20 buckets spanning tens of thousands
+/// of dollars for the same params. `OrderBook::to_l2_snapshot` walks the whole
+/// side, bucketing as it goes and stopping once the cap in buckets is reached,
+/// which matches the public API's aggregate-then-truncate semantics.
 fn compute_l2_variants_for_coin<O: InnerOrder>(
     order_book: &crate::order_book::OrderBook<O>,
     active: &HashSet<L2SnapshotParams>,
@@ -195,19 +212,16 @@ fn compute_l2_variants_for_coin<O: InnerOrder>(
     }
     let cap = Some(MAX_LEVELS);
 
-    // Raw base: capped, full-information, the parent of every derived shape.
     let base_params = L2SnapshotParams { n_sig_figs: None, mantissa: None };
-    let base = order_book.to_l2_snapshot(cap, None, None);
-
     for params in active {
         if *params == base_params {
             continue; // inserted unconditionally below
         }
-        let snapshot = base.to_l2_snapshot(cap, params.n_sig_figs, params.mantissa);
+        let snapshot = order_book.to_l2_snapshot(cap, params.n_sig_figs, params.mantissa);
         out.insert(*params, snapshot);
     }
-    // Always expose the raw base (one cheap entry) so raw consumers never miss it.
-    out.insert(base_params, base);
+    // Always expose the raw base so raw (None, None) consumers never miss it.
+    out.insert(base_params, order_book.to_l2_snapshot(cap, None, None));
     out
 }
 
@@ -224,6 +238,15 @@ fn compute_l2_variants_for_coin<O: InnerOrder>(
 /// Also evicts cache entries for coins no longer present in `order_books`
 /// (e.g. when a coin is delisted and the multi-book removes it). Without
 /// this the cache would grow monotonically with the universe size.
+/// Cap on present-but-uncached coins backfilled per flush. After a snapshot
+/// install (or an active-shape change) clears the cache, the full universe
+/// would otherwise be rebuilt in one rayon burst while the listener lock is
+/// held; the cap spreads that backfill across a few throttle windows.
+/// Uncapped coins are re-detected as uncached and picked up by subsequent
+/// flushes, so convergence is automatic. Dirty coins are never capped: a
+/// coin that actually changed must not be served stale.
+const L2_BACKFILL_COINS_PER_FLUSH: usize = 32;
+
 pub(super) fn compute_l2_snapshots_incremental<O: InnerOrder + Send + Sync>(
     order_books: &OrderBooks<O>,
     changed_coins: &HashSet<Coin>,
@@ -244,8 +267,13 @@ pub(super) fn compute_l2_snapshots_incremental<O: InnerOrder + Send + Sync>(
     // coins (first-time broadcast after a snapshot reset).
     let mut to_compute: Vec<Coin> =
         changed_coins.iter().filter(|c| order_books.as_ref().contains_key(*c)).cloned().collect();
+    let mut backfilled = 0usize;
     for coin in order_books.as_ref().keys() {
         if !cache.contains_key(coin) && !changed_coins.contains(coin) {
+            if backfilled >= L2_BACKFILL_COINS_PER_FLUSH {
+                break;
+            }
+            backfilled += 1;
             to_compute.push(coin.clone());
         }
     }
@@ -487,6 +515,54 @@ mod tests {
     }
 
     #[test]
+    fn test_backfill_is_capped_per_flush_and_converges() {
+        // Post-install: empty cache, no dirty coins. Each flush must backfill
+        // at most L2_BACKFILL_COINS_PER_FLUSH coins (bounding the under-lock
+        // rayon burst) and repeated flushes must converge to the full universe.
+        let n_coins = 3 * L2_BACKFILL_COINS_PER_FLUSH;
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        for i in 0..n_coins {
+            books.add_order(order(i as u64, &format!("C{i}"), Side::Bid, "1", "100"));
+        }
+
+        let mut cache = HashMap::new();
+        let (_, recomputed, changed) = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+        assert!(changed, "backfill introduces coins to the cache");
+        assert_eq!(recomputed.len(), L2_BACKFILL_COINS_PER_FLUSH, "backfill must be capped per flush");
+        assert_eq!(cache.len(), L2_BACKFILL_COINS_PER_FLUSH);
+
+        let mut flushes = 1;
+        while cache.len() < n_coins {
+            let (_, recomputed, _) = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+            assert!(recomputed.len() <= L2_BACKFILL_COINS_PER_FLUSH);
+            assert!(!recomputed.is_empty(), "the ramp must make progress every flush");
+            flushes += 1;
+        }
+        assert_eq!(flushes, 3, "the ramp must converge in universe/cap flushes");
+        // Converged: nothing left to backfill.
+        let (_, recomputed, _) = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+        assert!(recomputed.is_empty());
+    }
+
+    #[test]
+    fn test_dirty_coins_are_never_capped() {
+        // Every dirty coin must be rebuilt in the flush that drains it, even if
+        // there are more dirty coins than the backfill cap - the cap only
+        // applies to present-but-uncached (backfill) coins.
+        let n_coins = 2 * L2_BACKFILL_COINS_PER_FLUSH;
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        let mut dirty = HashSet::new();
+        for i in 0..n_coins {
+            books.add_order(order(i as u64, &format!("C{i}"), Side::Bid, "1", "100"));
+            dirty.insert(Coin::new(&format!("C{i}")));
+        }
+
+        let mut cache = HashMap::new();
+        let (_, recomputed, _) = compute_l2_snapshots_incremental(&books, &dirty, &all_params(), &mut cache);
+        assert_eq!(recomputed.len(), n_coins, "dirty coins must all be rebuilt in one flush");
+    }
+
+    #[test]
     fn test_dirty_evicted_coin_is_reported_recomputed() {
         // A coin whose last order was cancelled is dirty AND gone from the
         // book. It must still appear in the recomputed set so connections are
@@ -550,9 +626,45 @@ mod tests {
     }
 
     #[test]
+    fn test_coarse_variant_aggregates_full_depth_not_truncated_base() {
+        // Regression: aggregated variants used to be derived from the raw base
+        // AFTER it was truncated to MAX_LEVELS raw levels. The top raw levels
+        // cluster near the mid, so coarse groupings (nSigFigs=2 -> $1000-wide
+        // buckets here) collapsed into 1-2 buckets and all deep far-from-mid
+        // liquidity vanished. Aggregation must run over the FULL book and
+        // truncate by aggregated buckets, like HL's public API.
+        use crate::types::subscription::MAX_LEVELS;
+        let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
+        let mut oid = 0u64;
+        // More than MAX_LEVELS raw bid levels packed within ~$120 of the mid...
+        for i in 0..(MAX_LEVELS + 20) {
+            books.add_order(order(oid, "BTC", Side::Bid, "1", &format!("{}", 64_931 + i)));
+            oid += 1;
+        }
+        // ...plus deep liquidity far below the mid that the truncated base never saw.
+        for deep_px in [50_000, 40_000, 30_000, 20_000] {
+            books.add_order(order(oid, "BTC", Side::Bid, "1", &format!("{deep_px}")));
+            oid += 1;
+        }
+        // Above every bid for any MAX_LEVELS (fork: 400), so no bid crosses it.
+        books.add_order(order(oid, "BTC", Side::Ask, "1", &format!("{}", 64_931 + MAX_LEVELS + 100)));
+
+        let mut active = HashSet::new();
+        active.insert(L2SnapshotParams::new(Some(2), None));
+        let variants = compute_l2_variants_for_coin(books.as_ref().get(&Coin::new("BTC")).unwrap(), &active);
+        let [bids, _] = variants.get(&L2SnapshotParams::new(Some(2), None)).unwrap().as_ref();
+
+        // 64931..=65050 buckets to {65000, 64000}; the deep levels add 4 more.
+        assert_eq!(bids.len(), 6, "coarse buckets must cover the full book depth, got {bids:?}");
+        let total_sz: u64 = bids.iter().map(|l| l.sz.value()).sum();
+        let expected_sz = Sz::parse_from_str(&format!("{}", MAX_LEVELS + 24)).unwrap().value();
+        assert_eq!(total_sz, expected_sz, "no liquidity may be dropped by aggregation");
+    }
+
+    #[test]
     fn test_requested_variant_matches_full_compute() {
-        // A variant derived directly from the base must equal what the all-variants
-        // build produces for the same shape (derive-from-base is value-correct).
+        // A single-shape build must equal what the all-variants build produces
+        // for the same shape (subscription-aware computation is value-correct).
         let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
         for i in 0..20 {
             books.add_order(order(i, "BTC", Side::Bid, "1", &format!("{}", 50000 - i)));

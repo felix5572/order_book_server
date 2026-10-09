@@ -4,8 +4,8 @@
   origin   = git@github.com:felix5572/order_book_server(本 fork)
   imperator = imperator-co/order_book_server(**实际上游**, 活跃维护, 我们跟它)
   official = hyperliquid-dex/order_book_server(官方样例, 基本停更)
-上游同步:`git fetch imperator && git merge --ff-only imperator/main`(有分叉再正常 merge)。
-回馈 PR:分支 push 到 origin, GitHub 上 base 选 imperator-co(同 fork 网络可跨 fork PR)。
+上游同步:`git fetch imperator && git merge imperator/main`(我们有自有提交, 正常 merge, 逐处解冲突)。
+回馈 PR:2026-10 起不再尝试 —— imperator 不受理外部 PR(可能出于安全考虑), 只单向合并上游。
 主仓库 hyperliquid-trade 里的 order_book_server/ 已删除(本地留 gitignore 软链接方便工具)。
 
 ## 底座:imperator-co @ 47ce696(2026-06-30)— 2026-07-05 换入
@@ -16,6 +16,37 @@
 per-oid 双向 pending 配对(取代块级对齐)、parallel watchers + 有界 partial_line、
 metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、trades WS 带双方地址
 (counterparty 实时流!)、bookDiffs 订阅、--no-resync 漂移容忍、自带 229 测试、含 yawc。
+
+## 2026-10-09 合并 imperator 至 5710c9d(18 提交, 2026-07-15..08-17)
+
+上游带来、与我们相关的:
+- **粗精度 L2 先聚合整本再截断**(b083c18):此前粗 `nSigFigs` 变体从"截断到 MAX_LEVELS 的原始档"
+  再分组, 深处的档丢失(实测 CASHCAT 3 位 20 档只到 ~1385bp, 按档宽应 ~1740bp)。现与官方 API 同语义,
+  上限按聚合后的档数计。
+- **重同步**:永久重同步循环修复(insertBefore 回退只计指标不再打失步, 5710c9d)、重同步抑制与
+  期间保持响应、重放缓存按峰值事件率可调(新参数 `--replay-cache-events`, 默认 400 万 ≈ 2–4GB)。
+- ALO 优先级 `insertBefore` 队列锚点、pong 与广播解耦(每连接写任务)、按订阅者决定是否构建广播、
+  未触发条件单 `GET /untriggeredOrders`、L4 价格带 `GET /l4Book`、若干性能项。
+
+冲突与语义交叉的处理(测试 244 → 309 全过):
+- 待配对 New diff 缓存 = `(sz, diff px, insertBefore, 时间)`:保留官方 PR#9 移植(入簿价取 diff px)
+  的同时带上锚点;HIP-2/援助基金合成单(PR#10 移植)同样按锚点入队并记回退指标。
+- oracle 旁路:订阅不登记任何受控广播族(监听器有接收者就广播);推送改走上游的每连接 outbound。
+- metrics 两边合并;我们"迟到回填不抬高丢失边界"测试与上游"重同步抑制"测试并存。
+- **文件切换排空(审查 000212 P2)**:上游新增的 8MiB 分块读取与"读到零行即停"的切换排空循环不兼容
+  (上游自身同样如此):一块落在长行内部时返回零行但位置已前进, 随即切换会清掉 partial_line、静默丢掉
+  旧文件尾部且不标失步。改为"读取位置不再前进才停", 并补回归测试。
+- 上游测试按我们的改动调整:粗聚合测试的卖单价放到所有买单之上(我们 MAX_LEVELS=400 会让买单越过
+  原卖单成交);价格带测试的 diff 带上价格(PR#9 语义下入簿价取 diff px)。
+
+同批我方改动:
+- **`bbo` 线上格式改为官方 `WsBbo`**:`{coin, time, bbo: [bid|null, ask|null]}`(原为 `bid`/`ask`
+  两个字段)。理由:hl_md_gateway 拿本服务与官方 API 赛跑并原样转发, 两种格式会让下游拿到两套
+  wire。仓库内消费者(网关、qos_monitor)只读 coin/time, 不受影响。
+- 块内中间态照旧逐事件推送(用户 2026-10-09 接受:HL 先挂后吃, 消费侧看往外的变化即可)。
+
+官方仓库(hyperliquid-dex)同日核对:基线后只合并了 #12(insertBefore), imperator 已自行实现并随本次
+合并带入;开放中的 #15(只算用到的 L2 形状)已被 imperator 的按订阅计算覆盖, #13/#14/#11 不需要。
 
 ## 已移植(2026-07-05, 底座 47ce696 之上)
 

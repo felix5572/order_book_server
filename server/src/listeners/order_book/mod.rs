@@ -2,13 +2,14 @@ use crate::{
     listeners::order_book::state::OrderBookState,
     metrics::{
         BBO_BROADCAST_LATENCY, EVENT_PROCESSING_LATENCY, EVENTS_PROCESSED_TOTAL, FILE_EVENTS_TOTAL,
-        FILE_LINES_PARSED_TOTAL, L2_BROADCAST_LATENCY, L2_CONFLATION_BATCH_SIZE, ORDERBOOK_COINS_COUNT,
-        ORACLE_DATA_LOSS_TOTAL, ORDERBOOK_DESYNCS_TOTAL, ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL,
-        ORDERBOOK_TIME_MS, PARSE_ERRORS_TOTAL,
-        PENDING_DIFFS_CACHE, PENDING_ORDERS_CACHE, TRADES_UNPAIRED_FILLS_TOTAL,
+        FILE_LINES_PARSED_TOTAL, INSERT_BEFORE_FALLBACK_TOTAL, L2_BROADCAST_LATENCY, L2_CONFLATION_BATCH_SIZE,
+        LAST_EVENT_APPLIED_MS, LISTENER_LOCK_WAIT, ORACLE_DATA_LOSS_TOTAL, ORDERBOOK_COINS_COUNT, ORDERBOOK_DESYNCS_TOTAL,
+        ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL, ORDERBOOK_READY, ORDERBOOK_RESYNC_IN_FLIGHT, ORDERBOOK_TIME_MS,
+        ORDERBOOK_UNTRIGGERED_TOTAL, PARSE_ERRORS_TOTAL, PENDING_DIFFS_CACHE, PENDING_ORDERS_CACHE,
+        RESYNC_PHASE_DURATION, TRADES_UNPAIRED_FILLS_TOTAL,
     },
     order_book::{
-        Coin, Px, Side, Snapshot, Sz,
+        Coin, Px, PxBand, Side, Snapshot, Sz,
         multi_book::{Snapshots, load_snapshots_from_cli_json},
     },
     prelude::*,
@@ -16,7 +17,7 @@ use crate::{
         L2Book, L4Order, Trade,
         inner::{InnerL4Order, InnerLevel},
         node_data::{Batch, EventSource, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus, OracleUpdateEvent},
-        subscription::SimplifiedOracleUpdate,
+        subscription::{SimplifiedOracleUpdate, Subscription},
     },
 };
 use alloy::primitives::Address;
@@ -43,11 +44,18 @@ const L2_BROADCAST_THROTTLE_MS: u64 = 50;
 /// throttle so a quiet node between block flushes can never starve the L2 feed
 /// for more than ~throttle + tick.
 const L2_FLUSH_TICK_MS: u64 = 10;
-/// Cap on events cached for replay while a snapshot fetch is in flight. A fetch
-/// normally completes in 10-30s (tens of thousands of events); hitting this cap
-/// means something is pathologically wrong, so we drop the cache and schedule
+/// Default cap on events cached for replay while a snapshot fetch is in
+/// flight (tunable via --replay-cache-events). The cache must absorb the
+/// whole fetch window - hl-node dump + snapshot load + off-lock book build -
+/// and US-peak rates in --stream-with-block-info mode exceed 1M events per
+/// window, which made the old 1M cap overflow on every market-hours re-sync:
+/// the cache was dropped, a gapped book installed, and the next fetch hit the
+/// same wall. Each cached single-event batch is roughly 0.5-1KB resident, so
+/// this default bounds the cache at ~2-4GB in the worst case; it costs
+/// nothing when the backlog stays small (the phased install keeps draining
+/// it once the build finishes). Overflow still drops the cache and schedules
 /// another re-sync rather than risk OOM.
-const MAX_CACHED_EVENTS: usize = 1_000_000;
+const MAX_CACHED_EVENTS: usize = 4_000_000;
 
 mod parallel;
 mod state;
@@ -61,41 +69,253 @@ fn fetch_snapshot(
 ) {
     let tx = tx.clone();
     tokio::spawn(async move {
+        ORDERBOOK_RESYNC_IN_FLIGHT.set(1);
+        let total_start = Instant::now();
         // CRITICAL: Start caching BEFORE generating the snapshot. Every
         // book-affecting batch that arrives while hl-node dumps state is cached,
-        // and init_from_snapshot replays the ones above the snapshot height -
-        // so the handoff from snapshot to live stream is gapless. (We don't clone
-        // the existing state here: it's discarded by init_from_snapshot below,
-        // and cloning the whole BTreeMap/Slab tree temporarily doubles peak RSS.)
+        // and the install replays the ones above the snapshot height - so the
+        // handoff from snapshot to live stream is gapless.
         {
             let mut listener = listener.lock().await;
             listener.begin_caching();
         }
 
-        // Now generate snapshot - any events during this time are cached
+        // Read the height BEFORE the dump runs: the dump's content is at least
+        // this fresh, so a replay cutoff at this height can only over-replay
+        // (idempotent - duplicate adds are dropped by the oid guard, cancels of
+        // absent orders no-op). Reading it AFTER the dump over-stated the
+        // cutoff by the whole dump window and silently discarded every cached
+        // add/cancel inside it - permanent anchor holes and phantom orders,
+        // re-seeded at every install.
         let visor_path = get_visor_path(&snapshot_config);
+        let pre_dump_height = read_visor_height(&visor_path);
+
+        // Now generate snapshot - any events during this time are cached
         let res = match process_rmp_file(&snapshot_config).await {
             Ok(output_fln) => {
-                let snapshot =
-                    load_snapshots_from_cli_json::<InnerL4Order, (Address, L4Order)>(&output_fln, &visor_path).await;
+                let snapshot = match pre_dump_height {
+                    Some(height) => {
+                        load_snapshots_from_cli_json::<InnerL4Order, (Address, L4Order)>(&output_fln, height).await
+                    }
+                    None => Err("visor state height unavailable before dump".into()),
+                };
                 info!("Snapshot fetched");
                 match snapshot {
-                    Ok((height, expected_snapshot)) => {
-                        info!("Snapshot loaded at height {}", height);
-                        // Reinitialize from the snapshot and replay the cached
-                        // events above its height in one lock acquisition, so no
-                        // event can slip between the replay and going live.
-                        listener.lock().await.init_from_snapshot(expected_snapshot, height);
-                        Ok(())
+                    Ok((height, expected_snapshot, untriggered)) => {
+                        info!("Snapshot loaded at height {} ({} untriggered orders)", height, untriggered.len());
+                        // Phased install: build the replacement book and chase
+                        // the replay cache down off-lock, then commit in one
+                        // short lock hold - ingest keeps serving the current
+                        // book for the whole install.
+                        install_snapshot_phased(&listener, expected_snapshot, untriggered, height).await
                     }
                     Err(err) => Err(err),
                 }
             }
             Err(err) => Err(err),
         };
+        let total_elapsed = total_start.elapsed();
+        RESYNC_PHASE_DURATION.with_label_values(&["total"]).observe(total_elapsed.as_secs_f64());
+        info!("Snapshot fetch+install cycle finished in {}ms (ok={})", total_elapsed.as_millis(), res.is_ok());
+        ORDERBOOK_RESYNC_IN_FLIGHT.set(0);
         let _unused = tx.send(res);
         Ok::<(), Error>(())
     });
+}
+
+/// Replay-cache events that may remain when the phased install commits: small
+/// enough that the final under-lock replay adds only a few milliseconds to
+/// the commit's lock hold.
+const INSTALL_RESIDUAL_EVENTS_MAX: usize = 1_000;
+/// Bound on chase-the-tail rounds in the phased install. The chase converges
+/// whenever off-lock replay outruns live arrival (replay skips parse/group/
+/// broadcast, so it is far faster than live ingest); the cap only guards a
+/// pathological non-converging chase, in which case the commit replays
+/// whatever is still cached under the lock - the same worst case as the old
+/// single-lock install.
+const INSTALL_MAX_CHASE_ROUNDS: usize = 32;
+
+/// Spacing between consecutive snapshot fetches. Each fetch runs a 10-30s
+/// `hl-node compute-l4-snapshots` dump on the SAME host that produces and
+/// parses the stream; without spacing, a non-converging resync loop re-ran
+/// that dump every ticker period, exactly when the system was already loaded.
+/// A converged install resets the backoff to the base; a failed fetch or an
+/// install that left the book marked doubles it, up to the cap.
+const RESYNC_BACKOFF_BASE: Duration = Duration::from_secs(10);
+const RESYNC_BACKOFF_MAX: Duration = Duration::from_secs(300);
+
+// insertBefore fallbacks are metrics-only, never a desync reason. The anchor
+// race is architectural to this fork's event-by-event pipeline: cancels apply
+// instantly from the diff stream, while an anchored add must wait for its
+// status half to pair - an anchor placed and canceled within the same wave
+// (HFT quote churn) reliably loses the race. Verified empirically: missing
+// anchors are oids placed fractions of a second earlier and already gone from
+// the node's own book. A snapshot re-fetch cannot fix a timing race, and
+// marking these desynced kept the fetch loop permanently armed (a 20s
+// host-wide hl-node dump every backoff period, forever). Queue priority
+// self-corrects as levels churn; price/size state is never affected. Track
+// the rate via insert_before_fallback_total against insert_before_honored_total.
+
+/// Install a fetched snapshot without freezing ingest: build the replacement
+/// book on a blocking thread, then repeatedly steal the replay cache and
+/// replay it onto the new book off-lock ("chase the tail"), and only take the
+/// listener lock for a short final commit (residual replay, loss bookkeeping,
+/// swap). The live book keeps serving, and caching batches for replay,
+/// throughout, so a re-sync no longer stalls the event loop for the full
+/// build+replay duration (previously multiple seconds under load).
+///
+/// Deliberate trade-off: the outgoing and incoming books are both alive until
+/// the commit, so peak RSS roughly doubles for the duration of an install.
+async fn install_snapshot_phased(
+    listener: &Arc<Mutex<OrderBookListener>>,
+    snapshot: Snapshots<InnerL4Order>,
+    untriggered: Vec<InnerL4Order>,
+    height: u64,
+) -> Result<()> {
+    install_snapshot_phased_impl(
+        listener,
+        snapshot,
+        untriggered,
+        height,
+        INSTALL_RESIDUAL_EVENTS_MAX,
+        INSTALL_MAX_CHASE_ROUNDS,
+    )
+    .await
+}
+
+/// `residual_events_max` and `max_chase_rounds` are threaded through so tests
+/// can force chase rounds and the non-converging give-up path with small
+/// caches; production uses [`INSTALL_RESIDUAL_EVENTS_MAX`] and
+/// [`INSTALL_MAX_CHASE_ROUNDS`].
+async fn install_snapshot_phased_impl(
+    listener: &Arc<Mutex<OrderBookListener>>,
+    snapshot: Snapshots<InnerL4Order>,
+    untriggered: Vec<InnerL4Order>,
+    height: u64,
+    residual_events_max: usize,
+    max_chase_rounds: usize,
+) -> Result<()> {
+    let (ignore_spot, track_untriggered) = {
+        let guard = listener.lock().await;
+        (guard.ignore_spot, guard.track_untriggered)
+    };
+
+    // Phase 1 - build: pure CPU over every coin/order in the market. Run on a
+    // blocking thread so it neither holds the listener lock nor wedges a
+    // runtime worker that connection tasks need.
+    let build_start = Instant::now();
+    let mut new_state = tokio::task::spawn_blocking(move || {
+        OrderBookState::from_snapshot(snapshot, untriggered, height, 0, true, ignore_spot, track_untriggered)
+    })
+    .await?;
+    let build_elapsed = build_start.elapsed();
+    RESYNC_PHASE_DURATION.with_label_values(&["build"]).observe(build_elapsed.as_secs_f64());
+    info!("Replacement book built in {}ms", build_elapsed.as_millis());
+
+    // Seed the untriggered table from the live state when the snapshot yielded
+    // none (current hl-node dumps carry no trigger orders - a bare rebuild
+    // would wipe everything accumulated since startup). Runs BEFORE the chase
+    // replay so evictions cached during the fetch window apply on top.
+    {
+        let guard = listener.lock().await;
+        if let Some(old_state) = guard.order_book_state.as_ref() {
+            new_state.carry_forward_untriggered(old_state);
+        }
+    }
+
+    // Phase 2 - chase the tail: drain what accumulated, replay it off-lock,
+    // repeat. Each round's lock hold is only the O(1) cache steal.
+    let chase_start = Instant::now();
+    let mut replayed = 0usize;
+    let mut replay_failed = false;
+    for round in 0..max_chase_rounds {
+        let chunk = {
+            let mut guard = listener.lock().await;
+            let (pending_events, cache_alive) = guard.replay_cache_status();
+            // Phase 3 - commit, once the remainder is small enough to replay
+            // under the lock in one short hold. A dead cache (overflow while
+            // the install ran) commits immediately instead: replay above the
+            // snapshot height is incomplete, and finish_install's loss
+            // bookkeeping keeps the book marked for re-sync - but the fresh
+            // snapshot still supersedes the even-staler live book.
+            if !cache_alive || pending_events <= residual_events_max {
+                RESYNC_PHASE_DURATION.with_label_values(&["chase"]).observe(chase_start.elapsed().as_secs_f64());
+                info!("Phased install chase converged after {round} rounds; {replayed} events replayed off-lock");
+                let commit_start = Instant::now();
+                guard.finish_install(new_state, height, replayed, replay_failed);
+                RESYNC_PHASE_DURATION.with_label_values(&["commit"]).observe(commit_start.elapsed().as_secs_f64());
+                return Ok(());
+            }
+            guard.drain_replay_cache()
+        };
+        // The first chunk can hold the whole fetch-window backlog (up to the
+        // cache cap), so replay also runs on a blocking thread.
+        let (state_back, chunk_replayed, chunk_failed) = tokio::task::spawn_blocking(move || {
+            let mut state = new_state;
+            let mut chunk_replayed = 0usize;
+            let mut chunk_failed = false;
+            for batch in chunk {
+                chunk_failed |= replay_batch_above(&mut state, batch, height, &mut chunk_replayed);
+            }
+            (state, chunk_replayed, chunk_failed)
+        })
+        .await?;
+        new_state = state_back;
+        replayed += chunk_replayed;
+        replay_failed |= chunk_failed;
+    }
+    // Chase cap hit without converging: replay can't outrun live arrival, so
+    // replaying the remainder under the lock is unbounded (up to the full
+    // cache cap - a potentially minutes-long hold that would stall ingest,
+    // /health, and every connection touching the listener lock). Discard the
+    // remainder instead: commit the fresh-but-gapped book and re-mark it
+    // desynced in the same lock hold, so the damped ticker schedules another
+    // fetch. The fresh snapshot still supersedes the even-staler live book -
+    // the same trade-off the dead-cache commit above already accepts.
+    RESYNC_PHASE_DURATION.with_label_values(&["chase"]).observe(chase_start.elapsed().as_secs_f64());
+    let commit_start = Instant::now();
+    {
+        let mut guard = listener.lock().await;
+        let (pending_events, cache_alive) = guard.replay_cache_status();
+        if cache_alive && pending_events > residual_events_max {
+            let dropped = guard.abandon_replay_cache();
+            log::warn!(
+                "Phased install chase did not converge after {max_chase_rounds} rounds; \
+                 dropping {dropped} cached events and committing gapped book"
+            );
+            guard.finish_install(new_state, height, replayed, replay_failed);
+            // AFTER finish_install: it resets the desync epoch, and the
+            // re-mark must survive into the committed book.
+            guard.mark_desynced("install_chase_overflow");
+        } else {
+            // The backlog drained (or died) between the last round and here.
+            guard.finish_install(new_state, height, replayed, replay_failed);
+        }
+    }
+    RESYNC_PHASE_DURATION.with_label_values(&["commit"]).observe(commit_start.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// Replay one cached batch onto a not-yet-live book if it is above the
+/// snapshot height (batches at/below it are already reflected in the
+/// snapshot). Returns true when the apply errored.
+fn replay_batch_above(state: &mut OrderBookState, batch: EventBatch, height: u64, replayed: &mut usize) -> bool {
+    let res = match batch {
+        EventBatch::Orders(b) if b.block_number() > height => {
+            *replayed += b.events_len();
+            state.apply_order_statuses_hft(b).map(|_| ())
+        }
+        EventBatch::BookDiffs(b) if b.block_number() > height => {
+            *replayed += b.events_len();
+            state.apply_order_diffs_hft(b).map(|_| ())
+        }
+        _ => Ok(()),
+    };
+    if let Err(err) = res {
+        log::warn!("Replay apply error after snapshot at height {height}: {err}");
+        return true;
+    }
+    false
 }
 
 pub(crate) struct OrderBookListener {
@@ -107,8 +327,9 @@ pub(crate) struct OrderBookListener {
     order_book_state: Option<OrderBookState>,
     // Some while a snapshot fetch is in flight (initial startup and re-syncs):
     // every book-affecting batch is cached here and replayed above the snapshot
-    // height by init_from_snapshot, making the snapshot -> live-stream handoff
-    // gapless. None in steady state (no caching cost per event).
+    // height by the install (chase rounds + finish_install), making the
+    // snapshot -> live-stream handoff gapless. None in steady state (no caching
+    // cost per event).
     fetched_snapshot_cache: Option<VecDeque<EventBatch>>,
     // Total events across all cached batches; bounded by cache_event_cap.
     cached_event_count: usize,
@@ -117,14 +338,22 @@ pub(crate) struct OrderBookListener {
     // partial-line discard, pending-cache eviction, apply errors). The main loop
     // reacts by re-fetching a snapshot, which rebuilds the book and clears this.
     needs_resync: bool,
+    // True when the pending desync involves real data loss (wrong price/size
+    // state). Every desync reason is loss now that insertBefore fallbacks are
+    // metrics-only (see the comment at the resync backoff constants).
+    resync_data_loss: bool,
     // When true, mark_desynced still counts the desync metric but does NOT set
     // needs_resync, so the book keeps serving live events through drift instead
     // of re-fetching a snapshot. Operator opt-in (--no-resync) for environments
     // where a continuously-non-converging re-sync loop is worse than a knowingly
     // incomplete book. Drift is NOT self-healed while this is set.
     tolerate_drift: bool,
+    // False in --bbo-only mode: skip maintaining the untriggered trigger-order
+    // side table so the lightweight memory envelope holds. Threaded into every
+    // OrderBookState build.
+    track_untriggered: bool,
     // Upper bound on the height of any unrecovered data loss (0 = none).
-    // init_from_snapshot may only clear needs_resync when the snapshot height
+    // A snapshot install may only clear needs_resync when the snapshot height
     // covers this bound - a loss that occurred DURING a fetch can sit above the
     // snapshot's height (the snapshot source lags the stream), and clearing the
     // flag unconditionally would erase the signal and leave permanent drift.
@@ -147,7 +376,7 @@ pub(crate) struct OrderBookListener {
     last_l2_broadcast: Option<Instant>,
     // Incremental L2 snapshot cache. Each per-coin entry is Arc'd and shared with
     // the broadcast Arc, so unchanged coins cost an atomic bump rather than a
-    // full level-vector clone. Invalidated in `init_from_snapshot`.
+    // full level-vector clone. Invalidated in `finish_install`.
     l2_snapshot_cache: HashMap<Coin, Arc<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>>,
     // Coin-level conflation buffer for throttled L2 broadcasts. Every event unions
     // its changed_coins here; each L2 broadcast drains the full set so no coin
@@ -160,6 +389,10 @@ pub(crate) struct OrderBookListener {
     // Shared registry of L2 variant shapes any live connection wants. Read at flush
     // time so we compute only subscribed variants per coin instead of all 7.
     active_l2_params: ActiveL2Params,
+    // Live-subscription counts per broadcast family. The per-event L4/trades/BBO
+    // grouping + broadcast work is gated on these instead of receiver_count()
+    // (which counts connections, not interested subscribers).
+    active_subs: ActiveSubs,
     // The active variant set used for the last L2 build. When it changes (a new
     // shape is subscribed, or the last subscriber of a shape leaves), the cache holds
     // the wrong shapes, so we clear it to force a full rebuild against the new set -
@@ -186,7 +419,9 @@ impl OrderBookListener {
             cached_event_count: 0,
             cache_event_cap: MAX_CACHED_EVENTS,
             needs_resync: false,
+            resync_data_loss: false,
             tolerate_drift: false,
+            track_untriggered: true,
             max_loss_height: 0,
             last_seen_height: 0,
             late_backfill_reported: false,
@@ -196,6 +431,7 @@ impl OrderBookListener {
             l2_snapshot_cache: HashMap::new(),
             pending_dirty_l2_coins: HashSet::new(),
             active_l2_params,
+            active_subs: ActiveSubs::default(),
             last_active_l2_params: HashSet::new(),
         }
     }
@@ -205,11 +441,23 @@ impl OrderBookListener {
         self.active_l2_params.clone()
     }
 
+    /// Clone of the shared per-family subscription counts, for handing to
+    /// connections (which acquire/release guards on subscribe/unsubscribe).
+    pub(crate) fn active_subs(&self) -> ActiveSubs {
+        self.active_subs.clone()
+    }
+
     /// Opt out of snapshot re-fetch on data loss. The book keeps applying live
     /// events through drift; desyncs are still counted in metrics but never
     /// trigger a re-sync. See `tolerate_drift`.
     pub(crate) fn set_tolerate_drift(&mut self, tolerate: bool) {
         self.tolerate_drift = tolerate;
+    }
+
+    /// Opt out of untriggered trigger-order tracking (--bbo-only): the side
+    /// table stays empty and GET /untriggeredOrders serves empty data.
+    pub(crate) const fn set_track_untriggered(&mut self, track: bool) {
+        self.track_untriggered = track;
     }
 
     pub(crate) const fn is_ready(&self) -> bool {
@@ -243,8 +491,8 @@ impl OrderBookListener {
 
     /// Record that the in-memory book may have diverged from the node (events
     /// were dropped or discarded somewhere). The main-loop ticker reacts by
-    /// re-fetching a full snapshot; the flag is cleared only by an
-    /// init_from_snapshot whose height covers the recorded loss bound.
+    /// re-fetching a full snapshot; the flag is cleared only by a snapshot
+    /// install whose height covers the recorded loss bound.
     pub(crate) fn mark_desynced(&mut self, reason: &'static str) {
         /// Slack added to the loss bound: an unknown-height loss (e.g. a
         /// watcher discard) can be slightly ahead of the last parsed height.
@@ -263,10 +511,13 @@ impl OrderBookListener {
             error!("Order book marked out-of-sync ({reason}); scheduling snapshot re-fetch");
         }
         self.needs_resync = true;
+        // Every mark reason is real event loss (wrong price/size state) -
+        // insertBefore fallbacks are metrics-only and never reach here.
+        self.resync_data_loss = true;
         let state_height = self.order_book_state.as_ref().map_or(0, OrderBookState::height);
         let observed = state_height.max(self.last_seen_height);
         // No height observed yet (loss before any event parsed): conservative
-        // bound - only an informed downgrade in init_from_snapshot can clear it.
+        // bound - only an informed downgrade in finish_install can clear it.
         let bound = if observed == 0 { u64::MAX } else { observed.saturating_add(LOSS_HEIGHT_MARGIN) };
         self.max_loss_height = self.max_loss_height.max(bound);
     }
@@ -275,44 +526,102 @@ impl OrderBookListener {
         self.needs_resync
     }
 
-    /// Shrink the replay-cache cap so overflow behavior is testable without
-    /// constructing a million events.
-    #[cfg(test)]
-    const fn set_cache_event_cap(&mut self, cap: usize) {
+    /// Does the pending desync justify launching a snapshot fetch NOW?
+    /// Every mark reason is data loss now (fallbacks are metrics-only), so a
+    /// pending desync is always urgent; the fetch pacing comes from the
+    /// resync backoff alone.
+    const fn resync_is_urgent(&self) -> bool {
+        self.resync_data_loss
+    }
+
+    /// Override the replay-cache event cap (operator tuning via
+    /// --replay-cache-events; tests shrink it to make overflow reachable).
+    pub(crate) const fn set_cache_event_cap(&mut self, cap: usize) {
         self.cache_event_cap = cap;
     }
 
+    /// Single-lock install used by tests: build + full replay + commit in one
+    /// synchronous call. Production installs go through
+    /// [`install_snapshot_phased`], which does the build and the bulk of the
+    /// replay off-lock; both paths share [`Self::finish_install`] for the
+    /// commit semantics.
+    #[cfg(test)]
     fn init_from_snapshot(&mut self, snapshot: Snapshots<InnerL4Order>, height: u64) {
-        info!("Initializing from snapshot at height {}", height);
-        let mut new_state = OrderBookState::from_snapshot(snapshot, height, 0, true, self.ignore_spot);
+        info!("Initializing from snapshot at height {height}");
+        let mut new_state = OrderBookState::from_snapshot(
+            snapshot,
+            Vec::new(),
+            height,
+            0,
+            true,
+            self.ignore_spot,
+            self.track_untriggered,
+        );
+        // Mirror the production carry-forward (install_snapshot_phased_impl):
+        // a snapshot with no triggers must not wipe the accumulated table.
+        if let Some(old_state) = self.order_book_state.as_ref() {
+            new_state.carry_forward_untriggered(old_state);
+        }
+        // Free the outgoing book before building its replacement (the phased
+        // production path instead keeps it serving and pays the RSS overlap).
+        self.order_book_state = None;
+        self.l2_snapshot_cache = HashMap::new();
+        self.finish_install(new_state, height, 0, false);
+    }
 
-        // Replay every cached batch above the snapshot height. Batches at or
-        // below the height are already reflected in the snapshot; newer ones
-        // arrived while hl-node was dumping state and would otherwise be lost
-        // (the old behavior discarded the whole cache, so every add/cancel
-        // during the 10-30s snapshot window silently corrupted the book).
+    /// `(events currently cached for replay, whether the cache is alive)`.
+    /// A dead cache during an install means it overflowed: replay above the
+    /// snapshot height is incomplete and the committed book must stay marked
+    /// for re-sync (the loss bookkeeping in `finish_install` ensures that).
+    const fn replay_cache_status(&self) -> (usize, bool) {
+        (self.cached_event_count, self.fetched_snapshot_cache.is_some())
+    }
+
+    /// Steal the accumulated replay cache, leaving an empty live cache in
+    /// place so batches keep being recorded while the phased install replays
+    /// the stolen chunk off-lock. Resets the cap counter: the cap bounds
+    /// resident cache memory, and the stolen chunk is consumed immediately.
+    fn drain_replay_cache(&mut self) -> VecDeque<EventBatch> {
+        self.cached_event_count = 0;
+        self.fetched_snapshot_cache.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// Discard the replay cache without replaying it (chase-cap give-up): the
+    /// caller commits the gapped book and re-marks it desynced in the same
+    /// lock hold. Returns the number of discarded events.
+    fn abandon_replay_cache(&mut self) -> usize {
+        let dropped = self.cached_event_count;
+        self.cached_event_count = 0;
+        self.fetched_snapshot_cache = None;
+        dropped
+    }
+
+    /// Commit phase of a snapshot install: replay everything still cached
+    /// above `height` onto `new_state`, run the loss/desync bookkeeping,
+    /// invalidate the L2 caches, and swap the new book in. Synchronous with
+    /// no await points, so the caller's single lock hold covers the whole
+    /// commit and no event can slip between the residual replay and going
+    /// live. `replayed`/`replay_failed` carry totals from replay work already
+    /// done off-lock by the phased install.
+    ///
+    /// Replaying above the snapshot height is what keeps the handoff gapless:
+    /// batches at/below it are already reflected in the snapshot; newer ones
+    /// arrived while hl-node was dumping state and would otherwise be lost
+    /// (the pre-replay behavior discarded the whole cache, so every add or
+    /// cancel during the 10-30s snapshot window silently corrupted the book).
+    fn finish_install(&mut self, mut new_state: OrderBookState, height: u64, mut replayed: usize, mut replay_failed: bool) {
+        // Stop caching: after the swap below, live batches apply directly.
         let cache = self.fetched_snapshot_cache.take().unwrap_or_default();
         self.cached_event_count = 0;
-        let mut replayed = 0usize;
-        let mut replay_failed = false;
         for batch in cache {
-            let res = match batch {
-                EventBatch::Orders(b) if b.block_number() > height => {
-                    replayed += b.events_len();
-                    new_state.apply_order_statuses_hft(b).map(|_| ())
-                }
-                EventBatch::BookDiffs(b) if b.block_number() > height => {
-                    replayed += b.events_len();
-                    new_state.apply_order_diffs_hft(b).map(|_| ())
-                }
-                _ => Ok(()),
-            };
-            if let Err(err) = res {
-                log::warn!("Replay apply error after snapshot at height {height}: {err}");
-                replay_failed = true;
-            }
+            replay_failed |= replay_batch_above(&mut new_state, batch, height, &mut replayed);
         }
         info!("Replayed {replayed} cached events above snapshot height {height}");
+        // Drain fallbacks accumulated during replay: an anchored diff whose anchor
+        // was consumed at or below the snapshot height falls back benignly-looking,
+        // but the fresh book's queue priority is already off. Draining here also
+        // keeps the count from being misattributed to the first live batch.
+        let replay_fallbacks = new_state.take_insert_before_fallbacks();
         let prior_loss_height = self.max_loss_height;
         self.order_book_state = Some(new_state);
 
@@ -322,6 +631,17 @@ impl OrderBookListener {
         // clearing the flag in that case would erase the signal permanently.
         self.needs_resync = false;
         self.max_loss_height = 0;
+        // New desync epoch: the re-marks below start fresh urgency state.
+        self.resync_data_loss = false;
+        if replay_fallbacks > 0 {
+            // Counted for visibility but NOT re-marked: the fresh snapshot is by
+            // construction newer than the queue drift these fallbacks describe
+            // (their anchors were consumed at/below the snapshot height). The old
+            // re-mark made every install re-arm the resync loop - replay windows
+            // reliably produce far more fallbacks than any threshold.
+            INSERT_BEFORE_FALLBACK_TOTAL.inc_by(replay_fallbacks);
+            info!("Replay produced {replay_fallbacks} insertBefore fallbacks (benign against a fresh snapshot)");
+        }
         if replay_failed {
             self.mark_desynced("replay_apply_error");
         } else if prior_loss_height > height {
@@ -330,6 +650,7 @@ impl OrderBookListener {
                  keeping re-sync scheduled"
             );
             self.needs_resync = true;
+            self.resync_data_loss = true;
             // Downgrade an uninformed (u64::MAX) bound now that real heights
             // have been observed, so the next fetch can actually clear it.
             self.max_loss_height = if prior_loss_height == u64::MAX {
@@ -345,25 +666,43 @@ impl OrderBookListener {
             self.late_backfill_reported = false;
         }
 
-        // The incremental L2 cache references the previous book's coins/levels;
-        // drop it so the next broadcast does a full rebuild against the new state.
+        // The incremental L2 cache and the conflation buffer reference the
+        // outgoing book's coins/levels; invalidate both so the next broadcast
+        // recomputes every present coin fresh against the new book.
         self.l2_snapshot_cache = HashMap::new();
-        // The conflation buffer references the previous universe; clear it too. The
-        // cache reset above makes every present coin uncached, so the next broadcast
-        // recomputes all of them fresh regardless.
         self.pending_dirty_l2_coins.clear();
         // Force the next flush to treat the active variant set as "changed" so the
         // empty cache is rebuilt against whatever shapes are currently subscribed.
         self.last_active_l2_params.clear();
-        info!("Order book ready at height {}", height);
+        // Lock-free readiness/staleness signals for /health: seed the last-
+        // applied stamp here so the first probe after an install isn't
+        // reported stale before the next live batch lands.
+        ORDERBOOK_READY.set(1);
+        LAST_EVENT_APPLIED_MS.set(parallel::now_unix_ms() as i64);
+        info!("Order book ready at height {height}");
     }
 
     /// L4 snapshot of one coin's book - (time, height, snapshot). Replaces the
     /// old all-coins compute_snapshot, which cloned the entire multi-book under
     /// the listener lock on every l4Book subscribe and stalled event processing
     /// for hundreds of milliseconds.
-    pub(crate) fn compute_snapshot_for_coin(&self, coin: &Coin) -> Option<(u64, u64, Snapshot<InnerL4Order>)> {
-        self.order_book_state.as_ref().and_then(|state| state.compute_snapshot_for_coin(coin))
+    pub(crate) fn compute_snapshot_for_coin(
+        &self,
+        coin: &Coin,
+        band: PxBand,
+    ) -> Option<(u64, u64, Snapshot<InnerL4Order>)> {
+        self.order_book_state.as_ref().and_then(|state| state.compute_snapshot_for_coin(coin, band))
+    }
+
+    /// Untriggered trigger orders - all coins, or one coin when given - as
+    /// (time, height, orders). None until the first snapshot install. Only
+    /// bumps Arc refcounts under the listener lock; callers convert/serialize
+    /// off-lock.
+    pub(crate) fn compute_untriggered_snapshot(
+        &self,
+        coin: Option<&Coin>,
+    ) -> Option<(u64, u64, Vec<Arc<InnerL4Order>>)> {
+        self.order_book_state.as_ref().map(|state| state.untriggered_snapshot(coin))
     }
 }
 
@@ -691,7 +1030,7 @@ impl OrderBookListener {
             self.fetched_snapshot_cache = None;
             self.cached_event_count = 0;
             // The recorded loss bound (~current height) sits above the pending
-            // snapshot's height, so init_from_snapshot keeps the book marked.
+            // snapshot's height, so the install keeps the book marked.
             self.mark_desynced("event_cache_overflow");
             return;
         }
@@ -836,9 +1175,12 @@ impl OrderBookListener {
                     // Broadcast L4 order statuses for L4Book / orderUpdates
                     // subscribers: grouped per coin ONCE here (one clone per
                     // event), shared via Arc by every connection - the old path
-                    // cloned the whole batch per subscribed connection.
+                    // cloned the whole batch per subscribed connection. Gated
+                    // on live l4Book/orderUpdates subscriptions, not on
+                    // receiver_count(): with only BBO/L2 clients connected the
+                    // per-event clone+group work is pure waste under the lock.
                     if let Some(tx) = &self.internal_message_tx {
-                        if tx.receiver_count() > 0 && batch.events_len() > 0 {
+                        if self.active_subs.wants(BroadcastKind::L4Statuses) && batch.events_len() > 0 {
                             let msg = Arc::new(InternalMessage::L4OrderStatuses {
                                 time: batch.block_time(),
                                 height: batch.block_number(),
@@ -858,7 +1200,7 @@ impl OrderBookListener {
                     // clients would see events for coins whose state we never
                     // applied locally.
                     if let Some(tx) = &self.internal_message_tx {
-                        if tx.receiver_count() > 0 {
+                        if self.active_subs.wants(BroadcastKind::L4Diffs) {
                             let diffs_by_coin = group_diffs_by_coin(batch.events_ref(), state.ignore_spot());
                             if !diffs_by_coin.is_empty() {
                                 let msg = Arc::new(InternalMessage::L4OrderDiffs {
@@ -889,8 +1231,11 @@ impl OrderBookListener {
                 EventBatch::Fills(batch) => {
                     EVENTS_PROCESSED_TOTAL.with_label_values(&["fills"]).inc();
                     // Broadcast fills grouped per coin (move-only - the batch is
-                    // never applied to the book, so no event is cloned).
-                    if self.internal_message_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0) {
+                    // never applied to the book, so no event is cloned). Skipping
+                    // the pairing with zero trades subscribers is safe: its
+                    // output would be discarded, and a leg left waiting in the
+                    // pairer is dropped by the next matching leg anyway.
+                    if self.internal_message_tx.is_some() && self.active_subs.wants(BroadcastKind::Trades) {
                         let trades_by_coin = self.trade_pairer.group(batch);
                         if !trades_by_coin.is_empty() {
                             if let Some(tx) = &self.internal_message_tx {
@@ -901,6 +1246,15 @@ impl OrderBookListener {
                     Ok(HashSet::new())
                 }
             };
+
+            // Adds whose insertBefore anchor was missing rested at the back of
+            // their level instead. Metrics-only: the miss is an architectural
+            // pairing race (see the comment at the resync backoff constants),
+            // not book divergence - a re-fetch cannot fix it.
+            let fallbacks = state.take_insert_before_fallbacks();
+            if fallbacks > 0 {
+                INSERT_BEFORE_FALLBACK_TOTAL.inc_by(fallbacks);
+            }
 
             match result {
                 Ok(coins) => coins,
@@ -923,6 +1277,12 @@ impl OrderBookListener {
             HashSet::new()
         };
         EVENT_PROCESSING_LATENCY.with_label_values(&[source_label]).observe(process_start.elapsed().as_secs_f64());
+        // Staleness signal for /health: one atomic store per applied batch.
+        // Only the live-apply path advances it - batches consumed by the
+        // replay cache bailed out above, so a not-yet-ready book stays stale.
+        if self.order_book_state.is_some() {
+            LAST_EVENT_APPLIED_MS.set(parallel::now_unix_ms() as i64);
+        }
 
         // Log HFT state progress periodically
         static HFT_STATE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -938,6 +1298,7 @@ impl OrderBookListener {
                 // Record orderbook stats
                 ORDERBOOK_ORDERS_TOTAL.set(state.order_count() as i64);
                 ORDERBOOK_COINS_COUNT.set(state.coin_count() as i64);
+                ORDERBOOK_UNTRIGGERED_TOTAL.set(state.untriggered_count() as i64);
 
                 // Cleanup stale pending entries to prevent unbounded memory growth.
                 // A force-clear may evict genuinely in-flight order halves, so it
@@ -959,13 +1320,13 @@ impl OrderBookListener {
             self.mark_desynced(reason);
         }
 
-        // Fast BBO broadcast - ONLY for coins that changed AND only when someone is
-        // listening. Without the receiver-count gate we'd `get_bbos_for_coins` and
-        // spawn a tokio task per change even with zero subscribers, wasting CPU.
+        // Fast BBO broadcast - ONLY for coins that changed AND only when a bbo
+        // subscription is live. Without the gate we'd `get_bbos_for_coins`
+        // (map build + Coin clones) per change even with zero subscribers.
         if !changed_coins.is_empty() {
             if let Some(state) = &self.order_book_state {
                 if let Some(tx) = &self.internal_message_tx {
-                    if tx.receiver_count() > 0 {
+                    if self.active_subs.wants(BroadcastKind::Bbo) {
                         let bbo_start = Instant::now();
                         let (time, bbos) = state.get_bbos_for_coins(&changed_coins);
                         static BBO_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1076,19 +1437,11 @@ impl OrderBookListener {
             // Rebuild the shared universe only when the coin set actually changed.
             // Built once here instead of once per connection per broadcast (the
             // old per-connection derivation allocated the full coin-name set for
-            // every connection on every flush).
-            let universe = if coin_set_changed {
-                let market_filter = self.market_filter;
-                Some(Arc::new(
-                    self.l2_snapshot_cache
-                        .keys()
-                        .filter(|coin| coin_in_market_filter(coin, market_filter))
-                        .map(Coin::value)
-                        .collect::<HashSet<String>>(),
-                ))
-            } else {
-                None
-            };
+            // every connection on every flush). Derived from the book state, not
+            // the L2 cache: the cache is a partial universe while a post-install
+            // backfill ramp is in progress (see L2_BACKFILL_COINS_PER_FLUSH),
+            // and subscription validation must not shrink to the ramped subset.
+            let universe = if coin_set_changed { Some(self.universe()) } else { None };
 
             if let Some(tx) = &self.internal_message_tx {
                 let msg = Arc::new(InternalMessage::Snapshot {
@@ -1227,6 +1580,95 @@ impl Drop for L2ParamGuard {
     }
 }
 
+/// Broadcast families whose per-event work the listener gates on live
+/// subscriber counts. `L4Statuses` feeds l4Book + orderUpdates, `L4Diffs`
+/// feeds l4Book + bookDiffs, `Trades` feeds trades, `Bbo` feeds bbo.
+#[derive(Clone, Copy)]
+enum BroadcastKind {
+    L4Statuses,
+    L4Diffs,
+    Trades,
+    Bbo,
+}
+
+/// Live-subscription counts per broadcast family, shared between the listener
+/// and every connection (same RAII-guard pattern as [`ActiveL2Params`]).
+///
+/// The listener gates its per-event grouping/broadcast work on these instead
+/// of `tx.receiver_count()`: the receiver count is the number of CONNECTIONS,
+/// so a single BBO-only client used to force a deep clone + per-coin regroup
+/// of every L4 status/diff event - per event, inside the listener lock - with
+/// nobody subscribed to consume any of it.
+#[derive(Clone, Default)]
+pub(crate) struct ActiveSubs {
+    inner: Arc<ActiveSubCounts>,
+}
+
+#[derive(Default)]
+struct ActiveSubCounts {
+    l4_statuses: std::sync::atomic::AtomicUsize,
+    l4_diffs: std::sync::atomic::AtomicUsize,
+    trades: std::sync::atomic::AtomicUsize,
+    bbo: std::sync::atomic::AtomicUsize,
+}
+
+impl ActiveSubCounts {
+    const fn counter(&self, kind: BroadcastKind) -> &std::sync::atomic::AtomicUsize {
+        match kind {
+            BroadcastKind::L4Statuses => &self.l4_statuses,
+            BroadcastKind::L4Diffs => &self.l4_diffs,
+            BroadcastKind::Trades => &self.trades,
+            BroadcastKind::Bbo => &self.bbo,
+        }
+    }
+}
+
+impl ActiveSubs {
+    /// Guards for every broadcast family `sub` consumes (empty for l2Book,
+    /// which is gated separately via [`ActiveL2Params`]). Connections MUST
+    /// acquire before capturing the subscription's immediate snapshot, so the
+    /// event stream is already flowing when the snapshot is taken and no
+    /// update can fall in the gap between them; guards are released via Drop
+    /// on unsubscribe and disconnect alike.
+    pub(crate) fn acquire_for(&self, sub: &Subscription) -> Vec<ActiveSubGuard> {
+        match sub {
+            Subscription::L4Book { .. } => {
+                vec![self.acquire(BroadcastKind::L4Statuses), self.acquire(BroadcastKind::L4Diffs)]
+            }
+            Subscription::OrderUpdates { .. } => vec![self.acquire(BroadcastKind::L4Statuses)],
+            Subscription::BookDiffs { .. } => vec![self.acquire(BroadcastKind::L4Diffs)],
+            Subscription::Trades { .. } => vec![self.acquire(BroadcastKind::Trades)],
+            Subscription::Bbo { .. } => vec![self.acquire(BroadcastKind::Bbo)],
+            Subscription::L2Book { .. } => Vec::new(),
+            // Low-frequency side stream: the listener broadcasts it whenever any receiver
+            // exists (it never touches the book), so it registers no gated family.
+            Subscription::Oracle { .. } => Vec::new(),
+        }
+    }
+
+    fn acquire(&self, kind: BroadcastKind) -> ActiveSubGuard {
+        self.inner.counter(kind).fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ActiveSubGuard { inner: self.inner.clone(), kind }
+    }
+
+    fn wants(&self, kind: BroadcastKind) -> bool {
+        self.inner.counter(kind).load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+}
+
+/// RAII guard returned by [`ActiveSubs::acquire_for`]. Decrements its family's
+/// count on drop; disconnect-safe for the same reason as [`L2ParamGuard`].
+pub(crate) struct ActiveSubGuard {
+    inner: Arc<ActiveSubCounts>,
+    kind: BroadcastKind,
+}
+
+impl Drop for ActiveSubGuard {
+    fn drop(&mut self) {
+        self.inner.counter(self.kind).fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 // ============================================================================
 // HFT-OPTIMIZED VERSION
 // Uses parallel file watchers and immediate OrderDiff processing
@@ -1238,6 +1680,9 @@ impl Drop for L2ParamGuard {
 /// 2. Processes OrderDiffs immediately (doesn't wait for OrderStatuses)
 /// 3. Uses process time instead of block time for lowest latency
 pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, config: crate::ServerConfig) -> Result<()> {
+    if config.replay_cache_events > 0 {
+        listener.lock().await.set_cache_event_cap(config.replay_cache_events);
+    }
     let dir = match config.data_dir.clone() {
         Some(d) => d,
         None => dirs::home_dir().ok_or(
@@ -1288,6 +1733,8 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
     let start = Instant::now() + Duration::from_secs(5);
     let mut ticker = tokio::time::interval_at(start, Duration::from_secs(10));
     let mut snapshot_fetch_pending = false;
+    let mut resync_backoff = RESYNC_BACKOFF_BASE;
+    let mut next_fetch_allowed = Instant::now();
 
     // Drives L2 broadcasts on a fixed cadence so the feed has a guaranteed maximum
     // interval even when no events arrive. Skip missed ticks so a busy loop resumes
@@ -1325,7 +1772,10 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
             // and the tick is only Ready every L2_FLUSH_TICK_MS, so it cannot starve
             // the event arm in return.
             _ = l2_flush_ticker.tick() => {
-                listener.lock().await.flush_l2_if_due();
+                let lock_start = Instant::now();
+                let mut guard = listener.lock().await;
+                LISTENER_LOCK_WAIT.observe(lock_start.elapsed().as_secs_f64());
+                guard.flush_l2_if_due();
             }
 
             // Process events from the file watchers, draining up to
@@ -1377,7 +1827,9 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                     }
                 }
                 if !actions.is_empty() {
+                    let lock_start = Instant::now();
                     let mut guard = listener.lock().await;
+                    LISTENER_LOCK_WAIT.observe(lock_start.elapsed().as_secs_f64());
                     for action in actions {
                         match action {
                             Action::Apply(height, batch, source) => guard.apply_event_batch(height, batch, source),
@@ -1412,6 +1864,13 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                     }
                     Some(Ok(())) => {}
                 }
+                // Backoff bookkeeping: converged installs reset the spacing,
+                // anything else (fetch error, or an install that re-marked
+                // the book) doubles it so the next dump waits longer.
+                let converged = !listener.lock().await.needs_resync();
+                resync_backoff =
+                    if converged { RESYNC_BACKOFF_BASE } else { (resync_backoff * 2).min(RESYNC_BACKOFF_MAX) };
+                next_fetch_allowed = Instant::now() + resync_backoff;
             }
 
             // Periodic snapshot fetch: initial startup, plus whenever the book
@@ -1437,12 +1896,21 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                     }
                 }
 
-                let (is_ready, needs_resync) = {
+                let (is_ready, needs_resync, resync_urgent) = {
                     let guard = listener.lock().await;
-                    (guard.is_ready(), guard.needs_resync())
+                    (guard.is_ready(), guard.needs_resync(), guard.resync_is_urgent())
                 };
-                info!("Ticker: is_ready={is_ready}, needs_resync={needs_resync}, snapshot_fetch_pending={snapshot_fetch_pending}");
-                if (!is_ready || needs_resync) && !snapshot_fetch_pending {
+                info!(
+                    "Ticker: is_ready={is_ready}, needs_resync={needs_resync}, urgent={resync_urgent}, \
+                     snapshot_fetch_pending={snapshot_fetch_pending}"
+                );
+                // The initial fetch (not ready) is never damped. Re-syncs need
+                // an urgent desync (data loss, fallback burst, or a fallback
+                // that waited out the coalescing window) AND the backoff
+                // spacing to have elapsed.
+                let fetch_due =
+                    !is_ready || (needs_resync && resync_urgent && Instant::now() >= next_fetch_allowed);
+                if fetch_due && !snapshot_fetch_pending {
                     snapshot_fetch_pending = true;
                     let listener = listener.clone();
                     let snapshot_fetch_task_tx = snapshot_fetch_task_tx.clone();
@@ -1483,6 +1951,51 @@ mod tests {
         let mut listener = OrderBookListener::new(Some(tx), true, ActiveL2Params::new(), (true, true, true));
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 0);
         (listener, rx)
+    }
+
+    /// One-coin, one-bid Snapshots for init_from_snapshot tests.
+    fn snapshot_with(coin: &str, oid: u64, px_raw: u64) -> Snapshots<InnerL4Order> {
+        let order = InnerL4Order {
+            user: Address::new([0; 20]),
+            coin: Coin::new(coin),
+            side: Side::Bid,
+            limit_px: Px::new(px_raw),
+            sz: crate::order_book::Sz::new(100_000_000),
+            oid,
+            timestamp: 0,
+            trigger_condition: String::new(),
+            is_trigger: false,
+            trigger_px: String::new(),
+            is_position_tpsl: false,
+            reduce_only: false,
+            order_type: String::new(),
+            tif: None,
+            cloid: None,
+        };
+        let mut book: crate::order_book::OrderBook<InnerL4Order> = crate::order_book::OrderBook::new();
+        book.add_order(order);
+        Snapshots::new(std::iter::once((Coin::new(coin), book.to_snapshot())).collect())
+    }
+
+    #[test]
+    fn test_init_from_snapshot_reinstall_replaces_book() {
+        // Guards the early old-book drop: a second install over an existing
+        // state must fully replace the book, serving exactly the new snapshot.
+        let (mut listener, _rx) = ready_listener();
+        listener.init_from_snapshot(snapshot_with("BTC", 1, 500), 10);
+        assert!(listener.compute_snapshot_for_coin(&Coin::new("BTC"), PxBand::default()).is_some());
+
+        listener.init_from_snapshot(snapshot_with("ETH", 2, 600), 20);
+        assert!(
+            listener.compute_snapshot_for_coin(&Coin::new("BTC"), PxBand::default()).is_none(),
+            "old book must be gone after reinstall"
+        );
+        let (_time, height, snap) =
+            listener.compute_snapshot_for_coin(&Coin::new("ETH"), PxBand::default()).expect("new book serves");
+        assert_eq!(height, 20);
+        let [bids, asks] = snap.as_ref();
+        assert_eq!(bids.len(), 1);
+        assert!(asks.is_empty());
     }
 
     #[test]
@@ -1591,6 +2104,106 @@ mod tests {
         .unwrap()
     }
 
+    /// Status batch for an untriggered trigger order ("open" + isTrigger).
+    fn make_trigger_status_batch(coin: &str, oid: u64, height: u64) -> Batch<NodeDataOrderStatus> {
+        let mut order = make_l4_order_json(coin, oid);
+        order["isTrigger"] = serde_json::json!(true);
+        order["triggerPx"] = serde_json::json!("110.0");
+        order["orderType"] = serde_json::json!("Stop Market");
+        serde_json::from_value(serde_json::json!({
+            "local_time": "2024-01-15T10:30:00.000000000",
+            "block_time": "2024-01-15T10:30:00.000000000",
+            "block_number": height,
+            "events": [{
+                "time": "2024-01-15T10:30:00.000000000",
+                "user": "0x0000000000000000000000000000000000000000",
+                "hash": "0xabc",
+                "status": "open",
+                "order": order,
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_install_carries_untriggered_forward_when_snapshot_is_barren() {
+        // Current hl-node dumps contain no trigger orders; a re-sync must not
+        // wipe the live-accumulated untriggered table.
+        let (mut listener, _rx) = ready_listener();
+        listener.apply_event_batch(
+            10,
+            EventBatch::Orders(make_trigger_status_batch("BTC", 77, 10)),
+            EventSource::OrderStatuses,
+        );
+        assert_eq!(listener.compute_untriggered_snapshot(None).unwrap().2.len(), 1);
+
+        // Barren snapshot (book order only, no triggers) at a higher height.
+        listener.init_from_snapshot(snapshot_with("ETH", 1, 500), 20);
+        let carried = listener.compute_untriggered_snapshot(None).unwrap().2;
+        assert_eq!(carried.len(), 1, "barren snapshot must not wipe the untriggered table");
+        assert_eq!(carried[0].oid, 77);
+
+        // Carried entries must still evict on later terminal statuses.
+        let cancel: Batch<NodeDataOrderStatus> = {
+            let mut order = make_l4_order_json("BTC", 77);
+            order["isTrigger"] = serde_json::json!(true);
+            order["triggerPx"] = serde_json::json!("110.0");
+            serde_json::from_value(serde_json::json!({
+                "local_time": "2024-01-15T10:30:00.000000000",
+                "block_time": "2024-01-15T10:30:00.000000000",
+                "block_number": 30,
+                "events": [{
+                    "time": "2024-01-15T10:30:00.000000000",
+                    "user": "0x0000000000000000000000000000000000000000",
+                    "hash": "0xabc",
+                    "status": "canceled",
+                    "order": order,
+                }]
+            }))
+            .unwrap()
+        };
+        listener.apply_event_batch(30, EventBatch::Orders(cancel), EventSource::OrderStatuses);
+        assert_eq!(listener.compute_untriggered_snapshot(None).unwrap().2.len(), 0);
+    }
+
+    #[test]
+    fn test_install_with_trigger_bearing_snapshot_stays_authoritative() {
+        // When the dump DOES yield triggers, the rebuilt table replaces the old
+        // one wholesale (no merge of stale live entries).
+        let (mut listener, _rx) = ready_listener();
+        listener.apply_event_batch(
+            10,
+            EventBatch::Orders(make_trigger_status_batch("BTC", 77, 10)),
+            EventSource::OrderStatuses,
+        );
+
+        // Snapshot whose ETH book carries one trigger order (tail of both sides).
+        let trigger = InnerL4Order {
+            user: Address::new([3; 20]),
+            coin: Coin::new("ETH"),
+            side: Side::Bid,
+            limit_px: Px::new(500),
+            sz: crate::order_book::Sz::new(100_000_000),
+            oid: 99,
+            timestamp: 0,
+            trigger_condition: "Price above 110".to_string(),
+            is_trigger: true,
+            trigger_px: "110.0".to_string(),
+            is_position_tpsl: false,
+            reduce_only: false,
+            order_type: "Stop Market".to_string(),
+            tif: None,
+            cloid: None,
+        };
+        let snapshot = Snapshots::new(
+            std::iter::once((Coin::new("ETH"), Snapshot::from_sides(vec![trigger.clone()], vec![trigger]))).collect(),
+        );
+        listener.init_from_snapshot(snapshot, 20);
+        let table = listener.compute_untriggered_snapshot(None).unwrap().2;
+        assert_eq!(table.len(), 1, "snapshot-yielded triggers replace the old table");
+        assert_eq!(table[0].oid, 99);
+    }
+
     /// Feed a paired status + New diff (both halves of an order add) at `height`.
     fn feed_order(listener: &mut OrderBookListener, coin: &str, oid: u64, height: u64) {
         listener.apply_event_batch(
@@ -1616,6 +2229,38 @@ mod tests {
             }
         }
         panic!("no Snapshot message was broadcast");
+    }
+
+    // ==================== insertBefore fallback → re-sync wiring ====================
+
+    #[test]
+    fn insert_before_fallback_counted_not_marked() {
+        let (mut listener, _rx) = ready_listener();
+        feed_order(&mut listener, "BTC", 1, 1);
+
+        // A honored anchor is business as usual - no re-sync
+        listener.apply_event_batch(2, EventBatch::Orders(make_status_batch("BTC", 2, 2)), EventSource::OrderStatuses);
+        listener.apply_event_batch(
+            2,
+            EventBatch::BookDiffs(make_diff_batch("BTC", 2, 2, serde_json::json!({"new": {"sz": "1.0", "insertBefore": 1}}))),
+            EventSource::OrderDiffs,
+        );
+        assert!(!listener.needs_resync(), "a honored insertBefore anchor must not schedule a re-sync");
+
+        // A missing anchor rests the order at the back of the level; it is
+        // counted in metrics but never marks the book desynced.
+        listener.apply_event_batch(3, EventBatch::Orders(make_status_batch("BTC", 3, 3)), EventSource::OrderStatuses);
+        listener.apply_event_batch(
+            3,
+            EventBatch::BookDiffs(make_diff_batch(
+                "BTC",
+                3,
+                3,
+                serde_json::json!({"new": {"sz": "1.0", "insertBefore": 999}}),
+            )),
+            EventSource::OrderDiffs,
+        );
+        assert!(!listener.needs_resync(), "a missing anchor must not schedule a re-sync");
     }
 
     // ==================== Gapless snapshot handoff (drift fix) ====================
@@ -1756,6 +2401,152 @@ mod tests {
         assert!(!listener.universe().contains("ZED"), "backfill at/below the snapshot height is already covered");
     }
 
+    // ==================== Phased (off-lock) snapshot install ====================
+
+    #[tokio::test]
+    async fn test_phased_install_startup_replays_cache_above_snapshot_height() {
+        let (tx, _rx) = tokio::sync::broadcast::channel(32);
+        let listener =
+            Arc::new(Mutex::new(OrderBookListener::new(Some(tx), false, ActiveL2Params::new(), (true, true, true))));
+        {
+            let mut guard = listener.lock().await;
+            assert!(!guard.is_ready());
+            // Events stream in while the snapshot is being generated.
+            feed_order(&mut guard, "NEW", 1, 200);
+            feed_order(&mut guard, "OLD", 2, 100);
+        }
+
+        // residual_events_max = 0 forces the cache through at least one
+        // off-lock chase round before the commit sees an empty cache.
+        install_snapshot_phased_impl(
+            &listener,
+            Snapshots::new(HashMap::new()),
+            Vec::new(),
+            150,
+            0,
+            INSTALL_MAX_CHASE_ROUNDS,
+        )
+        .await
+        .expect("install");
+
+        let guard = listener.lock().await;
+        assert!(guard.is_ready());
+        let universe = guard.universe();
+        assert!(universe.contains("NEW"), "events above the snapshot height must be replayed");
+        assert!(!universe.contains("OLD"), "events at/below the snapshot height must not be double-applied");
+        assert!(!guard.needs_resync(), "a clean snapshot + replay is in sync");
+    }
+
+    #[tokio::test]
+    async fn test_phased_install_resync_serves_old_book_and_replays_onto_new() {
+        let (listener, _rx) = ready_listener();
+        let listener = Arc::new(Mutex::new(listener));
+        {
+            let mut guard = listener.lock().await;
+            feed_order(&mut guard, "BTC", 1, 10);
+            // A re-sync starts: events keep applying to the live book AND are cached.
+            guard.begin_caching();
+            feed_order(&mut guard, "ETH", 2, 20);
+            assert!(guard.universe().contains("ETH"), "events during a re-sync still apply to the live book");
+        }
+
+        install_snapshot_phased_impl(
+            &listener,
+            Snapshots::new(HashMap::new()),
+            Vec::new(),
+            15,
+            0,
+            INSTALL_MAX_CHASE_ROUNDS,
+        )
+        .await
+        .expect("install");
+
+        let guard = listener.lock().await;
+        let universe = guard.universe();
+        assert!(universe.contains("ETH"), "post-snapshot events must survive the phased re-init");
+        assert!(!universe.contains("BTC"), "pre-snapshot state must come from the snapshot alone");
+        assert!(!guard.needs_resync());
+    }
+
+    #[tokio::test]
+    async fn test_phased_install_commits_residual_without_chase_rounds() {
+        // Cache smaller than the residual threshold: the install must commit
+        // on its first lock hold (pure finish_install path).
+        let (tx, _rx) = tokio::sync::broadcast::channel(32);
+        let listener =
+            Arc::new(Mutex::new(OrderBookListener::new(Some(tx), false, ActiveL2Params::new(), (true, true, true))));
+        listener.lock().await.begin_caching();
+        feed_order(&mut *listener.lock().await, "NEW", 1, 200);
+
+        install_snapshot_phased(&listener, Snapshots::new(HashMap::new()), Vec::new(), 150).await.expect("install");
+
+        let guard = listener.lock().await;
+        assert!(guard.is_ready());
+        assert!(guard.universe().contains("NEW"), "residual events must be replayed by the commit");
+        assert!(!guard.needs_resync());
+    }
+
+    #[tokio::test]
+    async fn test_phased_install_cache_overflow_commits_book_still_marked() {
+        // The cache dies (overflow) before the install commits: the fresh book
+        // is still swapped in - fresher than the stale live one - but replay
+        // was incomplete, so the loss bookkeeping must keep a re-sync scheduled.
+        let (tx, _rx) = tokio::sync::broadcast::channel(32);
+        let listener =
+            Arc::new(Mutex::new(OrderBookListener::new(Some(tx), true, ActiveL2Params::new(), (true, true, true))));
+        {
+            let mut guard = listener.lock().await;
+            guard.set_cache_event_cap(1);
+            feed_order(&mut guard, "AAA", 1, 10); // 2 single-event batches: second one overflows
+            assert!(guard.needs_resync(), "cache overflow must mark the book for re-sync");
+            let (_pending, cache_alive) = guard.replay_cache_status();
+            assert!(!cache_alive, "overflow must drop the cache");
+        }
+
+        install_snapshot_phased_impl(
+            &listener,
+            Snapshots::new(HashMap::new()),
+            Vec::new(),
+            5,
+            0,
+            INSTALL_MAX_CHASE_ROUNDS,
+        )
+        .await
+        .expect("install");
+
+        let guard = listener.lock().await;
+        assert!(guard.is_ready(), "the fresh snapshot still supersedes the stale book");
+        assert!(guard.needs_resync(), "incomplete replay must keep the book marked");
+    }
+
+    #[tokio::test]
+    async fn test_phased_install_chase_cap_drops_cache_and_stays_marked() {
+        // max_chase_rounds = 0 with a still-alive over-threshold cache models a
+        // chase that never converged: the install must NOT replay the remainder
+        // under the lock (unbounded hold). It commits the gapped-but-fresh book,
+        // discards the cache, and keeps a re-sync scheduled.
+        let (tx, _rx) = tokio::sync::broadcast::channel(32);
+        let listener =
+            Arc::new(Mutex::new(OrderBookListener::new(Some(tx), false, ActiveL2Params::new(), (true, true, true))));
+        {
+            let mut guard = listener.lock().await;
+            guard.begin_caching();
+            feed_order(&mut guard, "NEW", 1, 200);
+        }
+
+        install_snapshot_phased_impl(&listener, Snapshots::new(HashMap::new()), Vec::new(), 150, 0, 0)
+            .await
+            .expect("install");
+
+        let guard = listener.lock().await;
+        assert!(guard.is_ready(), "the fresh snapshot still supersedes the stale book");
+        assert!(!guard.universe().contains("NEW"), "the give-up path must not replay the abandoned cache");
+        assert!(guard.needs_resync(), "dropping cached events must keep the book marked for re-sync");
+        let (pending, cache_alive) = guard.replay_cache_status();
+        assert_eq!(pending, 0, "the abandoned cache must be empty");
+        assert!(!cache_alive, "the abandoned cache must be gone, not just drained");
+    }
+
     #[test]
     fn test_late_backfill_with_no_cache_marks_desync() {
         let (mut listener, _rx) = ready_listener(); // cache already consumed by init
@@ -1812,6 +2603,94 @@ mod tests {
         assert!(!listener.late_backfill_reported, "resolved 周期必须重置 once-guard");
         listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 2, 10_500)));
         assert!(listener.needs_resync(), "resolved 之后的新迟到批必须重新 mark");
+    }
+
+    // ==================== Resync damping ====================
+
+    /// Feed one order whose insertBefore anchor is missing (falls back).
+    fn feed_fallback_order(listener: &mut OrderBookListener, oid: u64, height: u64) {
+        listener.apply_event_batch(
+            height,
+            EventBatch::Orders(make_status_batch("BTC", oid, height)),
+            EventSource::OrderStatuses,
+        );
+        listener.apply_event_batch(
+            height,
+            EventBatch::BookDiffs(make_diff_batch(
+                "BTC",
+                oid,
+                height,
+                serde_json::json!({"new": {"sz": "1.0", "insertBefore": 999}}),
+            )),
+            EventSource::OrderDiffs,
+        );
+    }
+
+    #[test]
+    fn test_fallbacks_never_mark_desync_at_any_rate() {
+        let (mut listener, _rx) = ready_listener();
+        feed_order(&mut listener, "BTC", 1, 1);
+        // The anchor race is architectural (cancels outrun anchored-add
+        // pairing); even a sustained storm must stay metrics-only - marking
+        // it desynced armed a permanent 20s-dump re-sync loop in production.
+        for i in 0..200_u64 {
+            feed_fallback_order(&mut listener, 100 + i, 2 + i);
+        }
+        assert!(!listener.needs_resync(), "fallbacks are metrics-only, never a desync reason");
+        assert!(!listener.resync_is_urgent());
+    }
+
+    #[test]
+    fn test_replay_fallbacks_do_not_rearm_resync() {
+        let (mut listener, _rx) = ready_listener();
+        listener.begin_caching();
+        // An anchored add with a missing anchor lands during the fetch window:
+        // applied live AND cached for replay.
+        feed_fallback_order(&mut listener, 50, 200);
+        assert!(!listener.needs_resync(), "below the burst threshold nothing marks");
+
+        // The install replays the cached batches (height 200 > 100) onto the
+        // fresh book; the anchor misses again there. That must NOT re-arm the
+        // resync loop - the snapshot is newer than the drift it describes.
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 100);
+        assert!(!listener.needs_resync(), "replay fallbacks must not re-mark the fresh book");
+    }
+
+    #[test]
+    fn test_fallback_burst_does_not_raise_loss_bound() {
+        let (mut listener, _rx) = ready_listener();
+        feed_order(&mut listener, "BTC", 1, 1);
+        for i in 0..50_u64 {
+            feed_fallback_order(&mut listener, 100 + i, 500 + i);
+        }
+        assert!(!listener.needs_resync(), "fallbacks never mark");
+        assert_eq!(listener.max_loss_height, 0, "queue-priority fallbacks are not data loss");
+        // With no phantom loss bound, any install fully clears the desync -
+        // the old behavior kept "data loss above snapshot height" scheduled
+        // off a bound that pure fallbacks had raised.
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 10);
+        assert!(!listener.needs_resync(), "no phantom loss bound may keep the re-sync scheduled");
+    }
+
+    #[test]
+    fn test_data_loss_desync_is_always_urgent() {
+        let (mut listener, _rx) = ready_listener();
+        listener.mark_desynced("watcher_data_loss");
+        assert!(listener.needs_resync());
+        assert!(listener.resync_is_urgent(), "data loss must never be damped");
+    }
+
+    #[test]
+    fn test_install_resets_damping_epoch() {
+        let (mut listener, _rx) = ready_listener();
+        // Establish a known stream height so the loss bound is informed and a
+        // covering snapshot can clear the flag in one install.
+        feed_order(&mut listener, "BTC", 1, 100);
+        listener.mark_desynced("watcher_data_loss");
+        listener.begin_caching();
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1_000);
+        assert!(!listener.needs_resync());
+        assert!(!listener.resync_is_urgent(), "a clean install must start a fresh damping epoch");
     }
 
     #[test]
@@ -1894,6 +2773,8 @@ mod tests {
     #[test]
     fn test_fills_broadcast_grouped_by_coin() {
         let (mut listener, mut rx) = ready_listener();
+        // Fills grouping only runs with a live trades subscription.
+        let _guards = listener.active_subs().acquire_for(&Subscription::Trades { coin: "BTC".to_string() });
         listener.apply_event_batch(1, EventBatch::Fills(make_fills_batch(&["BTC", "ETH", "BTC"], 1)), EventSource::Fills);
 
         let mut found = false;
@@ -1990,6 +2871,7 @@ mod tests {
         // ready_listener runs with ignore_spot=true: the spot coin's diff must
         // be stripped from the broadcast grouping too.
         let (mut listener, mut rx) = ready_listener();
+        let _guards = listener.active_subs().acquire_for(&Subscription::BookDiffs { coin: "BTC".to_string() });
         listener.apply_event_batch(
             1,
             EventBatch::BookDiffs(make_multi_diff_batch(&["BTC", "@1", "BTC"], 1)),
@@ -2012,6 +2894,8 @@ mod tests {
     #[test]
     fn test_all_spot_diff_batch_broadcasts_nothing() {
         let (mut listener, mut rx) = ready_listener(); // ignore_spot=true
+        // Subscriber present, so suppression must come from the empty grouping.
+        let _guards = listener.active_subs().acquire_for(&Subscription::BookDiffs { coin: "BTC".to_string() });
         listener.apply_event_batch(1, EventBatch::BookDiffs(make_multi_diff_batch(&["@1"], 1)), EventSource::OrderDiffs);
         while let Ok(msg) = rx.try_recv() {
             assert!(
@@ -2024,6 +2908,7 @@ mod tests {
     #[test]
     fn test_statuses_broadcast_grouped_by_coin() {
         let (mut listener, mut rx) = ready_listener();
+        let _guards = listener.active_subs().acquire_for(&Subscription::L4Book { coin: "BTC".to_string() });
         listener.apply_event_batch(7, EventBatch::Orders(make_status_batch("BTC", 1, 7)), EventSource::OrderStatuses);
 
         let mut found = false;
@@ -2035,6 +2920,39 @@ mod tests {
             }
         }
         assert!(found, "a grouped L4OrderStatuses message must be broadcast");
+    }
+
+    #[test]
+    fn test_l4_trades_bbo_broadcasts_gated_on_live_subscriptions() {
+        // A connected receiver exists (ready_listener holds one), but no
+        // l4Book/bookDiffs/orderUpdates/trades/bbo subscription is live: the
+        // per-event grouping and broadcasts must be skipped entirely. This
+        // guards the receiver_count()->subscriber-count gate change - one idle
+        // BBO-less connection must no longer turn on the L4 firehose work.
+        let (mut listener, mut rx) = ready_listener();
+        feed_order(&mut listener, "BTC", 1, 7);
+        listener.apply_event_batch(8, EventBatch::Fills(make_fills_batch(&["BTC"], 8)), EventSource::Fills);
+        while let Ok(msg) = rx.try_recv() {
+            assert!(
+                matches!(msg.as_ref(), InternalMessage::Snapshot { .. }),
+                "only L2 Snapshot broadcasts may fire without l4/trades/bbo subscribers"
+            );
+        }
+
+        // Acquiring a guard turns the corresponding family back on...
+        let guards = listener.active_subs().acquire_for(&Subscription::L4Book { coin: "BTC".to_string() });
+        feed_order(&mut listener, "BTC", 2, 9);
+        let mut saw_statuses = false;
+        while let Ok(msg) = rx.try_recv() {
+            saw_statuses |= matches!(msg.as_ref(), InternalMessage::L4OrderStatuses { .. });
+        }
+        assert!(saw_statuses, "statuses must be broadcast while an l4Book subscription is live");
+        // ...and dropping it (unsubscribe/disconnect) turns it off again.
+        drop(guards);
+        feed_order(&mut listener, "BTC", 3, 10);
+        while let Ok(msg) = rx.try_recv() {
+            assert!(!matches!(msg.as_ref(), InternalMessage::L4OrderStatuses { .. } | InternalMessage::L4OrderDiffs { .. }));
+        }
     }
 
     // ==================== Parse / apply split ====================
