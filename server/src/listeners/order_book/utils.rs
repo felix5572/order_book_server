@@ -8,174 +8,160 @@ use crate::{
         node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
     },
 };
-use log::{error, info};
+use log::info;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
 use tokio::process::Command;
 
-use crate::SnapshotMode;
-
-/// Configuration for snapshot fetching
+/// Configuration for snapshot fetching. Snapshots always come from one of the
+/// node's periodic abci checkpoints, dumped with `<hlnode_binary>
+/// compute-l4-snapshots` on this host (direct mode only, see `crate::SnapshotMode`).
 #[derive(Debug, Clone)]
 pub(super) struct SnapshotConfig {
-    pub mode: SnapshotMode,
-    pub docker_container: String,
     pub hlnode_binary: String,
-    pub abci_state_path: Option<PathBuf>,
     pub snapshot_output_path: Option<PathBuf>,
-    pub visor_state_path: Option<PathBuf>,
+    /// The node's event data dir (`~/hl/data`): the `*_streaming` streams and
+    /// `periodic_abci_states/` both live here.
     pub data_dir: PathBuf,
 }
 
-pub(super) async fn process_rmp_file(config: &SnapshotConfig) -> Result<PathBuf> {
-    info!("Triggering L4 snapshot via hl-node CLI (mode: {:?})...", config.mode);
+/// One periodic abci checkpoint, `<data_dir>/periodic_abci_states/<YYYYMMDD>/<height>.rmp`.
+///
+/// Verified on mainnet (bm, hl-node da17cb49, 2026-10-09): it is the node state
+/// AFTER applying block `height` (that block's adds are in the dump, the next
+/// block's are not); the node writes one every fixed number of blocks (10,000,
+/// ~12 min); and the file appears complete (full size, already linked), so
+/// existence means readable. `hyperliquid_data/abci_state.rmp` is a hard link to
+/// the newest checkpoint - it is not dumped directly because the node can swap
+/// it to a newer checkpoint mid-dump, and the dump carries no height of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Checkpoint {
+    pub height: u64,
+    pub path: PathBuf,
+}
 
+/// Checkpoints currently on disk, ascending by height. Entries that are not
+/// `<digits>.rmp` files are ignored.
+pub(super) fn list_checkpoints(data_dir: &Path) -> Result<Vec<Checkpoint>> {
+    let root = data_dir.join("periodic_abci_states");
+    let days = fs::read_dir(&root).map_err(|err| format!("read {}: {err}", root.display()))?;
+    let mut checkpoints = Vec::new();
+    for day in days {
+        let day = day?.path();
+        if !day.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&day)? {
+            let path = entry?.path();
+            if let Some(height) = checkpoint_height(&path) {
+                checkpoints.push(Checkpoint { height, path });
+            }
+        }
+    }
+    checkpoints.sort_by_key(|checkpoint| checkpoint.height);
+    Ok(checkpoints)
+}
+
+fn checkpoint_height(path: &Path) -> Option<u64> {
+    if path.extension()? != "rmp" {
+        return None;
+    }
+    path.file_stem()?.to_str()?.parse().ok()
+}
+
+/// The node's checkpoint grid as `(newest height, interval)`, read from the two
+/// newest checkpoints - the node's own cadence, no hard-coded interval. The
+/// hl_node_ops retention always keeps the newest two.
+pub(super) fn checkpoint_grid(checkpoints: &[Checkpoint]) -> Result<(u64, u64)> {
+    let [.., previous, newest] = checkpoints else {
+        return Err(format!(
+            "need two periodic abci checkpoints to infer the node's grid, found {}",
+            checkpoints.len()
+        )
+        .into());
+    };
+    let interval = newest
+        .height
+        .checked_sub(previous.height)
+        .filter(|interval| *interval > 0)
+        .ok_or_else(|| format!("non-increasing checkpoint heights {} -> {}", previous.height, newest.height))?;
+    Ok((newest.height, interval))
+}
+
+/// The checkpoint a fetch targets: the smallest grid height above
+/// `stream_height + lead` (room to open the replay cache before it) that also
+/// covers a known loss bound. `u64::MAX` is the "loss height unknown" sentinel,
+/// not a reachable block - it is not covered here; finish_install keeps the
+/// book marked and downgrades it to a real height for the next cycle. A stream
+/// lagging behind the newest checkpoint targets that existing checkpoint.
+pub(super) fn next_target_checkpoint(
+    grid_anchor: u64,
+    interval: u64,
+    stream_height: u64,
+    max_loss_height: u64,
+    lead: u64,
+) -> u64 {
+    let mut floor = stream_height.saturating_add(lead).saturating_add(1);
+    if max_loss_height != u64::MAX {
+        floor = floor.max(max_loss_height);
+    }
+    if floor <= grid_anchor {
+        return grid_anchor;
+    }
+    grid_anchor + (floor - grid_anchor).div_ceil(interval) * interval
+}
+
+/// The on-disk checkpoint at exactly `height`, if the node has written it.
+pub(super) fn find_checkpoint(data_dir: &Path, height: u64) -> Result<Option<Checkpoint>> {
+    Ok(list_checkpoints(data_dir)?.into_iter().find(|checkpoint| checkpoint.height == height))
+}
+
+/// Dump `checkpoint` to an L4 snapshot JSON with hl-node and return the JSON
+/// path. The dump's book state is exactly the checkpoint's height.
+pub(super) async fn process_rmp_file(config: &SnapshotConfig, checkpoint: &Checkpoint) -> Result<PathBuf> {
+    let output_path = config.snapshot_output_path.clone().unwrap_or_else(|| PathBuf::from("/tmp/hl_snapshot.json"));
+    info!(
+        "Running: {} --chain Mainnet compute-l4-snapshots --include-users --include-trigger-orders {} {}",
+        &config.hlnode_binary,
+        checkpoint.path.display(),
+        output_path.display()
+    );
     // The dump runs on the same host that produces and parses the stream, so
     // its wall-clock duration is the first thing to check when a re-sync
     // correlates with a latency incident.
     let dump_start = Instant::now();
-    let output_path = match config.mode {
-        SnapshotMode::Docker => {
-            // Docker mode: run command inside container
-            // data_dir should be the path containing node_*_by_block directories
-            // Snapshot goes to parent of data_dir (sibling to "data" folder)
-            let parent_dir = config.data_dir.parent().unwrap_or(&config.data_dir);
-            let output_path = config.snapshot_output_path.clone().unwrap_or_else(|| parent_dir.join("snapshot.json"));
-
-            let output = Command::new("docker")
-                .args(&[
-                    "exec",
-                    &config.docker_container,
-                    "./hl-node",
-                    "--chain",
-                    "Mainnet",
-                    "compute-l4-snapshots",
-                    "--include-users",
-                    "--include-trigger-orders",
-                    "hl/hyperliquid_data/abci_state.rmp",
-                    "hl/snapshot.json",
-                ])
-                .output()
-                .await;
-
-            match output {
-                Ok(out) => {
-                    if !out.status.success() {
-                        error!("hl-node compute-l4-snapshots failed: {}", String::from_utf8_lossy(&out.stderr));
-                        return Err("hl-node compute-l4-snapshots failed".into());
-                    }
-                    info!("L4 snapshot computed successfully (docker mode)");
-                }
-                Err(e) => {
-                    error!("Failed to execute docker command: {}", e);
-                    return Err(e.into());
-                }
-            }
-
-            output_path
-        }
-        SnapshotMode::Direct => {
-            // Direct mode: run hl-node directly on host
-            let abci_path = config.abci_state_path.clone().unwrap_or_else(|| {
-                let parent_dir = config.data_dir.parent().unwrap_or(&config.data_dir);
-                parent_dir.join("hyperliquid_data/abci_state.rmp")
-            });
-            let output_path =
-                config.snapshot_output_path.clone().unwrap_or_else(|| PathBuf::from("/tmp/hl_snapshot.json"));
-
-            info!(
-                "Running: {} --chain Mainnet compute-l4-snapshots --include-users --include-trigger-orders {} {}",
-                &config.hlnode_binary,
-                abci_path.display(),
-                output_path.display()
-            );
-
-            let output = Command::new(&config.hlnode_binary)
-                .args(&[
-                    "--chain",
-                    "Mainnet",
-                    "compute-l4-snapshots",
-                    "--include-users",
-                    "--include-trigger-orders",
-                    abci_path.to_str().unwrap_or(""),
-                    output_path.to_str().unwrap_or(""),
-                ])
-                .output()
-                .await;
-
-            match output {
-                Ok(out) => {
-                    if !out.status.success() {
-                        error!("hl-node compute-l4-snapshots failed: {}", String::from_utf8_lossy(&out.stderr));
-                        error!("stdout: {}", String::from_utf8_lossy(&out.stdout));
-                        return Err("hl-node compute-l4-snapshots failed".into());
-                    }
-                    info!("L4 snapshot computed successfully (direct mode)");
-                }
-                Err(e) => {
-                    error!("Failed to execute hl-node command: {}", e);
-                    return Err(e.into());
-                }
-            }
-
-            output_path
-        }
-    };
-
-    let dump_elapsed = dump_start.elapsed();
-    RESYNC_PHASE_DURATION.with_label_values(&["fetch_dump"]).observe(dump_elapsed.as_secs_f64());
-    info!("hl-node compute-l4-snapshots completed in {}ms (mode: {:?})", dump_elapsed.as_millis(), config.mode);
-
-    // Verify file exists
-    if output_path.exists() {
-        info!("Snapshot file found at: {:?}", output_path);
-        // Return tuple (output_path, visor_path) - but for now just output_path
-        // The caller needs visor_path too, so we'll store it
-        return Ok(output_path);
+    let output = Command::new(&config.hlnode_binary)
+        .args(["--chain", "Mainnet", "compute-l4-snapshots", "--include-users", "--include-trigger-orders"])
+        .arg(&checkpoint.path)
+        .arg(&output_path)
+        .output()
+        .await
+        .map_err(|err| format!("execute {}: {err}", config.hlnode_binary))?;
+    if !output.status.success() {
+        return Err(format!(
+            "hl-node compute-l4-snapshots on {} failed ({}): stderr={} stdout={}",
+            checkpoint.path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        )
+        .into());
     }
-
-    // Debug: List directory contents if file not found
-    if let Some(parent) = output_path.parent() {
-        error!("File not found. Listing directory {:?}:", parent);
-        if let Ok(entries) = fs::read_dir(parent) {
-            for entry in entries.flatten() {
-                error!(" - {:?}", entry.path());
-            }
-        } else {
-            error!("Failed to read directory {:?}", parent);
-        }
+    RESYNC_PHASE_DURATION.with_label_values(&["fetch_dump"]).observe(dump_start.elapsed().as_secs_f64());
+    info!(
+        "hl-node compute-l4-snapshots of checkpoint {} completed in {}ms",
+        checkpoint.height,
+        dump_start.elapsed().as_millis()
+    );
+    if !output_path.exists() {
+        return Err(format!("hl-node reported success but {} was not created", output_path.display()).into());
     }
-
-    Err("Snapshot file not created".into())
-}
-
-/// Current node height from `visor_abci_state.json`, or None if unreadable.
-/// Read BEFORE a dump is generated, it is a lower bound of the dump's content
-/// height (heights only advance), which makes it safe for both of its uses:
-/// as the startup-backfill floor (every line at or below it is covered by the
-/// snapshot) and as the replay cutoff (replaying events above it can only
-/// over-apply idempotently, never skip events the snapshot lacks). Reading it
-/// AFTER the dump would over-state the cutoff by the whole dump window.
-pub(super) fn read_visor_height(visor_path: &std::path::Path) -> Option<u64> {
-    let contents = fs::read_to_string(visor_path).ok()?;
-    let visor: serde_json::Value = serde_json::from_str(&contents).ok()?;
-    visor["height"].as_u64()
-}
-
-/// Get the visor state path based on config
-/// Get the visor state path based on config
-/// data_dir should be the path containing node_*_by_block directories
-/// visor_abci_state.json is in parent/hyperliquid_data/
-pub(super) fn get_visor_path(config: &SnapshotConfig) -> PathBuf {
-    config.visor_state_path.clone().unwrap_or_else(|| {
-        let parent_dir = config.data_dir.parent().unwrap_or(&config.data_dir);
-        parent_dir.join("hyperliquid_data/visor_abci_state.json")
-    })
+    Ok(output_path)
 }
 
 impl L2SnapshotParams {
@@ -365,20 +351,62 @@ mod tests {
         .collect()
     }
 
-    #[test]
-    fn test_read_visor_height() {
-        let dir = std::env::temp_dir().join(format!("obs_visor_test_{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("visor_abci_state.json");
-
-        fs::write(&path, r#"{"height": 12345, "other": "x"}"#).unwrap();
-        assert_eq!(read_visor_height(&path), Some(12345));
-
-        fs::write(&path, "not json").unwrap();
-        assert_eq!(read_visor_height(&path), None);
-
-        assert_eq!(read_visor_height(&dir.join("missing.json")), None);
+    fn checkpoint_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("obs_checkpoint_test_{}_{name}", std::process::id()));
         fs::remove_dir_all(&dir).ok();
+        dir
+    }
+
+    #[test]
+    fn test_list_checkpoints_sorted_across_days_ignoring_other_files() {
+        let dir = checkpoint_dir("list");
+        let root = dir.join("periodic_abci_states");
+        for day in ["20261008", "20261009"] {
+            fs::create_dir_all(root.join(day)).unwrap();
+        }
+        for (day, name) in [
+            ("20261009", "1177670000.rmp"),
+            ("20261008", "1177590000.rmp"),
+            ("20261009", "1177660000.rmp"),
+            ("20261009", "notes.txt"),
+            ("20261009", "partial.rmp"),
+        ] {
+            fs::write(root.join(day).join(name), b"x").unwrap();
+        }
+
+        let heights: Vec<u64> = list_checkpoints(&dir).unwrap().iter().map(|checkpoint| checkpoint.height).collect();
+        assert_eq!(heights, vec![1_177_590_000, 1_177_660_000, 1_177_670_000]);
+        let found = find_checkpoint(&dir, 1_177_660_000).unwrap().unwrap();
+        assert_eq!(found.path, root.join("20261009").join("1177660000.rmp"));
+        assert!(find_checkpoint(&dir, 1_177_680_000).unwrap().is_none(), "not written yet");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_list_checkpoints_without_the_directory_is_an_error() {
+        assert!(list_checkpoints(&checkpoint_dir("missing")).is_err());
+    }
+
+    #[test]
+    fn test_checkpoint_grid_comes_from_the_two_newest() {
+        let checkpoint = |height: u64| Checkpoint { height, path: PathBuf::from(format!("{height}.rmp")) };
+        assert_eq!(checkpoint_grid(&[checkpoint(100), checkpoint(200), checkpoint(300)]).unwrap(), (300, 100));
+        assert!(checkpoint_grid(&[checkpoint(300)]).is_err(), "one checkpoint cannot give an interval");
+        assert!(checkpoint_grid(&[checkpoint(300), checkpoint(300)]).is_err(), "zero interval");
+    }
+
+    #[test]
+    fn test_next_target_checkpoint() {
+        // Grid 10_000 + k * 10_000; the target must be strictly beyond stream + lead (30).
+        assert_eq!(next_target_checkpoint(10_000, 10_000, 15_000, 0, 30), 20_000);
+        assert_eq!(next_target_checkpoint(10_000, 10_000, 19_969, 0, 30), 20_000);
+        assert_eq!(next_target_checkpoint(10_000, 10_000, 19_970, 0, 30), 30_000, "no room to open the cache first");
+        // A finite loss bound beyond the next grid point pushes the target out...
+        assert_eq!(next_target_checkpoint(10_000, 10_000, 15_000, 20_050, 30), 30_000);
+        // ...the unknown-loss sentinel does not (it is not a reachable block).
+        assert_eq!(next_target_checkpoint(10_000, 10_000, 15_000, u64::MAX, 30), 20_000);
+        // A stream lagging behind the newest checkpoint targets that checkpoint.
+        assert_eq!(next_target_checkpoint(10_000, 10_000, 5_000, 0, 30), 10_000);
     }
 
     #[test]

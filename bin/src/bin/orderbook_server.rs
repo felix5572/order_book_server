@@ -42,9 +42,8 @@ struct Args {
 
     /// Directory containing the node's real-time event dirs
     /// (node_fills_streaming/, node_order_statuses_streaming/,
-    /// node_raw_book_diffs_streaming/), e.g. .../volumes/hl/data.
-    /// State files (abci_state.rmp, visor_abci_state.json) are auto-detected
-    /// in the sibling hyperliquid_data/ dir, i.e. <data_dir>/../hyperliquid_data/.
+    /// node_raw_book_diffs_streaming/) and its periodic abci checkpoints
+    /// (periodic_abci_states/), e.g. ~/hl/data.
     #[arg(long)]
     data_dir: Option<PathBuf>,
 
@@ -53,36 +52,20 @@ struct Args {
     markets: Markets,
 
     // ========== Snapshot Configuration ==========
-    /// Snapshot fetching mode: docker or direct
-    /// - docker: Use 'docker exec <container> hl-node ...' (for Docker users)
-    /// - direct: Call 'hl-node ...' directly (for systemctl/bare metal users)
-    #[arg(long, value_enum, default_value = "docker")]
+    /// Snapshot fetching mode. Only `direct` is supported: hl-node is called on
+    /// this host to dump the node's periodic abci checkpoints under
+    /// <data-dir>/periodic_abci_states. `docker` is rejected at startup.
+    #[arg(long, value_enum, default_value = "direct")]
     snapshot_mode: SnapshotMode,
 
-    /// Docker container name (only used in docker mode)
-    #[arg(long, default_value = "hyperliquid_hlnode")]
-    docker_container: String,
-
-    /// Path to hl-node binary (only used in direct mode).
-    /// Default: 'hl-node' (assumes in PATH)
+    /// Path to hl-node binary. Default: 'hl-node' (assumes in PATH)
     #[arg(long, default_value = "hl-node")]
     hlnode_binary: String,
 
-    /// Path to abci_state.rmp file (only used in direct mode).
-    /// Default: <data_dir>/../hyperliquid_data/abci_state.rmp
-    /// (sibling of --data-dir, alongside visor_abci_state.json)
-    #[arg(long)]
-    abci_state_path: Option<PathBuf>,
-
-    /// Path where snapshot.json will be written (only used in direct mode).
+    /// Path where snapshot.json will be written.
     /// Default: /tmp/hl_snapshot.json
     #[arg(long)]
     snapshot_output_path: Option<PathBuf>,
-
-    /// Path to visor_abci_state.json (optional, for height info).
-    /// Default: <data_dir>/.hyperliquid_rpc_hlnode_mainnet/volumes/hl/hyperliquid_data/visor_abci_state.json
-    #[arg(long)]
-    visor_state_path: Option<PathBuf>,
 
     /// Port for Prometheus metrics endpoint (0 to disable)
     #[arg(long, default_value = "9090")]
@@ -146,6 +129,11 @@ async fn start_metrics_server(port: u16) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if args.snapshot_mode == SnapshotMode::Docker {
+        return Err("--snapshot-mode docker is unsupported: checkpoint-aligned snapshots are wired for direct mode only \
+                    (run hl-node on this host and pass --snapshot-mode direct)"
+            .into());
+    }
 
     // Initialize logger with specified level
     // SAFETY: We're setting this before any threads are spawned
@@ -176,12 +164,8 @@ async fn main() -> Result<()> {
         include_perps,
         include_spot,
         include_hip3,
-        snapshot_mode: args.snapshot_mode,
-        docker_container: args.docker_container,
         hlnode_binary: args.hlnode_binary,
-        abci_state_path: args.abci_state_path,
         snapshot_output_path: args.snapshot_output_path,
-        visor_state_path: args.visor_state_path,
         metrics_port: args.metrics_port,
         bbo_only: args.bbo_only,
         l2book_heartbeat_ms: args.l2book_heartbeat_ms,
@@ -197,20 +181,9 @@ async fn main() -> Result<()> {
         println!("  Mode: BBO-ONLY (lightweight, ~100MB RAM)");
         println!("  Note: L2/L4/Trades subscriptions disabled");
     }
-    println!("  Snapshot mode: {:?}", config.snapshot_mode);
-    match config.snapshot_mode {
-        SnapshotMode::Docker => {
-            println!("  Container: {}", config.docker_container);
-        }
-        SnapshotMode::Direct => {
-            println!("  hl-node binary: {}", config.hlnode_binary);
-            if let Some(ref path) = config.abci_state_path {
-                println!("  abci_state: {}", path.display());
-            }
-            if let Some(ref path) = config.snapshot_output_path {
-                println!("  snapshot output: {}", path.display());
-            }
-        }
+    println!("  hl-node binary: {}", config.hlnode_binary);
+    if let Some(ref path) = config.snapshot_output_path {
+        println!("  snapshot output: {}", path.display());
     }
     if let Some(ref dir) = config.data_dir {
         println!("  Data dir: {}", dir.display());

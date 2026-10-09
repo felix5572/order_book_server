@@ -13,13 +13,16 @@ use clap::ValueEnum;
 pub use prelude::Result;
 pub use servers::websocket_server::run_websocket_server;
 
-/// Snapshot fetching mode
+/// Snapshot fetching mode. Only `direct` is supported: snapshots are dumped
+/// from the node's periodic abci checkpoints on this host. `docker` is kept as
+/// a CLI value only so that selecting it fails loudly at startup instead of
+/// silently running an unverified container path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum SnapshotMode {
-    /// Use docker exec to call hl-node inside container
-    #[default]
+    /// Unsupported - rejected at startup
     Docker,
     /// Call hl-node directly (for systemctl/bare metal setups)
+    #[default]
     Direct,
 }
 
@@ -38,18 +41,10 @@ pub struct ServerConfig {
     pub include_spot: bool,
     /// Include HIP-3 markets
     pub include_hip3: bool,
-    /// Snapshot fetching mode (docker or direct)
-    pub snapshot_mode: SnapshotMode,
-    /// Docker container name for exec commands (docker mode only)
-    pub docker_container: String,
-    /// Path to hl-node binary (direct mode only)
+    /// Path to hl-node binary (runs compute-l4-snapshots on checkpoints)
     pub hlnode_binary: String,
-    /// Path to abci_state.rmp file (direct mode only, has default)
-    pub abci_state_path: Option<PathBuf>,
-    /// Path where snapshot will be written (direct mode only, has default)
+    /// Path where snapshot will be written (has default)
     pub snapshot_output_path: Option<PathBuf>,
-    /// Path to visor_abci_state.json (optional)
-    pub visor_state_path: Option<PathBuf>,
     /// Port for Prometheus metrics endpoint (0 to disable)
     pub metrics_port: u16,
     /// BBO-only mode: lightweight mode that only tracks best bid/ask per coin

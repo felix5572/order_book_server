@@ -511,18 +511,38 @@ impl OrderBookState {
                         self.pending_new_diffs.insert(oid.clone(), (sz, diff_px, insert_before, Instant::now()));
                     }
                 }
+                // An order whose New diff still waits for its status is not on the book
+                // yet: a Remove/Update arriving in that window must act on the pending
+                // entry, or the late status installs a stale order (a permanent ghost /
+                // wrong size - the statuses stream lags the diffs stream).
                 InnerOrderDiff::Update { new_sz, .. } => {
-                    let _ = self.order_book.modify_sz(oid, coin.clone(), new_sz);
+                    if let Some((pending_sz, _, _, _)) = self.pending_new_diffs.get_mut(&oid) {
+                        *pending_sz = new_sz;
+                    } else if !self.order_book.modify_sz(oid.clone(), coin.clone(), new_sz) {
+                        note_diff_target_missing("update", &oid, &coin);
+                    }
                     changed_coins.insert(coin);
                 }
                 InnerOrderDiff::Remove => {
-                    let _ = self.order_book.cancel_order(oid.clone(), coin.clone());
+                    if self.pending_new_diffs.remove(&oid).is_none()
+                        && !self.order_book.cancel_order(oid.clone(), coin.clone())
+                    {
+                        note_diff_target_missing("remove", &oid, &coin);
+                    }
                     changed_coins.insert(coin);
                 }
             }
         }
         Ok(changed_coins)
     }
+}
+
+/// An Update/Remove found its order neither on the book nor pending. Counted
+/// for observation, never re-synced automatically (design 000220's choice);
+/// the count implies no particular cause.
+fn note_diff_target_missing(diff: &'static str, oid: &Oid, coin: &Coin) {
+    crate::metrics::DIFF_TARGET_MISSING_TOTAL.with_label_values(&[diff]).inc();
+    log::debug!("{diff} diff for oid={oid:?} coin={coin:?}: order neither on the book nor pending");
 }
 
 #[cfg(test)]
@@ -1054,6 +1074,59 @@ mod tests {
         let changed = state.apply_order_diffs_hft(make_diff_batch(vec![remove])).unwrap();
         assert!(changed.contains(&Coin::new("BTC")));
         assert_eq!(state.order_count(), 0);
+    }
+
+    /// Bitter-lesson regression (bm, 2026-10-09: PONS oid placed and removed one
+    /// block apart): the statuses stream lags the diffs stream, so a Remove can
+    /// arrive while the New still waits for its status. It must drop the pending
+    /// New, or the late "open" status books a ghost that nothing ever removes.
+    #[test]
+    fn test_remove_before_status_drops_pending_new_and_late_status_never_books() {
+        let mut state = empty_state();
+        let new = make_order_diff("BTC", 1, OrderDiff::New { sz: "5.0".to_string(), insert_before: None });
+        state.apply_order_diffs_hft(make_diff_batch(vec![new])).unwrap();
+        assert!(state.pending_new_diffs_has(&Oid::new(1)));
+
+        let remove = make_order_diff("BTC", 1, OrderDiff::Remove);
+        let changed = state.apply_order_diffs_hft(make_diff_batch(vec![remove])).unwrap();
+        assert!(changed.contains(&Coin::new("BTC")));
+        assert_eq!(state.pending_new_diffs_count(), 0, "the Remove consumes the pending New");
+
+        let late_open = make_order_status("BTC", 1, "open");
+        state.apply_order_statuses_hft(make_status_batch(vec![late_open])).unwrap();
+        assert_eq!(state.order_count(), 0, "the late status must not book a removed order");
+    }
+
+    /// Same race for a size change: the late status books the order with the
+    /// pending New's size, so an Update in the window must resize the pending entry.
+    #[test]
+    fn test_update_before_status_resizes_pending_new() {
+        let mut state = empty_state();
+        let new = make_order_diff("BTC", 1, OrderDiff::New { sz: "5.0".to_string(), insert_before: None });
+        state.apply_order_diffs_hft(make_diff_batch(vec![new])).unwrap();
+        let update = make_order_diff("BTC", 1, OrderDiff::Update { orig_sz: "5.0".to_string(), new_sz: "3.0".to_string() });
+        state.apply_order_diffs_hft(make_diff_batch(vec![update])).unwrap();
+
+        state.apply_order_statuses_hft(make_status_batch(vec![make_order_status("BTC", 1, "open")])).unwrap();
+        assert_eq!(state.order_count(), 1);
+        let (_, _, snapshot) = state.compute_snapshot_for_coin(&Coin::new("BTC"), PxBand::default()).unwrap();
+        assert_eq!(snapshot.as_ref()[0][0].sz(), crate::order_book::Sz::parse_from_str("3.0").unwrap(), "booked with the updated size");
+    }
+
+    #[test]
+    fn test_update_and_remove_of_unknown_order_are_counted_not_applied() {
+        let mut state = empty_state();
+        let metric = |diff: &str| crate::metrics::DIFF_TARGET_MISSING_TOTAL.with_label_values(&[diff]).get();
+        let (updates_before, removes_before) = (metric("update"), metric("remove"));
+
+        let update = make_order_diff("BTC", 7, OrderDiff::Update { orig_sz: "5.0".to_string(), new_sz: "3.0".to_string() });
+        let remove = make_order_diff("BTC", 8, OrderDiff::Remove);
+        state.apply_order_diffs_hft(make_diff_batch(vec![update, remove])).unwrap();
+
+        assert_eq!(state.order_count(), 0);
+        // Tests share the process-global registry, so compare deltas (>= for parallel tests).
+        assert!(metric("update") > updates_before);
+        assert!(metric("remove") > removes_before);
     }
 
     // ==================== Status Filtering ====================

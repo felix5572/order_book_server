@@ -22,7 +22,7 @@ Real-time orderbook data from a local Hyperliquid node:
 
 ### Prerequisites
 
-1. **Hyperliquid Node** - Running with streaming enabled (Docker or systemctl)
+1. **Hyperliquid Node** - Running on the same host with streaming enabled, writing its periodic abci checkpoints to `<data-dir>/periodic_abci_states/` (the node does this by default)
 2. **Rust** - For building from source
 
 ### System Requirements
@@ -55,15 +55,7 @@ cargo build --release
 
 ### Run
 
-**Docker mode** (node running via `docker compose`):
-```bash
-./target/release/orderbook_server \
-    --address 0.0.0.0 \
-    --port 8000 \
-    --data-dir /root/.hyperliquid_rpc_hlnode_mainnet/volumes/hl/data
-```
-
-**Direct mode** (node running via systemctl / bare metal):
+The node must run on the same host (systemctl / bare metal); `--snapshot-mode direct` is the default and the only supported mode:
 ```bash
 # IMPORTANT: copy the node binary to a name WITHOUT the string "hl-node" first,
 # or the node's process-detection routine will kill itself when the server
@@ -103,13 +95,11 @@ Your WebSocket client must support `permessage-deflate` for levels 1-9 to have a
 
 ### Snapshot Mode
 
-On startup, the server needs a **full L4 orderbook snapshot** to initialize its in-memory state. It obtains this by calling the `hl-node` binary's CLI, which reads the node's `abci_state.rmp` file (the node's persistent state) and dumps a JSON snapshot of every order currently on the book.
+On startup, the server needs a **full L4 orderbook snapshot** to initialize its in-memory state. It obtains this by calling the `hl-node` binary's `compute-l4-snapshots` CLI on one of the node's **periodic abci checkpoints** (`<data-dir>/periodic_abci_states/<YYYYMMDD>/<height>.rmp`) and loading the JSON dump of every order on the book.
 
-The `--snapshot-mode` flag controls *how* the server invokes `hl-node`:
+A checkpoint is the node state after applying block `<height>`, and the node writes one every fixed number of blocks (10,000 on mainnet, about every 12 minutes). The dump itself carries no height, so the server always dumps a specific checkpoint file and takes the height from its name. (`hyperliquid_data/abci_state.rmp` is a hard link to the newest checkpoint; it is not dumped directly because the node can swap it mid-dump.)
 
-**`docker` (default)** - Use when your Hyperliquid node runs inside a Docker container (the standard `docker compose` setup). The server runs `docker exec <container> ./hl-node ... compute-l4-snapshots ...` to execute the snapshot command inside the container, where `hl-node` and the state files are accessible.
-
-**`direct`** - Use when your node runs directly on the host via systemctl or bare metal. The server calls the `hl-node` binary directly on the host to generate the snapshot.
+`--snapshot-mode direct` (the default) is the only supported mode: the server calls the `hl-node` binary on this host. `--snapshot-mode docker` is rejected at startup.
 
 #### Direct mode and hl-node's process detection
 
@@ -119,24 +109,19 @@ The `--snapshot-mode` flag controls *how* the server invokes `hl-node`:
 >
 > Workaround: copy the node binary to a name that does not contain `hl-node` (e.g. `cp hl-node /usr/local/bin/ob-snapshotter`) and pass that via `--hlnode-binary`. Two extra rules:
 >
-> 1. **Keep the copy fresh** - hl-visor auto-updates the node binary, and a stale copy may eventually fail to read a newer `abci_state.rmp`. Re-copy after upgrades (a cron job or an `ExecStartPre=` in your systemd unit works).
+> 1. **Keep the copy fresh** - hl-visor auto-updates the node binary, and a stale copy may eventually fail to read a newer checkpoint. Re-copy after upgrades (a cron job or an `ExecStartPre=` in your systemd unit works).
 > 2. **Never put the string `hl-node` in the `--hlnode-binary` value** (or anywhere else in this server's command line / unit file) - it would sit in the server's own argv permanently and trip the same scan.
->
-> Docker mode is not affected on the host side: the snapshot command runs inside the container.
 
 After the initial snapshot, the server stays up to date by watching the node's `*_streaming/` directories for real-time order diffs, fills, and status updates via inotify.
 
-The handoff from snapshot to live stream is **gapless**: at startup the server backfills the streaming files from the node's last persisted height, and every event that arrives while the snapshot is being generated is cached and replayed on top of it (filtered by block height, so nothing is double-applied). If the server ever detects that events were provably lost (a corrupt line, an oversized batch, watcher data loss), it marks the book out-of-sync and automatically re-fetches a snapshot in the background while continuing to serve — see `orderbook_desyncs_total` in the metrics.
+The handoff from snapshot to live stream is **gapless** and **checkpoint-aligned**: a fetch targets the next checkpoint on the node's grid, opens a replay cache shortly before both book streams reach it (once both are tracking and neither has passed it), waits for the node to write it, dumps it, and replays every cached event above its height. After the install, book batches at or below that height (a lagging stream's backlog) are skipped - the snapshot already contains them. The cost is waiting for the next checkpoint: a fetch takes up to one checkpoint interval (~12 minutes, ~6 on average) plus the dump, during which the server keeps serving the previous book (startup: not ready until the first install). If the server ever detects that events were provably lost (a corrupt line, an oversized batch, watcher data loss), it marks the book out-of-sync and automatically re-fetches a snapshot this way in the background while continuing to serve — see `orderbook_desyncs_total` in the metrics.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--snapshot-mode` | `docker` | `docker` or `direct` |
-| `--docker-container` | `hyperliquid_hlnode` | Container name for `docker exec` (docker mode only) |
-| `--hlnode-binary` | `hl-node` | Path to hl-node binary on host (direct mode only) |
-| `--data-dir` | `~` | Path to the folder containing `node_fills_streaming/`, `node_order_statuses_streaming/`, and `node_raw_book_diffs_streaming/`. This is where the node writes its real-time event files |
-| `--abci-state-path` | auto | Path to `abci_state.rmp`. Auto-detected at `<data-dir>/../hyperliquid_data/abci_state.rmp` in direct mode (a sibling of `--data-dir`, alongside `visor_abci_state.json`). Override if your node stores state in a non-standard location |
+| `--snapshot-mode` | `direct` | Only `direct` is supported; `docker` is rejected at startup |
+| `--hlnode-binary` | `hl-node` | Path to the hl-node binary on this host (see the process-detection warning above) |
+| `--data-dir` | `~` | Path to the folder containing `node_fills_streaming/`, `node_order_statuses_streaming/`, `node_raw_book_diffs_streaming/`, and `periodic_abci_states/`. This is where the node writes its real-time event files and checkpoints |
 | `--snapshot-output-path` | auto | Path where `hl-node` writes its JSON snapshot output. Defaults to `/tmp/hl_snapshot.json`. Override if `/tmp` is not writable or you want snapshots stored elsewhere |
-| `--visor-state-path` | auto | Path to `visor_abci_state.json`, which contains the current block height. Auto-detected at `<data-dir>/../hyperliquid_data/visor_abci_state.json` (the *parent* of `--data-dir`, since `hyperliquid_data/` is a sibling of the `data/` event dir). Override if your visor state is in a non-standard location |
 
 ### Market Types
 
@@ -159,7 +144,7 @@ The handoff from snapshot to live stream is **gapless**: at startup the server b
 
 ### Drift tolerance
 
-By default, whenever the server detects provable data loss (e.g. a node stream stalls and pending order halves are force-evicted, or a backfill batch arrives too late to replay) it marks the book out-of-sync and re-fetches a full snapshot to rebuild from a known-good state.
+By default, whenever the server detects provable data loss (e.g. a node stream stalls and pending order halves are force-evicted) it marks the book out-of-sync and re-fetches a full snapshot to rebuild from a known-good state.
 
 In rare conditions this re-sync can fail to converge: if loss keeps being recorded at the live stream head faster than a snapshot can be fetched, every snapshot lands at a height *below* the recorded loss bound, so the re-sync flag never clears and the server re-fetches in a loop. `--no-resync` is an operator escape hatch for that case:
 
@@ -349,7 +334,7 @@ The Hyperliquid node must run with **all** of these flags enabled:
 ```
 ┌──────────────────────┐     ┌──────────────────────────────────────────────┐
 │   Hyperliquid Node   │     │  Orderbook Server                           │
-│   (Docker/Direct)    │     │                                             │
+│   (same host)        │     │                                             │
 │                      │     │  ┌──────────────────────────────┐           │
 │  writes to:          │     │  │ Parallel File Watchers       │           │
 │  - fills_streaming/  │─────▶  │ (3 inotify threads)          │           │
@@ -390,10 +375,11 @@ The Hyperliquid node must run with **all** of these flags enabled:
 
 The in-memory book is kept consistent with the node through three layers:
 
-1. **Startup backfill** - at boot, the watchers read the streaming files from the node's last persisted height (not from end-of-file), so data written before the server started is not skipped.
-2. **Snapshot replay** - every book-affecting event that arrives while a snapshot is being generated is cached and replayed above the snapshot height, making the snapshot-to-stream handoff gapless.
-3. **Desync self-healing** - any provable event loss (parse/apply error on a batch, oversized batch, watcher buffer discard, pending-cache eviction) marks the book out-of-sync and triggers an automatic background snapshot re-fetch. The book keeps serving its current state until the fresh snapshot lands. Each loss is recorded with a block-height bound, and the out-of-sync flag only clears once a snapshot's height actually covers that bound - a snapshot generated from lagging node state cannot mask a newer loss. Each occurrence is counted in `orderbook_desyncs_total{reason}`. The status/diff pairing caches are evicted by age (60 s): expected orphans are dropped silently, while an unpaired diff aging out counts as data loss and re-syncs the book.
-4. **Watcher watchdog** - if a file watcher thread dies (or every watcher channel closes), the server exits so the process supervisor restarts it into a clean re-sync, instead of serving a silently frozen book that still reports `ready`. A watcher that is alive but has produced no events for 2 minutes is loud-logged (restarting would not fix a stalled node).
+1. **Checkpoint-aligned snapshots** - every snapshot is a dump of one periodic abci checkpoint, whose height comes from its file name. The replay cache is opened before either book stream passes that height, so nothing between the checkpoint and the live stream is skipped; watchers start at end-of-file because everything older is covered by the checkpoint. (Dumping the newest checkpoint with a cutoff at the node's *current* height used to skip up to a whole checkpoint interval - cancelled orders came back as ghosts, new ones went missing.)
+2. **Snapshot replay** - every book-affecting event above the checkpoint height is cached while the snapshot is fetched and replayed onto it; after the install, a lagging stream's batches at or below the checkpoint height are skipped (`orderbook_stale_batches_skipped_total`) instead of rolling the snapshot back.
+3. **Pairing-window cancels** - a `Remove`/`Update` diff that arrives while its order's `New` diff is still waiting for its status (the statuses stream lags the diffs stream) acts on the pending entry, so the late status never books a cancelled order or a stale size. Diffs that find their order neither booked nor pending are counted in `orderbook_diff_target_missing_total`.
+4. **Desync self-healing** - any provable event loss (parse/apply error on a batch, oversized batch, watcher buffer discard, pending-cache eviction) marks the book out-of-sync and triggers an automatic background snapshot re-fetch. The book keeps serving its current state until the fresh snapshot lands. Each loss is recorded with a block-height bound, and the out-of-sync flag only clears once a snapshot's height actually covers that bound - a snapshot generated from lagging node state cannot mask a newer loss. Each occurrence is counted in `orderbook_desyncs_total{reason}`. The status/diff pairing caches are evicted by age (60 s): expected orphans are dropped silently, while an unpaired diff aging out counts as data loss and re-syncs the book.
+5. **Watcher watchdog** - if a file watcher thread dies (or every watcher channel closes), the server exits so the process supervisor restarts it into a clean re-sync, instead of serving a silently frozen book that still reports `ready`. A watcher that is alive but has produced no events for 2 minutes is loud-logged (restarting would not fix a stalled node).
 
 ### Deduplication
 
@@ -611,21 +597,17 @@ This fork deduplicates at the WebSocket level:
 
 The original (and earlier versions of this fork) could silently drift from the node: events arriving during the initial snapshot window were dropped, and any later data loss (corrupt line, oversized batch) corrupted the book permanently until a restart.
 
-This fork makes the snapshot-to-stream handoff gapless (startup backfill from the node's persisted height + height-filtered replay of events cached during snapshot generation) and self-heals from any detected data loss by automatically re-fetching a snapshot in the background. See [Consistency (no-drift) guarantees](#consistency-no-drift-guarantees).
+This fork makes the snapshot-to-stream handoff gapless (checkpoint-aligned snapshots + height-filtered replay of events cached during snapshot generation) and self-heals from any detected data loss by automatically re-fetching a snapshot in the background. See [Consistency (no-drift) guarantees](#consistency-no-drift-guarantees).
 
 ### BBO-Only Lightweight Mode
 
 New `--bbo-only` flag reduces memory from ~1 GB to ~100 MB by only tracking the top-of-book bid/ask per coin. L2/L4/Trades subscriptions are disabled. Useful for price feeds, alerting, or memory-constrained environments.
 
-### Snapshot Modes: Docker & Direct
+### Snapshots from Periodic Checkpoints
 
 The original fetches snapshots via HTTP POST to `localhost:3001` (the node's local RPC).
 
-This fork calls `hl-node compute-l4-snapshots` directly, with two modes:
-- **Docker**: `docker exec <container> hl-node ...` for container-based setups
-- **Direct**: calls the binary on the host for systemctl / bare metal deployments
-
-All paths (`abci_state.rmp`, `snapshot.json`, `visor_abci_state.json`) are auto-detected with manual override options.
+This fork calls `hl-node compute-l4-snapshots` on the host against a specific periodic abci checkpoint (`<data-dir>/periodic_abci_states/`), so the snapshot height is exact. Only direct (same-host) mode is supported.
 
 ### Market Filtering
 
@@ -659,14 +641,14 @@ Both use `yawc` with `permessage-deflate`. This fork increases the broadcast cha
 | | Original | This Fork |
 |---|----------|-----------|
 | Event model | Block-batched | Event-by-event |
-| Drift protection | None | Backfill + replay + auto re-sync |
+| Drift protection | None | Checkpoint-aligned snapshot + replay + auto re-sync |
 | File watchers | 1 thread | 3 parallel threads |
 | BBO subscription | No | Yes + dedup |
 | Order updates | No | Yes (per-user) |
 | BBO-only mode | No | Yes (~100MB) |
 | Metrics | None | 25+ Prometheus metrics |
 | Health endpoint | No | Yes |
-| Snapshot modes | HTTP RPC | Docker + Direct CLI |
+| Snapshot source | HTTP RPC | hl-node CLI on periodic checkpoints |
 | Market filtering | Hard-coded | --markets flag |
 | Graceful shutdown | No | Yes |
 | JSON parser | serde_json | sonic-rs |

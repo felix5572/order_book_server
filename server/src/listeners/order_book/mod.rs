@@ -6,7 +6,8 @@ use crate::{
         LAST_EVENT_APPLIED_MS, LISTENER_LOCK_WAIT, ORACLE_DATA_LOSS_TOTAL, ORDERBOOK_COINS_COUNT, ORDERBOOK_DESYNCS_TOTAL,
         ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL, ORDERBOOK_READY, ORDERBOOK_RESYNC_IN_FLIGHT, ORDERBOOK_TIME_MS,
         ORDERBOOK_UNTRIGGERED_TOTAL, PARSE_ERRORS_TOTAL, PENDING_DIFFS_CACHE, PENDING_ORDERS_CACHE,
-        RESYNC_PHASE_DURATION, TRADES_UNPAIRED_FILLS_TOTAL,
+        CHECKPOINT_MISSED_TOTAL, RESYNC_PHASE_DURATION, SNAPSHOT_CHECKPOINT_HEIGHT, STALE_BATCHES_SKIPPED_TOTAL,
+        TRADES_UNPAIRED_FILLS_TOTAL,
     },
     order_book::{
         Coin, Px, PxBand, Side, Snapshot, Sz,
@@ -35,7 +36,10 @@ use tokio::{
     },
     time::{Instant, MissedTickBehavior, interval},
 };
-use utils::{EventBatch, SnapshotConfig, get_visor_path, process_rmp_file, read_visor_height};
+use utils::{
+    Checkpoint, EventBatch, SnapshotConfig, checkpoint_grid, find_checkpoint, list_checkpoints, next_target_checkpoint,
+    process_rmp_file,
+};
 
 /// Minimum interval between L2 broadcasts. Caps the broadcast rate at 20/sec; the
 /// conflation buffer accumulates dirty coins between broadcasts.
@@ -61,66 +65,136 @@ mod parallel;
 mod state;
 mod utils;
 
+/// Blocks a target checkpoint must lie beyond the streams when chosen, so the
+/// replay cache can still be opened before the streams reach it.
+const CHECKPOINT_LEAD_BLOCKS: u64 = 30;
+/// The replay cache opens once the leading book stream is within this many
+/// blocks of the target checkpoint (~10s at mainnet's ~14 blocks/s), so the
+/// cache holds roughly the dump window rather than a whole checkpoint interval.
+const CACHE_WINDOW_MARGIN_BLOCKS: u64 = 150;
+/// Poll cadence while waiting for the cache window and for the checkpoint file.
+const CHECKPOINT_POLL: Duration = Duration::from_millis(500);
+
+/// Run one snapshot fetch + install cycle in the background and report the
+/// outcome on `tx`. Any error releases this cycle's replay cache (loss marks
+/// are kept) so the next cycle starts a fresh window.
 fn fetch_snapshot(
     snapshot_config: SnapshotConfig,
     listener: Arc<Mutex<OrderBookListener>>,
     tx: UnboundedSender<Result<()>>,
     _ignore_spot: bool,
 ) {
-    let tx = tx.clone();
     tokio::spawn(async move {
         ORDERBOOK_RESYNC_IN_FLIGHT.set(1);
         let total_start = Instant::now();
-        // CRITICAL: Start caching BEFORE generating the snapshot. Every
-        // book-affecting batch that arrives while hl-node dumps state is cached,
-        // and the install replays the ones above the snapshot height - so the
-        // handoff from snapshot to live stream is gapless.
-        {
-            let mut listener = listener.lock().await;
-            listener.begin_caching();
+        let res = fetch_and_install_at_checkpoint(&snapshot_config, &listener).await;
+        if res.is_err() {
+            listener.lock().await.release_cache_window();
         }
-
-        // Read the height BEFORE the dump runs: the dump's content is at least
-        // this fresh, so a replay cutoff at this height can only over-replay
-        // (idempotent - duplicate adds are dropped by the oid guard, cancels of
-        // absent orders no-op). Reading it AFTER the dump over-stated the
-        // cutoff by the whole dump window and silently discarded every cached
-        // add/cancel inside it - permanent anchor holes and phantom orders,
-        // re-seeded at every install.
-        let visor_path = get_visor_path(&snapshot_config);
-        let pre_dump_height = read_visor_height(&visor_path);
-
-        // Now generate snapshot - any events during this time are cached
-        let res = match process_rmp_file(&snapshot_config).await {
-            Ok(output_fln) => {
-                let snapshot = match pre_dump_height {
-                    Some(height) => {
-                        load_snapshots_from_cli_json::<InnerL4Order, (Address, L4Order)>(&output_fln, height).await
-                    }
-                    None => Err("visor state height unavailable before dump".into()),
-                };
-                info!("Snapshot fetched");
-                match snapshot {
-                    Ok((height, expected_snapshot, untriggered)) => {
-                        info!("Snapshot loaded at height {} ({} untriggered orders)", height, untriggered.len());
-                        // Phased install: build the replacement book and chase
-                        // the replay cache down off-lock, then commit in one
-                        // short lock hold - ingest keeps serving the current
-                        // book for the whole install.
-                        install_snapshot_phased(&listener, expected_snapshot, untriggered, height).await
-                    }
-                    Err(err) => Err(err),
-                }
-            }
-            Err(err) => Err(err),
-        };
         let total_elapsed = total_start.elapsed();
         RESYNC_PHASE_DURATION.with_label_values(&["total"]).observe(total_elapsed.as_secs_f64());
         info!("Snapshot fetch+install cycle finished in {}ms (ok={})", total_elapsed.as_millis(), res.is_ok());
         ORDERBOOK_RESYNC_IN_FLIGHT.set(0);
         let _unused = tx.send(res);
-        Ok::<(), Error>(())
     });
+}
+
+/// Snapshot the book from a periodic abci checkpoint with a gapless handoff.
+/// The checkpoint is the node state after block B (B from its file name); the
+/// replay cache is opened before either book stream passes B, so every batch
+/// above B is replayed onto the dump and nothing between the checkpoint and the
+/// live stream is skipped. (Dumping the newest checkpoint with a cutoff at the
+/// node's current height skipped up to a whole checkpoint interval of events -
+/// removed orders came back as ghosts, new ones went missing.)
+async fn fetch_and_install_at_checkpoint(
+    snapshot_config: &SnapshotConfig,
+    listener: &Arc<Mutex<OrderBookListener>>,
+) -> Result<()> {
+    let wait_start = Instant::now();
+    let checkpoint = await_checkpoint_with_cache_window(snapshot_config, listener).await?;
+    RESYNC_PHASE_DURATION.with_label_values(&["checkpoint_wait"]).observe(wait_start.elapsed().as_secs_f64());
+    info!("Checkpoint {} ready: {}", checkpoint.height, checkpoint.path.display());
+
+    let output_path = process_rmp_file(snapshot_config, &checkpoint).await?;
+    let (height, snapshot, untriggered) =
+        load_snapshots_from_cli_json::<InnerL4Order, (Address, L4Order)>(&output_path, checkpoint.height).await?;
+    info!("Snapshot loaded at checkpoint height {height} ({} untriggered orders)", untriggered.len());
+    // Phased install: build the replacement book and chase the replay cache
+    // down off-lock, then commit in one short lock hold - ingest keeps serving
+    // the current book for the whole install.
+    install_snapshot_phased(listener, snapshot, untriggered, height).await?;
+    SNAPSHOT_CHECKPOINT_HEIGHT.set(i64::try_from(height).map_err(|_| format!("checkpoint height {height} overflows i64"))?);
+    Ok(())
+}
+
+/// Pick the next checkpoint on the node's grid, open the replay cache just
+/// before the book streams reach it, and wait until the node has written it.
+/// A checkpoint the streams pass before the cache could open, or one the node
+/// never writes, is abandoned (its cache released) for the next grid point.
+async fn await_checkpoint_with_cache_window(
+    snapshot_config: &SnapshotConfig,
+    listener: &Arc<Mutex<OrderBookListener>>,
+) -> Result<Checkpoint> {
+    loop {
+        // Target from real stream heights: before both book streams deliver,
+        // any target would be guessed from height 0.
+        let (stream_height, max_loss_height) = loop {
+            {
+                let guard = listener.lock().await;
+                if guard.book_streams_tracking() {
+                    break (guard.book_stream_height(), guard.max_loss_height);
+                }
+            }
+            tokio::time::sleep(CHECKPOINT_POLL).await;
+        };
+        let (grid_anchor, interval) = checkpoint_grid(&list_checkpoints(&snapshot_config.data_dir)?)?;
+        let target =
+            next_target_checkpoint(grid_anchor, interval, stream_height, max_loss_height, CHECKPOINT_LEAD_BLOCKS);
+        info!("Snapshot fetch targets checkpoint {target} (grid interval {interval})");
+
+        let opened = loop {
+            match listener.lock().await.try_open_cache_window(target) {
+                CacheWindow::Opened => break true,
+                CacheWindow::Passed => break false,
+                CacheWindow::NotYet => {}
+            }
+            tokio::time::sleep(CHECKPOINT_POLL).await;
+        };
+        if !opened {
+            warn!("Book streams passed checkpoint {target} before the replay cache opened; retargeting");
+            continue;
+        }
+
+        loop {
+            if let Some(checkpoint) = find_checkpoint(&snapshot_config.data_dir, target)? {
+                return Ok(checkpoint);
+            }
+            let stream_height = listener.lock().await.book_stream_height();
+            if stream_height > target.saturating_add(interval / 2) {
+                CHECKPOINT_MISSED_TOTAL.inc();
+                error!(
+                    "Checkpoint {target} still missing with the streams at {stream_height}; \
+                     releasing its replay cache and retargeting"
+                );
+                listener.lock().await.release_cache_window();
+                break;
+            }
+            tokio::time::sleep(CHECKPOINT_POLL).await;
+        }
+    }
+}
+
+/// Outcome of trying to open the replay cache for a target checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheWindow {
+    /// Both book streams are tracking and at/below the target: every batch
+    /// above the target will be cached.
+    Opened,
+    /// Not inside the window yet (or a book stream has produced nothing yet).
+    NotYet,
+    /// A book stream is already beyond the target: its batches just above the
+    /// target were applied uncached, so this checkpoint cannot be used.
+    Passed,
 }
 
 /// Replay-cache events that may remain when the phased install commits: small
@@ -361,12 +435,15 @@ pub(crate) struct OrderBookListener {
     // Highest block height observed on the live stream; the best "now" proxy
     // for bounding losses whose exact height is unknown (watcher discards).
     last_seen_height: u64,
-    // Once-guard for the late-backfill drop path: metric/log/re-sync scheduling
-    // fire at most once per resolved cycle (the startup backfill is a flood).
-    // A dedicated flag because under tolerate_drift needs_resync stays false
-    // and cannot serve as one. Cleared only when a snapshot actually covers
-    // the recorded loss (see init_from_snapshot).
-    late_backfill_reported: bool,
+    // Height of the checkpoint the live book was installed from. Book batches
+    // at/below it are already reflected in that snapshot: a lagging stream's
+    // backlog must be skipped after the install, not applied on top of it.
+    installed_snapshot_height: Option<u64>,
+    // Highest block each book stream has delivered (0 = nothing yet). The
+    // replay cache may only open while BOTH are tracking and at/below the
+    // target checkpoint - the max alone cannot show the slower one started.
+    last_status_height: u64,
+    last_diff_height: u64,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
     // Pairs fill legs into public-schema trades; holds at most the one leg
     // awaiting its counterpart across Fills batches (single-event batches in
@@ -412,10 +489,9 @@ impl OrderBookListener {
             ignore_spot,
             market_filter,
             order_book_state: None,
-            // Cache from the very first event: the initial snapshot fetch hasn't
-            // started yet, and anything arriving before it completes must be
-            // replayable or it is lost (the pre-existing startup drift window).
-            fetched_snapshot_cache: Some(VecDeque::new()),
+            // No cache until a fetch opens its window just before the target
+            // checkpoint: events before that are covered by the checkpoint.
+            fetched_snapshot_cache: None,
             cached_event_count: 0,
             cache_event_cap: MAX_CACHED_EVENTS,
             needs_resync: false,
@@ -424,7 +500,9 @@ impl OrderBookListener {
             track_untriggered: true,
             max_loss_height: 0,
             last_seen_height: 0,
-            late_backfill_reported: false,
+            installed_snapshot_height: None,
+            last_status_height: 0,
+            last_diff_height: 0,
             internal_message_tx,
             trade_pairer: TradePairer::default(),
             last_l2_broadcast: None,
@@ -479,14 +557,50 @@ impl OrderBookListener {
         }))
     }
 
-    /// Start caching book-affecting batches for replay. Idempotent: an already
-    /// active cache (e.g. the one running since construction) is kept, so events
-    /// cached before the snapshot fetch was triggered are not thrown away.
-    fn begin_caching(&mut self) {
-        if self.fetched_snapshot_cache.is_none() {
-            self.fetched_snapshot_cache = Some(VecDeque::new());
-            self.cached_event_count = 0;
+    /// Both book streams have delivered at least one batch (their watchers are
+    /// tracking the live files).
+    const fn book_streams_tracking(&self) -> bool {
+        self.last_status_height > 0 && self.last_diff_height > 0
+    }
+
+    /// Highest block either book stream has delivered.
+    const fn book_stream_height(&self) -> u64 {
+        if self.last_status_height > self.last_diff_height { self.last_status_height } else { self.last_diff_height }
+    }
+
+    /// Open this fetch's replay cache for `target` (one locked decision): only
+    /// when both book streams are tracking and neither has passed the target,
+    /// so every batch above the target is cached, and only inside the window
+    /// just before it, so the cache spans the dump rather than a whole interval.
+    fn try_open_cache_window(&mut self, target: u64) -> CacheWindow {
+        let leading = self.book_stream_height();
+        if leading > target {
+            return CacheWindow::Passed;
         }
+        if !self.book_streams_tracking() || leading < target.saturating_sub(CACHE_WINDOW_MARGIN_BLOCKS) {
+            return CacheWindow::NotYet;
+        }
+        assert!(self.fetched_snapshot_cache.is_none(), "a replay cache window is already open");
+        self.fetched_snapshot_cache = Some(VecDeque::new());
+        self.cached_event_count = 0;
+        CacheWindow::Opened
+    }
+
+    /// Drop this fetch's replay cache (abandoned checkpoint or failed fetch).
+    /// Loss marks are deliberately untouched: releasing the cache recovers
+    /// nothing, and the next cycle opens a fresh window.
+    fn release_cache_window(&mut self) {
+        self.fetched_snapshot_cache = None;
+        self.cached_event_count = 0;
+    }
+
+    /// Tests: open a fetch's replay cache directly. The production gate is
+    /// `try_open_cache_window`, which has its own tests.
+    #[cfg(test)]
+    fn open_cache_window_for_test(&mut self) {
+        assert!(self.fetched_snapshot_cache.is_none(), "a replay cache window is already open");
+        self.fetched_snapshot_cache = Some(VecDeque::new());
+        self.cached_event_count = 0;
     }
 
     /// Record that the in-memory book may have diverged from the node (events
@@ -624,6 +738,9 @@ impl OrderBookListener {
         let replay_fallbacks = new_state.take_insert_before_fallbacks();
         let prior_loss_height = self.max_loss_height;
         self.order_book_state = Some(new_state);
+        // Every install commit goes through here, so this is the single owner
+        // of the stale-batch boundary for the live path.
+        self.installed_snapshot_height = Some(height);
 
         // A fresh snapshot plus a complete replay is in sync by construction -
         // but only for data at or below the snapshot height. A loss recorded
@@ -658,12 +775,6 @@ impl OrderBookListener {
             } else {
                 prior_loss_height
             };
-        } else {
-            // This cycle's recorded loss (if any) is covered by the snapshot:
-            // the next late backfill is a new reportable event. NOT reset on a
-            // non-covering snapshot above - that is still the same unresolved
-            // cycle, and re-arming would let the flood spam the counter again.
-            self.late_backfill_reported = false;
         }
 
         // The incremental L2 cache and the conflation buffer reference the
@@ -1063,53 +1174,6 @@ impl OrderBookListener {
         }
     }
 
-    /// Cache a startup-backfill batch for snapshot replay. Backfill batches are
-    /// NEVER applied to a live book: they are older than the live stream by
-    /// construction, and applying e.g. a stale size update on top of newer
-    /// state would corrupt the book. If the replay cache is already gone (the
-    /// snapshot landed before the backfill drained, or the cache overflowed),
-    /// the batch cannot be used safely and is dropped; a covering snapshot
-    /// supersedes everything it carried.
-    ///
-    /// A dropped batch DOES update the loss bound with its own block height:
-    /// that is CERTAIN loss information, and unlike the live tip it cannot
-    /// ratchet the bound forever - backfill heights are capped by the disk
-    /// tail at startup (the backfill is one-shot), a fixed ceiling the
-    /// periodic abci checkpoint passes within a cycle or two.
-    ///
-    /// Metric / log / re-sync scheduling fire AT MOST ONCE per cycle: the
-    /// startup backfill is a flood (hours of stream lines), and re-marking on
-    /// every late batch (a) spams the desync counter (291k observed on
-    /// 2026-07-06) and (b) ratchets the loss bound to the LIVE stream tip on
-    /// each call - which grows without bound while the covering snapshot's
-    /// height comes from the checkpoint (~10k blocks behind), so the flag
-    /// became unclearable and the re-fetch loop starved the host. The
-    /// once-guard is a dedicated flag (`late_backfill_reported`) because
-    /// under tolerate_drift `needs_resync` stays false and cannot serve as one.
-    fn cache_backfill_batch(&mut self, event_batch: EventBatch) {
-        // Backfill only ever wraps statuses/diffs (see the watcher); fills and
-        // oracle updates never mutate the book.
-        let height = match &event_batch {
-            EventBatch::Orders(b) => b.block_number(),
-            EventBatch::BookDiffs(b) => b.block_number(),
-            _ => return,
-        };
-        if self.fetched_snapshot_cache.is_some() {
-            self.push_to_replay_cache(event_batch);
-            return;
-        }
-        // Skipped under tolerate_drift: a nonzero bound would arm a re-fetch at
-        // the next init_from_snapshot, breaking the "ride out drift" contract.
-        if !self.tolerate_drift {
-            self.max_loss_height = self.max_loss_height.max(height);
-        }
-        if self.late_backfill_reported {
-            return;
-        }
-        self.late_backfill_reported = true;
-        self.mark_desynced("late_backfill");
-    }
-
     /// Apply a parsed event batch to the book and run the fast broadcast paths.
     /// HFT mode: events are applied the instant they arrive, without block-level
     /// synchronization, with order-level caching for status/diff pairing.
@@ -1128,6 +1192,21 @@ impl OrderBookListener {
         // book streams never produced).
         if !matches!(event_batch, EventBatch::OracleUpdates(_)) {
             self.last_seen_height = self.last_seen_height.max(height);
+        }
+        match &event_batch {
+            EventBatch::Orders(_) => self.last_status_height = self.last_status_height.max(height),
+            EventBatch::BookDiffs(_) => self.last_diff_height = self.last_diff_height.max(height),
+            EventBatch::Fills(_) | EventBatch::OracleUpdates(_) => {}
+        }
+        // A lagging book stream can still deliver batches at/below the installed
+        // checkpoint; the snapshot already reflects them, and applying them (or
+        // broadcasting them as book changes) would roll the book back - e.g. an
+        // old size update overwriting the snapshot's newer size.
+        if matches!(event_batch, EventBatch::Orders(_) | EventBatch::BookDiffs(_))
+            && self.installed_snapshot_height.is_some_and(|installed| height <= installed)
+        {
+            STALE_BATCHES_SKIPPED_TOTAL.with_label_values(&[source_label]).inc();
+            return;
         }
 
         // Sanity cap on batch size. A malformed/malicious line could otherwise
@@ -1696,12 +1775,8 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
 
     // Create SnapshotConfig from ServerConfig
     let snapshot_config = SnapshotConfig {
-        mode: config.snapshot_mode,
-        docker_container: config.docker_container.clone(),
         hlnode_binary: config.hlnode_binary.clone(),
-        abci_state_path: config.abci_state_path.clone(),
         snapshot_output_path: config.snapshot_output_path.clone(),
-        visor_state_path: config.visor_state_path.clone(),
         data_dir: dir.clone(),
     };
 
@@ -1710,22 +1785,17 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
         listener.ignore_spot
     };
 
-    // Startup-backfill floor: the node's currently persisted height. The initial
-    // snapshot is generated after this point, so its height is >= the floor and
-    // every line at or below it is already covered by the snapshot. The watchers
-    // backfill on-disk lines above the floor that the old seek-to-EOF behavior
-    // skipped. 0 (visor unreadable) disables the backfill - the snapshot load
-    // would fail on the same file anyway.
-    let backfill_min_height = read_visor_height(&get_visor_path(&snapshot_config)).unwrap_or(0);
-    info!("Startup backfill floor height: {backfill_min_height}");
-
+    // Watchers track from the end of each stream file; nothing older is read.
+    // The first snapshot comes from a checkpoint the streams have not reached
+    // yet, with the replay cache opened before they reach it, so no event above
+    // the snapshot is ever skipped and nothing below it is needed.
     // Start parallel file watchers. They send straight into the bounded tokio
     // channel via blocking_send (backpressure parks the reader threads; the
     // events sit on disk meanwhile). The join handles and health timestamps
     // feed the watchdog in the periodic ticker below - a dead or wedged
     // watcher must not let the server keep serving a silently frozen book.
     let (mut tokio_rx, watcher_handles, last_order_statuses, _last_fills, last_order_diffs, _last_oracle) =
-        parallel::start_parallel_file_watchers(dir, backfill_min_height);
+        parallel::start_parallel_file_watchers(dir);
 
     // Snapshot fetch channel
     let (snapshot_fetch_task_tx, mut snapshot_fetch_task_rx) = unbounded_channel::<Result<()>>();
@@ -1755,7 +1825,6 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
     /// One parsed watcher event, ready to apply under the listener lock.
     enum Action {
         Apply(u64, EventBatch, EventSource),
-        Backfill(EventBatch),
         Desync,
     }
 
@@ -1792,15 +1861,13 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                 // Arrival order is preserved across the batch.
                 let mut actions = Vec::with_capacity(count);
                 for event in event_buf.drain(..) {
-                    let (line, source, is_backfill) = match event {
+                    let (line, source) = match event {
                         // OrderDiffs are the BBO-critical path; statuses and fills
                         // are less latency-sensitive but share the same flow.
-                        parallel::FileEvent::OrderDiff(line) => (line, EventSource::OrderDiffs, false),
-                        parallel::FileEvent::OrderStatus(line) => (line, EventSource::OrderStatuses, false),
-                        parallel::FileEvent::Fill(line) => (line, EventSource::Fills, false),
-                        parallel::FileEvent::OracleUpdate(line) => (line, EventSource::OracleUpdates, false),
-                        parallel::FileEvent::BackfillOrderDiff(line) => (line, EventSource::OrderDiffs, true),
-                        parallel::FileEvent::BackfillOrderStatus(line) => (line, EventSource::OrderStatuses, true),
+                        parallel::FileEvent::OrderDiff(line) => (line, EventSource::OrderDiffs),
+                        parallel::FileEvent::OrderStatus(line) => (line, EventSource::OrderStatuses),
+                        parallel::FileEvent::Fill(line) => (line, EventSource::Fills),
+                        parallel::FileEvent::OracleUpdate(line) => (line, EventSource::OracleUpdates),
                         parallel::FileEvent::Desync(source) => {
                             if source == EventSource::OracleUpdates {
                                 // Oracle is a side stream: its loss never corrupts the
@@ -1817,13 +1884,7 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                         }
                     };
                     if let Some((height, batch)) = parse_event_line(&line, source) {
-                        actions.push(if is_backfill {
-                            // Backfill lines are cache-only: replayed above the
-                            // snapshot height, never applied to a live book.
-                            Action::Backfill(batch)
-                        } else {
-                            Action::Apply(height, batch, source)
-                        });
+                        actions.push(Action::Apply(height, batch, source));
                     }
                 }
                 if !actions.is_empty() {
@@ -1833,7 +1894,6 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                     for action in actions {
                         match action {
                             Action::Apply(height, batch, source) => guard.apply_event_batch(height, batch, source),
-                            Action::Backfill(batch) => guard.cache_backfill_batch(batch),
                             Action::Desync => guard.mark_desynced("watcher_data_loss"),
                         }
                     }
@@ -2266,17 +2326,21 @@ mod tests {
     // ==================== Gapless snapshot handoff (drift fix) ====================
 
     #[test]
-    fn test_startup_events_cached_and_replayed_above_snapshot_height() {
+    fn test_startup_ignores_events_until_the_cache_window_opens_then_replays_above_checkpoint() {
         let (tx, _rx) = tokio::sync::broadcast::channel(32);
         let mut listener = OrderBookListener::new(Some(tx), false, ActiveL2Params::new(), (true, true, true));
         assert!(!listener.is_ready());
+        assert_eq!(listener.replay_cache_status(), (0, false), "no cache before a fetch opens its window");
 
-        // Events stream in while the snapshot is being generated (book not ready).
-        feed_order(&mut listener, "NEW", 1, 200);
+        // Before the window: not ready and not cached - the checkpoint covers it.
         feed_order(&mut listener, "OLD", 2, 100);
+        assert_eq!(listener.replay_cache_status(), (0, false));
 
-        // Snapshot lands at height 150: the height-200 events must be replayed;
-        // the height-100 events are already reflected in the snapshot state.
+        // Window for checkpoint 150 opens (both streams tracking, within the margin).
+        assert_eq!(listener.try_open_cache_window(150), CacheWindow::Opened);
+        feed_order(&mut listener, "NEW", 1, 200);
+
+        // The checkpoint-150 snapshot lands: height-200 events are replayed.
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 150);
         assert!(listener.is_ready());
         let universe = listener.universe();
@@ -2293,7 +2357,7 @@ mod tests {
         assert!(listener.universe().contains("BTC"));
 
         // A re-sync starts: events keep applying to the live book AND are cached.
-        listener.begin_caching();
+        listener.open_cache_window_for_test();
         feed_order(&mut listener, "ETH", 2, 20);
         assert!(listener.universe().contains("ETH"), "events during a re-sync still apply to the live book");
 
@@ -2311,6 +2375,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::broadcast::channel(32);
         let mut listener = OrderBookListener::new(Some(tx), true, ActiveL2Params::new(), (true, true, true));
         listener.set_cache_event_cap(1);
+        listener.open_cache_window_for_test();
 
         feed_order(&mut listener, "AAA", 1, 10); // 2 single-event batches: second one overflows
         assert!(listener.needs_resync(), "cache overflow must mark the book for re-sync");
@@ -2322,7 +2387,7 @@ mod tests {
 
         // A later clean fetch whose height covers the loss bound clears it.
         listener.set_cache_event_cap(MAX_CACHED_EVENTS);
-        listener.begin_caching();
+        listener.open_cache_window_for_test();
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1_000);
         assert!(!listener.needs_resync());
     }
@@ -2338,12 +2403,12 @@ mod tests {
 
         // A snapshot BELOW the loss bound must not clear the flag: the lost
         // data is above its height and would stay missing forever.
-        listener.begin_caching();
+        listener.open_cache_window_for_test();
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 50);
         assert!(listener.needs_resync(), "a snapshot below the loss height must not clear the desync");
 
         // A snapshot covering the loss bound (height + margin) clears it.
-        listener.begin_caching();
+        listener.open_cache_window_for_test();
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1_000);
         assert!(!listener.needs_resync());
     }
@@ -2355,50 +2420,13 @@ mod tests {
         // observed heights, and the next covering snapshot clears it.
         let (mut listener, _rx) = ready_listener(); // ready at height 0, nothing observed
         listener.mark_desynced("test_reason");
-        listener.begin_caching();
+        listener.open_cache_window_for_test();
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1);
         assert!(listener.needs_resync(), "an unknown-height loss is never cleared by the first snapshot");
 
-        listener.begin_caching();
+        listener.open_cache_window_for_test();
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 2);
         assert!(!listener.needs_resync(), "the downgraded bound lets the next snapshot clear it");
-    }
-
-    #[test]
-    fn test_backfill_batches_cached_for_replay_never_applied_live() {
-        let (mut listener, _rx) = ready_listener(); // ready at height 0, cache None
-        listener.begin_caching();
-
-        // Backfill arrives for a coin the live book has never seen.
-        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("ZED", 7, 99)));
-        listener.cache_backfill_batch(EventBatch::BookDiffs(make_diff_batch(
-            "ZED",
-            7,
-            99,
-            serde_json::json!({"new": {"sz": "1.0"}}),
-        )));
-        assert!(!listener.universe().contains("ZED"), "backfill must never touch the live book");
-
-        // Snapshot at height 50: the backfilled height-99 events are replayed.
-        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 50);
-        assert!(listener.universe().contains("ZED"), "backfill above the snapshot height must be replayed");
-        assert!(!listener.needs_resync());
-    }
-
-    #[test]
-    fn test_backfill_below_snapshot_height_not_replayed() {
-        let (mut listener, _rx) = ready_listener();
-        listener.begin_caching();
-        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("ZED", 7, 40)));
-        listener.cache_backfill_batch(EventBatch::BookDiffs(make_diff_batch(
-            "ZED",
-            7,
-            40,
-            serde_json::json!({"new": {"sz": "1.0"}}),
-        )));
-        // Snapshot at height 50 already contains everything at height 40.
-        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 50);
-        assert!(!listener.universe().contains("ZED"), "backfill at/below the snapshot height is already covered");
     }
 
     // ==================== Phased (off-lock) snapshot install ====================
@@ -2412,6 +2440,7 @@ mod tests {
             let mut guard = listener.lock().await;
             assert!(!guard.is_ready());
             // Events stream in while the snapshot is being generated.
+            guard.open_cache_window_for_test();
             feed_order(&mut guard, "NEW", 1, 200);
             feed_order(&mut guard, "OLD", 2, 100);
         }
@@ -2445,7 +2474,7 @@ mod tests {
             let mut guard = listener.lock().await;
             feed_order(&mut guard, "BTC", 1, 10);
             // A re-sync starts: events keep applying to the live book AND are cached.
-            guard.begin_caching();
+            guard.open_cache_window_for_test();
             feed_order(&mut guard, "ETH", 2, 20);
             assert!(guard.universe().contains("ETH"), "events during a re-sync still apply to the live book");
         }
@@ -2475,7 +2504,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::broadcast::channel(32);
         let listener =
             Arc::new(Mutex::new(OrderBookListener::new(Some(tx), false, ActiveL2Params::new(), (true, true, true))));
-        listener.lock().await.begin_caching();
+        listener.lock().await.open_cache_window_for_test();
         feed_order(&mut *listener.lock().await, "NEW", 1, 200);
 
         install_snapshot_phased(&listener, Snapshots::new(HashMap::new()), Vec::new(), 150).await.expect("install");
@@ -2497,6 +2526,7 @@ mod tests {
         {
             let mut guard = listener.lock().await;
             guard.set_cache_event_cap(1);
+            guard.open_cache_window_for_test();
             feed_order(&mut guard, "AAA", 1, 10); // 2 single-event batches: second one overflows
             assert!(guard.needs_resync(), "cache overflow must mark the book for re-sync");
             let (_pending, cache_alive) = guard.replay_cache_status();
@@ -2530,7 +2560,7 @@ mod tests {
             Arc::new(Mutex::new(OrderBookListener::new(Some(tx), false, ActiveL2Params::new(), (true, true, true))));
         {
             let mut guard = listener.lock().await;
-            guard.begin_caching();
+            guard.open_cache_window_for_test();
             feed_order(&mut guard, "NEW", 1, 200);
         }
 
@@ -2547,62 +2577,100 @@ mod tests {
         assert!(!cache_alive, "the abandoned cache must be gone, not just drained");
     }
 
+    // ==================== Checkpoint-aligned cache window ====================
+
     #[test]
-    fn test_late_backfill_with_no_cache_marks_desync() {
-        let (mut listener, _rx) = ready_listener(); // cache already consumed by init
-        assert!(!listener.needs_resync());
-        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 1, 99)));
-        assert!(
-            listener.needs_resync(),
-            "a backfill batch arriving after the replay cache is gone cannot be applied safely"
-        );
+    fn test_cache_window_opens_only_when_both_streams_track_and_neither_passed_the_target() {
+        let new_listener = || {
+            let (tx, _rx) = tokio::sync::broadcast::channel(32);
+            OrderBookListener::new(Some(tx), false, ActiveL2Params::new(), (true, true, true))
+        };
+        let status_at = |listener: &mut OrderBookListener, height: u64| {
+            listener.apply_event_batch(height, EventBatch::Orders(make_status_batch("BTC", height, height)), EventSource::OrderStatuses);
+        };
+        let diff_at = |listener: &mut OrderBookListener, height: u64| {
+            listener.apply_event_batch(
+                height,
+                EventBatch::BookDiffs(make_diff_batch("BTC", height, height, serde_json::json!({"new": {"sz": "1.0"}}))),
+                EventSource::OrderDiffs,
+            );
+        };
+
+        let mut listener = new_listener();
+        assert_eq!(listener.try_open_cache_window(1_000), CacheWindow::NotYet, "no stream has delivered yet");
+        status_at(&mut listener, 900);
+        assert_eq!(listener.try_open_cache_window(1_000), CacheWindow::NotYet, "the diffs stream is not tracking yet");
+        diff_at(&mut listener, 800);
+        assert_eq!(listener.try_open_cache_window(1_000), CacheWindow::Opened, "both tracking, leader within the margin");
+        assert_eq!(listener.replay_cache_status(), (0, true));
+
+        let mut early = new_listener();
+        status_at(&mut early, 700);
+        diff_at(&mut early, 700);
+        assert_eq!(early.try_open_cache_window(1_000), CacheWindow::NotYet, "outside the window: no cache yet");
+        assert_eq!(early.replay_cache_status(), (0, false));
+
+        let mut late = new_listener();
+        status_at(&mut late, 990);
+        diff_at(&mut late, 1_001);
+        assert_eq!(late.try_open_cache_window(1_000), CacheWindow::Passed, "a stream beyond the target");
+        assert_eq!(late.replay_cache_status(), (0, false));
     }
 
-    /// 2026-07-06 风暴回归: 重打标会把 loss bound 骑到 live 尖端(每次 mark 取当前
-    /// 高度+margin), 让周期 abci 快照永远盖不住 → flag 不可清除。修正后: bound 跟随
-    /// 被丢批**自身**的高度(确定损失信息, 天花板=启动磁盘尾, 固定), 绝不跟随并行
-    /// 上涨的 live tip; mark/metric 每周期至多一次。
     #[test]
-    fn test_late_backfill_bound_follows_batch_height_not_live_tip() {
-        let (mut listener, _rx) = ready_listener();
-        feed_order(&mut listener, "BTC", 1, 100); // 建立 live 观测高度
-        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 2, 99)));
-        assert!(listener.needs_resync());
-        // 更高的迟到批: bound 跟上它(否则快照会在没覆盖它的情况下清 flag)。
-        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 2, 9_000)));
-        // live tip 冲到 50_000 后再来一个低位迟到批: bound 必须停在 9_000,
-        // 不许被重打标骑到 live 尖端(unclearable ratchet 回归)。
-        feed_order(&mut listener, "BTC", 3, 50_000);
-        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 2, 5_000)));
-        assert_eq!(
-            listener.max_loss_height, 9_000,
-            "loss bound 只跟被丢批自身最大高度, 不跟 live tip"
-        );
-    }
-
-    /// 顾问补充的 reset 时机: reported flag 只在本轮 loss 真被快照覆盖清掉时重置;
-    /// 未覆盖的快照仍属同一轮 unresolved, 重置会让洪水重新刷 metric/mark。
-    #[test]
-    fn test_late_backfill_reported_resets_only_when_loss_resolved() {
+    fn test_releasing_the_cache_window_keeps_loss_marks() {
         let (mut listener, _rx) = ready_listener();
         feed_order(&mut listener, "BTC", 1, 100);
-        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 2, 300)));
-        assert!(listener.needs_resync());
-        assert!(listener.late_backfill_reported);
+        listener.mark_desynced("test_reason");
+        let loss_bound = listener.max_loss_height;
+        listener.open_cache_window_for_test();
+        feed_order(&mut listener, "ETH", 2, 120);
 
-        // 未覆盖快照(50 < bound 300): 同一轮, flag 不重置。
-        listener.begin_caching();
-        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 50);
-        assert!(listener.needs_resync(), "非覆盖快照不得清 flag");
-        assert!(listener.late_backfill_reported, "unresolved 周期必须保持 once-guard");
+        listener.release_cache_window();
+        assert_eq!(listener.replay_cache_status(), (0, false), "the next cycle opens a fresh window");
+        assert!(listener.needs_resync(), "releasing the cache recovers nothing");
+        assert_eq!(listener.max_loss_height, loss_bound);
+    }
 
-        // 覆盖快照清掉本轮 → flag 重置, 新的迟到批开新一轮(重新 mark)。
-        listener.begin_caching();
-        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 10_000);
-        assert!(!listener.needs_resync());
-        assert!(!listener.late_backfill_reported, "resolved 周期必须重置 once-guard");
-        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 2, 10_500)));
-        assert!(listener.needs_resync(), "resolved 之后的新迟到批必须重新 mark");
+    /// r1 P2 of design 000220: after installing checkpoint B, a lagging stream
+    /// can still deliver batches at/below B. They are already in the snapshot
+    /// and must not roll it back; the lagging stream's batches above B apply.
+    #[test]
+    fn test_book_batches_at_or_below_the_installed_checkpoint_are_skipped() {
+        use crate::order_book::InnerOrder;
+        let (tx, _rx) = tokio::sync::broadcast::channel(32);
+        let mut listener = OrderBookListener::new(Some(tx), false, ActiveL2Params::new(), (true, true, true));
+        listener.init_from_snapshot(snapshot_with("BTC", 1, 10_000_000_000), 100);
+        let skipped = |stream: &str| STALE_BATCHES_SKIPPED_TOTAL.with_label_values(&[stream]).get();
+        let (diffs_before, statuses_before) = (skipped("diffs"), skipped("orders"));
+        let btc_size = |listener: &OrderBookListener| {
+            let state = listener.order_book_state.as_ref().unwrap();
+            let (_, _, snapshot) = state.compute_snapshot_for_coin(&Coin::new("BTC"), PxBand::default()).unwrap();
+            snapshot.as_ref()[0][0].sz()
+        };
+        let original = btc_size(&listener);
+
+        // An old size update and an old add at/below B: skipped, book unchanged.
+        let update = |height| {
+            EventBatch::BookDiffs(make_diff_batch("BTC", 1, height, serde_json::json!({"update": {"origSz": "1.0", "newSz": "0.5"}})))
+        };
+        listener.apply_event_batch(100, update(100), EventSource::OrderDiffs);
+        feed_order(&mut listener, "OLD", 2, 99);
+        assert_eq!(btc_size(&listener), original, "a stale update must not roll the snapshot back");
+        assert!(!listener.universe().contains("OLD"), "a stale add must not be booked");
+        assert!(skipped("diffs") > diffs_before && skipped("orders") > statuses_before);
+
+        // The diffs stream runs ahead to B+10 while the statuses stream is at B+1:
+        // the lagging stream's B+1 status still pairs and books normally.
+        listener.apply_event_batch(
+            101,
+            EventBatch::BookDiffs(make_diff_batch("NEW", 3, 101, serde_json::json!({"new": {"sz": "1.0"}}))),
+            EventSource::OrderDiffs,
+        );
+        listener.apply_event_batch(110, update(110), EventSource::OrderDiffs);
+        listener.apply_event_batch(101, EventBatch::Orders(make_status_batch("NEW", 3, 101)), EventSource::OrderStatuses);
+        assert!(listener.universe().contains("NEW"), "batches above B from the lagging stream apply");
+        assert_ne!(btc_size(&listener), original, "an update above B applies");
     }
 
     // ==================== Resync damping ====================
@@ -2643,7 +2711,7 @@ mod tests {
     #[test]
     fn test_replay_fallbacks_do_not_rearm_resync() {
         let (mut listener, _rx) = ready_listener();
-        listener.begin_caching();
+        listener.open_cache_window_for_test();
         // An anchored add with a missing anchor lands during the fetch window:
         // applied live AND cached for replay.
         feed_fallback_order(&mut listener, 50, 200);
@@ -2687,7 +2755,7 @@ mod tests {
         // covering snapshot can clear the flag in one install.
         feed_order(&mut listener, "BTC", 1, 100);
         listener.mark_desynced("watcher_data_loss");
-        listener.begin_caching();
+        listener.open_cache_window_for_test();
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1_000);
         assert!(!listener.needs_resync());
         assert!(!listener.resync_is_urgent(), "a clean install must start a fresh damping epoch");
@@ -2703,16 +2771,9 @@ mod tests {
             !listener.needs_resync(),
             "with tolerate_drift set, a desync must not schedule a snapshot re-fetch"
         );
-        // ...and the higher-level late-backfill path stays quiet too.
-        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 1, 99)));
-        assert!(!listener.needs_resync(), "tolerate_drift must suppress the late-backfill desync path as well");
         // drift 模式不许积累 loss bound: 非零 bound 会在下一次 init_from_snapshot
         // 走 prior > height 分支把 needs_resync 置回 true, 打破 drift 契约。
         assert_eq!(listener.max_loss_height, 0, "drift 模式不得积累 loss bound");
-        // 洪水第二批: once-guard 生效(P3 — metric 不再每行刷)。
-        listener.cache_backfill_batch(EventBatch::Orders(make_status_batch("BTC", 1, 200)));
-        assert!(listener.late_backfill_reported, "drift 模式下 reported 标志承担 once-guard");
-        assert!(!listener.needs_resync());
     }
 
     // ==================== Per-coin fan-out grouping ====================

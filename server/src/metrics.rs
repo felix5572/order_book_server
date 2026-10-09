@@ -174,6 +174,33 @@ lazy_static! {
         "New diffs whose insertBefore anchor was missing; order rested at back of level"
     ).expect("metric can be created");
 
+    /// Update/Remove diffs whose order is neither on the book nor waiting to
+    /// pair in pending_new_diffs. Counted for observation, never re-synced
+    /// automatically (a deliberate choice of design 000220; no cause is implied).
+    pub static ref DIFF_TARGET_MISSING_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_diff_target_missing_total", "Update/Remove diffs whose order was neither booked nor pending"),
+        &["diff"]
+    ).expect("metric can be created");
+
+    /// Live book batches at or below the installed snapshot height, skipped
+    /// because the snapshot already reflects them (a lagging stream's backlog).
+    pub static ref STALE_BATCHES_SKIPPED_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_stale_batches_skipped_total", "Book batches at/below the installed snapshot height skipped"),
+        &["stream"]
+    ).expect("metric can be created");
+
+    /// Target checkpoints that never appeared on the node's grid in time.
+    pub static ref CHECKPOINT_MISSED_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_checkpoint_missed_total",
+        "Periodic abci checkpoints that did not appear before the stream moved half an interval past them"
+    ).expect("metric can be created");
+
+    /// Height of the checkpoint the current book was installed from.
+    pub static ref SNAPSHOT_CHECKPOINT_HEIGHT: IntGauge = IntGauge::new(
+        "orderbook_snapshot_checkpoint_height",
+        "Block height of the periodic abci checkpoint behind the installed book"
+    ).expect("metric can be created");
+
     // ==================== FILE WATCHER METRICS ====================
 
     /// File events received per source (orders, diffs, fills)
@@ -320,6 +347,10 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ORDERBOOK_DESYNCS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ORACLE_DATA_LOSS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(INSERT_BEFORE_FALLBACK_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(DIFF_TARGET_MISSING_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(STALE_BATCHES_SKIPPED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(CHECKPOINT_MISSED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(SNAPSHOT_CHECKPOINT_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(INSERT_BEFORE_HONORED_TOTAL.clone())).ok();
 
     // File watcher metrics

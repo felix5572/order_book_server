@@ -5,15 +5,19 @@ Wants=network.target
 
 [Service]
 Type=simple
-User=root
-ExecStart=/root/order_book_server/target/release/orderbook_server \
+# Direct mode only: the node runs on this host as the same user, writing its
+# streams and periodic abci checkpoints under --data-dir. --hlnode-binary must be
+# a copy of the node binary whose path does not contain the string "hl-node"
+# (README: "Direct mode and hl-node's process detection").
+User=ubuntu
+ExecStart=/home/ubuntu/order_book_server/target/release/orderbook_server \
     --address 0.0.0.0 \
     --port 8000 \
     --compression-level 1 \
     --markets all \
-    --snapshot-mode docker \
-    --docker-container hyperliquid_hlnode \
-    --data-dir /root/.hyperliquid_sentry/volumes/hl/data \
+    --snapshot-mode direct \
+    --hlnode-binary /home/ubuntu/ob-snapshotter \
+    --data-dir /home/ubuntu/hl/data \
     --metrics-port 9090 \
     --log-level info
 

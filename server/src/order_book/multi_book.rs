@@ -253,10 +253,9 @@ where
     Ok((height, Snapshots::new(books), untriggered))
 }
 
-/// Load snapshots from a CLI-generated JSON file. `height` is the caller's
-/// replay cutoff - it MUST be a lower bound of the dump's content height
-/// (read the visor state BEFORE invoking the dump), so replay above it can
-/// only over-apply idempotently, never skip events the snapshot lacks.
+/// Load snapshots from a CLI-generated JSON file. The dump carries no height
+/// of its own: `height` must be the exact height of the checkpoint that was
+/// dumped (taken from its file name), and becomes the replay cutoff.
 /// Returns the typed books plus the flat untriggered trigger-order list
 /// (empty for dumps made without `--include-trigger-orders`).
 pub(crate) async fn load_snapshots_from_cli_json<O, R>(
