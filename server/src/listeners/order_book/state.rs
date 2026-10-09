@@ -32,6 +32,15 @@ pub(super) struct OrderBookState {
     // The anchor must survive the cache so a late-pairing priority ALO order still splices
     // into the right queue position.
     pending_new_diffs: rustc_hash::FxHashMap<Oid, (crate::order_book::types::Sz, Px, Option<Oid>, Instant)>,
+    // Orders an Update to size 0 already removed from the book (`modify_sz` drops a
+    // zero-size order). For a fully filled order the node sends Update(newSz=0) and
+    // then Remove (every zero update in a 28s mainnet sample, 2026-10-09); this
+    // pairs that Remove so only genuinely unknown targets count as missing.
+    zeroed_awaiting_remove: rustc_hash::FxHashMap<Oid, Instant>,
+    // Update/Remove diffs whose target was neither booked, nor pending, nor (for a
+    // Remove) just zeroed - mirrors orderbook_diff_target_missing_total for this
+    // state, so tests can assert it without the process-global registry.
+    missing_diff_targets: u64,
     // insertBefore anchors that were missing from the book (add fell back to the back of
     // the level). Drained per batch by the listener, which converts a nonzero count into
     // a desync mark + Prometheus counter. Sticky across snapshot replay on purpose.
@@ -104,6 +113,8 @@ impl OrderBookState {
             order_book: OrderBooks::from_snapshots(snapshot, ignore_triggers),
             pending_order_statuses: rustc_hash::FxHashMap::default(),
             pending_new_diffs: rustc_hash::FxHashMap::default(),
+            zeroed_awaiting_remove: rustc_hash::FxHashMap::default(),
+            missing_diff_targets: 0,
             insert_before_fallbacks: 0,
             untriggered_orders,
             track_untriggered,
@@ -271,6 +282,10 @@ impl OrderBookState {
             log::info!("Evicted {aged_statuses} aged pending_order_statuses entries (no matching BookDiff)");
         }
 
+        // A zero-size Update whose Remove never followed: nothing to repair (the
+        // order is already off the book), just bound the map.
+        self.zeroed_awaiting_remove.retain(|_, at| at.elapsed() < PENDING_MAX_AGE);
+
         let before = self.pending_new_diffs.len();
         self.pending_new_diffs.retain(|_, (_, _, _, at)| at.elapsed() < PENDING_MAX_AGE);
         let aged_diffs = before - self.pending_new_diffs.len();
@@ -422,6 +437,9 @@ impl OrderBookState {
         for (_, _, _, at) in self.pending_new_diffs.values_mut() {
             *at = backdated;
         }
+        for at in self.zeroed_awaiting_remove.values_mut() {
+            *at = backdated;
+        }
     }
 
     #[cfg(test)]
@@ -516,17 +534,29 @@ impl OrderBookState {
                 // entry, or the late status installs a stale order (a permanent ghost /
                 // wrong size - the statuses stream lags the diffs stream).
                 InnerOrderDiff::Update { new_sz, .. } => {
-                    if let Some((pending_sz, _, _, _)) = self.pending_new_diffs.get_mut(&oid) {
+                    if new_sz.is_zero() && self.pending_new_diffs.remove(&oid).is_some() {
+                        // Filled while still waiting for its status: it never books;
+                        // the Remove that follows pairs with this record, and the
+                        // late status goes the existing orphan way.
+                        self.zeroed_awaiting_remove.insert(oid, Instant::now());
+                    } else if let Some((pending_sz, _, _, _)) = self.pending_new_diffs.get_mut(&oid) {
                         *pending_sz = new_sz;
-                    } else if !self.order_book.modify_sz(oid.clone(), coin.clone(), new_sz) {
+                    } else if self.order_book.modify_sz(oid.clone(), coin.clone(), new_sz) {
+                        if new_sz.is_zero() {
+                            self.zeroed_awaiting_remove.insert(oid, Instant::now());
+                        }
+                    } else {
+                        self.missing_diff_targets += 1;
                         note_diff_target_missing("update", &oid, &coin);
                     }
                     changed_coins.insert(coin);
                 }
                 InnerOrderDiff::Remove => {
                     if self.pending_new_diffs.remove(&oid).is_none()
+                        && self.zeroed_awaiting_remove.remove(&oid).is_none()
                         && !self.order_book.cancel_order(oid.clone(), coin.clone())
                     {
+                        self.missing_diff_targets += 1;
                         note_diff_target_missing("remove", &oid, &coin);
                     }
                     changed_coins.insert(coin);
@@ -537,12 +567,28 @@ impl OrderBookState {
     }
 }
 
-/// An Update/Remove found its order neither on the book nor pending. Counted
-/// for observation, never re-synced automatically (design 000220's choice);
-/// the count implies no particular cause.
+/// An Update/Remove found its order neither on the book, nor pending, nor
+/// (for a Remove) just zeroed by an Update. Counted for observation, never
+/// re-synced automatically (design 000220's choice); the count implies no
+/// particular cause. Logged at WARN, at most once per 10s with the running
+/// total, so a real anomaly is visible without flooding the log.
 fn note_diff_target_missing(diff: &'static str, oid: &Oid, coin: &Coin) {
-    crate::metrics::DIFF_TARGET_MISSING_TOTAL.with_label_values(&[diff]).inc();
-    log::debug!("{diff} diff for oid={oid:?} coin={coin:?}: order neither on the book nor pending");
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_WARN_MS: AtomicU64 = AtomicU64::new(0);
+    const WARN_INTERVAL_MS: u64 = 10_000;
+    let counter = crate::metrics::DIFF_TARGET_MISSING_TOTAL.with_label_values(&[diff]);
+    counter.inc();
+    let now_ms = super::parallel::now_unix_ms();
+    let last = LAST_WARN_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) >= WARN_INTERVAL_MS
+        && LAST_WARN_MS.compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    {
+        log::warn!(
+            "{diff} diff for oid={oid:?} coin={coin:?}: order neither on the book nor pending \
+             ({} {diff} misses so far)",
+            counter.get()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1113,6 +1159,70 @@ mod tests {
         assert_eq!(snapshot.as_ref()[0][0].sz(), crate::order_book::Sz::parse_from_str("3.0").unwrap(), "booked with the updated size");
     }
 
+    /// A fully filled order arrives as Update(newSz=0) then Remove (mainnet,
+    /// 2026-10-09: ~38/s, every zero update followed by a Remove). The zero update
+    /// already drops the order, so the Remove must pair with it, not count as missing.
+    #[test]
+    fn test_zero_size_update_then_remove_is_paired_not_missing() {
+        let mut state = empty_state();
+        state.apply_order_statuses_hft(make_status_batch(vec![make_order_status("BTC", 1, "open")])).unwrap();
+        let new = make_order_diff("BTC", 1, OrderDiff::New { sz: "5.0".to_string(), insert_before: None });
+        state.apply_order_diffs_hft(make_diff_batch(vec![new])).unwrap();
+        assert_eq!(state.order_count(), 1);
+
+        let fill = make_order_diff("BTC", 1, OrderDiff::Update { orig_sz: "5.0".to_string(), new_sz: "0.0".to_string() });
+        state.apply_order_diffs_hft(make_diff_batch(vec![fill])).unwrap();
+        assert_eq!(state.order_count(), 0, "a zero-size update removes the order");
+        assert!(state.zeroed_awaiting_remove.contains_key(&Oid::new(1)));
+
+        let remove = make_order_diff("BTC", 1, OrderDiff::Remove);
+        state.apply_order_diffs_hft(make_diff_batch(vec![remove])).unwrap();
+        assert!(state.zeroed_awaiting_remove.is_empty(), "the Remove pairs with the zero update");
+        assert_eq!(state.missing_diff_targets, 0);
+    }
+
+    /// Review 000222 P2: filled while the New still waits for its status. Both
+    /// arrival orders of the late status must leave no booked order, consume the
+    /// zero record, and count nothing as missing.
+    #[test]
+    fn test_zero_update_while_pending_then_status_and_remove_in_either_order() {
+        for status_before_remove in [true, false] {
+            let mut state = empty_state();
+            let new = make_order_diff("BTC", 1, OrderDiff::New { sz: "5.0".to_string(), insert_before: None });
+            state.apply_order_diffs_hft(make_diff_batch(vec![new])).unwrap();
+            let fill = make_order_diff("BTC", 1, OrderDiff::Update { orig_sz: "5.0".to_string(), new_sz: "0.0".to_string() });
+            state.apply_order_diffs_hft(make_diff_batch(vec![fill])).unwrap();
+            assert_eq!(state.pending_new_diffs_count(), 0, "a zero update ends the pending New");
+
+            let status = || make_status_batch(vec![make_order_status("BTC", 1, "open")]);
+            let remove = || make_diff_batch(vec![make_order_diff("BTC", 1, OrderDiff::Remove)]);
+            if status_before_remove {
+                state.apply_order_statuses_hft(status()).unwrap();
+                state.apply_order_diffs_hft(remove()).unwrap();
+            } else {
+                state.apply_order_diffs_hft(remove()).unwrap();
+                state.apply_order_statuses_hft(status()).unwrap();
+            }
+            assert_eq!(state.order_count(), 0, "never booked (status_before_remove={status_before_remove})");
+            assert!(state.zeroed_awaiting_remove.is_empty(), "the Remove consumed the zero record");
+            assert_eq!(state.missing_diff_targets, 0, "nothing counted as missing");
+        }
+    }
+
+    #[test]
+    fn test_aged_zeroed_entries_are_dropped_without_data_loss() {
+        let mut state = empty_state();
+        state.apply_order_statuses_hft(make_status_batch(vec![make_order_status("BTC", 1, "open")])).unwrap();
+        let new = make_order_diff("BTC", 1, OrderDiff::New { sz: "5.0".to_string(), insert_before: None });
+        state.apply_order_diffs_hft(make_diff_batch(vec![new])).unwrap();
+        let fill = make_order_diff("BTC", 1, OrderDiff::Update { orig_sz: "5.0".to_string(), new_sz: "0.0".to_string() });
+        state.apply_order_diffs_hft(make_diff_batch(vec![fill])).unwrap();
+
+        state.age_pending_entries(Duration::from_secs(61));
+        assert!(!state.cleanup_stale_pending(), "an unpaired zero update loses nothing");
+        assert!(state.zeroed_awaiting_remove.is_empty());
+    }
+
     #[test]
     fn test_update_and_remove_of_unknown_order_are_counted_not_applied() {
         let mut state = empty_state();
@@ -1124,7 +1234,8 @@ mod tests {
         state.apply_order_diffs_hft(make_diff_batch(vec![update, remove])).unwrap();
 
         assert_eq!(state.order_count(), 0);
-        // Tests share the process-global registry, so compare deltas (>= for parallel tests).
+        assert_eq!(state.missing_diff_targets, 2, "one update and one remove miss");
+        // The process-global metric moves too (deltas: tests share the registry).
         assert!(metric("update") > updates_before);
         assert!(metric("remove") > removes_before);
     }
