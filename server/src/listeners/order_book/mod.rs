@@ -518,6 +518,10 @@ pub(crate) struct OrderBookListener {
     // this is what lets a brand-new subscriber be served within one throttle window
     // even on an otherwise-quiet coin.
     last_active_l2_params: HashSet<L2SnapshotParams>,
+    // When the periodic "State progress" line was last logged. It used to fire
+    // every 1000 batches (~18 lines/s on mainnet, ~90% of all output), pushing
+    // everything else out of the terminal scrollback within a minute.
+    last_progress_log: Option<Instant>,
 }
 
 impl OrderBookListener {
@@ -555,6 +559,7 @@ impl OrderBookListener {
             active_l2_params,
             active_subs: ActiveSubs::default(),
             last_active_l2_params: HashSet::new(),
+            last_progress_log: None,
         }
     }
 
@@ -923,6 +928,17 @@ impl OrderBookListener {
         let bbos = raw.into_iter().map(|(coin, raw)| (coin, CoinBbo { raw, frame: SharedFrame::new() })).collect();
         InternalMessage::BboUpdate { bbos, time, withheld_period: self.book_trust.withheld_periods() }
     }
+}
+
+/// The periodic "State progress" line is due: the first time, then at most once
+/// per interval (the metrics and pending cleanup beside it keep their cadence).
+fn progress_log_due(last: &mut Option<Instant>, now: Instant) -> bool {
+    const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
+    if last.is_some_and(|at| now.duration_since(at) < PROGRESS_LOG_INTERVAL) {
+        return false;
+    }
+    *last = Some(now);
+    true
 }
 
 /// Does `coin` belong to one of the enabled market types?
@@ -1498,15 +1514,17 @@ impl OrderBookListener {
                     desync_reason = Some("pending_cache_cleared");
                 }
 
-                info!(
-                    "State progress #{}: height={}, status_height={}, diff_height={}, pending_statuses={}, pending_diffs={}",
-                    sc,
-                    state.height(),
-                    state.status_height(),
-                    state.diff_height(),
-                    state.pending_order_statuses_count(),
-                    state.pending_new_diffs_count()
-                );
+                if progress_log_due(&mut self.last_progress_log, Instant::now()) {
+                    info!(
+                        "State progress #{}: height={}, status_height={}, diff_height={}, pending_statuses={}, pending_diffs={}",
+                        sc,
+                        state.height(),
+                        state.status_height(),
+                        state.diff_height(),
+                        state.pending_order_statuses_count(),
+                        state.pending_new_diffs_count()
+                    );
+                }
             }
         }
         if let Some(reason) = desync_reason {
@@ -2927,6 +2945,16 @@ mod tests {
         // drift 模式不许积累 loss bound: 非零 bound 会在下一次 init_from_snapshot
         // 走 prior > height 分支把 needs_resync 置回 true, 打破 drift 契约。
         assert_eq!(listener.max_loss_height, 0, "drift 模式不得积累 loss bound");
+    }
+
+    #[test]
+    fn test_progress_log_is_throttled_by_time() {
+        let start = Instant::now();
+        let mut last = None;
+        assert!(progress_log_due(&mut last, start), "the first progress line is logged");
+        assert!(!progress_log_due(&mut last, start + Duration::from_secs(9)));
+        assert!(progress_log_due(&mut last, start + Duration::from_secs(10)));
+        assert!(!progress_log_due(&mut last, start + Duration::from_secs(19)));
     }
 
     // ==================== Untrusted book withheld (design 000249 B) ====================
