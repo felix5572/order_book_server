@@ -698,6 +698,19 @@ impl OrderBookListener {
         /// on a snapshot that misses the tail of the loss by a few blocks.
         const LOSS_HEIGHT_MARGIN: u64 = 100;
 
+        let state_height = self.order_book_state.as_ref().map_or(0, OrderBookState::height);
+        let observed = state_height.max(self.last_seen_height);
+        // No height observed yet (loss before any event parsed): conservative
+        // bound - only an informed downgrade in finish_install can clear it.
+        let bound = if observed == 0 { u64::MAX } else { observed.saturating_add(LOSS_HEIGHT_MARGIN) };
+        // Already withholding for a loss whose bound covers this one: the mark
+        // changes nothing, so it is not counted again. A node restart replays
+        // blocks below the stream high-water mark and every cleanup pass
+        // re-marks (~11k in 2 min, 2026-10-10).
+        if self.needs_resync && self.resync_data_loss && bound <= self.max_loss_height {
+            return;
+        }
+
         ORDERBOOK_DESYNCS_TOTAL.with_label_values(&[reason]).inc();
         // Operator opted to ride out drift: count the desync so it stays visible
         // in metrics, but do NOT schedule a re-fetch. The book keeps serving live
@@ -712,11 +725,6 @@ impl OrderBookListener {
         // Every mark reason is real event loss (wrong price/size state) -
         // insertBefore fallbacks are metrics-only and never reach here.
         self.resync_data_loss = true;
-        let state_height = self.order_book_state.as_ref().map_or(0, OrderBookState::height);
-        let observed = state_height.max(self.last_seen_height);
-        // No height observed yet (loss before any event parsed): conservative
-        // bound - only an informed downgrade in finish_install can clear it.
-        let bound = if observed == 0 { u64::MAX } else { observed.saturating_add(LOSS_HEIGHT_MARGIN) };
         self.max_loss_height = self.max_loss_height.max(bound);
         self.publish_book_trust(reason);
     }
@@ -930,11 +938,11 @@ impl OrderBookListener {
     }
 }
 
-/// The periodic "State progress" line is due: the first time, then at most once
-/// per interval (the metrics and pending cleanup beside it keep their cadence).
-fn progress_log_due(last: &mut Option<Instant>, now: Instant) -> bool {
-    const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
-    if last.is_some_and(|at| now.duration_since(at) < PROGRESS_LOG_INTERVAL) {
+/// A throttled log line ("State progress", lost New diffs) is due: the first
+/// time, then at most once per interval (the work beside it keeps its cadence).
+fn throttled_log_due(last: &mut Option<Instant>, now: Instant) -> bool {
+    const THROTTLED_LOG_INTERVAL: Duration = Duration::from_secs(10);
+    if last.is_some_and(|at| now.duration_since(at) < THROTTLED_LOG_INTERVAL) {
         return false;
     }
     *last = Some(now);
@@ -1514,7 +1522,7 @@ impl OrderBookListener {
                     desync_reason = Some("pending_cache_cleared");
                 }
 
-                if progress_log_due(&mut self.last_progress_log, Instant::now()) {
+                if throttled_log_due(&mut self.last_progress_log, Instant::now()) {
                     info!(
                         "State progress #{}: height={}, status_height={}, diff_height={}, pending_statuses={}, pending_diffs={}",
                         sc,
@@ -2951,10 +2959,10 @@ mod tests {
     fn test_progress_log_is_throttled_by_time() {
         let start = Instant::now();
         let mut last = None;
-        assert!(progress_log_due(&mut last, start), "the first progress line is logged");
-        assert!(!progress_log_due(&mut last, start + Duration::from_secs(9)));
-        assert!(progress_log_due(&mut last, start + Duration::from_secs(10)));
-        assert!(!progress_log_due(&mut last, start + Duration::from_secs(19)));
+        assert!(throttled_log_due(&mut last, start), "the first progress line is logged");
+        assert!(!throttled_log_due(&mut last, start + Duration::from_secs(9)));
+        assert!(throttled_log_due(&mut last, start + Duration::from_secs(10)));
+        assert!(!throttled_log_due(&mut last, start + Duration::from_secs(19)));
     }
 
     // ==================== Untrusted book withheld (design 000249 B) ====================
@@ -3026,6 +3034,23 @@ mod tests {
         assert!(!listener.book_trusted() && !listener.book_trust().is_trusted());
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 700);
         assert!(listener.book_trusted() && listener.book_trust().is_trusted());
+    }
+
+    /// While the book already withholds for a loss, a re-mark under the same
+    /// bound (node-restart replay) is not counted; a loss past it is.
+    #[test]
+    fn test_remark_under_the_loss_bound_is_not_counted() {
+        const REASON: &str = "test_remark_under_bound"; // own label: the registry is process-global
+        let marks = || ORDERBOOK_DESYNCS_TOTAL.with_label_values(&[REASON]).get();
+        let (mut listener, _rx) = ready_listener();
+        apply_booked_order(&mut listener, 1, 500);
+        listener.mark_desynced(REASON); // bound 600
+        listener.mark_desynced(REASON);
+        assert_eq!((marks(), listener.max_loss_height), (1, 600));
+
+        apply_booked_order(&mut listener, 2, 700);
+        listener.mark_desynced(REASON);
+        assert_eq!((marks(), listener.max_loss_height), (2, 800), "a loss past the bound raises it");
     }
 
     #[test]

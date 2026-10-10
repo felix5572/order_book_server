@@ -83,6 +83,12 @@ pub(super) struct OrderBookState {
     // orderbook_pending_orphans_evicted_total for this state, like
     // missing_diff_targets. Expected to stay 0: a rise means New diffs were lost.
     orphan_statuses: u64,
+    // New diffs evicted as lost since this book was installed. Logged with the
+    // total at most every 10s: a node restart replays blocks below the stream
+    // high-water mark and every cleanup pass evicts (~11k lines in 2 min,
+    // 2026-10-10).
+    lost_new_diffs: u64,
+    last_loss_log: Option<tokio::time::Instant>, // the listener's throttle clock
     // insertBefore anchors that were missing from the book (add fell back to the back of
     // the level). Drained per batch by the listener, which converts a nonzero count into
     // a desync mark + Prometheus counter. Sticky across snapshot replay on purpose.
@@ -160,6 +166,8 @@ impl OrderBookState {
             zeroed_awaiting_remove: rustc_hash::FxHashMap::default(),
             missing_diff_targets: 0,
             orphan_statuses: 0,
+            lost_new_diffs: 0,
+            last_loss_log: None,
             insert_before_fallbacks: 0,
             untriggered_orders,
             track_untriggered,
@@ -377,10 +385,15 @@ impl OrderBookState {
         self.pending_new_diffs.retain(|_, (_, _, _, block)| *block >= statuses_applied);
         let lost = before - self.pending_new_diffs.len();
         if lost > 0 {
-            log::warn!(
-                "Evicted {lost} pending_new_diffs: the status stream passed their block (status height \
-                 {statuses_applied}) without their status - data loss"
-            );
+            self.lost_new_diffs += lost as u64;
+            if super::throttled_log_due(&mut self.last_loss_log, tokio::time::Instant::now()) {
+                log::warn!(
+                    "Evicted {lost} pending_new_diffs: the status stream passed their block (status height \
+                     {statuses_applied}) without their status - data loss; {} since install (lines at most \
+                     every 10s)",
+                    self.lost_new_diffs
+                );
+            }
             cleared = true;
         }
 
@@ -1551,6 +1564,20 @@ mod tests {
         state.apply_order_statuses_hft(status_batch_at(11, Vec::new())).unwrap();
         assert!(state.cleanup_stale_pending(), "the status stream passed block 10: the order is lost");
         assert_eq!(state.pending_new_diffs_count(), 0);
+    }
+
+    /// A node restart rewrites blocks below the status stream's high-water
+    /// mark: every replayed New diff is evicted as lost (fail-closed - the
+    /// rewind is never served) and each one adds to the logged total.
+    #[test]
+    fn test_replayed_new_diffs_below_the_status_high_water_mark_are_lost() {
+        let mut state = empty_state();
+        state.apply_order_statuses_hft(status_batch_at(20, Vec::new())).unwrap();
+        state.apply_order_diffs_hft(diff_batch_at(10, vec![new_diff("BTC", 1), new_diff("BTC", 2)])).unwrap();
+        assert!(state.cleanup_stale_pending());
+        state.apply_order_diffs_hft(diff_batch_at(11, vec![new_diff("BTC", 3)])).unwrap();
+        assert!(state.cleanup_stale_pending());
+        assert_eq!((state.pending_new_diffs_count(), state.lost_new_diffs), (0, 3));
     }
 
     #[test]
