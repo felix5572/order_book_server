@@ -32,6 +32,18 @@ impl StreamProgress {
     }
 }
 
+/// A resting-type status waiting for its New diff (the two share one block).
+struct PendingStatus {
+    status: NodeDataOrderStatus,
+    block: u64,
+    // A later status for the oid came in the same block. An order that fills on
+    // entry gets "open" then "filled" there and never a New diff (every unpaired
+    // open in a 175-block mainnet sample, 2026-10-10), so its eviction is
+    // expected, not an orphan. A New diff that does come still pairs with it
+    // (rested, then filled in the same block).
+    settled_in_block: bool,
+}
+
 pub(super) struct OrderBookState {
     order_book: OrderBooks<InnerL4Order>,
     // Furthest block applied by either book stream: the loss bound and the
@@ -50,7 +62,7 @@ pub(super) struct OrderBookState {
     // Entries carry their block: an order's status and New diff share one block
     // (every resting order in two mainnet windows, ~1M each, 2026-10-10), so a
     // status can still pair until the diff stream applies a later block.
-    pending_order_statuses: rustc_hash::FxHashMap<Oid, (NodeDataOrderStatus, u64)>,
+    pending_order_statuses: rustc_hash::FxHashMap<Oid, PendingStatus>,
     // Persistent cache of New diffs (sz + resting px + optional insertBefore anchor) waiting
     // for their OrderStatuses. This is the other half of bidirectional caching - handles when
     // Diff arrives BEFORE Status. px comes from the diff (official PR#9): the diff's px is the
@@ -67,6 +79,10 @@ pub(super) struct OrderBookState {
     // Remove) just zeroed - mirrors orderbook_diff_target_missing_total for this
     // state, so tests can assert it without the process-global registry.
     missing_diff_targets: u64,
+    // Statuses evicted unpaired and not settled in their block - mirrors
+    // orderbook_pending_orphans_evicted_total for this state, like
+    // missing_diff_targets. Expected to stay 0: a rise means New diffs were lost.
+    orphan_statuses: u64,
     // insertBefore anchors that were missing from the book (add fell back to the back of
     // the level). Drained per batch by the listener, which converts a nonzero count into
     // a desync mark + Prometheus counter. Sticky across snapshot replay on purpose.
@@ -143,6 +159,7 @@ impl OrderBookState {
             pending_new_diffs: rustc_hash::FxHashMap::default(),
             zeroed_awaiting_remove: rustc_hash::FxHashMap::default(),
             missing_diff_targets: 0,
+            orphan_statuses: 0,
             insert_before_fallbacks: 0,
             untriggered_orders,
             track_untriggered,
@@ -331,13 +348,23 @@ impl OrderBookState {
         const ZEROED_MAX_AGE: Duration = Duration::from_secs(60);
         let mut cleared = false;
 
+        // Both streams must have passed the block: the diff stream so no New
+        // diff can still pair, the status stream so a settling status from a
+        // later line of the same block (open -> filled) has been seen.
         let diffs_applied = self.diffs.height;
-        let before = self.pending_order_statuses.len();
-        self.pending_order_statuses.retain(|_, (_, block)| *block >= diffs_applied);
-        let orphans = before - self.pending_order_statuses.len();
+        let both_applied = diffs_applied.min(self.statuses.height);
+        let mut orphans = 0;
+        self.pending_order_statuses.retain(|_, pending| {
+            let keep = pending.block >= both_applied;
+            if !keep && !pending.settled_in_block {
+                orphans += 1;
+            }
+            keep
+        });
         if orphans > 0 {
-            crate::metrics::PENDING_ORPHANS_EVICTED_TOTAL.inc_by(orphans as u64);
-            log::debug!("Evicted {orphans} orphan pending_order_statuses (diff stream passed their block)");
+            self.orphan_statuses += orphans;
+            crate::metrics::PENDING_ORPHANS_EVICTED_TOTAL.inc_by(orphans);
+            log::debug!("Evicted {orphans} orphan pending_order_statuses (both streams passed their block)");
         }
 
         // A zero-size Update whose Remove never followed: nothing to repair (the
@@ -473,7 +500,12 @@ impl OrderBookState {
                 log::debug!("Order added (status arrived after diff): oid={:?} coin={:?}", oid, order_coin);
             } else if order_status.is_inserted_into_book() {
                 // Diff hasn't arrived yet - cache the OrderStatus
-                self.pending_order_statuses.insert(oid, (order_status, height));
+                let pending = PendingStatus { status: order_status, block: height, settled_in_block: false };
+                self.pending_order_statuses.insert(oid, pending);
+            } else if let Some(pending) = self.pending_order_statuses.get_mut(&oid)
+                && pending.block == height
+            {
+                pending.settled_in_block = true;
             }
         }
         Ok(changed_coins)
@@ -524,7 +556,7 @@ impl OrderBookState {
                     // re-introduce wrong resting prices).
                     let diff_px = Px::parse_from_str(diff.px())?;
                     // Check if OrderStatus already arrived
-                    if let Some((order, _)) = self.pending_order_statuses.remove(&oid) {
+                    if let Some(PendingStatus { status: order, .. }) = self.pending_order_statuses.remove(&oid) {
                         // Both arrived - add order immediately!
                         let time = order.time.and_utc().timestamp_millis();
                         let order_coin = Coin::new(&order.order.coin);
@@ -1441,24 +1473,68 @@ mod tests {
         }
     }
 
-    /// An orphan status (the order never rested) waits while more lines of its
-    /// block may come, and is dropped silently once the diff stream applies a
-    /// later block.
+    /// An orphan status (its New diff never came, nor did a settling status in
+    /// its block) waits while more lines of its block may come on either
+    /// stream, and is dropped and counted once both streams apply a later block.
     #[test]
-    fn test_orphan_status_dropped_only_after_diff_stream_passes_its_block() {
+    fn test_orphan_status_dropped_only_after_both_streams_pass_its_block() {
         let mut state = empty_state();
-        let orphans = || crate::metrics::PENDING_ORPHANS_EVICTED_TOTAL.get();
-        let before = orphans();
         state.apply_order_statuses_hft(status_batch_at(10, vec![make_order_status("BTC", 1, "open")])).unwrap();
 
-        state.apply_order_diffs_hft(diff_batch_at(10, vec![new_diff("ETH", 2)])).unwrap();
+        state.apply_order_diffs_hft(diff_batch_at(10, Vec::new())).unwrap();
         assert!(!state.cleanup_stale_pending());
         assert!(state.pending_order_statuses_has(&Oid::new(1)), "block 10 may still carry its New diff");
 
         state.apply_order_diffs_hft(diff_batch_at(11, Vec::new())).unwrap();
+        assert!(!state.cleanup_stale_pending());
+        assert!(state.pending_order_statuses_has(&Oid::new(1)), "block 10 may still carry a settling status");
+
+        state.apply_order_statuses_hft(status_batch_at(11, Vec::new())).unwrap();
         assert!(!state.cleanup_stale_pending(), "an orphan status is not data loss");
         assert!(!state.pending_order_statuses_has(&Oid::new(1)));
-        assert!(orphans() > before, "counted (process-global registry: delta)");
+        assert_eq!(state.orphan_statuses, 1);
+    }
+
+    /// The diff stream leads and a cleanup lands between the two status lines
+    /// of one block: the later "filled" still settles the entry (review 000255).
+    #[test]
+    fn test_settling_status_on_a_later_line_after_the_diff_stream_passed() {
+        let mut state = empty_state();
+        state.apply_order_statuses_hft(status_batch_at(10, vec![make_order_status("BTC", 1, "open")])).unwrap();
+        state.apply_order_diffs_hft(diff_batch_at(11, Vec::new())).unwrap();
+        assert!(!state.cleanup_stale_pending());
+
+        state.apply_order_statuses_hft(status_batch_at(10, vec![make_order_status("BTC", 1, "filled")])).unwrap();
+        state.apply_order_statuses_hft(status_batch_at(11, Vec::new())).unwrap();
+        assert!(!state.cleanup_stale_pending());
+        assert_eq!(state.pending_order_statuses_count(), 0);
+        assert_eq!(state.orphan_statuses, 0);
+    }
+
+    /// An order that fills on entry gets "open" then "filled" in one block and
+    /// never a New diff: evicted with the block, but not an orphan. A settled
+    /// status still pairs with a New diff that does come (rested, then filled in
+    /// the same block); a status from a later block does not settle it.
+    #[test]
+    fn test_status_settled_in_its_block_is_evicted_without_counting_as_orphan() {
+        let mut state = empty_state();
+        let block_10 = vec![
+            make_order_status("BTC", 1, "open"),
+            make_order_status("BTC", 1, "filled"),
+            make_order_status("BTC", 2, "open"),
+            make_order_status("BTC", 2, "filled"),
+            make_order_status("BTC", 3, "open"),
+        ];
+        state.apply_order_statuses_hft(status_batch_at(10, block_10)).unwrap();
+        state.apply_order_statuses_hft(status_batch_at(11, vec![make_order_status("BTC", 3, "canceled")])).unwrap();
+
+        state.apply_order_diffs_hft(diff_batch_at(10, vec![new_diff("BTC", 2)])).unwrap();
+        assert_eq!(state.order_count(), 1, "the settled status still pairs with its New diff");
+
+        state.apply_order_diffs_hft(diff_batch_at(11, Vec::new())).unwrap();
+        assert!(!state.cleanup_stale_pending());
+        assert_eq!(state.pending_order_statuses_count(), 0, "the status stream is at 11 already");
+        assert_eq!(state.orphan_statuses, 1, "only oid 3: its later status came in another block");
     }
 
     /// A New diff whose status never comes is data loss - but only once the
