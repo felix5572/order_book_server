@@ -4,8 +4,9 @@ use crate::{
         BBO_BROADCAST_LATENCY, EVENT_PROCESSING_LATENCY, EVENTS_PROCESSED_TOTAL, FILE_EVENTS_TOTAL,
         FILE_LINES_PARSED_TOTAL, INSERT_BEFORE_FALLBACK_TOTAL, L2_BROADCAST_LATENCY, L2_CONFLATION_BATCH_SIZE,
         LAST_EVENT_APPLIED_MS, LISTENER_LOCK_WAIT, ORACLE_DATA_LOSS_TOTAL, ORDERBOOK_COINS_COUNT, ORDERBOOK_DESYNCS_TOTAL,
-        ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL, ORDERBOOK_READY, ORDERBOOK_RESYNC_IN_FLIGHT, ORDERBOOK_TIME_MS,
-        ORDERBOOK_UNTRIGGERED_TOTAL, PARSE_ERRORS_TOTAL, PENDING_DIFFS_CACHE, PENDING_ORDERS_CACHE,
+        ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL, ORDERBOOK_READY, ORDERBOOK_RESYNC_IN_FLIGHT, ORDERBOOK_STREAM_HEIGHT,
+        ORDERBOOK_STREAM_SKEW_BLOCKS, ORDERBOOK_TIME_MS, ORDERBOOK_UNTRIGGERED_TOTAL, PARSE_ERRORS_TOTAL,
+        PENDING_DIFFS_CACHE, PENDING_ORDERS_CACHE,
         CHECKPOINT_MISSED_TOTAL, RESYNC_PHASE_DURATION, SNAPSHOT_CHECKPOINT_HEIGHT, STALE_BATCHES_SKIPPED_TOTAL,
         TRADES_UNPAIRED_FILLS_TOTAL,
     },
@@ -1373,23 +1374,29 @@ impl OrderBookListener {
                 ORDERBOOK_TIME_MS.set(state.time() as i64);
                 PENDING_ORDERS_CACHE.set(state.pending_order_statuses_count() as i64);
                 PENDING_DIFFS_CACHE.set(state.pending_new_diffs_count() as i64);
+                let (status_height, diff_height) = (state.status_height() as i64, state.diff_height() as i64);
+                ORDERBOOK_STREAM_HEIGHT.with_label_values(&["statuses"]).set(status_height);
+                ORDERBOOK_STREAM_HEIGHT.with_label_values(&["diffs"]).set(diff_height);
+                ORDERBOOK_STREAM_SKEW_BLOCKS.set(status_height - diff_height);
 
                 // Record orderbook stats
                 ORDERBOOK_ORDERS_TOTAL.set(state.order_count() as i64);
                 ORDERBOOK_COINS_COUNT.set(state.coin_count() as i64);
                 ORDERBOOK_UNTRIGGERED_TOTAL.set(state.untriggered_count() as i64);
 
-                // Cleanup stale pending entries to prevent unbounded memory growth.
-                // A force-clear may evict genuinely in-flight order halves, so it
-                // counts as data loss and the book must re-sync.
+                // Drop pending halves the other book stream has passed. A New diff
+                // passed without its status, or a cap force-clear, is data loss and
+                // the book must re-sync.
                 if state.cleanup_stale_pending() {
                     desync_reason = Some("pending_cache_cleared");
                 }
 
                 info!(
-                    "State progress #{}: height={}, pending_statuses={}, pending_diffs={}",
+                    "State progress #{}: height={}, status_height={}, diff_height={}, pending_statuses={}, pending_diffs={}",
                     sc,
                     state.height(),
+                    state.status_height(),
+                    state.diff_height(),
                     state.pending_order_statuses_count(),
                     state.pending_new_diffs_count()
                 );

@@ -116,6 +116,27 @@ lazy_static! {
         "Pending order diffs in HFT cache"
     ).expect("metric can be created");
 
+    /// Applied block height per book stream: pairing eviction and the l2/bbo
+    /// frame time follow these, not the wall clock.
+    pub static ref ORDERBOOK_STREAM_HEIGHT: IntGaugeVec = IntGaugeVec::new(
+        Opts::new("orderbook_stream_height", "Applied block height per book stream"),
+        &["stream"]
+    ).expect("metric can be created");
+
+    /// Applied statuses height minus applied diffs height (signed, blocks): how
+    /// far the two independently read book streams have drifted in this process.
+    pub static ref ORDERBOOK_STREAM_SKEW_BLOCKS: IntGauge = IntGauge::new(
+        "orderbook_stream_skew_blocks",
+        "Applied statuses height minus applied diffs height"
+    ).expect("metric can be created");
+
+    /// Pending statuses dropped once the diff stream passed their block without
+    /// a New diff: orders that never rested (expected orphans, not data loss).
+    pub static ref PENDING_ORPHANS_EVICTED_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_pending_orphans_evicted_total",
+        "Pending statuses dropped after the diff stream passed their block"
+    ).expect("metric can be created");
+
     /// Broadcast channel lag (receivers behind)
     pub static ref CHANNEL_LAG: IntGauge = IntGauge::new(
         "broadcast_channel_lag",
@@ -338,6 +359,9 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ORDERBOOK_TIME_MS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_ORDERS_CACHE.clone())).ok();
     REGISTRY.register(Box::new(PENDING_DIFFS_CACHE.clone())).ok();
+    REGISTRY.register(Box::new(ORDERBOOK_STREAM_HEIGHT.clone())).ok();
+    REGISTRY.register(Box::new(ORDERBOOK_STREAM_SKEW_BLOCKS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_ORPHANS_EVICTED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(CHANNEL_LAG.clone())).ok();
 
     // Error metrics

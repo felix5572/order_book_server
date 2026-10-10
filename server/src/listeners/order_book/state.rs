@@ -15,23 +15,49 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) struct OrderBookState {
-    order_book: OrderBooks<InnerL4Order>,
+/// Applied (block height, block time ms) of a book stream. `>=` so the time
+/// still advances on a later line of the same block (a block spans many lines).
+#[derive(Debug, Clone, Copy)]
+struct StreamProgress {
     height: u64,
     time: u64,
+}
+
+impl StreamProgress {
+    const fn advance(&mut self, height: u64, time: u64) {
+        if height >= self.height {
+            self.height = height;
+            self.time = time;
+        }
+    }
+}
+
+pub(super) struct OrderBookState {
+    order_book: OrderBooks<InnerL4Order>,
+    // Furthest block applied by either book stream: the loss bound and the
+    // height/time metrics. L4 snapshots keep stamping it (their (time, height)
+    // is the splice point for the L4 diff stream).
+    latest: StreamProgress,
+    // Applied progress of each book stream. The two are read by separate
+    // watchers and drift apart by minutes during a node catch-up (2026-10-10),
+    // so pairing eviction and the l2/bbo frame time follow them, never the
+    // wall clock.
+    statuses: StreamProgress,
+    diffs: StreamProgress,
     ignore_spot: bool,
     // Persistent cache of OrderStatuses waiting for their New diffs
     // Allows OrderStatus and OrderDiff to arrive in any order (HFT-compatible).
-    // Entries carry their insertion time so cleanup can evict by age instead of
-    // nuking the whole map (which killed in-flight halves and forced re-syncs).
-    pending_order_statuses: rustc_hash::FxHashMap<Oid, (NodeDataOrderStatus, Instant)>,
+    // Entries carry their block: an order's status and New diff share one block
+    // (every resting order in two mainnet windows, ~1M each, 2026-10-10), so a
+    // status can still pair until the diff stream applies a later block.
+    pending_order_statuses: rustc_hash::FxHashMap<Oid, (NodeDataOrderStatus, u64)>,
     // Persistent cache of New diffs (sz + resting px + optional insertBefore anchor) waiting
     // for their OrderStatuses. This is the other half of bidirectional caching - handles when
     // Diff arrives BEFORE Status. px comes from the diff (official PR#9): the diff's px is the
     // true resting price - trigger/converted orders can carry a different px on the status.
     // The anchor must survive the cache so a late-pairing priority ALO order still splices
-    // into the right queue position.
-    pending_new_diffs: rustc_hash::FxHashMap<Oid, (crate::order_book::types::Sz, Px, Option<Oid>, Instant)>,
+    // into the right queue position. The trailing u64 is the diff's block (see above).
+    pending_new_diffs: rustc_hash::FxHashMap<Oid, (crate::order_book::types::Sz, Px, Option<Oid>, u64)>,
     // Orders an Update to size 0 already removed from the book (`modify_sz` drops a
     // zero-size order). For a fully filled order the node sends Update(newSz=0) and
     // then Remove (every zero update in a 28s mainnet sample, 2026-10-09); this
@@ -106,10 +132,12 @@ impl OrderBookState {
                 }
             }
         }
+        let installed = StreamProgress { height, time };
         Self {
             ignore_spot,
-            time,
-            height,
+            latest: installed,
+            statuses: installed,
+            diffs: installed,
             order_book: OrderBooks::from_snapshots(snapshot, ignore_triggers),
             pending_order_statuses: rustc_hash::FxHashMap::default(),
             pending_new_diffs: rustc_hash::FxHashMap::default(),
@@ -141,7 +169,7 @@ impl OrderBookState {
     }
 
     pub(super) const fn height(&self) -> u64 {
-        self.height
+        self.latest.height
     }
 
     pub(super) const fn ignore_spot(&self) -> bool {
@@ -149,7 +177,23 @@ impl OrderBookState {
     }
 
     pub(super) const fn time(&self) -> u64 {
-        self.time
+        self.latest.time
+    }
+
+    pub(super) const fn status_height(&self) -> u64 {
+        self.statuses.height
+    }
+
+    pub(super) const fn diff_height(&self) -> u64 {
+        self.diffs.height
+    }
+
+    /// Block time both book streams have applied: the l2/bbo frame stamp. A
+    /// progress mark, not a per-block consistent cut - a leading diff stream's
+    /// Update/Remove are already on the book; only pairing waits for the
+    /// slower stream. During a catch-up it no longer claims the faster stream's time.
+    const fn book_time(&self) -> u64 {
+        if self.statuses.time < self.diffs.time { self.statuses.time } else { self.diffs.time }
     }
 
     /// L4 snapshot of a single coin - (time, height, snapshot). Returns None when
@@ -160,7 +204,7 @@ impl OrderBookState {
         coin: &Coin,
         band: PxBand,
     ) -> Option<(u64, u64, Snapshot<InnerL4Order>)> {
-        self.order_book.snapshot_for_coin(coin, band).map(|snapshot| (self.time, self.height, snapshot))
+        self.order_book.snapshot_for_coin(coin, band).map(|snapshot| (self.latest.time, self.latest.height, snapshot))
     }
 
     /// Incremental variant: rebuilds variants only for `changed_coins` and reuses
@@ -180,7 +224,7 @@ impl OrderBookState {
                 active,
                 cache,
             );
-        (self.time, snapshots, recomputed, coin_set_changed)
+        (self.book_time(), snapshots, recomputed, coin_set_changed)
     }
 
     pub(super) fn compute_universe(&self) -> HashSet<Coin> {
@@ -235,7 +279,7 @@ impl OrderBookState {
             Some(c) => self.untriggered_orders.get(c).map(|m| m.values().cloned().collect()).unwrap_or_default(),
             None => self.untriggered_orders.values().flat_map(|m| m.values().cloned()).collect(),
         };
-        (self.time, self.height, orders)
+        (self.latest.time, self.latest.height, orders)
     }
 
     /// Number of coins tracked in the orderbook
@@ -245,20 +289,22 @@ impl OrderBookState {
 
     /// Cleanup stale pending entries to prevent unbounded memory growth.
     ///
-    /// Primary mechanism is AGE-based eviction: a half that has waited longer
-    /// than `PENDING_MAX_AGE` will never pair (the two streams skew by
-    /// milliseconds, not minutes). The old size-only force-clear nuked
-    /// genuinely in-flight young halves whenever a burst pushed the map over
-    /// the cap, forcing an avoidable 10-30s snapshot re-sync.
+    /// A pending half is dropped only once it provably can no longer pair: an
+    /// order's status and New diff share one block, so a half from block h is
+    /// done waiting when the OTHER stream has applied a block > h (strictly: a
+    /// block spans many lines, so `== h` may still deliver it). How long it
+    /// waited is irrelevant - during a node catch-up the two watchers drift
+    /// apart by minutes (2026-10-10: the old 60s wall-clock age dropped live
+    /// halves, and those orders never reached the book).
     ///
     /// Loss semantics differ per cache:
-    /// - Aged-out `pending_order_statuses` are expected orphans (statuses with
-    ///   `is_inserted_into_book() == true` whose order never rested, so no New
-    ///   diff ever comes) - evicted silently, NOT data loss.
-    /// - An aged-out `pending_new_diffs` entry means a New diff never got its
-    ///   status: the book is missing that order, which IS data loss.
+    /// - A status passed by the diff stream is an expected orphan (an order
+    ///   that never rested, e.g. a `FrontendMarket` "open") - dropped silently
+    ///   and counted, NOT data loss.
+    /// - A New diff passed by the status stream lost its status: the book is
+    ///   missing that order, which IS data loss.
     ///
-    /// The size caps remain as an OOM backstop; hitting one still force-clears
+    /// The size caps remain an OOM backstop only; hitting one still force-clears
     /// (fresh `HashMap::new()` so the high-water-mark bucket capacity is
     /// actually released) and counts as data loss.
     /// Also opportunistically compacts the orderbook slab allocators on the same
@@ -268,52 +314,67 @@ impl OrderBookState {
     /// Returns `true` when potentially-live data was evicted; the caller must
     /// treat this as data loss and mark the book for re-sync.
     pub(super) fn cleanup_stale_pending(&mut self) -> bool {
-        const MAX_PENDING_ORDERS: usize = 50_000;
-        const MAX_PENDING_DIFFS: usize = 10_000;
-        const PENDING_MAX_AGE: Duration = Duration::from_secs(60);
+        // ~3.5k resting orders/s on mainnet; one stream stalled for the longest
+        // catch-up seen (231s) is ~0.8M. Status entries are ~0.5-0.7KB each.
+        const PENDING_CAP: usize = 1_000_000;
+        let cleared = self.evict_pending(PENDING_CAP);
 
+        let compacted = self.order_book.compact_all();
+        if compacted > 0 {
+            let (live, cap) = self.order_book.slab_stats();
+            log::info!("Compacted {compacted} price-level slabs (live={live}, capacity={cap})");
+        }
+        cleared
+    }
+
+    fn evict_pending(&mut self, cap: usize) -> bool {
+        const ZEROED_MAX_AGE: Duration = Duration::from_secs(60);
         let mut cleared = false;
 
+        let diffs_applied = self.diffs.height;
         let before = self.pending_order_statuses.len();
-        self.pending_order_statuses.retain(|_, (_, at)| at.elapsed() < PENDING_MAX_AGE);
-        let aged_statuses = before - self.pending_order_statuses.len();
-        if aged_statuses > 0 {
-            // Expected orphans (order never rested -> no New diff): not data loss.
-            log::info!("Evicted {aged_statuses} aged pending_order_statuses entries (no matching BookDiff)");
+        self.pending_order_statuses.retain(|_, (_, block)| *block >= diffs_applied);
+        let orphans = before - self.pending_order_statuses.len();
+        if orphans > 0 {
+            crate::metrics::PENDING_ORPHANS_EVICTED_TOTAL.inc_by(orphans as u64);
+            log::debug!("Evicted {orphans} orphan pending_order_statuses (diff stream passed their block)");
         }
 
         // A zero-size Update whose Remove never followed: nothing to repair (the
-        // order is already off the book), just bound the map.
-        self.zeroed_awaiting_remove.retain(|_, at| at.elapsed() < PENDING_MAX_AGE);
+        // order is already off the book), just bound the map. Single-stream and
+        // metric-only, so its wall-clock age stays.
+        self.zeroed_awaiting_remove.retain(|_, at| at.elapsed() < ZEROED_MAX_AGE);
 
+        let statuses_applied = self.statuses.height;
         let before = self.pending_new_diffs.len();
-        self.pending_new_diffs.retain(|_, (_, _, _, at)| at.elapsed() < PENDING_MAX_AGE);
-        let aged_diffs = before - self.pending_new_diffs.len();
-        if aged_diffs > 0 {
-            // A New diff with no status in 60s: the order is missing from the book.
-            log::warn!("Evicted {aged_diffs} aged pending_new_diffs entries (status never arrived - data loss)");
+        self.pending_new_diffs.retain(|_, (_, _, _, block)| *block >= statuses_applied);
+        let lost = before - self.pending_new_diffs.len();
+        if lost > 0 {
+            log::warn!(
+                "Evicted {lost} pending_new_diffs: the status stream passed their block (status height \
+                 {statuses_applied}) without their status - data loss"
+            );
             cleared = true;
         }
 
-        if self.pending_order_statuses.len() > MAX_PENDING_ORDERS {
+        if self.pending_order_statuses.len() > cap {
             log::warn!(
-                "Clearing stale pending_order_statuses cache: {} entries (orphaned orders without matching BookDiffs)",
+                "Clearing pending_order_statuses at the {cap} cap: {} entries (status height {statuses_applied}, \
+                 diff height {diffs_applied})",
                 self.pending_order_statuses.len()
             );
             self.pending_order_statuses = rustc_hash::FxHashMap::default();
             cleared = true;
         }
 
-        if self.pending_new_diffs.len() > MAX_PENDING_DIFFS {
-            log::warn!("Clearing stale pending_new_diffs cache: {} entries", self.pending_new_diffs.len());
+        if self.pending_new_diffs.len() > cap {
+            log::warn!(
+                "Clearing pending_new_diffs at the {cap} cap: {} entries (status height {statuses_applied}, \
+                 diff height {diffs_applied})",
+                self.pending_new_diffs.len()
+            );
             self.pending_new_diffs = rustc_hash::FxHashMap::default();
             cleared = true;
-        }
-
-        let compacted = self.order_book.compact_all();
-        if compacted > 0 {
-            let (live, cap) = self.order_book.slab_stats();
-            log::info!("Compacted {compacted} price-level slabs (live={live}, capacity={cap})");
         }
         cleared
     }
@@ -334,7 +395,7 @@ impl OrderBookState {
         >,
     ) {
         let bbos = self.order_book.get_bbos_for_coins(coins);
-        (self.time, bbos)
+        (self.book_time(), bbos)
     }
 
     /// HFT-specific: Process OrderStatuses independently without block synchronization
@@ -345,11 +406,8 @@ impl OrderBookState {
         let time = batch.block_time();
         let mut changed_coins = HashSet::new();
 
-        // Update height/time to track progress (>= ensures time updates even at same height)
-        if height >= self.height {
-            self.height = height;
-            self.time = time;
-        }
+        self.statuses.advance(height, time);
+        self.latest.advance(height, time);
 
         for order_status in batch.events() {
             let oid = Oid::new(order_status.order.oid);
@@ -415,7 +473,7 @@ impl OrderBookState {
                 log::debug!("Order added (status arrived after diff): oid={:?} coin={:?}", oid, order_coin);
             } else if order_status.is_inserted_into_book() {
                 // Diff hasn't arrived yet - cache the OrderStatus
-                self.pending_order_statuses.insert(oid, (order_status, Instant::now()));
+                self.pending_order_statuses.insert(oid, (order_status, height));
             }
         }
         Ok(changed_coins)
@@ -426,17 +484,11 @@ impl OrderBookState {
         self.pending_order_statuses.contains_key(oid)
     }
 
-    /// Backdate every pending entry's insertion time, so tests can exercise
-    /// age-based eviction without sleeping.
+    /// Backdate the zero-update records (the only wall-clock-aged map), so
+    /// tests can exercise their eviction without sleeping.
     #[cfg(test)]
-    pub(crate) fn age_pending_entries(&mut self, by: Duration) {
+    pub(crate) fn age_zeroed_entries(&mut self, by: Duration) {
         let backdated = Instant::now().checked_sub(by).unwrap_or_else(Instant::now);
-        for (_, at) in self.pending_order_statuses.values_mut() {
-            *at = backdated;
-        }
-        for (_, _, _, at) in self.pending_new_diffs.values_mut() {
-            *at = backdated;
-        }
         for at in self.zeroed_awaiting_remove.values_mut() {
             *at = backdated;
         }
@@ -455,11 +507,8 @@ impl OrderBookState {
         let time = batch.block_time();
         let mut changed_coins = HashSet::new();
 
-        // Update height/time to track progress (>= ensures time updates even at same height)
-        if height >= self.height {
-            self.height = height;
-            self.time = time;
-        }
+        self.diffs.advance(height, time);
+        self.latest.advance(height, time);
 
         for diff in batch.events() {
             let oid = diff.oid();
@@ -526,7 +575,7 @@ impl OrderBookState {
                         changed_coins.insert(coin);
                     } else {
                         // Status hasn't arrived yet - cache the diff size + resting px + queue anchor
-                        self.pending_new_diffs.insert(oid.clone(), (sz, diff_px, insert_before, Instant::now()));
+                        self.pending_new_diffs.insert(oid.clone(), (sz, diff_px, insert_before, height));
                     }
                 }
                 // An order whose New diff still waits for its status is not on the book
@@ -665,6 +714,41 @@ mod tests {
             "block_number": 100,
             "events": diffs
         })).unwrap()
+    }
+
+    /// Block b's time: 100ms per block from the fixtures' base time.
+    fn block_time_str(block: u64) -> String {
+        let base = NaiveDateTime::parse_from_str("2024-01-15 10:30:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        (base + chrono::Duration::milliseconds(i64::try_from(block).unwrap() * 100))
+            .format("%Y-%m-%dT%H:%M:%S%.9f")
+            .to_string()
+    }
+
+    fn block_time_ms(block: u64) -> u64 {
+        let time = NaiveDateTime::parse_from_str(&block_time_str(block), "%Y-%m-%dT%H:%M:%S%.9f").unwrap();
+        u64::try_from(time.and_utc().timestamp_millis()).unwrap()
+    }
+
+    fn status_batch_at(block: u64, statuses: Vec<NodeDataOrderStatus>) -> Batch<NodeDataOrderStatus> {
+        serde_json::from_value(serde_json::json!({
+            "local_time": block_time_str(block),
+            "block_time": block_time_str(block),
+            "block_number": block,
+            "events": statuses
+        })).unwrap()
+    }
+
+    fn diff_batch_at(block: u64, diffs: Vec<NodeDataOrderDiff>) -> Batch<NodeDataOrderDiff> {
+        serde_json::from_value(serde_json::json!({
+            "local_time": block_time_str(block),
+            "block_time": block_time_str(block),
+            "block_number": block,
+            "events": diffs
+        })).unwrap()
+    }
+
+    fn new_diff(coin: &str, oid: u64) -> NodeDataOrderDiff {
+        make_order_diff(coin, oid, OrderDiff::New { sz: "1.0".to_string(), insert_before: None })
     }
 
     /// Diff fixture with custom user/px (for special-address / resting-px tests).
@@ -1218,7 +1302,7 @@ mod tests {
         let fill = make_order_diff("BTC", 1, OrderDiff::Update { orig_sz: "5.0".to_string(), new_sz: "0.0".to_string() });
         state.apply_order_diffs_hft(make_diff_batch(vec![fill])).unwrap();
 
-        state.age_pending_entries(Duration::from_secs(61));
+        state.age_zeroed_entries(Duration::from_secs(61));
         assert!(!state.cleanup_stale_pending(), "an unpaired zero update loses nothing");
         assert!(state.zeroed_awaiting_remove.is_empty());
     }
@@ -1321,30 +1405,115 @@ mod tests {
 
     // ==================== Cleanup Tests ====================
 
+    /// 2026-10-10 regression: during a node catch-up the two book streams drift
+    /// apart by minutes inside the server. Whichever leads, every order must
+    /// still pair however many cleanups run while the other stream catches up.
     #[test]
-    fn test_cleanup_evicts_aged_statuses_silently() {
-        let mut state = empty_state();
-        for i in 0..100u64 {
-            let status = make_order_status("BTC", i, "open");
-            state.apply_order_statuses_hft(make_status_batch(vec![status])).unwrap();
+    fn test_catch_up_drift_pairs_every_order_in_either_lead() {
+        for statuses_lead in [true, false] {
+            let mut state = empty_state();
+            let lines = |block: u64| [block * 10, block * 10 + 1]; // two lines per block
+            let feed_statuses = |state: &mut OrderBookState| {
+                for block in 1..=100 {
+                    for oid in lines(block) {
+                        state.apply_order_statuses_hft(status_batch_at(block, vec![make_order_status("BTC", oid, "open")])).unwrap();
+                    }
+                    assert!(!state.cleanup_stale_pending(), "statuses_lead={statuses_lead} block={block}");
+                }
+            };
+            let feed_diffs = |state: &mut OrderBookState| {
+                for block in 1..=100 {
+                    for oid in lines(block) {
+                        state.apply_order_diffs_hft(diff_batch_at(block, vec![new_diff("BTC", oid)])).unwrap();
+                    }
+                    assert!(!state.cleanup_stale_pending(), "statuses_lead={statuses_lead} block={block}");
+                }
+            };
+            if statuses_lead {
+                feed_statuses(&mut state);
+                feed_diffs(&mut state);
+            } else {
+                feed_diffs(&mut state);
+                feed_statuses(&mut state);
+            }
+            assert_eq!(state.order_count(), 200, "statuses_lead={statuses_lead}");
+            assert_eq!((state.pending_order_statuses_count(), state.pending_new_diffs_count()), (0, 0));
         }
-        state.age_pending_entries(std::time::Duration::from_secs(61));
-        // Aged statuses are expected orphans (order never rested) - NOT data loss.
-        assert!(!state.cleanup_stale_pending(), "aged status eviction must not force a re-sync");
-        assert_eq!(state.pending_order_statuses_count(), 0);
+    }
+
+    /// An orphan status (the order never rested) waits while more lines of its
+    /// block may come, and is dropped silently once the diff stream applies a
+    /// later block.
+    #[test]
+    fn test_orphan_status_dropped_only_after_diff_stream_passes_its_block() {
+        let mut state = empty_state();
+        let orphans = || crate::metrics::PENDING_ORPHANS_EVICTED_TOTAL.get();
+        let before = orphans();
+        state.apply_order_statuses_hft(status_batch_at(10, vec![make_order_status("BTC", 1, "open")])).unwrap();
+
+        state.apply_order_diffs_hft(diff_batch_at(10, vec![new_diff("ETH", 2)])).unwrap();
+        assert!(!state.cleanup_stale_pending());
+        assert!(state.pending_order_statuses_has(&Oid::new(1)), "block 10 may still carry its New diff");
+
+        state.apply_order_diffs_hft(diff_batch_at(11, Vec::new())).unwrap();
+        assert!(!state.cleanup_stale_pending(), "an orphan status is not data loss");
+        assert!(!state.pending_order_statuses_has(&Oid::new(1)));
+        assert!(orphans() > before, "counted (process-global registry: delta)");
+    }
+
+    /// A New diff whose status never comes is data loss - but only once the
+    /// status stream has applied a later block.
+    #[test]
+    fn test_new_diff_without_status_is_loss_once_status_stream_passes_its_block() {
+        let mut state = empty_state();
+        state.apply_order_diffs_hft(diff_batch_at(10, vec![new_diff("BTC", 1)])).unwrap();
+
+        state.apply_order_statuses_hft(status_batch_at(10, vec![make_order_status("ETH", 2, "filled")])).unwrap();
+        assert!(!state.cleanup_stale_pending(), "block 10 may still carry its status");
+        assert!(state.pending_new_diffs_has(&Oid::new(1)));
+
+        state.apply_order_statuses_hft(status_batch_at(11, Vec::new())).unwrap();
+        assert!(state.cleanup_stale_pending(), "the status stream passed block 10: the order is lost");
+        assert_eq!(state.pending_new_diffs_count(), 0);
     }
 
     #[test]
-    fn test_cleanup_evicts_aged_diffs_as_data_loss() {
+    fn test_cap_overflow_clears_and_counts_as_loss() {
         let mut state = empty_state();
-        for i in 0..100u64 {
-            let diff = make_order_diff("BTC", i, OrderDiff::New { sz: "1.0".to_string(), insert_before: None });
-            state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
+        for oid in 0..6 {
+            state.apply_order_statuses_hft(status_batch_at(100, vec![make_order_status("BTC", oid, "open")])).unwrap();
         }
-        state.age_pending_entries(std::time::Duration::from_secs(61));
-        // A New diff whose status never arrived means the book is missing an order.
-        assert!(state.cleanup_stale_pending(), "aged diff eviction is data loss and must trigger a re-sync");
-        assert_eq!(state.pending_new_diffs_count(), 0);
+        assert!(!state.evict_pending(6), "at the cap: kept");
+        assert_eq!(state.pending_order_statuses_count(), 6);
+        state.apply_order_statuses_hft(status_batch_at(100, vec![make_order_status("BTC", 6, "open")])).unwrap();
+        assert!(state.evict_pending(6), "over the cap: cleared as data loss");
+        assert_eq!(state.pending_order_statuses_count(), 0);
+    }
+
+    /// l2/bbo frames carry the block time both streams applied; L4 snapshots
+    /// keep the furthest (time, height), their splice point for L4 diffs.
+    #[test]
+    fn test_frames_stamp_the_slower_stream_l4_keeps_the_furthest() {
+        let mut state = empty_state();
+        state.apply_order_statuses_hft(status_batch_at(50, vec![make_order_status("BTC", 1, "open")])).unwrap();
+        state.apply_order_diffs_hft(diff_batch_at(40, vec![new_diff("BTC", 2)])).unwrap();
+        state.apply_order_statuses_hft(status_batch_at(40, vec![make_order_status("BTC", 2, "open")])).unwrap();
+
+        assert_eq!((state.status_height(), state.diff_height()), (50, 40));
+        assert_eq!(state.get_bbos_for_coins(&HashSet::from([Coin::new("BTC")])).0, block_time_ms(40));
+        let (l2_time, _, _, _) = state.l2_snapshots_incremental(&HashSet::new(), &HashSet::new(), &mut HashMap::new());
+        assert_eq!(l2_time, block_time_ms(40));
+        let (l4_time, l4_height, _) = state.compute_snapshot_for_coin(&Coin::new("BTC"), PxBand::default()).unwrap();
+        assert_eq!((l4_time, l4_height), (block_time_ms(50), 50));
+    }
+
+    #[test]
+    fn test_snapshot_install_starts_both_streams_at_its_height() {
+        let snapshots = Snapshots::new(HashMap::new());
+        let time = block_time_ms(500);
+        let state = OrderBookState::from_snapshot(snapshots, Vec::new(), 500, time, true, false, true);
+        assert_eq!((state.status_height(), state.diff_height(), state.height()), (500, 500, 500));
+        assert_eq!(state.book_time(), time);
     }
 
     #[test]
