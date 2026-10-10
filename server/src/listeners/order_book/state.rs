@@ -338,9 +338,9 @@ impl OrderBookState {
     /// The size caps remain an OOM backstop only; hitting one still force-clears
     /// (fresh `HashMap::new()` so the high-water-mark bucket capacity is
     /// actually released) and counts as data loss.
-    /// Also opportunistically compacts the orderbook slab allocators on the same
-    /// cadence, since both are unbounded-growth vectors that the maintenance tick
-    /// is responsible for bounding.
+    /// Also evicts books left empty (O(coins)). Slab compaction no longer runs
+    /// here: a sweep over every level of every coin on this cadence stalled the
+    /// listener for milliseconds (see `PriceLevel::remove`).
     ///
     /// Returns `true` when potentially-live data was evicted; the caller must
     /// treat this as data loss and mark the book for re-sync.
@@ -350,11 +350,7 @@ impl OrderBookState {
         const PENDING_CAP: usize = 1_000_000;
         let cleared = self.evict_pending(PENDING_CAP);
 
-        let compacted = self.order_book.compact_all();
-        if compacted > 0 {
-            let (live, cap) = self.order_book.slab_stats();
-            log::info!("Compacted {compacted} price-level slabs (live={live}, capacity={cap})");
-        }
+        self.order_book.evict_empty_books();
         cleared
     }
 

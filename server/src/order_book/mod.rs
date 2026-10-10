@@ -179,21 +179,8 @@ impl<O: InnerOrder> OrderBook<O> {
         )
     }
 
-    /// Compact every price-level's `LinkedList` slab. Returns the number of lists
-    /// that were actually rebuilt (lists below the fragmentation threshold are
-    /// skipped). See `LinkedList::compact` for the threshold.
-    pub(crate) fn compact(&mut self) -> usize {
-        let mut compacted = 0usize;
-        for level in self.bids.values_mut().chain(self.asks.values_mut()) {
-            if level.compact() {
-                compacted += 1;
-            }
-        }
-        compacted
-    }
-
     /// Returns (total live nodes, total slab capacity) summed across every level.
-    /// Useful for tracking fragmentation in Prometheus.
+    #[cfg(test)]
     pub(crate) fn slab_stats(&self) -> (usize, usize) {
         let mut live = 0usize;
         let mut cap = 0usize;
@@ -987,21 +974,28 @@ mod tests {
         }
     }
 
+    /// Draining a deep level compacts its slab on the way down (no sweep), and
+    /// compaction keeps the level's aggregate and queue order.
     #[test]
-    fn test_compact_preserves_level_aggregates() {
+    fn test_cancels_compact_the_level_and_keep_aggregates_and_order() {
         let mut book = OrderBook::new();
         let mut factory = OrderFactory::default();
-        // Build a deep level, then drain most of it so the slab is heavily
-        // over-allocated and compaction actually fires.
         for _ in 0..500u64 {
             book.add_order(factory.order(100, 50, Side::Bid));
         }
+        let (_, peak_capacity) = book.slab_stats();
         for i in 0..450u64 {
             book.cancel_order(Oid::new(i));
         }
-        let before = book.get_bbo();
-        assert!(book.compact() > 0, "the churned level should have been compacted");
-        assert_eq!(book.get_bbo(), before, "compaction must not change level aggregates");
+        let (live, capacity) = book.slab_stats();
+        assert_eq!(live, 50);
+        assert!(capacity <= 2 * live + 64 && capacity < peak_capacity, "capacity {capacity} after peak {peak_capacity}");
+        let mut single = OrderBook::new();
+        single.add_order(OrderFactory::default().order(100, 50, Side::Bid));
+        let unit = single.get_bbo().0.map(|(_, sz, _)| sz.value()).expect("one bid");
+        assert_eq!(book.get_bbo().0.map(|(_, sz, n)| (sz.value(), n)), Some((unit * 50, 50)), "aggregate of the 50 left");
+        let oids: Vec<u64> = book.to_snapshot().as_ref()[0].iter().map(|order| order.oid().value()).collect();
+        assert_eq!(oids, (450..500).collect::<Vec<_>>(), "queue order survives the rebuild");
     }
 
     // ==================== Performance / Stress Tests ====================

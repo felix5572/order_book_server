@@ -118,29 +118,12 @@ impl<O: InnerOrder> OrderBooks<O> {
             .collect()
     }
 
-    /// Compact slab allocators across every coin's orderbook. Returns the number
-    /// of price-level lists that were actually rebuilt. Cheap when nothing is
-    /// fragmented, so safe to call on a slow maintenance cadence.
-    ///
-    /// Also evicts any books whose order count dropped to zero — the per-event
-    /// path covers single-order eviction, but a stuck book that emptied during
-    /// a missed-event window is otherwise pinned forever.
-    pub(crate) fn compact_all(&mut self) -> usize {
-        let compacted: usize = self.order_books.values_mut().map(|book| book.compact()).sum();
+    /// Evicts books whose order count dropped to zero: the per-event path covers
+    /// single-order eviction, but a book that emptied during a missed-event
+    /// window is otherwise pinned forever. O(coins); slab compaction happens
+    /// per level on removal (`PriceLevel::remove`).
+    pub(crate) fn evict_empty_books(&mut self) {
         self.order_books.retain(|_, book| book.order_count() > 0);
-        compacted
-    }
-
-    /// Returns (total live nodes, total slab capacity) summed across all coins.
-    pub(crate) fn slab_stats(&self) -> (usize, usize) {
-        let mut live = 0usize;
-        let mut cap = 0usize;
-        for book in self.order_books.values() {
-            let (l, c) = book.slab_stats();
-            live += l;
-            cap += c;
-        }
-        (live, cap)
     }
 }
 
@@ -635,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_all_evicts_empty_books() {
+    fn test_evict_empty_books() {
         let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
         // Seed two coins, then drain one without triggering per-event eviction
         // (we cancel via OrderBook directly so the MultiBook path doesn't run).
@@ -645,8 +628,8 @@ mod tests {
         assert_eq!(books.as_ref().len(), 2);
         // Cancel order 1 via MultiBook to trigger eviction of the BTC book.
         books.cancel_order(Oid::new(1), Coin::new("BTC"));
-        // ETH still has an order; compact_all should leave it alone.
-        books.compact_all();
+        // ETH still has an order; eviction should leave it alone.
+        books.evict_empty_books();
         assert!(books.as_ref().contains_key(&Coin::new("ETH")));
         assert!(!books.as_ref().contains_key(&Coin::new("BTC")));
     }

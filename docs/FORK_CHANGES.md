@@ -202,6 +202,29 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
 
 三者取样集合不同, 只能并排对比各入口的累计滞后来辅助定位。分位数之差不是各段耗时(审查 000265)。
 
+## 2026-10-10 价位内存整理改为删单时就地进行(去掉每 1000 批一次的全量扫描)
+
+**定位**(000265 的分阶段延迟 + perf):
+- 节点写行 → watcher 读到: p50 0.25ms。
+- 节点写行 → 应用(`node_line_lag_seconds{stage="apply"}`, 累计滞后): p50 3.6–4.4ms, p90 8–9ms。
+- 但解析加应用实测只有约 1.5ms/块(真实行解析 0.4–0.9µs, 应用 0.5–0.9µs)。
+- perf 20s 采样: 约 30% 样本在 `apply_event_batch` 自身(内联代码), 约合一个核的 25%。
+  热点是遍历价位 B 树的循环, 对应 `cleanup_stale_pending` 里每 1000 批(约 66ms 一次)调用的 `compact_all()`。
+- `compact_all()` 遍历全部币种的全部价位, 只为检查是否需要整理。
+  43.8 万单的本地测试盘口上一次耗时 1.4–8ms, 而线上现在约 53 万单、1217 个币。
+  它在监听锁内运行, 期间事件全部排队。
+
+**改动**:
+- `PriceLevel::remove` 删单后调用 `LinkedList::compact()`:
+  - 阈值检查是 O(1);
+  - 超阈值才重建, O(该价位), 保持队列顺序。
+  - 只有删单会让价位变"稀疏", 所以在这里整理就够了。
+- 周期任务只保留清理空盘口: `MultiBook::evict_empty_books()`, O(币种数)。
+- 删去 `compact_all`、`OrderBook::compact`、`PriceLevel::compact` 及 slab 统计; 统计函数只留测试用。
+- "Compacted N price-level slabs" 日志随之消失。
+
+**预期**: 监听器不再每 66ms 卡几毫秒, 应用滞后与 l2 发布滞后应明显下降(用 `node_line_lag_seconds` 验收)。
+
 ## 已移植(2026-07-05, 底座 47ce696 之上)
 
 1. **官方 PR#9:新单进簿价用 diff 的 px**(status px 对 trigger/转化单可能不同)。

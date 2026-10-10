@@ -182,6 +182,7 @@ impl<K: Clone + Eq + Hash, T: Clone> LinkedList<K, T> {
     }
 
     /// Number of live nodes in the slab.
+    #[cfg(test)]
     pub(crate) fn slab_len(&self) -> usize {
         self.slab.len()
     }
@@ -190,6 +191,7 @@ impl<K: Clone + Eq + Hash, T: Clone> LinkedList<K, T> {
     /// `Slab::remove` marks a slot free but never releases the underlying `Vec`,
     /// so after many add/cancel cycles this grows to the high-water mark of
     /// concurrent orders. Compaction is the only way to reclaim it.
+    #[cfg(test)]
     pub(crate) fn slab_capacity(&self) -> usize {
         self.slab.capacity()
     }
@@ -207,7 +209,7 @@ impl<K: Clone + Eq + Hash, T: Clone> LinkedList<K, T> {
 
     /// Rebuild the slab from scratch when it is heavily over-allocated, releasing
     /// the slots that `slab::Slab::remove` left behind. No-op below the threshold
-    /// so this is safe to call on every maintenance tick.
+    /// (an O(1) check), so the level calls it after every removal.
     pub(crate) fn compact(&mut self) -> bool {
         if self.slab.capacity() <= 2 * self.slab.len() + 64 {
             return false;

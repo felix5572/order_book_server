@@ -53,10 +53,17 @@ impl<O: InnerOrder> PriceLevel<O> {
     }
 
     /// Remove an order by id, decrementing the aggregate by its current size.
+    /// Then releases this level's slab if removals left it heavily
+    /// over-allocated (O(1) check; a rebuild is O(level) and keeps queue order).
+    /// Compacting here, where the level shrinks, replaced a sweep over every
+    /// level of every coin every 1000 batches: 1.4-8ms each on a 438k-order
+    /// test book, and the hot spot of a mainnet perf profile (~25% of a core) -
+    /// a suspected contributor to the l2 delay (2026-10-10).
     pub(crate) fn remove(&mut self, oid: Oid) -> Option<O> {
         let removed = self.orders.remove_node(oid);
         if let Some(order) = &removed {
             self.total_sz = self.total_sz.saturating_sub(order.sz().value());
+            self.orders.compact();
         }
         self.debug_validate();
         removed
@@ -103,6 +110,8 @@ impl<O: InnerOrder> PriceLevel<O> {
                 break;
             }
         }
+        // Filled makers left this level like a remove does (see `remove`).
+        self.orders.compact();
         self.debug_validate();
     }
 
@@ -124,17 +133,12 @@ impl<O: InnerOrder> PriceLevel<O> {
         self.orders.to_vec()
     }
 
-    /// Compaction preserves the order set, so the aggregate is unaffected.
-    pub(crate) fn compact(&mut self) -> bool {
-        let compacted = self.orders.compact();
-        self.debug_validate();
-        compacted
-    }
-
+    #[cfg(test)]
     pub(crate) fn slab_len(&self) -> usize {
         self.orders.slab_len()
     }
 
+    #[cfg(test)]
     pub(crate) fn slab_capacity(&self) -> usize {
         self.orders.slab_capacity()
     }
