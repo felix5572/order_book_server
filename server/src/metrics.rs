@@ -181,6 +181,14 @@ lazy_static! {
         "Oracle update lines lost (watcher discard or oversize batch drop)"
     ).unwrap();
 
+    /// L2 publishes by what made them due (design 000260): `quiet` = the book
+    /// streams went quiet, `max_delay` = lines kept flowing, `recheck` = a
+    /// deferred publish found a subscriber.
+    pub static ref L2_FLUSH_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("l2_flush_total", "L2 publishes by trigger"),
+        &["trigger"]
+    ).expect("metric can be created");
+
     pub static ref ORDERBOOK_DESYNCS_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_desyncs_total", "Times the order book was marked out-of-sync"),
         &["reason"]
@@ -358,6 +366,7 @@ pub fn register_metrics() {
     // Latency metrics
     REGISTRY.register(Box::new(BBO_BROADCAST_LATENCY.clone())).ok();
     REGISTRY.register(Box::new(L2_BROADCAST_LATENCY.clone())).ok();
+    REGISTRY.register(Box::new(L2_FLUSH_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(L2_CONFLATION_BATCH_SIZE.clone())).ok();
     REGISTRY.register(Box::new(EVENT_PROCESSING_LATENCY.clone())).ok();
 

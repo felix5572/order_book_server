@@ -437,12 +437,13 @@ curl http://localhost:9090/metrics
 | | `orderbook_stream_skew_blocks` | Applied statuses height minus applied diffs height: how far the two book streams have drifted in this process |
 | | `orderbook_book_trusted` | 1 = no known unrecovered data loss; 0 = the book is withheld until a covering re-sync |
 | | `orderbook_untrusted_seconds_total` | Seconds the book was withheld for known data loss (added when each period ends) |
-| | `orderbook_pending_orphans_evicted_total` | Pending statuses dropped once the diff stream passed their block (orders that never rested; not data loss) |
+| | `orderbook_pending_orphans_evicted_total` | Pending statuses dropped unpaired once both streams passed their block, except orders settled in that block and statuses replayed after a node restart; expected to stay ~0 |
 | | `uptime_seconds` | Server uptime in seconds |
 | | `server_start_time_seconds` | Server start timestamp (unix) |
 | **Latency** | `bbo_broadcast_latency_seconds` | BBO broadcast latency histogram |
 | | `l2_broadcast_latency_seconds` | L2 broadcast latency histogram |
-| | `l2_conflation_batch_size` | Coins rebuilt per L2 broadcast (changed within the 50 ms throttle window) |
+| | `l2_conflation_batch_size` | Coins rebuilt per L2 broadcast (changed since the previous one) |
+| | `l2_flush_total{trigger}` | L2 publishes by trigger: `quiet` (book streams quiet 2 ms), `max_delay` (20 ms of continuous lines), `recheck` (a deferred publish found a subscriber) |
 | | `event_processing_latency_seconds{event_type}` | Per-event processing latency |
 | **File Watcher** | `file_events_total{source}` | File events received by source |
 | | `file_lines_parsed_total{source}` | Lines parsed from files by source |
