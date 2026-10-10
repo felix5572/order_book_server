@@ -134,7 +134,7 @@ lazy_static! {
     /// a New diff: orders that never rested (expected orphans, not data loss).
     pub static ref PENDING_ORPHANS_EVICTED_TOTAL: IntCounter = IntCounter::new(
         "orderbook_pending_orphans_evicted_total",
-        "Pending statuses dropped unpaired after both streams passed their block, except orders settled in that block (filled on entry)"
+        "Pending statuses dropped unpaired after both streams passed their block, except orders settled in that block (filled on entry) and statuses replayed after a node restart"
     ).expect("metric can be created");
 
     /// 1 = no known unrecovered data loss; 0 = the book is known to miss

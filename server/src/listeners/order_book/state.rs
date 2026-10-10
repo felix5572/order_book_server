@@ -42,6 +42,12 @@ struct PendingStatus {
     // expected, not an orphan. A New diff that does come still pairs with it
     // (rested, then filled in the same block).
     settled_in_block: bool,
+    // Arrived below the status stream's high-water mark: a node restart
+    // rewriting blocks already applied (within one run the stream never goes
+    // back, 128M lines checked 2026-10-10). Its New diff may already have been
+    // evicted as lost, which marks the desync, so its eviction is not counted
+    // as an orphan (one replay counted ~4M, 2026-10-10).
+    replayed: bool,
 }
 
 pub(super) struct OrderBookState {
@@ -364,7 +370,7 @@ impl OrderBookState {
         let mut orphans = 0;
         self.pending_order_statuses.retain(|_, pending| {
             let keep = pending.block >= both_applied;
-            if !keep && !pending.settled_in_block {
+            if !keep && !pending.settled_in_block && !pending.replayed {
                 orphans += 1;
             }
             keep
@@ -446,6 +452,7 @@ impl OrderBookState {
         let time = batch.block_time();
         let mut changed_coins = HashSet::new();
 
+        let replayed = height < self.statuses.height;
         self.statuses.advance(height, time);
         self.latest.advance(height, time);
 
@@ -513,7 +520,7 @@ impl OrderBookState {
                 log::debug!("Order added (status arrived after diff): oid={:?} coin={:?}", oid, order_coin);
             } else if order_status.is_inserted_into_book() {
                 // Diff hasn't arrived yet - cache the OrderStatus
-                let pending = PendingStatus { status: order_status, block: height, settled_in_block: false };
+                let pending = PendingStatus { status: order_status, block: height, settled_in_block: false, replayed };
                 self.pending_order_statuses.insert(oid, pending);
             } else if let Some(pending) = self.pending_order_statuses.get_mut(&oid)
                 && pending.block == height
@@ -1564,6 +1571,21 @@ mod tests {
         state.apply_order_statuses_hft(status_batch_at(11, Vec::new())).unwrap();
         assert!(state.cleanup_stale_pending(), "the status stream passed block 10: the order is lost");
         assert_eq!(state.pending_new_diffs_count(), 0);
+    }
+
+    /// A replayed status (node restart, below the status high-water mark) is
+    /// evicted unpaired without counting as an orphan.
+    #[test]
+    fn test_replayed_status_below_the_status_high_water_mark_is_not_an_orphan() {
+        let mut state = empty_state();
+        state.apply_order_statuses_hft(status_batch_at(20, Vec::new())).unwrap();
+        state.apply_order_statuses_hft(status_batch_at(10, vec![make_order_status("BTC", 1, "open")])).unwrap();
+        assert!(state.pending_order_statuses_has(&Oid::new(1)), "a replayed status can still pair");
+
+        state.apply_order_diffs_hft(diff_batch_at(21, Vec::new())).unwrap();
+        state.apply_order_statuses_hft(status_batch_at(21, Vec::new())).unwrap();
+        assert!(!state.cleanup_stale_pending());
+        assert_eq!((state.pending_order_statuses_count(), state.orphan_statuses), (0, 0));
     }
 
     /// A node restart rewrites blocks below the status stream's high-water
