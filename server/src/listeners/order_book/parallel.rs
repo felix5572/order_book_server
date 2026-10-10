@@ -1,7 +1,10 @@
 // HFT-optimized parallel file watcher
 // Each event source runs on its own thread for maximum throughput
 
-use crate::types::node_data::EventSource;
+use crate::{
+    metrics::NODE_LINE_LAG,
+    types::node_data::{EventSource, line_local_time_unix_nanos},
+};
 use log::{error, info, warn};
 use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
 use std::{
@@ -51,6 +54,19 @@ pub(super) fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Seconds since a node write stamped `node_unix_nanos` (same host clock).
+pub(super) fn seconds_since_node_write(node_unix_nanos: i64) -> f64 {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    (i128::try_from(now).unwrap_or(i128::MAX) - i128::from(node_unix_nanos)) as f64 / 1e9
+}
+
+/// How fresh the data is when the watcher sees it: lag of the newest line read.
+fn observe_read_lag(source: EventSource, lines: &[String]) {
+    if let Some(node_ns) = lines.last().and_then(|line| line_local_time_unix_nanos(line)) {
+        NODE_LINE_LAG.with_label_values(&["read", source.metric_label()]).observe(seconds_since_node_write(node_ns));
+    }
 }
 
 /// File reader state for a single source
@@ -499,6 +515,7 @@ pub(super) fn spawn_file_watcher(
 
                         // EVENT-DRIVEN: Read data when inotify fires modify event
                         let lines = reader.on_modify();
+                        observe_read_lag(source, &lines);
                         for line in lines {
                             let event = match source {
                                 EventSource::OrderStatuses => FileEvent::OrderStatus(line),
@@ -524,6 +541,7 @@ pub(super) fn spawn_file_watcher(
                     // Fallback polling - safety net for missed events
                     // This runs every 500ms instead of every 10ms
                     let lines = reader.on_modify();
+                    observe_read_lag(source, &lines);
                     for line in lines {
                         let event = match source {
                             EventSource::OrderStatuses => FileEvent::OrderStatus(line),

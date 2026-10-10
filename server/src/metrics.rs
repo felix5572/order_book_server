@@ -48,9 +48,9 @@ lazy_static! {
             .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0])
     ).expect("metric can be created");
 
-    /// Number of coins rebuilt per L2 broadcast (conflation batch size). Tracks how
-    /// many coins changed within each 50ms throttle window; spikes toward the
-    /// universe size indicate full-universe windows (lock-duration pressure).
+    /// Number of coins rebuilt per L2 broadcast (conflation batch size): coins
+    /// changed since the previous publish; spikes toward the universe size
+    /// indicate full-universe windows (lock-duration pressure).
     pub static ref L2_CONFLATION_BATCH_SIZE: Histogram = Histogram::with_opts(
         HistogramOpts::new("l2_conflation_batch_size", "Coins rebuilt per L2 broadcast")
             .buckets(vec![1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 150.0])
@@ -180,6 +180,21 @@ lazy_static! {
         "obs_oracle_data_loss_total",
         "Oracle update lines lost (watcher discard or oversize batch drop)"
     ).unwrap();
+
+    /// Seconds from the node writing a line (its `local_time`, same host clock) to
+    /// a stage here: `read` = the watcher read it (newest line of each read),
+    /// `apply` = the batch was applied to the book (once per book batch),
+    /// `publish` = an l2 publish was built and handed to the broadcast channel
+    /// (newest applied book line; not socket delivery). Each stage samples a
+    /// different set, so these are cumulative lags to compare side by side -
+    /// quantile differences are not per-stage durations (review 000265).
+    pub static ref NODE_LINE_LAG: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("node_line_lag_seconds", "Node line local_time to this server stage")
+            .buckets(vec![
+                0.0005, 0.001, 0.0015, 0.002, 0.003, 0.004, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.03, 0.05, 0.1, 0.25, 1.0, 5.0,
+            ]),
+        &["stage", "source"]
+    ).expect("metric can be created");
 
     /// L2 publishes by what made them due (design 000260): `quiet` = the book
     /// streams went quiet, `max_delay` = lines kept flowing, `recheck` = a
@@ -367,6 +382,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(BBO_BROADCAST_LATENCY.clone())).ok();
     REGISTRY.register(Box::new(L2_BROADCAST_LATENCY.clone())).ok();
     REGISTRY.register(Box::new(L2_FLUSH_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(NODE_LINE_LAG.clone())).ok();
     REGISTRY.register(Box::new(L2_CONFLATION_BATCH_SIZE.clone())).ok();
     REGISTRY.register(Box::new(EVENT_PROCESSING_LATENCY.clone())).ok();
 

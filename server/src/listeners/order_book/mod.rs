@@ -2,7 +2,7 @@ use crate::{
     listeners::order_book::state::OrderBookState,
     metrics::{
         BBO_BROADCAST_LATENCY, EVENT_PROCESSING_LATENCY, EVENTS_PROCESSED_TOTAL, FILE_EVENTS_TOTAL,
-        FILE_LINES_PARSED_TOTAL, INSERT_BEFORE_FALLBACK_TOTAL, L2_BROADCAST_LATENCY, L2_CONFLATION_BATCH_SIZE, L2_FLUSH_TOTAL,
+        FILE_LINES_PARSED_TOTAL, INSERT_BEFORE_FALLBACK_TOTAL, L2_BROADCAST_LATENCY, L2_CONFLATION_BATCH_SIZE, L2_FLUSH_TOTAL, NODE_LINE_LAG,
         LAST_EVENT_APPLIED_MS, LISTENER_LOCK_WAIT, ORACLE_DATA_LOSS_TOTAL, ORDERBOOK_COINS_COUNT, ORDERBOOK_DESYNCS_TOTAL,
         ORDERBOOK_BOOK_TRUSTED, ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL, ORDERBOOK_READY, ORDERBOOK_RESYNC_IN_FLIGHT,
         ORDERBOOK_STREAM_HEIGHT, ORDERBOOK_UNTRUSTED_SECONDS_TOTAL,
@@ -494,6 +494,9 @@ pub(crate) struct OrderBookListener {
     // the full set, so no coin starves between publishes. Mutated only under the
     // listener lock (like l2_snapshot_cache). Bounded by the universe size.
     l2_conflation: l2_conflation::L2Conflation,
+    // Node write time (unix ns) of the newest book line applied to the state,
+    // for the publish stage of NODE_LINE_LAG.
+    last_book_line_node_ns: Option<i64>,
     // Shared registry of L2 variant shapes any live connection wants. Read at flush
     // time so we compute only subscribed variants per coin instead of all 7.
     active_l2_params: ActiveL2Params,
@@ -544,6 +547,7 @@ impl OrderBookListener {
             trade_pairer: TradePairer::default(),
             l2_snapshot_cache: HashMap::new(),
             l2_conflation: l2_conflation::L2Conflation::default(),
+            last_book_line_node_ns: None,
             active_l2_params,
             active_subs: ActiveSubs::default(),
             last_active_l2_params: HashSet::new(),
@@ -1338,9 +1342,12 @@ impl OrderBookListener {
             STALE_BATCHES_SKIPPED_TOTAL.with_label_values(&[source_label]).inc();
             return;
         }
-        if matches!(event_batch, EventBatch::Orders(_) | EventBatch::BookDiffs(_)) {
+        let is_book_batch = matches!(event_batch, EventBatch::Orders(_) | EventBatch::BookDiffs(_));
+        if is_book_batch {
             self.l2_conflation.note_book_event(Instant::now());
         }
+        // Taken before the batch is consumed; observed once it has been applied.
+        let book_line_node_ns = if is_book_batch { event_batch.local_time_unix_nanos() } else { None };
 
         // Sanity cap on batch size. A malformed/malicious line could otherwise
         // pin hundreds of MB and freeze the listener for seconds.
@@ -1469,7 +1476,15 @@ impl OrderBookListener {
             }
 
             match result {
-                Ok(coins) => coins,
+                Ok(coins) => {
+                    if let Some(node_ns) = book_line_node_ns {
+                        NODE_LINE_LAG
+                            .with_label_values(&["apply", source_label])
+                            .observe(parallel::seconds_since_node_write(node_ns));
+                        self.last_book_line_node_ns = Some(node_ns);
+                    }
+                    coins
+                }
                 Err(err) => {
                     // Per-event errors (malformed Px/Sz, unrecognized diff variant) are
                     // recoverable: skip the offending batch and keep serving every other
@@ -1671,6 +1686,10 @@ impl OrderBookListener {
                 drop(tx.send(msg));
             }
             L2_BROADCAST_LATENCY.observe(l2_start.elapsed().as_secs_f64());
+            // Built and handed to the broadcast channel (not yet on any socket).
+            if let Some(node_ns) = self.last_book_line_node_ns {
+                NODE_LINE_LAG.with_label_values(&["publish", "book"]).observe(parallel::seconds_since_node_write(node_ns));
+            }
         }
     }
 }

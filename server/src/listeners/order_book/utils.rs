@@ -305,6 +305,18 @@ pub(super) enum EventBatch {
     OracleUpdates(Batch<crate::types::node_data::OracleUpdateEvent>),
 }
 
+impl EventBatch {
+    /// The node's wall clock (unix ns) when it wrote this line.
+    pub(super) fn local_time_unix_nanos(&self) -> Option<i64> {
+        match self {
+            Self::Orders(batch) => batch.local_time_unix_nanos(),
+            Self::BookDiffs(batch) => batch.local_time_unix_nanos(),
+            Self::Fills(batch) => batch.local_time_unix_nanos(),
+            Self::OracleUpdates(batch) => batch.local_time_unix_nanos(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

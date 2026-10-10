@@ -185,6 +185,20 @@ impl<E> Batch<E> {
         self.events.len()
     }
 
+    /// The node's wall clock (unix ns) when it wrote this line.
+    pub(crate) const fn local_time_unix_nanos(&self) -> Option<i64> {
+        self.local_time.and_utc().timestamp_nanos_opt()
+    }
+}
+
+/// The node's `local_time` (unix ns) read from the fixed prefix of a streaming
+/// line without parsing the rest: the watcher samples it per read, and the full
+/// parse later validates the whole line. `None` when the line does not start
+/// with the `--stream-with-block-info` schema.
+pub(crate) fn line_local_time_unix_nanos(line: &str) -> Option<i64> {
+    let rest = line.strip_prefix("{\"local_time\":\"")?;
+    let text = &rest[..rest.find('"')?];
+    NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").ok()?.and_utc().timestamp_nanos_opt()
 }
 
 #[cfg(test)]
@@ -316,6 +330,16 @@ mod tests {
         let json = r#"{"local_time":"2026-07-04T15:15:35.355393675","block_time":"2026-07-04T15:05:30.164329916","block_number":1060360001,"events":[]}"#;
         let batch: Batch<OracleUpdateEvent> = serde_json::from_str(json).unwrap();
         assert_eq!(batch.events_len(), 0);
+    }
+
+    /// The watcher's prefix read agrees with the full parse; another schema is None.
+    #[test]
+    fn test_line_local_time_matches_the_full_parse() {
+        let json = r#"{"local_time":"2026-07-04T15:15:35.355393675","block_time":"2026-07-04T15:05:30.164329916","block_number":1060360001,"events":[]}"#;
+        let batch: Batch<OracleUpdateEvent> = serde_json::from_str(json).unwrap();
+        assert_eq!(line_local_time_unix_nanos(json), batch.local_time_unix_nanos());
+        assert_eq!(line_local_time_unix_nanos(json).map(|ns| ns % 1_000_000_000), Some(355_393_675));
+        assert_eq!(line_local_time_unix_nanos(r#"{"block_time":"2026-07-04T15:05:30.1"}"#), None);
     }
 
     // ==================== NodeDataOrderDiff Tests ====================

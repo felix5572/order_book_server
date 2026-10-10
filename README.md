@@ -443,6 +443,7 @@ curl http://localhost:9090/metrics
 | **Latency** | `bbo_broadcast_latency_seconds` | BBO broadcast latency histogram |
 | | `l2_broadcast_latency_seconds` | L2 broadcast latency histogram |
 | | `l2_conflation_batch_size` | Coins rebuilt per L2 broadcast (changed since the previous one) |
+| | `node_line_lag_seconds{stage,source}` | Cumulative lag from the node writing a line (`local_time`, same host clock) to `read` (watcher, newest line per read), `apply` (batch applied to the book) and `publish` (l2 built and handed to the broadcast channel); stages sample different sets, so compare side by side rather than subtracting quantiles |
 | | `l2_flush_total{trigger}` | L2 publishes by trigger: `quiet` (book streams quiet 2 ms), `max_delay` (20 ms of continuous lines), `recheck` (a deferred publish found a subscriber) |
 | | `event_processing_latency_seconds{event_type}` | Per-event processing latency |
 | **File Watcher** | `file_events_total{source}` | File events received by source |
