@@ -8,7 +8,7 @@
 
 use lazy_static::lazy_static;
 use prometheus::{
-    Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
+    Counter, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
 };
 
 lazy_static! {
@@ -135,6 +135,19 @@ lazy_static! {
     pub static ref PENDING_ORPHANS_EVICTED_TOTAL: IntCounter = IntCounter::new(
         "orderbook_pending_orphans_evicted_total",
         "Pending statuses dropped after the diff stream passed their block"
+    ).expect("metric can be created");
+
+    /// 1 = no known unrecovered data loss; 0 = the book is known to miss
+    /// orders and l2/bbo/L4 snapshots are withheld until a covering re-sync.
+    pub static ref ORDERBOOK_BOOK_TRUSTED: IntGauge = IntGauge::new(
+        "orderbook_book_trusted",
+        "1 when the book has no known unrecovered data loss (derived outputs published)"
+    ).expect("metric can be created");
+
+    /// Seconds spent untrusted, added when each untrusted period ends.
+    pub static ref ORDERBOOK_UNTRUSTED_SECONDS_TOTAL: Counter = Counter::new(
+        "orderbook_untrusted_seconds_total",
+        "Seconds the book was withheld for known data loss (completed periods)"
     ).expect("metric can be created");
 
     /// Broadcast channel lag (receivers behind)
@@ -362,6 +375,9 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ORDERBOOK_STREAM_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(ORDERBOOK_STREAM_SKEW_BLOCKS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_ORPHANS_EVICTED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ORDERBOOK_BOOK_TRUSTED.clone())).ok();
+    REGISTRY.register(Box::new(ORDERBOOK_UNTRUSTED_SECONDS_TOTAL.clone())).ok();
+    ORDERBOOK_BOOK_TRUSTED.set(1);
     REGISTRY.register(Box::new(CHANNEL_LAG.clone())).ok();
 
     // Error metrics

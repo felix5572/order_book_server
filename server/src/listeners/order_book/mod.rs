@@ -4,7 +4,8 @@ use crate::{
         BBO_BROADCAST_LATENCY, EVENT_PROCESSING_LATENCY, EVENTS_PROCESSED_TOTAL, FILE_EVENTS_TOTAL,
         FILE_LINES_PARSED_TOTAL, INSERT_BEFORE_FALLBACK_TOTAL, L2_BROADCAST_LATENCY, L2_CONFLATION_BATCH_SIZE,
         LAST_EVENT_APPLIED_MS, LISTENER_LOCK_WAIT, ORACLE_DATA_LOSS_TOTAL, ORDERBOOK_COINS_COUNT, ORDERBOOK_DESYNCS_TOTAL,
-        ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL, ORDERBOOK_READY, ORDERBOOK_RESYNC_IN_FLIGHT, ORDERBOOK_STREAM_HEIGHT,
+        ORDERBOOK_BOOK_TRUSTED, ORDERBOOK_HEIGHT, ORDERBOOK_ORDERS_TOTAL, ORDERBOOK_READY, ORDERBOOK_RESYNC_IN_FLIGHT,
+        ORDERBOOK_STREAM_HEIGHT, ORDERBOOK_UNTRUSTED_SECONDS_TOTAL,
         ORDERBOOK_STREAM_SKEW_BLOCKS, ORDERBOOK_TIME_MS, ORDERBOOK_UNTRIGGERED_TOTAL, PARSE_ERRORS_TOTAL,
         PENDING_DIFFS_CACHE, PENDING_ORDERS_CACHE,
         CHECKPOINT_MISSED_TOTAL, RESYNC_PHASE_DURATION, SNAPSHOT_CHECKPOINT_HEIGHT, STALE_BATCHES_SKIPPED_TOTAL,
@@ -26,7 +27,10 @@ use alloy::primitives::Address;
 use log::{error, info, warn};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -317,7 +321,7 @@ async fn install_snapshot_phased_impl(
                 RESYNC_PHASE_DURATION.with_label_values(&["chase"]).observe(chase_start.elapsed().as_secs_f64());
                 info!("Phased install chase converged after {round} rounds; {replayed} events replayed off-lock");
                 let commit_start = Instant::now();
-                guard.finish_install(new_state, height, replayed, replay_failed);
+                guard.finish_install(new_state, height, replayed, replay_failed, false);
                 RESYNC_PHASE_DURATION.with_label_values(&["commit"]).observe(commit_start.elapsed().as_secs_f64());
                 return Ok(());
             }
@@ -358,13 +362,10 @@ async fn install_snapshot_phased_impl(
                 "Phased install chase did not converge after {max_chase_rounds} rounds; \
                  dropping {dropped} cached events and committing gapped book"
             );
-            guard.finish_install(new_state, height, replayed, replay_failed);
-            // AFTER finish_install: it resets the desync epoch, and the
-            // re-mark must survive into the committed book.
-            guard.mark_desynced("install_chase_overflow");
+            guard.finish_install(new_state, height, replayed, replay_failed, true);
         } else {
             // The backlog drained (or died) between the last round and here.
-            guard.finish_install(new_state, height, replayed, replay_failed);
+            guard.finish_install(new_state, height, replayed, replay_failed, false);
         }
     }
     RESYNC_PHASE_DURATION.with_label_values(&["commit"]).observe(commit_start.elapsed().as_secs_f64());
@@ -391,6 +392,42 @@ fn replay_batch_above(state: &mut OrderBookState, batch: EventBatch, height: u64
         return true;
     }
     false
+}
+
+/// Lock-free mirror of [`OrderBookListener::book_trusted`] for the send paths
+/// that do not take the listener lock: per-connection heartbeats and the
+/// pre-cache gate of the HTTP / l4Book snapshot reads. Written only by the
+/// listener, under its lock, when the predicate changes (design 000249 B).
+#[derive(Clone)]
+pub(crate) struct BookTrust {
+    trusted: Arc<AtomicBool>,
+    // Withheld periods begun so far. A connection that sees it move forgets the
+    // frames it sent before - its heartbeat would re-stamp them with the current
+    // time after recovery - even if it never observed the withheld window itself.
+    withheld_periods: Arc<AtomicU64>,
+}
+
+impl BookTrust {
+    pub(crate) fn new() -> Self {
+        Self { trusted: Arc::new(AtomicBool::new(true)), withheld_periods: Arc::new(AtomicU64::new(0)) }
+    }
+
+    pub(crate) fn is_trusted(&self) -> bool {
+        self.trusted.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn withheld_periods(&self) -> u64 {
+        self.withheld_periods.load(Ordering::Acquire)
+    }
+
+    /// Called only on a change. The period count moves before trust drops, so
+    /// a reader that sees "untrusted" never sees the count it held before.
+    fn set(&self, trusted: bool) {
+        if !trusted {
+            self.withheld_periods.fetch_add(1, Ordering::AcqRel);
+        }
+        self.trusted.store(trusted, Ordering::Release);
+    }
 }
 
 pub(crate) struct OrderBookListener {
@@ -423,6 +460,10 @@ pub(crate) struct OrderBookListener {
     // where a continuously-non-converging re-sync loop is worse than a knowingly
     // incomplete book. Drift is NOT self-healed while this is set.
     tolerate_drift: bool,
+    // Mirror of `book_trusted()` for lock-free readers, and when it last went
+    // false (for the untrusted-seconds counter and the recovery log).
+    book_trust: BookTrust,
+    untrusted_since: Option<Instant>,
     // False in --bbo-only mode: skip maintaining the untriggered trigger-order
     // side table so the lightweight memory envelope holds. Threaded into every
     // OrderBookState build.
@@ -498,6 +539,8 @@ impl OrderBookListener {
             needs_resync: false,
             resync_data_loss: false,
             tolerate_drift: false,
+            book_trust: BookTrust::new(),
+            untrusted_since: None,
             track_untriggered: true,
             max_loss_height: 0,
             last_seen_height: 0,
@@ -541,6 +584,41 @@ impl OrderBookListener {
 
     pub(crate) const fn is_ready(&self) -> bool {
         self.order_book_state.is_some()
+    }
+
+    /// No known, unrecovered data loss: the book may be published as l2/bbo
+    /// frames and L4 / untriggered snapshots. False from a data-loss mark until
+    /// an install whose height covers the loss bound - a book known to miss
+    /// orders is withheld rather than served (design 000249 B). Readiness is
+    /// `is_ready`'s business; `tolerate_drift` never marks, so it stays true.
+    pub(crate) const fn book_trusted(&self) -> bool {
+        !(self.needs_resync && self.resync_data_loss)
+    }
+
+    /// Handle on the lock-free trust mirror, for the server's send paths.
+    pub(crate) fn book_trust(&self) -> BookTrust {
+        self.book_trust.clone()
+    }
+
+    /// Push a change of `book_trusted()` to the mirror, the metrics and the log.
+    fn publish_book_trust(&mut self, reason: &str) {
+        let trusted = self.book_trusted();
+        if trusted == self.book_trust.is_trusted() {
+            return;
+        }
+        self.book_trust.set(trusted);
+        ORDERBOOK_BOOK_TRUSTED.set(i64::from(trusted));
+        if trusted {
+            let untrusted = self.untrusted_since.take().map_or(Duration::ZERO, |since| since.elapsed());
+            ORDERBOOK_UNTRUSTED_SECONDS_TOTAL.inc_by(untrusted.as_secs_f64());
+            info!("Order book trusted again after {:.1}s ({reason}): l2/bbo/L4 snapshots resume", untrusted.as_secs_f64());
+        } else {
+            self.untrusted_since = Some(Instant::now());
+            error!(
+                "Order book untrusted ({reason}, loss bound height {}): l2/bbo/L4 snapshots withheld until a covering re-sync",
+                self.max_loss_height
+            );
+        }
     }
 
     /// Coin universe filtered by the configured market types, for subscription
@@ -635,6 +713,7 @@ impl OrderBookListener {
         // bound - only an informed downgrade in finish_install can clear it.
         let bound = if observed == 0 { u64::MAX } else { observed.saturating_add(LOSS_HEIGHT_MARGIN) };
         self.max_loss_height = self.max_loss_height.max(bound);
+        self.publish_book_trust(reason);
     }
 
     pub(crate) const fn needs_resync(&self) -> bool {
@@ -661,7 +740,7 @@ impl OrderBookListener {
     /// replay off-lock; both paths share [`Self::finish_install`] for the
     /// commit semantics.
     #[cfg(test)]
-    fn init_from_snapshot(&mut self, snapshot: Snapshots<InnerL4Order>, height: u64) {
+    pub(crate) fn init_from_snapshot(&mut self, snapshot: Snapshots<InnerL4Order>, height: u64) {
         info!("Initializing from snapshot at height {height}");
         let mut new_state = OrderBookState::from_snapshot(
             snapshot,
@@ -681,7 +760,7 @@ impl OrderBookListener {
         // production path instead keeps it serving and pays the RSS overlap).
         self.order_book_state = None;
         self.l2_snapshot_cache = HashMap::new();
-        self.finish_install(new_state, height, 0, false);
+        self.finish_install(new_state, height, 0, false, false);
     }
 
     /// `(events currently cached for replay, whether the cache is alive)`.
@@ -724,7 +803,19 @@ impl OrderBookListener {
     /// arrived while hl-node was dumping state and would otherwise be lost
     /// (the pre-replay behavior discarded the whole cache, so every add or
     /// cancel during the 10-30s snapshot window silently corrupted the book).
-    fn finish_install(&mut self, mut new_state: OrderBookState, height: u64, mut replayed: usize, mut replay_failed: bool) {
+    ///
+    /// `residual_dropped`: the chase gave up and discarded cached events above
+    /// `height`, so the committed book is gapped and re-marked here - inside the
+    /// one final trust decision, so the lock-free mirror never flips to trusted
+    /// for a book already known to be incomplete (review 000251 P2).
+    fn finish_install(
+        &mut self,
+        mut new_state: OrderBookState,
+        height: u64,
+        mut replayed: usize,
+        mut replay_failed: bool,
+        residual_dropped: bool,
+    ) {
         // Stop caching: after the swap below, live batches apply directly.
         let cache = self.fetched_snapshot_cache.take().unwrap_or_default();
         self.cached_event_count = 0;
@@ -792,6 +883,11 @@ impl OrderBookListener {
         ORDERBOOK_READY.set(1);
         LAST_EVENT_APPLIED_MS.set(parallel::now_unix_ms() as i64);
         info!("Order book ready at height {height}");
+        if residual_dropped {
+            // After the epoch reset above, so the re-mark survives into the committed book.
+            self.mark_desynced("install_chase_overflow");
+        }
+        self.publish_book_trust("snapshot install");
     }
 
     /// L4 snapshot of one coin's book - (time, height, snapshot). Replaces the
@@ -815,6 +911,17 @@ impl OrderBookListener {
         coin: Option<&Coin>,
     ) -> Option<(u64, u64, Vec<Arc<InnerL4Order>>)> {
         self.order_book_state.as_ref().map(|state| state.untriggered_snapshot(coin))
+    }
+}
+
+#[cfg(test)]
+impl OrderBookListener {
+    /// The bbo broadcast the listener would send for `coin` right now.
+    pub(crate) fn bbo_update_for_test(&self, coin: &str) -> InternalMessage {
+        let state = self.order_book_state.as_ref().expect("an installed book");
+        let (time, raw) = state.get_bbos_for_coins(&HashSet::from([Coin::new(coin)]));
+        let bbos = raw.into_iter().map(|(coin, raw)| (coin, CoinBbo { raw, frame: SharedFrame::new() })).collect();
+        InternalMessage::BboUpdate { bbos, time, withheld_period: self.book_trust.withheld_periods() }
     }
 }
 
@@ -1409,7 +1516,8 @@ impl OrderBookListener {
         // Fast BBO broadcast - ONLY for coins that changed AND only when a bbo
         // subscription is live. Without the gate we'd `get_bbos_for_coins`
         // (map build + Coin clones) per change even with zero subscribers.
-        if !changed_coins.is_empty() {
+        // Withheld while the book is known to miss orders (see `book_trusted`).
+        if !changed_coins.is_empty() && self.book_trusted() {
             if let Some(state) = &self.order_book_state {
                 if let Some(tx) = &self.internal_message_tx {
                     if self.active_subs.wants(BroadcastKind::Bbo) {
@@ -1426,7 +1534,8 @@ impl OrderBookListener {
                             .into_iter()
                             .map(|(coin, raw)| (coin, CoinBbo { raw, frame: SharedFrame::new() }))
                             .collect();
-                        let msg = Arc::new(InternalMessage::BboUpdate { bbos, time });
+                        let withheld_period = self.book_trust.withheld_periods();
+                        let msg = Arc::new(InternalMessage::BboUpdate { bbos, time, withheld_period });
                         drop(tx.send(msg));
                         BBO_BROADCAST_LATENCY.observe(bbo_start.elapsed().as_secs_f64());
                     }
@@ -1472,6 +1581,12 @@ impl OrderBookListener {
     /// Safe to call on every tick: O(1) early-return when not due. Runs under the
     /// listener lock.
     pub(crate) fn flush_l2_if_due(&mut self) {
+        // Withheld while the book is known to miss orders (see `book_trusted`).
+        // Dirty coins keep accumulating; the covering install resets the cache
+        // and buffer and rebuilds every coin on its first flush.
+        if !self.book_trusted() {
+            return;
+        }
         let should_broadcast_l2 = !self.pending_dirty_l2_coins.is_empty()
             && self
                 .last_l2_broadcast
@@ -1536,6 +1651,7 @@ impl OrderBookListener {
                     dirty: recomputed,
                     universe,
                     l2_frames: L2FrameCache::new(),
+                    withheld_period: self.book_trust.withheld_periods(),
                 });
                 drop(tx.send(msg));
             }
@@ -1571,6 +1687,10 @@ pub(crate) enum InternalMessage {
         /// Lazy per-broadcast cache of rendered L2 frames, shared by every
         /// connection (see [`L2FrameCache`]).
         l2_frames: L2FrameCache,
+        /// `BookTrust::withheld_periods` when built. A connection that consumes
+        /// it under a later count drops it: built before a withheld period
+        /// began, it must not re-seed the heartbeat/dedup cache (review 000251 r2).
+        withheld_period: u64,
     },
     /// Trades grouped per coin ONCE in the listener; connections share the
     /// Arc'd vectors AND the lazily-serialized wire frame per coin.
@@ -1582,6 +1702,8 @@ pub(crate) enum InternalMessage {
     BboUpdate {
         bbos: HashMap<Coin, CoinBbo>,
         time: u64,
+        /// As on `Snapshot`.
+        withheld_period: u64,
     },
     /// HFT L4 streaming - order diffs without waiting for status pairing,
     /// grouped per coin once (shared by l4Book and bookDiffs subscribers).
@@ -2556,6 +2678,30 @@ mod tests {
         assert!(guard.needs_resync(), "incomplete replay must keep the book marked");
     }
 
+    /// Review 000251 P2: entered already untrusted, a snapshot that covers the
+    /// old loss but whose chase gives up must never publish trusted on the way -
+    /// the untrusted period is neither ended nor restarted.
+    #[tokio::test]
+    async fn test_chase_giveup_install_never_publishes_trusted() {
+        let (mut guard, _rx) = ready_listener();
+        feed_order(&mut guard, "BTC", 1, 5);
+        guard.mark_desynced("pending_cache_cleared"); // loss bound 105, covered by the 150 snapshot
+        let (since, withheld) = (guard.untrusted_since, guard.book_trust().withheld_periods());
+        assert!(since.is_some());
+        guard.open_cache_window_for_test();
+        feed_order(&mut guard, "NEW", 2, 200);
+        let listener = Arc::new(Mutex::new(guard));
+
+        install_snapshot_phased_impl(&listener, Snapshots::new(HashMap::new()), Vec::new(), 150, 0, 0)
+            .await
+            .expect("install");
+
+        let guard = listener.lock().await;
+        assert!(!guard.book_trusted() && !guard.book_trust().is_trusted());
+        assert_eq!(guard.untrusted_since, since, "the untrusted period is neither ended nor restarted");
+        assert_eq!(guard.book_trust().withheld_periods(), withheld, "no false -> true -> false flip");
+    }
+
     #[tokio::test]
     async fn test_phased_install_chase_cap_drops_cache_and_stays_marked() {
         // max_chase_rounds = 0 with a still-alive over-threshold cache models a
@@ -2781,6 +2927,85 @@ mod tests {
         // drift 模式不许积累 loss bound: 非零 bound 会在下一次 init_from_snapshot
         // 走 prior > height 分支把 needs_resync 置回 true, 打破 drift 契约。
         assert_eq!(listener.max_loss_height, 0, "drift 模式不得积累 loss bound");
+    }
+
+    // ==================== Untrusted book withheld (design 000249 B) ====================
+
+    /// A booked BTC order in block `height`: status + New diff, so the book
+    /// changes and a bbo broadcast is due.
+    fn apply_booked_order(listener: &mut OrderBookListener, oid: u64, height: u64) {
+        listener.apply_event_batch(height, EventBatch::Orders(make_status_batch("BTC", oid, height)), EventSource::OrderStatuses);
+        let new = serde_json::json!({"new": {"sz": "1.0"}});
+        listener.apply_event_batch(height, EventBatch::BookDiffs(make_diff_batch("BTC", oid, height, new)), EventSource::OrderDiffs);
+    }
+
+    fn drain_kinds(rx: &mut tokio::sync::broadcast::Receiver<Arc<InternalMessage>>) -> Vec<&'static str> {
+        let mut kinds = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            kinds.push(match msg.as_ref() {
+                InternalMessage::BboUpdate { .. } => "bbo",
+                InternalMessage::Snapshot { .. } => "l2",
+                InternalMessage::L4OrderDiffs { .. } => "l4_diffs",
+                InternalMessage::L4OrderStatuses { .. } => "l4_statuses",
+                InternalMessage::Fills { .. } => "trades",
+                InternalMessage::OracleUpdates { .. } => "oracle",
+            });
+        }
+        kinds
+    }
+
+    #[test]
+    fn test_known_loss_withholds_bbo_and_l2_not_raw_streams_until_a_covering_install() {
+        let (mut listener, mut rx) = ready_listener();
+        let btc = || "BTC".to_string();
+        let _subs = [
+            listener.active_subs().acquire_for(&Subscription::Bbo { coin: btc() }),
+            listener.active_subs().acquire_for(&Subscription::BookDiffs { coin: btc() }),
+            listener.active_subs().acquire_for(&Subscription::Trades { coin: btc() }),
+        ];
+        let _l2 = listener.active_l2_params().acquire(L2SnapshotParams::new(None, None));
+        let trust = listener.book_trust();
+
+        apply_booked_order(&mut listener, 1, 5);
+        listener.mark_desynced("pending_cache_cleared"); // loss bound 5 + margin
+        assert!(!listener.book_trusted() && !trust.is_trusted(), "the mirror follows the mark");
+        drain_kinds(&mut rx);
+
+        apply_booked_order(&mut listener, 2, 6);
+        listener.apply_event_batch(6, EventBatch::Fills(make_fills_batch(&["BTC"], 6)), EventSource::Fills);
+        listener.last_l2_broadcast = None;
+        listener.flush_l2_if_due();
+        let withheld = drain_kinds(&mut rx);
+        assert!(!withheld.contains(&"bbo") && !withheld.contains(&"l2"), "{withheld:?}");
+        assert!(withheld.contains(&"l4_diffs") && withheld.contains(&"trades"), "raw streams continue: {withheld:?}");
+        assert!(!listener.pending_dirty_l2_coins.is_empty(), "dirty coins keep accumulating");
+
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1_000);
+        assert!(listener.book_trusted() && trust.is_trusted(), "a covering install restores trust");
+        apply_booked_order(&mut listener, 3, 1_001);
+        listener.last_l2_broadcast = None;
+        listener.flush_l2_if_due();
+        let resumed = drain_kinds(&mut rx);
+        assert!(resumed.contains(&"bbo") && resumed.contains(&"l2"), "{resumed:?}");
+    }
+
+    #[test]
+    fn test_install_below_the_loss_bound_stays_untrusted() {
+        let (mut listener, _rx) = ready_listener();
+        apply_booked_order(&mut listener, 1, 500);
+        listener.mark_desynced("pending_cache_cleared"); // bound 600
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 550);
+        assert!(!listener.book_trusted() && !listener.book_trust().is_trusted());
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 700);
+        assert!(listener.book_trusted() && listener.book_trust().is_trusted());
+    }
+
+    #[test]
+    fn test_tolerate_drift_keeps_the_book_published() {
+        let (mut listener, _rx) = ready_listener();
+        listener.set_tolerate_drift(true);
+        listener.mark_desynced("pending_cache_cleared");
+        assert!(listener.book_trusted() && listener.book_trust().is_trusted());
     }
 
     // ==================== Per-coin fan-out grouping ====================

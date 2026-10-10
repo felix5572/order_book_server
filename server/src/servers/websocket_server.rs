@@ -1,7 +1,7 @@
 use crate::{
     listeners::order_book::{
-        ActiveL2Params, ActiveSubGuard, ActiveSubs, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey, L2ParamGuard,
-        L2SnapshotParams, OrderBookListener, hl_listen_hft,
+        ActiveL2Params, ActiveSubGuard, ActiveSubs, BookTrust, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey,
+        L2ParamGuard, L2SnapshotParams, OrderBookListener, hl_listen_hft,
     },
     metrics::{
         BBO_CHANGES_TOTAL, BROADCAST_RECEIVERS, BROADCASTS_TOTAL, CHANNEL_DROPS_TOTAL, CHANNEL_LAG,
@@ -137,6 +137,8 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         listener.set_track_untriggered(!config.bbo_only);
         listener
     };
+    // Lock-free trust mirror for the send paths below (design 000249 B).
+    let book_trust = listener.book_trust();
     let listener = Arc::new(Mutex::new(listener));
     let listener_task = {
         let listener = listener.clone();
@@ -173,12 +175,14 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                 let bbo_heartbeat_ms = config.bbo_heartbeat_ms;
                 let listener = listener.clone();
                 let l4_cache = l4_cache.clone();
+                let book_trust = book_trust.clone();
                 move |ws_upgrade| async move {
                     ws_handler(
                         ws_upgrade,
                         internal_message_tx.clone(),
                         listener.clone(),
                         l4_cache.clone(),
+                        book_trust.clone(),
                         bbo_only,
                         l2book_heartbeat_ms,
                         bbo_heartbeat_ms,
@@ -192,7 +196,10 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
             get({
                 let listener = listener.clone();
                 let l4_cache = l4_cache.clone();
-                move |query, headers| l4_snapshot_handler(query, headers, listener.clone(), l4_cache.clone())
+                let book_trust = book_trust.clone();
+                move |query, headers| {
+                    l4_snapshot_handler(query, headers, listener.clone(), l4_cache.clone(), book_trust.clone())
+                }
             }),
         )
         .route(
@@ -200,8 +207,15 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
             get({
                 let listener = listener.clone();
                 let untriggered_cache = untriggered_cache.clone();
+                let book_trust = book_trust.clone();
                 move |query, headers| {
-                    untriggered_orders_handler(query, headers, listener.clone(), untriggered_cache.clone())
+                    untriggered_orders_handler(
+                        query,
+                        headers,
+                        listener.clone(),
+                        untriggered_cache.clone(),
+                        book_trust.clone(),
+                    )
                 }
             }),
         )
@@ -310,6 +324,7 @@ fn ws_handler(
     internal_message_tx: Sender<Arc<InternalMessage>>,
     listener: Arc<Mutex<OrderBookListener>>,
     l4_cache: Arc<L4SnapshotCache>,
+    book_trust: BookTrust,
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
@@ -334,8 +349,17 @@ fn ws_handler(
             }
         };
 
-        handle_socket(ws, internal_message_tx, listener, l4_cache, bbo_only, l2book_heartbeat_ms, bbo_heartbeat_ms)
-            .await;
+        handle_socket(
+            ws,
+            internal_message_tx,
+            listener,
+            l4_cache,
+            book_trust,
+            bbo_only,
+            l2book_heartbeat_ms,
+            bbo_heartbeat_ms,
+        )
+        .await;
     });
 
     resp.into_response()
@@ -347,6 +371,7 @@ async fn handle_socket(
     internal_message_tx: Sender<Arc<InternalMessage>>,
     listener: Arc<Mutex<OrderBookListener>>,
     l4_cache: Arc<L4SnapshotCache>,
+    book_trust: BookTrust,
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
@@ -425,6 +450,7 @@ async fn handle_socket(
             &mut sub_guards,
             &listener,
             &l4_cache,
+            &book_trust,
             bbo_only,
             l2book_heartbeat_ms,
             bbo_heartbeat_ms,
@@ -443,6 +469,27 @@ async fn handle_socket(
     if tokio::time::timeout(WS_SEND_TIMEOUT, &mut writer).await.is_err() {
         writer.abort();
     }
+}
+
+/// A withheld period began since this connection last looked: forget the l2/bbo
+/// frames it sent before. The heartbeat would re-stamp them with the current
+/// time, and the dedup could swallow the first post-recovery frame that would
+/// re-establish them (review 000251 P2). Returns true when it forgot, so the
+/// next l2 snapshot re-evaluates every subscription rather than only dirty coins.
+fn forget_pre_withholding_frames(
+    book_trust: &BookTrust,
+    withheld_seen: &mut u64,
+    last_l2: &mut HashMap<String, L2Entry>,
+    last_bbo: &mut HashMap<String, BboEntry>,
+) -> bool {
+    let withheld = book_trust.withheld_periods();
+    if withheld == *withheld_seen {
+        return false;
+    }
+    *withheld_seen = withheld;
+    last_l2.clear();
+    last_bbo.clear();
+    true
 }
 
 /// A connection's session loop: broadcast fan-out, heartbeats, and inbound
@@ -464,6 +511,7 @@ async fn run_session(
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
     listener: &Arc<Mutex<OrderBookListener>>,
     l4_cache: &Arc<L4SnapshotCache>,
+    book_trust: &BookTrust,
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
@@ -482,31 +530,41 @@ async fn run_session(
     // carried dirty coins this connection never saw, so the next Snapshot must
     // re-evaluate every subscription instead of trusting the dirty-set skip.
     let mut force_full_l2 = false;
+    // Withheld periods this connection has accounted for (see `forget_pre_withholding_frames`).
+    let mut withheld_seen = book_trust.withheld_periods();
     while alive {
         select! {
             recv_result = internal_message_rx.recv() => {
                 match recv_result {
                     Ok(msg) => {
                         match msg.as_ref() {
-                            InternalMessage::Snapshot{ l2_snapshots, time, dirty, universe: new_universe, l2_frames } => {
+                            InternalMessage::Snapshot{ l2_snapshots, time, dirty, universe: new_universe, l2_frames, withheld_period } => {
+                                force_full_l2 |= forget_pre_withholding_frames(book_trust, &mut withheld_seen, last_l2, last_bbo);
                                 if let Some(u) = new_universe {
                                     *universe = Arc::clone(u);
                                 }
-                                for sub in manager.subscriptions() {
-                                    if !alive { break; }
-                                    // Skip BBO subs here - they get fast updates via BboUpdate
-                                    if !matches!(sub, Subscription::Bbo { .. }) {
-                                        alive &= send_ws_data_from_snapshot(outbound, sub, l2_snapshots.as_ref(), *time, last_l2, dirty, force_full_l2, l2_frames, l2_hb.is_some()).await;
+                                // Built before a withheld period began: dropped, so it can
+                                // never re-seed the heartbeat/dedup cache (review 000251 r2).
+                                if *withheld_period == withheld_seen {
+                                    for sub in manager.subscriptions() {
+                                        if !alive { break; }
+                                        // Skip BBO subs here - they get fast updates via BboUpdate
+                                        if !matches!(sub, Subscription::Bbo { .. }) {
+                                            alive &= send_ws_data_from_snapshot(outbound, sub, l2_snapshots.as_ref(), *time, last_l2, dirty, force_full_l2, l2_frames, l2_hb.is_some()).await;
+                                        }
                                     }
+                                    force_full_l2 = false;
                                 }
-                                force_full_l2 = false;
                             },
-                            InternalMessage::BboUpdate{ bbos, time } => {
-                                // Fast path for BBO subscribers only
-                                for sub in manager.subscriptions() {
-                                    if !alive { break; }
-                                    if let Subscription::Bbo { coin } = sub {
-                                        alive &= send_ws_data_from_bbo(outbound, coin, bbos, *time, last_bbo, bbo_hb.is_some()).await;
+                            InternalMessage::BboUpdate{ bbos, time, withheld_period } => {
+                                force_full_l2 |= forget_pre_withholding_frames(book_trust, &mut withheld_seen, last_l2, last_bbo);
+                                // Fast path for BBO subscribers only; a pre-withholding build is dropped as above.
+                                if *withheld_period == withheld_seen {
+                                    for sub in manager.subscriptions() {
+                                        if !alive { break; }
+                                        if let Subscription::Bbo { coin } = sub {
+                                            alive &= send_ws_data_from_bbo(outbound, coin, bbos, *time, last_bbo, bbo_hb.is_some()).await;
+                                        }
                                     }
                                 }
                             },
@@ -620,8 +678,14 @@ async fn run_session(
             _ = heartbeat_tick(&mut heartbeat_ticker) => {
                 let now = Instant::now();
                 let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                // A heartbeat re-stamps the last frame with the current time:
+                // while the book is known to miss orders that would pass the
+                // withheld book off as fresh (design 000249 B), and after it the
+                // frames from before must not come back (review 000251 P2).
+                force_full_l2 |= forget_pre_withholding_frames(book_trust, &mut withheld_seen, last_l2, last_bbo);
+                let trusted = book_trust.is_trusted();
                 for sub in manager.subscriptions() {
-                    if !alive { break; }
+                    if !alive || !trusted { break; }
                     match sub {
                         Subscription::L2Book { coin, n_sig_figs, mantissa, n_levels } => {
                             let Some(hb) = l2_hb else { continue };
@@ -682,7 +746,7 @@ async fn run_session(
                                         alive &= outbound.send_pong();
                                     }
                                     _ => {
-                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards).await;
+                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards).await;
                                     }
                                 }
                             }
@@ -722,6 +786,7 @@ async fn receive_client_message(
     universe: &HashSet<String>,
     listener: Arc<Mutex<OrderBookListener>>,
     l4_cache: &Arc<L4SnapshotCache>,
+    book_trust: &BookTrust,
     bbo_only: bool,
     last_l2: &mut HashMap<String, L2Entry>,
     last_bbo: &mut HashMap<String, BboEntry>,
@@ -811,7 +876,7 @@ async fn receive_client_message(
     };
     if success {
         let snapshot_msg = if let ClientMessage::Subscribe { subscription } = &client_message {
-            let msg = subscription.handle_immediate_snapshot(listener, l4_cache).await;
+            let msg = subscription.handle_immediate_snapshot(listener, l4_cache, book_trust).await;
             match msg {
                 Ok(msg) => msg,
                 Err(err) => {
@@ -1099,12 +1164,14 @@ impl Subscription {
         &self,
         listener: Arc<Mutex<OrderBookListener>>,
         l4_cache: &Arc<L4SnapshotCache>,
+        book_trust: &BookTrust,
     ) -> Result<Option<bytes::Bytes>> {
         if let Self::L4Book { coin } = self {
-            if let Some(body) = l4_snapshot_body(l4_cache, &listener, coin, PxBand::default()).await? {
-                return Ok(Some(l4_ws_frame(&body)));
-            }
-            return Err("Snapshot Failed".into());
+            return match l4_snapshot_body(l4_cache, book_trust, &listener, coin, PxBand::default()).await? {
+                SnapshotBody::Built(body) => Ok(Some(l4_ws_frame(&body))),
+                SnapshotBody::Absent => Err("Snapshot Failed".into()),
+                SnapshotBody::Resyncing => Err(BOOK_RESYNCING_MESSAGE.into()),
+            };
         }
         Ok(None)
     }
@@ -1120,6 +1187,20 @@ fn l4_ws_frame(body: &bytes::Bytes) -> bytes::Bytes {
     frame.push(b'}');
     bytes::Bytes::from(frame)
 }
+
+/// A derived snapshot read (l4Book / untriggeredOrders body).
+enum SnapshotBody {
+    Built(bytes::Bytes),
+    /// No book yet (before the first install) or, for l4Book, none for the coin.
+    Absent,
+    /// The book is known to miss orders until a covering re-sync: withheld,
+    /// never answered with an empty or stale body (design 000249 B).
+    Resyncing,
+}
+
+/// Why a derived snapshot is unavailable while the book is withheld.
+const BOOK_RESYNCING_MESSAGE: &str = "book resyncing after data loss";
+const BOOK_RESYNCING_BODY: &str = r#"{"error":"book resyncing after data loss"}"#;
 
 /// How long a built L4 snapshot body may be re-served. Long enough that a
 /// burst of pollers (or a reconnect storm of l4Book subscribes) shares ONE
@@ -1165,6 +1246,15 @@ impl L4SnapshotCache {
         Self { entries: std::sync::Mutex::new(HashMap::new()), build_permits }
     }
 
+    /// The pre-build read of a derived snapshot: withheld while the book is
+    /// untrusted - even when an earlier body is still fresh - else a cache hit.
+    fn trusted_get(&self, book_trust: &BookTrust, key: &(String, PxBand)) -> Option<SnapshotBody> {
+        if !book_trust.is_trusted() {
+            return Some(SnapshotBody::Resyncing);
+        }
+        self.get(key).map(|(body, _)| SnapshotBody::Built(body))
+    }
+
     /// Fresh cached body (and gzip, if one was built) for `key`.
     fn get(&self, key: &(String, PxBand)) -> Option<(bytes::Bytes, Option<bytes::Bytes>)> {
         let entries = self.entries.lock().ok()?;
@@ -1174,16 +1264,22 @@ impl L4SnapshotCache {
         hit
     }
 
-    /// Insert a freshly-built body. Expired entries are swept here (inserts
-    /// are TTL-rate-limited per key, so the sweep is cheap); if the map is
-    /// still at capacity afterwards the body is simply served uncached.
-    fn insert(&self, key: (String, PxBand), body: bytes::Bytes) {
+    /// Insert a freshly-built body, aged from `taken_at` - when its snapshot was
+    /// taken under the listener lock, not when the off-lock build finished - so
+    /// a slow build never re-enters the cache with a full TTL; one already past
+    /// the TTL is served uncached (review 000249 r2 P3). Expired entries are
+    /// swept here (inserts are TTL-rate-limited per key, so the sweep is cheap);
+    /// if the map is still at capacity afterwards the body is simply served uncached.
+    fn insert(&self, key: (String, PxBand), body: bytes::Bytes, taken_at: Instant) {
+        if taken_at.elapsed() >= L4_SNAPSHOT_CACHE_TTL {
+            return;
+        }
         if let Ok(mut entries) = self.entries.lock() {
             if entries.len() >= L4_SNAPSHOT_CACHE_MAX_ENTRIES {
                 entries.retain(|_, e| e.built_at.elapsed() < L4_SNAPSHOT_CACHE_TTL);
             }
             if entries.len() < L4_SNAPSHOT_CACHE_MAX_ENTRIES {
-                entries.insert(key, L4CacheEntry { built_at: Instant::now(), body, gzipped: None });
+                entries.insert(key, L4CacheEntry { built_at: taken_at, body, gzipped: None });
             }
         }
     }
@@ -1203,27 +1299,36 @@ impl L4SnapshotCache {
 /// The listener lock is held only for the banded clone inside
 /// `compute_snapshot_for_coin`; the `L4Order` conversion and the MB-scale
 /// serialization run on a blocking thread so they neither hold the lock nor
-/// wedge async runtime workers. `Ok(None)` when the coin has no book.
+/// wedge async runtime workers. Withheld (`Resyncing`) while the book is known
+/// to miss orders: checked before every cache read and again under the lock,
+/// since the book may be marked while a request waits for a permit or the lock.
 async fn l4_snapshot_body(
     cache: &Arc<L4SnapshotCache>,
+    book_trust: &BookTrust,
     listener: &Arc<Mutex<OrderBookListener>>,
     coin: &str,
     band: PxBand,
-) -> Result<Option<bytes::Bytes>> {
+) -> Result<SnapshotBody> {
     let key = (coin.to_string(), band);
-    if let Some((body, _)) = cache.get(&key) {
-        return Ok(Some(body));
+    if let Some(read) = cache.trusted_get(book_trust, &key) {
+        return Ok(read);
     }
     // Single-flight (approximate): concurrent requesters queue here; whoever
     // follows the builder through re-checks the cache and hits it.
     let _permit = cache.build_permits.acquire().await?;
-    if let Some((body, _)) = cache.get(&key) {
-        return Ok(Some(body));
+    if let Some(read) = cache.trusted_get(book_trust, &key) {
+        return Ok(read);
     }
 
-    let snapshot = listener.lock().await.compute_snapshot_for_coin(&Coin::new(coin), band);
+    let (taken_at, snapshot) = {
+        let guard = listener.lock().await;
+        if !guard.book_trusted() {
+            return Ok(SnapshotBody::Resyncing);
+        }
+        (Instant::now(), guard.compute_snapshot_for_coin(&Coin::new(coin), band))
+    };
     let Some((time, height, coin_snapshot)) = snapshot else {
-        return Ok(None);
+        return Ok(SnapshotBody::Absent);
     };
     let coin_owned = coin.to_string();
     let body = tokio::task::spawn_blocking(move || -> Result<bytes::Bytes> {
@@ -1235,8 +1340,8 @@ async fn l4_snapshot_body(
         Ok(bytes::Bytes::from(serde_json::to_string(&book)?))
     })
     .await??;
-    cache.insert(key, body.clone());
-    Ok(Some(body))
+    cache.insert(key, body.clone(), taken_at);
+    Ok(SnapshotBody::Built(body))
 }
 
 /// Query parameters for the one-shot GET /l4Book endpoint.
@@ -1258,6 +1363,7 @@ async fn l4_snapshot_handler(
     headers: axum::http::HeaderMap,
     listener: Arc<Mutex<OrderBookListener>>,
     l4_cache: Arc<L4SnapshotCache>,
+    book_trust: BookTrust,
 ) -> axum::response::Response {
     fn json_response(status: axum::http::StatusCode, body: String) -> axum::response::Response {
         axum::response::Response::builder()
@@ -1276,8 +1382,8 @@ async fn l4_snapshot_handler(
             );
         }
     };
-    match l4_snapshot_body(&l4_cache, &listener, &query.coin, band).await {
-        Ok(Some(body)) => {
+    match l4_snapshot_body(&l4_cache, &book_trust, &listener, &query.coin, band).await {
+        Ok(SnapshotBody::Built(body)) => {
             // Order JSON compresses ~10x; without this, transfer time
             // dwarfs the build for remote clients pulling MB-scale
             // snapshots (a $2000 BTC band is ~2.4MB raw, ~250KB gzipped).
@@ -1299,10 +1405,13 @@ async fn l4_snapshot_handler(
                 .body(body.into())
                 .unwrap_or_else(|_| axum::response::Response::new(String::new().into()))
         }
-        Ok(None) => json_response(
+        Ok(SnapshotBody::Absent) => json_response(
             axum::http::StatusCode::NOT_FOUND,
             format!(r#"{{"error":"no order book for coin {}"}}"#, query.coin),
         ),
+        Ok(SnapshotBody::Resyncing) => {
+            json_response(axum::http::StatusCode::SERVICE_UNAVAILABLE, BOOK_RESYNCING_BODY.to_string())
+        }
         Err(err) => {
             error!("l4Book snapshot build error: {err}");
             json_response(
@@ -1362,27 +1471,35 @@ struct UntriggeredOrders {
 /// Serialized untriggered-orders body (all coins, or one coin), built at most
 /// once per TTL. Same discipline as `l4_snapshot_body`: the listener lock is
 /// held only for the order clone; grouping, conversion, and serialization run
-/// on a blocking thread. `Ok(None)` until the first snapshot install.
+/// on a blocking thread. `Absent` until the first snapshot install; withheld
+/// (`Resyncing`) exactly like `l4_snapshot_body`.
 async fn untriggered_body(
     cache: &Arc<L4SnapshotCache>,
+    book_trust: &BookTrust,
     listener: &Arc<Mutex<OrderBookListener>>,
     coin: Option<&str>,
-) -> Result<Option<bytes::Bytes>> {
+) -> Result<SnapshotBody> {
     // Reuses the l4 cache's (String, PxBand) key with a default band; ""
     // (never a valid coin) keys the all-coins body.
     let key = (coin.unwrap_or_default().to_string(), PxBand::default());
-    if let Some((body, _)) = cache.get(&key) {
-        return Ok(Some(body));
+    if let Some(read) = cache.trusted_get(book_trust, &key) {
+        return Ok(read);
     }
     let _permit = cache.build_permits.acquire().await?;
-    if let Some((body, _)) = cache.get(&key) {
-        return Ok(Some(body));
+    if let Some(read) = cache.trusted_get(book_trust, &key) {
+        return Ok(read);
     }
 
     let filter_coin = coin.map(Coin::new);
-    let snapshot = listener.lock().await.compute_untriggered_snapshot(filter_coin.as_ref());
+    let (taken_at, snapshot) = {
+        let guard = listener.lock().await;
+        if !guard.book_trusted() {
+            return Ok(SnapshotBody::Resyncing);
+        }
+        (Instant::now(), guard.compute_untriggered_snapshot(filter_coin.as_ref()))
+    };
     let Some((time, height, mut orders)) = snapshot else {
-        return Ok(None);
+        return Ok(SnapshotBody::Absent);
     };
     let body = tokio::task::spawn_blocking(move || -> Result<bytes::Bytes> {
         // Deterministic output (sorted coins, oid-ordered orders) so repeat
@@ -1403,8 +1520,8 @@ async fn untriggered_body(
         Ok(bytes::Bytes::from(serde_json::to_string(&body)?))
     })
     .await??;
-    cache.insert(key, body.clone());
-    Ok(Some(body))
+    cache.insert(key, body.clone(), taken_at);
+    Ok(SnapshotBody::Built(body))
 }
 
 /// One-shot untriggered trigger orders over plain HTTP. Every request returns
@@ -1418,6 +1535,7 @@ async fn untriggered_orders_handler(
     headers: axum::http::HeaderMap,
     listener: Arc<Mutex<OrderBookListener>>,
     cache: Arc<L4SnapshotCache>,
+    book_trust: BookTrust,
 ) -> axum::response::Response {
     fn json_response(status: axum::http::StatusCode, body: String) -> axum::response::Response {
         axum::response::Response::builder()
@@ -1437,8 +1555,8 @@ async fn untriggered_orders_handler(
         );
     }
 
-    match untriggered_body(&cache, &listener, query.coin.as_deref()).await {
-        Ok(Some(body)) => {
+    match untriggered_body(&cache, &book_trust, &listener, query.coin.as_deref()).await {
+        Ok(SnapshotBody::Built(body)) => {
             let accepts_gzip = headers
                 .get(axum::http::header::ACCEPT_ENCODING)
                 .and_then(|v| v.to_str().ok())
@@ -1458,10 +1576,13 @@ async fn untriggered_orders_handler(
                 .body(body.into())
                 .unwrap_or_else(|_| axum::response::Response::new(String::new().into()))
         }
-        Ok(None) => json_response(
+        Ok(SnapshotBody::Absent) => json_response(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             r#"{"error":"initializing - snapshot not yet installed"}"#.to_string(),
         ),
+        Ok(SnapshotBody::Resyncing) => {
+            json_response(axum::http::StatusCode::SERVICE_UNAVAILABLE, BOOK_RESYNCING_BODY.to_string())
+        }
         Err(err) => {
             error!("untriggeredOrders build error: {err}");
             json_response(
@@ -1707,12 +1828,220 @@ mod tests {
         assert_eq!(l4_ws_frame(&body).as_ref(), expected.as_bytes());
     }
 
+    /// One-bid BTC book at `px_raw` (raw units: 1e8 = 1.0).
+    fn btc_bid_snapshot(px_raw: u64) -> crate::order_book::multi_book::Snapshots<crate::types::inner::InnerL4Order> {
+        use crate::order_book::{OrderBook, Px, Side, Sz};
+        let order = crate::types::inner::InnerL4Order {
+            user: alloy::primitives::Address::new([0; 20]),
+            coin: Coin::new("BTC"),
+            side: Side::Bid,
+            limit_px: Px::new(px_raw),
+            sz: Sz::new(100_000_000),
+            oid: 1,
+            timestamp: 0,
+            trigger_condition: String::new(),
+            is_trigger: false,
+            trigger_px: String::new(),
+            is_position_tpsl: false,
+            reduce_only: false,
+            order_type: String::new(),
+            tif: None,
+            cloid: None,
+        };
+        let mut book: OrderBook<crate::types::inner::InnerL4Order> = OrderBook::new();
+        book.add_order(order);
+        crate::order_book::multi_book::Snapshots::new(HashMap::from([(Coin::new("BTC"), book.to_snapshot())]))
+    }
+
+    /// The best-bid px of the next bbo frame within `within`, or None.
+    async fn next_bbo_bid_px(ws: &mut WebSocket, within: Duration) -> Option<String> {
+        let frame = tokio::time::timeout(within, ws.next()).await.ok().flatten()?;
+        let value: serde_json::Value = serde_json::from_slice(&frame.payload).unwrap();
+        assert_eq!(value["channel"], "bbo", "{value}");
+        Some(value["data"]["bbo"][0]["px"].as_str().unwrap().to_string())
+    }
+
+    const PX_100: u64 = 10_000_000_000;
+
+    /// A loopback WS session (127.0.0.1 only) on a book with one BTC bid at
+    /// 100, subscribed to BTC bbo with a 50ms bbo heartbeat, after the first
+    /// frame (bid 100) has been received.
+    struct BboSession {
+        listener: Arc<Mutex<OrderBookListener>>,
+        tx: Sender<Arc<InternalMessage>>,
+        ws: WebSocket,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    // Test-only, driven by the single-threaded #[tokio::test] runtime: the yawc
+    // client socket held across awaits need not be Send.
+    #[allow(clippy::future_not_send)]
+    impl BboSession {
+        async fn open() -> Self {
+            let (tx, _rx) = channel(32);
+            let mut state = OrderBookListener::new(Some(tx.clone()), false, ActiveL2Params::new(), (true, true, true));
+            state.init_from_snapshot(btc_bid_snapshot(PX_100), 10);
+            let trust = state.book_trust();
+            let listener = Arc::new(Mutex::new(state));
+            let cache = Arc::new(L4SnapshotCache::new(Arc::new(tokio::sync::Semaphore::new(L4_SNAPSHOT_BUILD_PERMITS))));
+            let app = Router::new().route(
+                "/ws",
+                get({
+                    let (listener, tx) = (listener.clone(), tx.clone());
+                    move |incoming| {
+                        let (listener, tx, cache, trust) = (listener.clone(), tx.clone(), cache.clone(), trust.clone());
+                        async move { ws_handler(incoming, tx, listener, cache, trust, false, 0, 50, yawc::Options::default()) }
+                    }
+                }),
+            );
+            let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = tcp.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(tcp, app).await.unwrap() });
+            let mut ws = WebSocket::connect(format!("ws://{addr}/ws").parse().unwrap()).await.unwrap();
+            ws.send(FrameView::text(r#"{"method":"subscribe","subscription":{"type":"bbo","coin":"BTC"}}"#.as_bytes().to_vec()))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), ws.next()).await.unwrap().unwrap(); // subscription ack
+            let mut session = Self { listener, tx, ws, server };
+            session.send(session.current_bbo().await);
+            assert_eq!(session.next_bid_px(Duration::from_secs(1)).await.as_deref(), Some("100"));
+            session
+        }
+
+        /// The bbo broadcast the listener would send now (stamped with the
+        /// current withheld-period count).
+        async fn current_bbo(&self) -> InternalMessage {
+            self.listener.lock().await.bbo_update_for_test("BTC")
+        }
+
+        fn send(&self, msg: InternalMessage) {
+            assert!(self.tx.send(Arc::new(msg)).is_ok());
+        }
+
+        async fn next_bid_px(&mut self, within: Duration) -> Option<String> {
+            next_bbo_bid_px(&mut self.ws, within).await
+        }
+
+        async fn withhold(&mut self) {
+            self.listener.lock().await.mark_desynced("pending_cache_cleared");
+            while tokio::time::timeout(Duration::from_millis(120), self.ws.next()).await.is_ok() {} // in-flight pre-mark frames
+        }
+
+        async fn recover(&self, px_raw: u64) {
+            self.listener.lock().await.init_from_snapshot(btc_bid_snapshot(px_raw), 1_000);
+        }
+
+        /// After recovery: nothing before a fresh frame, then the fresh frame
+        /// (even at an unchanged price) and heartbeats carrying only it.
+        async fn assert_only_fresh_frames_after_recovery(&mut self, expected: &str, case: &str) {
+            let before_fresh = self.next_bid_px(Duration::from_millis(150)).await;
+            assert!(before_fresh.is_none(), "{case}: a pre-loss frame came back before a fresh one: {before_fresh:?}");
+            self.send(self.current_bbo().await);
+            let fresh = self.next_bid_px(Duration::from_secs(1)).await;
+            assert_eq!(fresh.as_deref(), Some(expected), "{case}: the fresh frame is sent even at an unchanged price");
+            let heartbeat = self.next_bid_px(Duration::from_millis(200)).await;
+            assert_eq!(heartbeat.as_deref(), Some(expected), "{case}: heartbeats resend only the fresh frame");
+            self.server.abort();
+        }
+    }
+
+    /// Review 000251 P2 (from the reviewer's loopback probe): a withheld period
+    /// must not let the pre-loss frame come back after recovery - neither re-
+    /// stamped by the heartbeat before a fresh frame, nor by the dedup
+    /// swallowing the fresh frame when the recovered price equals the old one.
+    #[tokio::test]
+    async fn test_recovery_never_heartbeats_pre_loss_bbo() {
+        for (recovered_px, expected) in [(2 * PX_100, "200"), (PX_100, "100")] {
+            let mut session = BboSession::open().await;
+            session.withhold().await;
+            session.recover(recovered_px).await;
+            session.assert_only_fresh_frames_after_recovery(expected, &format!("recovered={expected}")).await;
+        }
+    }
+
+    /// Review 000251 r2 P2: a bbo built while trusted but consumed only after a
+    /// withheld period began - during it, or even after recovery - is dropped
+    /// and never re-seeds the heartbeat cache.
+    #[tokio::test]
+    async fn test_pre_loss_bbo_consumed_late_never_rebuilds_the_heartbeat() {
+        for consumed_after_recovery in [false, true] {
+            let case = format!("consumed_after_recovery={consumed_after_recovery}");
+            let mut session = BboSession::open().await;
+            let built_before_loss = session.current_bbo().await;
+            session.withhold().await;
+            if consumed_after_recovery {
+                session.recover(2 * PX_100).await;
+                session.send(built_before_loss);
+            } else {
+                session.send(built_before_loss);
+                let dropped = session.next_bid_px(Duration::from_millis(150)).await;
+                assert!(dropped.is_none(), "{case}: a pre-loss build is not sent while withheld: {dropped:?}");
+                session.recover(2 * PX_100).await;
+            }
+            session.assert_only_fresh_frames_after_recovery("200", &case).await;
+        }
+    }
+
+    #[test]
+    fn test_cache_insert_ages_from_the_snapshot_instant() {
+        let cache = L4SnapshotCache::new(Arc::new(tokio::sync::Semaphore::new(L4_SNAPSHOT_BUILD_PERMITS)));
+        let key = ("BTC".to_string(), PxBand::default());
+        let body = || bytes::Bytes::from_static(b"{}");
+        let expired = Instant::now().checked_sub(L4_SNAPSHOT_CACHE_TTL).unwrap();
+        cache.insert(key.clone(), body(), expired);
+        assert!(cache.get(&key).is_none(), "a build older than the TTL is served uncached");
+        let taken = Instant::now().checked_sub(L4_SNAPSHOT_CACHE_TTL / 2).unwrap();
+        cache.insert(key.clone(), body(), taken);
+        assert_eq!(cache.entries.lock().unwrap()[&key].built_at, taken, "aged from the snapshot, not the insert");
+    }
+
+    /// Design 000249 B: while the book is known to miss orders a derived read is
+    /// withheld - even with a fresh body in the cache - and re-checked under the
+    /// lock; once a covering install lands (and no pre-mark build is still within
+    /// its TTL) a fresh build is served.
+    #[tokio::test]
+    async fn test_untrusted_book_withholds_snapshot_reads_even_from_a_fresh_cache() {
+        let (tx, _rx) = channel(32);
+        let mut listener = OrderBookListener::new(Some(tx), false, ActiveL2Params::new(), (true, true, true));
+        let empty = || crate::order_book::multi_book::Snapshots::new(HashMap::new());
+        listener.init_from_snapshot(empty(), 10);
+        let trust = listener.book_trust();
+        let listener = Arc::new(Mutex::new(listener));
+        let permits = Arc::new(tokio::sync::Semaphore::new(L4_SNAPSHOT_BUILD_PERMITS));
+        let cache = Arc::new(L4SnapshotCache::new(permits.clone()));
+
+        assert!(matches!(untriggered_body(&cache, &trust, &listener, None).await.unwrap(), SnapshotBody::Built(_)));
+        listener.lock().await.mark_desynced("pending_cache_cleared");
+        assert!(
+            matches!(untriggered_body(&cache, &trust, &listener, None).await.unwrap(), SnapshotBody::Resyncing),
+            "the fresh cached body is not served once the book is untrusted"
+        );
+        let l4 = l4_snapshot_body(&cache, &trust, &listener, "BTC", PxBand::default()).await.unwrap();
+        assert!(matches!(l4, SnapshotBody::Resyncing));
+
+        // The mark landed after this request passed the pre-cache gate: the
+        // under-lock re-check withholds it and nothing is cached.
+        let passed_gate = BookTrust::new();
+        let fresh_cache = Arc::new(L4SnapshotCache::new(permits));
+        let read = untriggered_body(&fresh_cache, &passed_gate, &listener, None).await.unwrap();
+        assert!(matches!(read, SnapshotBody::Resyncing));
+        assert!(fresh_cache.entries.lock().unwrap().is_empty());
+
+        listener.lock().await.init_from_snapshot(empty(), 1_000);
+        tokio::time::sleep(L4_SNAPSHOT_CACHE_TTL).await;
+        let SnapshotBody::Built(body) = untriggered_body(&cache, &trust, &listener, None).await.unwrap() else {
+            panic!("a covering install serves again");
+        };
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["height"], 1_000, "a fresh build from the installed book");
+    }
+
     #[test]
     fn test_l4_snapshot_cache_ttl_and_cap() {
         let cache = L4SnapshotCache::new(Arc::new(tokio::sync::Semaphore::new(L4_SNAPSHOT_BUILD_PERMITS)));
         let key = ("BTC".to_string(), PxBand::default());
         assert!(cache.get(&key).is_none());
-        cache.insert(key.clone(), bytes::Bytes::from_static(b"{}"));
+        cache.insert(key.clone(), bytes::Bytes::from_static(b"{}"), Instant::now());
         let (body, gz) = cache.get(&key).expect("fresh entry must hit");
         assert_eq!(body.as_ref(), b"{}");
         assert!(gz.is_none());
@@ -1722,7 +2051,7 @@ mod tests {
         // The key-count cap holds even when every entry is fresh: over-cap
         // inserts are dropped (served uncached) instead of growing the map.
         for i in 0..(2 * L4_SNAPSHOT_CACHE_MAX_ENTRIES) {
-            cache.insert((format!("C{i}"), PxBand::default()), bytes::Bytes::from_static(b"{}"));
+            cache.insert((format!("C{i}"), PxBand::default()), bytes::Bytes::from_static(b"{}"), Instant::now());
         }
         let len = cache.entries.lock().unwrap().len();
         assert!(len <= L4_SNAPSHOT_CACHE_MAX_ENTRIES, "cache must stay capped, got {len}");
