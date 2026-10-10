@@ -308,7 +308,7 @@ mod tests {
 
     fn load_snapshots_from_str<O, R>(str: &str) -> Result<(u64, Snapshots<O>)>
     where
-        O: TryFrom<R, Error = crate::prelude::Error>,
+        O: TryFrom<R, Error = Error>,
         R: Serialize + for<'a> Deserialize<'a>,
     {
         #[allow(clippy::type_complexity)]
@@ -330,7 +330,7 @@ mod tests {
 
     async fn load_snapshots_from_json<O, R>(path: &PathBuf) -> Result<(u64, Snapshots<O>)>
     where
-        O: TryFrom<R, Error = crate::prelude::Error>,
+        O: TryFrom<R, Error = Error>,
         R: Serialize + for<'a> Deserialize<'a>,
     {
         let file_contents = read_to_string(path).await?;

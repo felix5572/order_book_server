@@ -47,7 +47,7 @@ struct_excessive_bools         = { level = "allow" }
 absolute_paths_not_starting_with_crate        = { level = "warn" }
 explicit_outlives_requirements                = { level = "warn" }
 ffi_unwind_calls                              = { level = "warn" }
-keyword-idents                                = { level = "warn" }
+keyword_idents                                = { level = "warn" }
 keyword_idents_2018                           = { level = "warn" }
 keyword_idents_2024                           = { level = "warn" }
 let_underscore_drop                           = { level = "warn" }

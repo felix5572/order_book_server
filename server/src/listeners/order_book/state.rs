@@ -846,7 +846,7 @@ mod tests {
             user: Address::new([1; 20]),
             coin: Coin::new(coin),
             side: crate::order_book::types::Side::Bid,
-            limit_px: crate::order_book::Px::new(100_000_000),
+            limit_px: Px::new(100_000_000),
             sz: crate::order_book::Sz::new(100_000_000),
             oid,
             timestamp: 1000,
@@ -1609,7 +1609,7 @@ mod tests {
         }
 
         // Time matching diffs arrival
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         for i in 0..1000u64 {
             let diff = make_order_diff("BTC", i, OrderDiff::New { sz: "1.0".to_string(), insert_before: None });
             state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
@@ -1634,7 +1634,7 @@ mod tests {
             state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
         }
 
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         for i in 0..1000u64 {
             let status = make_order_status("BTC", i, "open");
             state.apply_order_statuses_hft(make_status_batch(vec![status])).unwrap();

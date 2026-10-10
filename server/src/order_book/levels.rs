@@ -244,7 +244,7 @@ mod tests {
             ],
         );
         let snapshot = book.to_l2_snapshot(None, Some(2), None);
-        let [bids, asks] = to_levels(snapshot);
+        let [bids, _] = to_levels(snapshot);
         // With 2 sig figs, bids at 3401 and 3405 both bucket to 3400
         assert_eq!(bids.len(), 1);
         assert_eq!(bids[0].1, 200);
@@ -307,7 +307,7 @@ mod tests {
         let start = std::time::Instant::now();
         let iterations = 1000u32;
         for _ in 0..iterations {
-            let _ = book.to_l2_snapshot(Some(20), Some(3), None);
+            drop(book.to_l2_snapshot(Some(20), Some(3), None));
         }
         let elapsed = start.elapsed();
         let per_call = elapsed / iterations;

@@ -990,8 +990,8 @@ fn oracle_updates_by_coin(batch: &Batch<OracleUpdateEvent>) -> HashMap<String, S
 
 fn parse_event_line(line: &str, event_source: EventSource) -> Option<(u64, EventBatch)> {
     // Count events for debugging
-    static HFT_EVENT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let count = HFT_EVENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    static HFT_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
+    let count = HFT_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
     if count % 1000 == 0 {
         log::debug!("parse_event_line event #{}, source: {}, line_len: {}", count, event_source, line.len());
     }
@@ -1023,8 +1023,8 @@ fn parse_event_line(line: &str, event_source: EventSource) -> Option<(u64, Event
             FILE_LINES_PARSED_TOTAL.with_label_values(&[event_source.metric_label()]).inc_by(line.len() as u64);
 
             // Log successful parses periodically
-            static PARSE_OK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let ok_count = PARSE_OK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            static PARSE_OK_COUNT: AtomicU64 = AtomicU64::new(0);
+            let ok_count = PARSE_OK_COUNT.fetch_add(1, Ordering::Relaxed);
             if ok_count % 10_000 == 0 {
                 log::debug!("parse OK #{}: height={}, source={}", ok_count, height, event_source);
             }
@@ -1033,8 +1033,8 @@ fn parse_event_line(line: &str, event_source: EventSource) -> Option<(u64, Event
         Err(err) => {
             // Log ALL parse errors for debugging
             PARSE_ERRORS_TOTAL.with_label_values(&[event_source.metric_label()]).inc();
-            static PARSE_ERR_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let err_count = PARSE_ERR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            static PARSE_ERR_COUNT: AtomicU64 = AtomicU64::new(0);
+            let err_count = PARSE_ERR_COUNT.fetch_add(1, Ordering::Relaxed);
             if err_count % 1000 == 0 {
                 error!("parse error #{}: {}, source: {}, line_len: {}", err_count, err, event_source, line.len());
             }
@@ -1488,8 +1488,8 @@ impl OrderBookListener {
         }
 
         // Log HFT state progress periodically
-        static HFT_STATE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let sc = HFT_STATE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        static HFT_STATE_COUNT: AtomicU64 = AtomicU64::new(0);
+        let sc = HFT_STATE_COUNT.fetch_add(1, Ordering::Relaxed);
         if sc % 1000 == 0 {
             if let Some(state) = &mut self.order_book_state {
                 // Record health metrics
@@ -1541,8 +1541,8 @@ impl OrderBookListener {
                     if self.active_subs.wants(BroadcastKind::Bbo) {
                         let bbo_start = Instant::now();
                         let (time, bbos) = state.get_bbos_for_coins(&changed_coins);
-                        static BBO_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                        let bc = BBO_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        static BBO_BROADCAST_COUNT: AtomicU64 = AtomicU64::new(0);
+                        let bc = BBO_BROADCAST_COUNT.fetch_add(1, Ordering::Relaxed);
                         if bc % 1000 == 0 {
                             log::debug!("Fast BBO broadcast #{} at time {} for {} coins", bc, time, changed_coins.len());
                         }
@@ -1647,8 +1647,8 @@ impl OrderBookListener {
             let (time, l2_snapshots, recomputed, coin_set_changed) =
                 state.l2_snapshots_incremental(&dirty, &active, &mut self.l2_snapshot_cache);
 
-            static L2_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let bc = L2_BROADCAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            static L2_BROADCAST_COUNT: AtomicU64 = AtomicU64::new(0);
+            let bc = L2_BROADCAST_COUNT.fetch_add(1, Ordering::Relaxed);
             if bc % 100 == 0 {
                 log::debug!("L2 broadcast #{} at time {} for {} dirty coins", bc, time, dirty.len());
             }
@@ -1873,12 +1873,12 @@ impl ActiveSubs {
     }
 
     fn acquire(&self, kind: BroadcastKind) -> ActiveSubGuard {
-        self.inner.counter(kind).fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.counter(kind).fetch_add(1, Ordering::SeqCst);
         ActiveSubGuard { inner: self.inner.clone(), kind }
     }
 
     fn wants(&self, kind: BroadcastKind) -> bool {
-        self.inner.counter(kind).load(std::sync::atomic::Ordering::SeqCst) > 0
+        self.inner.counter(kind).load(Ordering::SeqCst) > 0
     }
 }
 
@@ -1891,7 +1891,7 @@ pub(crate) struct ActiveSubGuard {
 
 impl Drop for ActiveSubGuard {
     fn drop(&mut self) {
-        self.inner.counter(self.kind).fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.counter(self.kind).fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -2094,7 +2094,7 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                 // restarting us would not fix the node, so don't exit for it.
                 let now_ms = parallel::now_unix_ms();
                 for (name, last) in [("OrderDiffs", &last_order_diffs), ("OrderStatuses", &last_order_statuses)] {
-                    let ts = last.load(std::sync::atomic::Ordering::Relaxed);
+                    let ts = last.load(Ordering::Relaxed);
                     if ts > 0 && now_ms.saturating_sub(ts) > WATCHER_STALL_ALARM_MS {
                         error!(
                             "{name} watcher has produced no events for {}s - node stream stalled?",
@@ -2167,7 +2167,7 @@ mod tests {
             coin: Coin::new(coin),
             side: Side::Bid,
             limit_px: Px::new(px_raw),
-            sz: crate::order_book::Sz::new(100_000_000),
+            sz: Sz::new(100_000_000),
             oid,
             timestamp: 0,
             trigger_condition: String::new(),
@@ -2390,7 +2390,7 @@ mod tests {
             coin: Coin::new("ETH"),
             side: Side::Bid,
             limit_px: Px::new(500),
-            sz: crate::order_book::Sz::new(100_000_000),
+            sz: Sz::new(100_000_000),
             oid: 99,
             timestamp: 0,
             trigger_condition: "Price above 110".to_string(),

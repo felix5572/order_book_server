@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(inner.side(), Side::Bid);
         assert_eq!(inner.limit_px(), Px::parse_from_str("50000.5").unwrap());
         assert_eq!(inner.sz(), Sz::parse_from_str("1.25").unwrap());
-        assert_eq!(inner.oid(), crate::order_book::Oid::new(42));
+        assert_eq!(inner.oid(), Oid::new(42));
         assert_eq!(inner.user, addr);
     }
 

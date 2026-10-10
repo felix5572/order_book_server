@@ -219,7 +219,7 @@ mod tests {
         order.is_trigger = is_trigger;
         order.tif = tif.map(String::from);
         NodeDataOrderStatus {
-            time: chrono::NaiveDateTime::parse_from_str("2024-01-15 10:30:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+            time: NaiveDateTime::parse_from_str("2024-01-15 10:30:00", "%Y-%m-%d %H:%M:%S").unwrap(),
             user: Address::new([0; 20]),
             hash: Some("0xabc".to_string()),
             builder: None,
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_event_source_streaming_dirs() {
-        let dir = std::path::Path::new("/data");
+        let dir = Path::new("/data");
         assert_eq!(EventSource::Fills.event_source_dir_streaming(dir), PathBuf::from("/data/node_fills_streaming"));
         assert_eq!(EventSource::OrderStatuses.event_source_dir_streaming(dir), PathBuf::from("/data/node_order_statuses_streaming"));
         assert_eq!(EventSource::OrderDiffs.event_source_dir_streaming(dir), PathBuf::from("/data/node_raw_book_diffs_streaming"));

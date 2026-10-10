@@ -1,0 +1,5 @@
+# One compiler everywhere (local, bm): warnings seen locally are the ones the
+# server build prints. Bump deliberately, together with a clean warning pass.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy"]

@@ -15,7 +15,9 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 futures-util = "0.3.31"
 rayon = "1.10"
-alloy = { version = "1.0.22", default-features = false, features = ["std", "serde", "reqwest-rustls-tls", "full"] }
+# Only alloy::primitives::Address is used; "full" pulled in sol-macro (and proc-macro-error2,
+# flagged future-incompatible by rustc 1.99) plus the provider/contract stack for nothing.
+alloy = { version = "1.0.22", default-features = false, features = ["std", "serde"] }
 strum_macros = "0.27.2"
 yawc = { version = "0.2.6", features = ["axum"] }
 flate2 = "1"

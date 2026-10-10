@@ -309,7 +309,7 @@ pub(super) enum EventBatch {
 mod tests {
     use super::*;
     use crate::{
-        order_book::{Px, Side, Sz, multi_book::Snapshots, types::InnerOrder},
+        order_book::{Px, Side, Sz, multi_book::Snapshots},
         types::inner::InnerL4Order,
     };
     use alloy::primitives::Address;
@@ -442,7 +442,7 @@ mod tests {
 
         let mut cache = HashMap::new();
         // First call seeds the cache for both coins.
-        let _ = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+        drop(compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache));
         assert_eq!(cache.len(), 2);
         let btc_first = Arc::clone(cache.get(&Coin::new("BTC")).unwrap());
         let eth_first = Arc::clone(cache.get(&Coin::new("ETH")).unwrap());
@@ -450,7 +450,7 @@ mod tests {
         // Mark BTC changed; ETH unchanged. ETH's Arc must be the same object.
         let changed: HashSet<Coin> = std::iter::once(Coin::new("BTC")).collect();
         books.add_order(order(3, "BTC", Side::Bid, "2", "50001"));
-        let _ = compute_l2_snapshots_incremental(&books, &changed, &all_params(), &mut cache);
+        drop(compute_l2_snapshots_incremental(&books, &changed, &all_params(), &mut cache));
 
         let btc_after = cache.get(&Coin::new("BTC")).unwrap();
         let eth_after = cache.get(&Coin::new("ETH")).unwrap();
@@ -470,7 +470,7 @@ mod tests {
 
         let mut cache = HashMap::new();
         // Seed both coins.
-        let _ = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+        drop(compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache));
         let a_seed = Arc::clone(cache.get(&Coin::new("A")).unwrap());
         let b_seed = Arc::clone(cache.get(&Coin::new("B")).unwrap());
 
@@ -480,7 +480,7 @@ mod tests {
         books.add_order(order(4, "B", Side::Bid, "5", "201"));
 
         let dirty: HashSet<Coin> = ["A", "B"].iter().map(|c| Coin::new(c)).collect();
-        let _ = compute_l2_snapshots_incremental(&books, &dirty, &all_params(), &mut cache);
+        drop(compute_l2_snapshots_incremental(&books, &dirty, &all_params(), &mut cache));
 
         assert!(
             !Arc::ptr_eq(&a_seed, cache.get(&Coin::new("A")).unwrap()),
@@ -503,13 +503,13 @@ mod tests {
         books.add_order(order(2, "B", Side::Bid, "1", "200"));
 
         let mut cache = HashMap::new();
-        let _ = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+        drop(compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache));
         let a_seed = Arc::clone(cache.get(&Coin::new("A")).unwrap());
 
         // A's book changes, but only B is passed as changed (A's change was dropped).
         books.add_order(order(3, "A", Side::Bid, "5", "101"));
         let only_b: HashSet<Coin> = std::iter::once(Coin::new("B")).collect();
-        let _ = compute_l2_snapshots_incremental(&books, &only_b, &all_params(), &mut cache);
+        drop(compute_l2_snapshots_incremental(&books, &only_b, &all_params(), &mut cache));
 
         assert!(
             Arc::ptr_eq(&a_seed, cache.get(&Coin::new("A")).unwrap()),
@@ -598,7 +598,7 @@ mod tests {
         let mut books: OrderBooks<InnerL4Order> = OrderBooks::from_snapshots(Snapshots::new(HashMap::new()), true);
         books.add_order(order(1, "BTC", Side::Bid, "1", "50000"));
         let mut cache = HashMap::new();
-        let _ = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+        drop(compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache));
 
         books.cancel_order(crate::order_book::Oid::new(1), Coin::new("BTC")); // book evicted
         let dirty: HashSet<Coin> = std::iter::once(Coin::new("BTC")).collect();
@@ -614,13 +614,13 @@ mod tests {
         books.add_order(order(2, "ETH", Side::Bid, "1", "3000"));
 
         let mut cache = HashMap::new();
-        let _ = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+        drop(compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache));
         assert!(cache.contains_key(&Coin::new("BTC")));
 
         // Cancel BTC's only order — the multi-book evicts the empty book, which
         // means our cache must also drop the entry on the next incremental call.
         books.cancel_order(crate::order_book::Oid::new(1), Coin::new("BTC"));
-        let _ = compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache);
+        drop(compute_l2_snapshots_incremental(&books, &HashSet::new(), &all_params(), &mut cache));
         assert!(!cache.contains_key(&Coin::new("BTC")), "BTC entry should have been evicted from the cache");
         assert!(cache.contains_key(&Coin::new("ETH")));
     }

@@ -529,7 +529,7 @@ mod test {
 
     #[test]
     fn test_server_response_pong_serialization() {
-        let json = serde_json::to_string(&super::ServerResponse::Pong).unwrap();
+        let json = serde_json::to_string(&ServerResponse::Pong).unwrap();
         assert_eq!(json, r#"{"channel":"pong"}"#);
 
         let oracle = ServerResponse::OracleUpdates(std::sync::Arc::new(vec![]));
@@ -555,7 +555,7 @@ mod test {
 
     #[test]
     fn test_server_response_error_serialization() {
-        let json = serde_json::to_string(&super::ServerResponse::Error("test error".to_string())).unwrap();
+        let json = serde_json::to_string(&ServerResponse::Error("test error".to_string())).unwrap();
         assert!(json.contains("test error"));
         assert!(json.contains("error"));
     }
@@ -567,7 +567,7 @@ mod test {
             time: 1000,
             bbo: [Some(crate::types::Level::new("100".to_string(), "1.5".to_string(), 2)), None],
         };
-        let json = serde_json::to_string(&super::ServerResponse::Bbo(bbo)).unwrap();
+        let json = serde_json::to_string(&ServerResponse::Bbo(bbo)).unwrap();
         // Same shape as api.hyperliquid.xyz `bbo` frames (an empty side is null).
         assert_eq!(json, r#"{"channel":"bbo","data":{"coin":"BTC","time":1000,"bbo":[{"px":"100","sz":"1.5","n":2},null]}}"#);
     }

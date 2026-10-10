@@ -166,6 +166,8 @@ impl<K: Clone + Eq + Hash, T: Clone> LinkedList<K, T> {
         res
     }
 
+    // Only the debug-build aggregate check (`PriceLevel::debug_validate`) and tests use it.
+    #[cfg(any(debug_assertions, test))]
     pub(crate) fn fold<F, Acc>(&self, mut init: Acc, f: F) -> Acc
     where
         F: Fn(&mut Acc, &T),
