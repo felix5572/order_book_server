@@ -1,6 +1,6 @@
 use crate::metrics::WS_SUBSCRIPTIONS_ACTIVE;
 use crate::types::node_data::{NodeDataOrderDiff, NodeDataOrderStatus};
-use crate::types::{Bbo, L2Book, L4Book, Trade};
+use crate::types::{Bbo, Fill, L2Book, L4Book, Trade};
 use alloy::primitives::Address;
 use log::debug;
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,10 @@ pub(crate) enum Subscription {
     Bbo { coin: String },
     #[serde(rename_all = "camelCase")]
     OrderUpdates { user: String },
+    /// The user's fills in the official `userFills` wire shape, increments only
+    /// (never an `isSnapshot` frame).
+    #[serde(rename_all = "camelCase")]
+    UserFills { user: String },
     #[serde(rename_all = "camelCase")]
     BookDiffs { coin: String },
     /// HIP-3 deployer oracle updates for the listed coins.
@@ -108,21 +112,28 @@ impl Subscription {
                 debug!("Valid subscription");
                 true
             }
-            Self::OrderUpdates { user } => {
-                // Validate the user address format (must be valid hex address)
-                if user.len() != 42 || !user.starts_with("0x") {
-                    debug!("Invalid subscription: user address must be 42 characters starting with 0x");
+            Self::OrderUpdates { user } | Self::UserFills { user } => {
+                if !is_user_address(user) {
                     return false;
                 }
-                if user[2..].chars().any(|c| !c.is_ascii_hexdigit()) {
-                    debug!("Invalid subscription: user address contains invalid hex characters");
-                    return false;
-                }
-                debug!("Valid orderUpdates subscription for user: {}", user);
+                debug!("Valid {} subscription for user: {}", self.type_label(), user);
                 true
             }
         }
     }
+}
+
+/// A user address in the wire form: `0x` followed by 40 hex digits.
+fn is_user_address(user: &str) -> bool {
+    if user.len() != 42 || !user.starts_with("0x") {
+        debug!("Invalid subscription: user address must be 42 characters starting with 0x");
+        return false;
+    }
+    if user[2..].chars().any(|c| !c.is_ascii_hexdigit()) {
+        debug!("Invalid subscription: user address contains invalid hex characters");
+        return false;
+    }
+    true
 }
 
 impl Subscription {
@@ -133,10 +144,20 @@ impl Subscription {
             Self::L4Book { .. } => "l4Book",
             Self::Trades { .. } => "trades",
             Self::OrderUpdates { .. } => "orderUpdates",
+            Self::UserFills { .. } => "userFills",
             Self::BookDiffs { .. } => "bookDiffs",
             Self::Oracle { .. } => "oracleUpdates",
         }
     }
+}
+
+/// One `userFills` frame: the subscribed user (echoed as subscribed) and that
+/// user's fills from one fills batch, in node order. Same shape as the official
+/// API's incremental `userFills` data, without `isSnapshot`.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct UserFills {
+    pub user: String,
+    pub fills: Vec<Fill>,
 }
 
 /// Per-coin oracle update pushed to `oracle` subscribers. `time`/`height` are
@@ -180,6 +201,7 @@ pub(crate) enum ServerResponse {
     Bbo(Bbo),
     BookDiffs(std::sync::Arc<Vec<NodeDataOrderDiff>>),
     OrderUpdates(Vec<OrderUpdate>),
+    UserFills(UserFills),
     OracleUpdates(std::sync::Arc<Vec<SimplifiedOracleUpdate>>),
     Pong,
     Error(String),
@@ -232,7 +254,7 @@ mod test {
     use crate::types::node_data::NodeDataOrderDiff;
     use crate::types::subscription::{MAX_LEVELS, Subscription};
 
-    use super::{ClientMessage, ServerResponse};
+    use super::{ClientMessage, ServerResponse, UserFills};
 
     #[test]
     fn test_message_deserialization_subscription_response() {
@@ -468,6 +490,7 @@ mod test {
         assert_eq!(Subscription::L4Book { coin: "".to_string() }.type_label(), "l4Book");
         assert_eq!(Subscription::Trades { coin: "".to_string() }.type_label(), "trades");
         assert_eq!(Subscription::OrderUpdates { user: "".to_string() }.type_label(), "orderUpdates");
+        assert_eq!(Subscription::UserFills { user: "".to_string() }.type_label(), "userFills");
         assert_eq!(Subscription::BookDiffs { coin: "".to_string() }.type_label(), "bookDiffs");
     }
 
@@ -583,6 +606,7 @@ mod test {
             (r#"{"method":"subscribe","subscription":{"type":"bookDiffs","coin":"BTC"}}"#, "bookDiffs"),
             (r#"{"method":"subscribe","subscription":{"type":"l2Book","coin":"BTC"}}"#, "l2Book"),
             (r#"{"method":"subscribe","subscription":{"type":"orderUpdates","user":"0xABcDEF1234567890abcdef1234567890AbCdEf12"}}"#, "orderUpdates"),
+            (r#"{"method":"subscribe","subscription":{"type":"userFills","user":"0xabcdef1234567890abcdef1234567890abcdef12"}}"#, "userFills"),
         ];
         for (json, label) in cases {
             let msg: ClientMessage = serde_json::from_str(json).expect(&format!("failed to parse {label}"));
@@ -595,6 +619,49 @@ mod test {
         let json = r#"{"method":"unsubscribe","subscription":{"type":"trades","coin":"BTC"}}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         assert!(matches!(msg, ClientMessage::Unsubscribe { .. }));
+    }
+
+    #[test]
+    fn test_user_fills_subscription_validates_the_address_like_order_updates() {
+        let universe = std::collections::HashSet::new();
+        let user_fills = |user: &str| Subscription::UserFills { user: user.to_string() };
+        assert!(user_fills("0xabcdef1234567890abcdef1234567890abcdef12").validate(&universe));
+        assert!(!user_fills("0xABC").validate(&universe), "too short");
+        assert!(!user_fills("abcdef1234567890abcdef1234567890abcdef1234").validate(&universe), "no 0x");
+        assert!(!user_fills("0xGGGGGG1234567890abcdef1234567890abcdef12").validate(&universe), "not hex");
+    }
+
+    /// A userFills frame has the official incremental shape and carries the modeled
+    /// fields: on these real-shape node lines (cloid set, twapId null; builderFee and
+    /// liquidation present or absent) the output equals the input.
+    #[test]
+    fn test_user_fills_frame_keeps_the_node_fill_fields() {
+        let node_fills = [
+            r#"{"coin":"ETH","px":"2512.0","sz":"0.1201","side":"A","time":1791829884085,"startPosition":"13.3473","dir":"Close Long","closedPnl":"0.134512","hash":"0xd8b2","oid":572293425349,"crossed":false,"fee":"-0.00905","tid":706893944732179,"cloid":"0x0000000000000000000001a0fbdd3054","feeToken":"USDC","twapId":null}"#,
+            r#"{"coin":"BTC","px":"100.0","sz":"1.0","side":"B","time":1,"startPosition":"0","dir":"Open Long","closedPnl":"0","hash":"0xabc","oid":7,"crossed":true,"fee":"0.5","tid":8,"cloid":"0x01","feeToken":"USDC","twapId":3,"builderFee":"0.01","liquidation":{"liquidatedUser":"0x0000000000000000000000000000000000000003","markPx":"99.0","method":"market"}}"#,
+        ];
+        let fills: Vec<crate::types::Fill> =
+            node_fills.iter().map(|json| serde_json::from_str(json).unwrap()).collect();
+        let user = "0x0000000000000000000000000000000000000001".to_string();
+        let frame: serde_json::Value =
+            serde_json::to_value(ServerResponse::UserFills(UserFills { user: user.clone(), fills })).unwrap();
+        let expected_fills: Vec<serde_json::Value> =
+            node_fills.iter().map(|json| serde_json::from_str(json).unwrap()).collect();
+        assert_eq!(frame, serde_json::json!({"channel": "userFills", "data": {"user": user, "fills": expected_fills}}));
+    }
+
+    /// The forwarding is typed, not byte-for-byte: missing cloid/twapId come out as null,
+    /// null builderFee/liquidation are omitted, and unmodeled fields are dropped. A consumer
+    /// compares parsed fills (both missing and null read as none).
+    #[test]
+    fn test_user_fills_frame_normalizes_optional_fields() {
+        let node = r#"{"coin":"BTC","px":"100.0","sz":"1.0","side":"B","time":1,"startPosition":"0","dir":"Open Long","closedPnl":"0","hash":"0xabc","oid":7,"crossed":true,"fee":"0.5","tid":8,"feeToken":"USDC","builderFee":null,"liquidation":null,"newField":1}"#;
+        let fill: crate::types::Fill = serde_json::from_str(node).unwrap();
+        let out = serde_json::to_value(&fill).unwrap();
+        assert_eq!(out["cloid"], serde_json::Value::Null, "missing cloid -> null");
+        assert_eq!(out["twapId"], serde_json::Value::Null, "missing twapId -> null");
+        assert!(out.get("builderFee").is_none() && out.get("liquidation").is_none(), "null -> omitted");
+        assert!(out.get("newField").is_none(), "unmodeled fields are dropped");
     }
 
     #[test]

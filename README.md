@@ -17,6 +17,7 @@ Real-time orderbook data from a local Hyperliquid node:
 - **l4Book** - Full Level 4 orderbook with individual order details (price-banded one-shot reads via `GET /l4Book`)
 - **untriggered orders** - Pending stop / TP-SL trigger orders per coin (one-shot reads via `GET /untriggeredOrders`)
 - **orderUpdates** - User-specific order status stream
+- **userFills** - User-specific fills in the official `userFills` shape (increments only)
 
 ## Quick Start
 
@@ -305,6 +306,17 @@ Response:
 
 > **Ordering:** within one block, updates for the same coin preserve their original order; updates spanning multiple coins may arrive grouped by coin. `time` and `height` are identical across the whole message.
 
+### Subscribe to User Fills (User-Specific)
+The user's fills in the same shape as the official API's incremental `userFills` frames (never an `isSnapshot` frame):
+```json
+{ "method": "subscribe", "subscription": { "type": "userFills", "user": "0x1234567890abcdef1234567890abcdef12345678" } }
+```
+Response (`user` echoed as subscribed; each fill carries the modeled fields — missing `cloid`/`twapId` come out as `null`, null `builderFee`/`liquidation` are omitted, unmodeled fields are dropped):
+```json
+{ "channel": "userFills", "data": { "user": "0x...", "fills": [{ "coin": "ETH", "px": "2512.0", "sz": "0.1201", "side": "A", "time": 1791829884085, "startPosition": "13.3473", "dir": "Close Long", "closedPnl": "0.134512", "hash": "0x...", "oid": 572293425349, "crossed": false, "fee": "-0.00905", "tid": 706893944732179, "cloid": "0x...", "feeToken": "USDC", "twapId": null }] } }
+```
+> **Note:** Requires node to run with `--write-fills`. A raw event stream: it continues while the book is withheld. Replayed fills after a node restart are sent as written: deduplicate by the fill identity `(coin, time, tid)` and gate freshness on the consumer side. A connection holding `userFills` is closed when it lags the internal broadcast (overwritten fills cannot be re-sent).
+
 ### Ping/Pong
 ```json
 { "method": "ping" }
@@ -419,10 +431,10 @@ curl http://localhost:9090/metrics
 |----------|--------|-------------|
 | **Connections** | `ws_connections_active` | Current WebSocket connections |
 | | `ws_connections_total` | Total connections since startup |
-| | `ws_subscriptions_active{type}` | Active subscriptions by type (bbo/l2Book/l4Book/trades/bookDiffs/orderUpdates) |
+| | `ws_subscriptions_active{type}` | Active subscriptions by type (bbo/l2Book/l4Book/trades/bookDiffs/orderUpdates/userFills) |
 | | `broadcast_receivers` | Number of broadcast channel receivers |
 | **Throughput** | `events_processed_total{type}` | Events by type (orders/diffs/fills) |
-| | `broadcasts_total{channel}` | Broadcasts by channel (bbo/l2/l4/trades) |
+| | `broadcasts_total{channel}` | Broadcasts by channel (bbo/l2/l4/trades/bookDiffs/userFills) |
 | | `messages_sent_total` | Total WebSocket messages sent |
 | | `bbo_changes_total{coin}` | BBO changes per coin |
 | **Health** | `orderbook_height` | Current block height |
@@ -590,6 +602,7 @@ This fork spawns **3 dedicated inotify threads** (one per event source) that fee
 | Trades | Yes | Yes |
 | **BBO** | No | Yes - dedicated top-of-book feed with per-coin deduplication |
 | **orderUpdates** | No | Yes - per-user order status stream (filter by address) |
+| **userFills** | No | Yes - per-user fills, official `userFills` shape (filter by address) |
 
 ### Deduplication
 

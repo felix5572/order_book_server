@@ -13,7 +13,7 @@ use crate::{
     types::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
-        subscription::{SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, OrderUpdate, ServerResponse, Subscription, SubscriptionManager},
+        subscription::{SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, OrderUpdate, ServerResponse, Subscription, SubscriptionManager, UserFills},
     },
 };
 use axum::{Router, routing::get};
@@ -587,18 +587,26 @@ async fn run_session(
                                     }
                                 }
                             },
-                            InternalMessage::Fills{ trades_by_coin } => {
+                            InternalMessage::Fills{ trades_by_coin, fills } => {
                                 // Per-coin payloads were grouped once in the listener; the
                                 // wire frame is serialized once by the first subscribed
                                 // connection and shared (refcounted bytes) by every other.
                                 for sub in manager.subscriptions() {
                                     if !alive { break; }
-                                    if let Subscription::Trades { coin } = sub {
-                                        if let Some(ct) = trades_by_coin.get(coin.as_str()) {
-                                            BROADCASTS_TOTAL.with_label_values(&["trades"]).inc();
-                                            let frame = ct.frame.get_or_serialize(|| ServerResponse::Trades(Arc::clone(&ct.trades)));
-                                            alive &= outbound.send_frame(frame).await;
+                                    match sub {
+                                        Subscription::Trades { coin } => {
+                                            if let Some(ct) = trades_by_coin.get(coin.as_str()) {
+                                                BROADCASTS_TOTAL.with_label_values(&["trades"]).inc();
+                                                let frame = ct.frame.get_or_serialize(|| ServerResponse::Trades(Arc::clone(&ct.trades)));
+                                                alive &= outbound.send_frame(frame).await;
+                                            }
                                         }
+                                        Subscription::UserFills { user } => {
+                                            if let Some(fills) = fills {
+                                                alive &= send_ws_user_fills(outbound, user, fills, user_addrs).await;
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                             },
@@ -662,6 +670,14 @@ async fn run_session(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         CHANNEL_LAG.set(n as i64);
                         CHANNEL_DROPS_TOTAL.inc();
+                        if lagged_outcome(manager) == LaggedOutcome::CloseUserFills {
+                            // Fills are events: the next message cannot bring back the ones
+                            // overwritten in the broadcast. Ending the connection lets the
+                            // subscriber see the gap (the gateway treats it as this source going
+                            // down and backs off), instead of a silently gapped fill stream.
+                            log::warn!("Receiver lagged {n} messages on a userFills connection: fills cannot be re-sent, closing it");
+                            return;
+                        }
                         // A dropped Snapshot may have carried dirty coins we never
                         // saw - process the next one in full (hash dedup still
                         // suppresses sends whose payload didn't actually change).
@@ -1607,18 +1623,8 @@ async fn send_ws_order_updates(
     statuses_by_coin: &HashMap<String, crate::listeners::order_book::CoinStatuses>,
     user_addrs: &mut HashMap<String, alloy::primitives::Address>,
 ) -> bool {
-    // Parse each subscription's address once, not once per broadcast.
-    let user_addr = match user_addrs.get(user) {
-        Some(addr) => *addr,
-        None => match user.parse::<alloy::primitives::Address>() {
-            Ok(addr) => {
-                user_addrs.insert(user.to_string(), addr);
-                addr
-            }
-            // invalid address; validation prevents this at subscribe time
-            Err(_) => return true,
-        },
-    };
+    // invalid address; validation prevents this at subscribe time
+    let Some(user_addr) = subscribed_user_address(user, user_addrs) else { return true };
 
     let user_updates: Vec<OrderUpdate> = statuses_by_coin
         .values()
@@ -1631,6 +1637,55 @@ async fn send_ws_order_updates(
         return outbound.send_message(ServerResponse::OrderUpdates(user_updates)).await;
     }
     true
+}
+
+/// What a broadcast lag means for one connection. Book subscriptions recover from the next full
+/// snapshot; a userFills subscription cannot get back fills overwritten in the broadcast.
+#[derive(Debug, PartialEq, Eq)]
+enum LaggedOutcome {
+    ResyncBook,
+    CloseUserFills,
+}
+
+fn lagged_outcome(manager: &SubscriptionManager) -> LaggedOutcome {
+    if manager.subscriptions().iter().any(|sub| matches!(sub, Subscription::UserFills { .. })) {
+        return LaggedOutcome::CloseUserFills;
+    }
+    LaggedOutcome::ResyncBook
+}
+
+/// Send a userFills subscriber the user's fills from one fills batch, in node
+/// order, as one official-shape `userFills` frame (nothing when it has none).
+/// Clones only the matching fills; the user is echoed exactly as subscribed.
+async fn send_ws_user_fills(
+    outbound: &Outbound,
+    user: &str,
+    fills: &[crate::types::node_data::NodeDataFill],
+    user_addrs: &mut HashMap<String, alloy::primitives::Address>,
+) -> bool {
+    // invalid address; validation prevents this at subscribe time
+    let Some(user_addr) = subscribed_user_address(user, user_addrs) else { return true };
+    let user_fills: Vec<crate::types::Fill> =
+        fills.iter().filter(|fill| fill.0 == user_addr).map(|fill| fill.1.clone()).collect();
+    if user_fills.is_empty() {
+        return true;
+    }
+    BROADCASTS_TOTAL.with_label_values(&["userFills"]).inc();
+    outbound.send_message(ServerResponse::UserFills(UserFills { user: user.to_string(), fills: user_fills })).await
+}
+
+/// A user subscription's address, parsed once per connection rather than once
+/// per broadcast; None for a string that is not an address.
+fn subscribed_user_address(
+    user: &str,
+    user_addrs: &mut HashMap<String, alloy::primitives::Address>,
+) -> Option<alloy::primitives::Address> {
+    if let Some(addr) = user_addrs.get(user) {
+        return Some(*addr);
+    }
+    let addr = user.parse::<alloy::primitives::Address>().ok()?;
+    user_addrs.insert(user.to_string(), addr);
+    Some(addr)
 }
 
 #[cfg(test)]
@@ -1773,6 +1828,59 @@ mod tests {
         assert!(!outbound.send_pong());
         // And the idle-session watchdog branch fires.
         outbound.data_tx.closed().await;
+    }
+
+    /// A broadcast lag closes a connection that holds userFills (book-only or mixed alike: the
+    /// overwritten fills cannot come back), and keeps the book-only resync for the rest.
+    #[test]
+    fn test_lag_closes_user_fills_connections_and_resyncs_book_only_ones() {
+        let user_fills = Subscription::UserFills { user: "0x00000000000000000000000000000000000000aa".to_string() };
+        let book = Subscription::Bbo { coin: "BTC".to_string() };
+        let manager = |subs: Vec<Subscription>| {
+            let mut manager = SubscriptionManager::default();
+            for sub in subs {
+                manager.subscribe(sub).unwrap();
+            }
+            manager
+        };
+        assert_eq!(lagged_outcome(&manager(vec![book.clone()])), LaggedOutcome::ResyncBook);
+        assert_eq!(lagged_outcome(&manager(vec![user_fills.clone()])), LaggedOutcome::CloseUserFills);
+        assert_eq!(lagged_outcome(&manager(vec![book, user_fills])), LaggedOutcome::CloseUserFills, "mixed");
+    }
+
+    /// A userFills subscriber gets only its own fills from a batch, in node order,
+    /// as one frame echoing the user as subscribed; a batch without them sends nothing.
+    #[tokio::test]
+    async fn test_send_ws_user_fills_filters_by_user_in_node_order() {
+        let fill = |user: &str, tid: u64| -> crate::types::node_data::NodeDataFill {
+            serde_json::from_value(serde_json::json!([user, {
+                "coin": "BTC", "px": "100.0", "sz": "1.0", "side": "B", "time": 1, "startPosition": "0",
+                "dir": "Open Long", "closedPnl": "0", "hash": "0xabc", "oid": tid, "crossed": true,
+                "fee": "0.5", "tid": tid, "feeToken": "USDC"
+            }]))
+            .unwrap()
+        };
+        let ours = "0x00000000000000000000000000000000000000aa";
+        let other = "0x00000000000000000000000000000000000000bb";
+        let (data_tx, mut data_rx) = mpsc::channel(8);
+        let (pong_tx, _pong_rx) = mpsc::channel(8);
+        let outbound = Outbound { data_tx, pong_tx };
+        let mut user_addrs = HashMap::new();
+        // Subscribed in mixed case: matched by address, echoed as subscribed.
+        let subscribed = "0x00000000000000000000000000000000000000AA";
+
+        let batch = [fill(ours, 1), fill(other, 2), fill(ours, 3)];
+        assert!(send_ws_user_fills(&outbound, subscribed, &batch, &mut user_addrs).await);
+        let frame: serde_json::Value = serde_json::from_slice(&data_rx.try_recv().unwrap()).unwrap();
+        assert_eq!(frame["channel"], "userFills");
+        assert_eq!(frame["data"]["user"], subscribed);
+        let tids: Vec<u64> =
+            frame["data"]["fills"].as_array().unwrap().iter().map(|f| f["tid"].as_u64().unwrap()).collect();
+        assert_eq!(tids, [1, 3]);
+        assert!(frame["data"].get("isSnapshot").is_none(), "increments only");
+
+        assert!(send_ws_user_fills(&outbound, subscribed, &[fill(other, 4)], &mut user_addrs).await);
+        assert!(data_rx.try_recv().is_err(), "no frame when the batch has none of the user's fills");
     }
 
     #[tokio::test]

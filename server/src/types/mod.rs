@@ -205,6 +205,12 @@ pub(crate) struct Fill {
     pub fee_token: String,
     #[serde(default)]
     pub twap_id: Option<u64>,
+    /// Present only on fills of builder-routed orders. Modeled so a `userFills`
+    /// frame keeps it; absent (or null) is omitted on output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_fee: Option<String>,
+    /// Present only on liquidation fills; absent (or null) is omitted on output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liquidation: Option<Liquidation>,
 }
 

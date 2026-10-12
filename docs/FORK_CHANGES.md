@@ -225,6 +225,27 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
 
 **预期**: 监听器不再每 66ms 卡几毫秒, 应用滞后与 l2 发布滞后应明显下降(用 `node_line_lag_seconds` 验收)。
 
+## 2026-10-12 新增 `userFills { user }` 订阅(私有成交两路竞争的 bm 一路)
+
+**用途**: hyperliquid-trade 的行情网关(私有流代理)把它和官方 `userFills` 按成交身份 `(coin, time, tid)` 竞争,
+先到先转(设计见主仓库 `.review/000330`, 网关实现 000332)。
+10-12 实测: 节点 `node_fills_streaming` 里我们账户当天 612 笔成交与官方 `userFillsByTime` 的 tid 集合相同、字段逐字相同。
+
+**改动**:
+- 订阅 `{"type":"userFills","user":"0x…"}`, 地址校验与 `orderUpdates` 共用 `is_user_address`。
+- 推送照官方增量帧: `{"channel":"userFills","data":{"user":<订阅原样>,"fills":[…]}}`, 从不发 `isSnapshot`。
+  每个成交批(流式模式下一行一笔)里该用户的成交按节点顺序合成一帧; 没有就不发。
+- `Fill` 补 `builderFee`; `builderFee` 与 `liquidation` 缺省或 null 时不输出。转发是按已建模字段的 typed 语义,
+  不是逐字节原样: 缺省的 `cloid`/`twapId` 输出 null, 未建模的新字段丢弃(消费方按解析后语义比较, 缺省与 null 同为无)。
+- 监听器: 有 `userFills` 订阅(新广播族 `UserFills`)时, `InternalMessage::Fills` 带上该批原始成交
+  (流式一批一笔, 复制一笔); 无订阅时不复制。trades 配对照旧只在有 trades 订阅时做。
+- 成交是原始事件流: 盘口不可信(已知丢数据停供)期间照推, 与 trades/orderUpdates 一致。
+  ob 刚启动、首次装好快照前整个服务拒连, 订阅方按自己的退避重连。
+- 节点重启重放的旧成交照原样推出; 去重和新鲜度由订阅方负责(网关: 成交身份 `(coin, time, tid)` 先到先转、
+  会话边界 + 10s 新鲜度门)。
+- 内部广播跟不上(Lagged)时, 持有 `userFills` 的连接直接关闭(被覆盖的成交补不回, 让订阅方看到缺口按断线处理);
+  只订盘口的连接照旧等下一张完整快照(审查 000333 P2)。
+
 ## 已移植(2026-07-05, 底座 47ce696 之上)
 
 1. **官方 PR#9:新单进簿价用 diff 的 px**(status px 对 trigger/转化单可能不同)。

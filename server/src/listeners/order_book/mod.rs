@@ -1449,17 +1449,24 @@ impl OrderBookListener {
                 }
                 EventBatch::Fills(batch) => {
                     EVENTS_PROCESSED_TOTAL.with_label_values(&["fills"]).inc();
-                    // Broadcast fills grouped per coin (move-only - the batch is
-                    // never applied to the book, so no event is cloned). Skipping
-                    // the pairing with zero trades subscribers is safe: its
-                    // output would be discarded, and a leg left waiting in the
-                    // pairer is dropped by the next matching leg anyway.
-                    if self.internal_message_tx.is_some() && self.active_subs.wants(BroadcastKind::Trades) {
-                        let trades_by_coin = self.trade_pairer.group(batch);
-                        if !trades_by_coin.is_empty() {
-                            if let Some(tx) = &self.internal_message_tx {
-                                drop(tx.send(Arc::new(InternalMessage::Fills { trades_by_coin })));
-                            }
+                    if let Some(tx) = &self.internal_message_tx {
+                        // userFills subscribers filter the raw fills per user. Copied
+                        // before the pairing below consumes the batch; a streaming
+                        // batch carries one fill, so the copy is one event.
+                        let fills = (self.active_subs.wants(BroadcastKind::UserFills) && batch.events_len() > 0)
+                            .then(|| Arc::new(batch.events_ref().to_vec()));
+                        // Trades grouped per coin (move-only - the batch is never
+                        // applied to the book). Skipping the pairing with zero trades
+                        // subscribers is safe: its output would be discarded, and a
+                        // leg left waiting in the pairer is dropped by the next
+                        // matching leg anyway.
+                        let trades_by_coin = if self.active_subs.wants(BroadcastKind::Trades) {
+                            self.trade_pairer.group(batch)
+                        } else {
+                            HashMap::new()
+                        };
+                        if !trades_by_coin.is_empty() || fills.is_some() {
+                            drop(tx.send(Arc::new(InternalMessage::Fills { trades_by_coin, fills })));
                         }
                     }
                     Ok(HashSet::new())
@@ -1727,9 +1734,12 @@ pub(crate) enum InternalMessage {
         withheld_period: u64,
     },
     /// Trades grouped per coin ONCE in the listener; connections share the
-    /// Arc'd vectors AND the lazily-serialized wire frame per coin.
+    /// Arc'd vectors AND the lazily-serialized wire frame per coin. `fills` is
+    /// the batch's raw fills, present only while a userFills subscription is
+    /// live; each connection filters it by its subscribed users.
     Fills {
         trades_by_coin: HashMap<String, CoinTrades>,
+        fills: Option<Arc<Vec<NodeDataFill>>>,
     },
     /// Fast BBO-only broadcast path - bypasses expensive L2 snapshot computation.
     /// Connections dedup on the raw values and share the per-coin wire frame.
@@ -1824,12 +1834,14 @@ impl Drop for L2ParamGuard {
 
 /// Broadcast families whose per-event work the listener gates on live
 /// subscriber counts. `L4Statuses` feeds l4Book + orderUpdates, `L4Diffs`
-/// feeds l4Book + bookDiffs, `Trades` feeds trades, `Bbo` feeds bbo.
+/// feeds l4Book + bookDiffs, `Trades` feeds trades, `UserFills` feeds userFills,
+/// `Bbo` feeds bbo.
 #[derive(Clone, Copy)]
 enum BroadcastKind {
     L4Statuses,
     L4Diffs,
     Trades,
+    UserFills,
     Bbo,
 }
 
@@ -1851,6 +1863,7 @@ struct ActiveSubCounts {
     l4_statuses: std::sync::atomic::AtomicUsize,
     l4_diffs: std::sync::atomic::AtomicUsize,
     trades: std::sync::atomic::AtomicUsize,
+    user_fills: std::sync::atomic::AtomicUsize,
     bbo: std::sync::atomic::AtomicUsize,
 }
 
@@ -1860,6 +1873,7 @@ impl ActiveSubCounts {
             BroadcastKind::L4Statuses => &self.l4_statuses,
             BroadcastKind::L4Diffs => &self.l4_diffs,
             BroadcastKind::Trades => &self.trades,
+            BroadcastKind::UserFills => &self.user_fills,
             BroadcastKind::Bbo => &self.bbo,
         }
     }
@@ -1880,6 +1894,7 @@ impl ActiveSubs {
             Subscription::OrderUpdates { .. } => vec![self.acquire(BroadcastKind::L4Statuses)],
             Subscription::BookDiffs { .. } => vec![self.acquire(BroadcastKind::L4Diffs)],
             Subscription::Trades { .. } => vec![self.acquire(BroadcastKind::Trades)],
+            Subscription::UserFills { .. } => vec![self.acquire(BroadcastKind::UserFills)],
             Subscription::Bbo { .. } => vec![self.acquire(BroadcastKind::Bbo)],
             Subscription::L2Book { .. } => Vec::new(),
             // Low-frequency side stream: the listener broadcasts it whenever any receiver
@@ -3166,7 +3181,8 @@ mod tests {
 
         let mut found = false;
         while let Ok(msg) = rx.try_recv() {
-            if let InternalMessage::Fills { trades_by_coin } = msg.as_ref() {
+            if let InternalMessage::Fills { trades_by_coin, fills } = msg.as_ref() {
+                assert!(fills.is_none(), "raw fills ride along only for userFills subscribers");
                 assert_eq!(trades_by_coin.len(), 2);
                 assert_eq!(trades_by_coin.get("BTC").map(|t| t.trades.len()), Some(2));
                 assert_eq!(trades_by_coin.get("ETH").map(|t| t.trades.len()), Some(1));
@@ -3181,6 +3197,64 @@ mod tests {
             }
         }
         assert!(found, "a grouped Fills message must be broadcast");
+    }
+
+    /// The raw fills of every Fills message, in order.
+    fn drain_raw_fills(rx: &mut tokio::sync::broadcast::Receiver<Arc<InternalMessage>>) -> Vec<Vec<NodeDataFill>> {
+        let mut raw = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let InternalMessage::Fills { fills, .. } = msg.as_ref() {
+                raw.push(fills.as_ref().map(|fills| fills.as_ref().clone()).unwrap_or_default());
+            }
+        }
+        raw
+    }
+
+    #[test]
+    fn test_user_fills_subscription_carries_the_raw_fills_without_trades() {
+        let (mut listener, mut rx) = ready_listener();
+        listener.apply_event_batch(1, EventBatch::Fills(make_fills_batch(&["BTC"], 1)), EventSource::Fills);
+        assert!(drain_raw_fills(&mut rx).is_empty(), "no trades/userFills subscriber: nothing is broadcast");
+
+        let guards = listener.active_subs().acquire_for(&Subscription::UserFills {
+            user: "0x0000000000000000000000000000000000000002".to_string(),
+        });
+        listener.apply_event_batch(2, EventBatch::Fills(make_fills_batch(&["BTC", "ETH"], 2)), EventSource::Fills);
+        let mut found = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let InternalMessage::Fills { trades_by_coin, fills } = msg.as_ref() {
+                assert!(trades_by_coin.is_empty(), "no trades subscriber: no pairing");
+                let fills = fills.as_ref().expect("a userFills subscriber gets the raw fills");
+                let legs: Vec<(String, u64, &str)> =
+                    fills.iter().map(|f| (format!("{:#x}", f.0), f.1.tid, f.1.coin.as_str())).collect();
+                assert_eq!(legs, [
+                    ("0x0000000000000000000000000000000000000001".to_string(), 0, "BTC"),
+                    ("0x0000000000000000000000000000000000000002".to_string(), 0, "BTC"),
+                    ("0x0000000000000000000000000000000000000001".to_string(), 1, "ETH"),
+                    ("0x0000000000000000000000000000000000000002".to_string(), 1, "ETH"),
+                ], "every leg, in node order");
+                found = true;
+            }
+        }
+        assert!(found, "a Fills message must be broadcast for the userFills subscriber");
+
+        drop(guards);
+        listener.apply_event_batch(3, EventBatch::Fills(make_fills_batch(&["BTC"], 3)), EventSource::Fills);
+        assert!(drain_raw_fills(&mut rx).is_empty(), "the last userFills subscriber left");
+    }
+
+    /// Fills are raw events: a known loss withholds the book, not the user's fills.
+    #[test]
+    fn test_user_fills_continue_while_the_book_is_withheld() {
+        let (mut listener, mut rx) = ready_listener();
+        let _guards = listener.active_subs().acquire_for(&Subscription::UserFills {
+            user: "0x0000000000000000000000000000000000000001".to_string(),
+        });
+        listener.mark_desynced("pending_cache_cleared");
+        assert!(!listener.book_trusted());
+        drain_raw_fills(&mut rx);
+        listener.apply_event_batch(7, EventBatch::Fills(make_fills_batch(&["BTC"], 7)), EventSource::Fills);
+        assert_eq!(drain_raw_fills(&mut rx).iter().map(Vec::len).collect::<Vec<_>>(), [2]);
     }
 
     #[test]
