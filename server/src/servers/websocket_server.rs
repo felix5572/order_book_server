@@ -271,7 +271,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
             "/coinPositions",
             get({
                 let accounts = accounts.clone();
-                move |query| coin_positions_handler(query, accounts.clone())
+                move |query, headers| coin_positions_handler(query, headers, accounts.clone())
             }),
         ),
         None => app,

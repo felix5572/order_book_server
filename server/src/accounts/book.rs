@@ -55,6 +55,10 @@ pub(crate) const CLOCK_MARGIN_MS: u64 = 1_000;
 /// its block on its stream.
 const MAX_MARK_LOG: usize = 2_000_000;
 
+/// Silent position changes listed per anchor install (all are counted): evidence of backstop liquidation or ADL comes
+/// a few at a time; a systematic contradiction needs only examples.
+const MAX_SILENT_SAMPLES: usize = 100;
+
 /// Held fills outside the anchor universe. About 2 per second arrive outside it (spot and outcome markets,
 /// 2026-10-19) and ~110 per second before the first anchor, so this is hours of anchor outage, not a normal state.
 const MAX_HELD_FILLS: usize = 500_000;
@@ -263,27 +267,35 @@ impl CoinBook {
         Self { size_decimals: coin.size_decimals, records: records.collect(), version }
     }
 
-    /// Keeps records set after `height`, takes the anchor's value for the rest and returns how many of those the
-    /// anchor contradicts (diagnostic: a size change without an observed fill, or a fill the stream lost).
-    fn merge(&mut self, height: u64, mut positions: FxHashMap<Address, AnchorPosition>) -> u64 {
-        let mut silent_changes = 0;
+    /// Keeps records set after `height`, takes the anchor's value for the rest, and counts (and samples) the ones the
+    /// anchor contradicts: a size change without an observed fill (backstop liquidation, ADL) or a fill the stream lost.
+    fn merge(&mut self, name: &str, height: u64, mut positions: FxHashMap<Address, AnchorPosition>, report: &mut InstallReport) {
+        let size_decimals = self.size_decimals;
+        let mut silent = |user: Address, projected: Option<(i64, u64)>, anchor_size_raw: i64| {
+            report.silent_position_changes += 1;
+            if report.silent_samples.len() < MAX_SILENT_SAMPLES {
+                report.silent_samples.push(SilentChange { coin: name.to_string(), user, size_decimals, projected, anchor_size_raw });
+            }
+        };
         self.records.retain(|user, record| {
             let anchored = positions.remove(user);
             if record.version_block > height {
                 record.anchor_row = anchored.map(|position| position.row);
                 return true;
             }
-            if record.size_raw != anchored.as_ref().map_or(0, |position| position.size_raw) {
-                silent_changes += 1;
+            let anchor_size_raw = anchored.as_ref().map_or(0, |position| position.size_raw);
+            if record.size_raw != anchor_size_raw {
+                silent(*user, Some((record.size_raw, record.version_block)), anchor_size_raw);
             }
             anchored.is_some_and(|position| {
                 *record = PositionRecord::anchored(height, position);
                 true
             })
         });
-        silent_changes += positions.len() as u64;
+        for (user, position) in &positions {
+            silent(*user, None, position.size_raw);
+        }
         self.records.extend(positions.into_iter().map(|(user, position)| (user, PositionRecord::anchored(height, position))));
-        silent_changes
     }
 }
 
@@ -380,10 +392,26 @@ pub(crate) struct MiscReport {
     pub(crate) new_unknown_kinds: Vec<String>,
 }
 
+/// A position an anchor contradicts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SilentChange {
+    pub(crate) coin: String,
+    pub(crate) user: Address,
+    pub(crate) size_decimals: u32,
+    /// The fill projection's size and the block that set it; `None` when the view held no record (opened silently).
+    pub(crate) projected: Option<(i64, u64)>,
+    /// 0 when the anchor holds no such position (closed silently).
+    pub(crate) anchor_size_raw: i64,
+}
+
 /// What an anchor install did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct InstallReport {
+    /// The anchor this one replaced.
+    pub(crate) previous_anchor: Option<u64>,
     pub(crate) silent_position_changes: u64,
+    /// Up to `MAX_SILENT_SAMPLES` of them.
+    pub(crate) silent_samples: Vec<SilentChange>,
     /// Records of coins that left the universe, dropped.
     pub(crate) dropped_coin_records: usize,
     /// Held fills the anchor covers, dropped.
@@ -561,7 +589,7 @@ impl AccountBook {
         }
         for event in batch.events() {
             match event {
-                MiscEvent::Ledger(users) => self.mark_all(users, MarkKind::Ledger, block, &mut report),
+                MiscEvent::Ledger { users, .. } => self.mark_all(users, MarkKind::Ledger, block, &mut report),
                 MiscEvent::Funding(users) => self.mark_all(users, MarkKind::Funding, block, &mut report),
                 MiscEvent::Irrelevant => {}
                 MiscEvent::Unknown(kind) => {
@@ -591,7 +619,7 @@ impl AccountBook {
             "anchor {height} is not newer than the installed {:?}",
             self.anchor
         );
-        let mut report = InstallReport::default();
+        let mut report = InstallReport { previous_anchor: self.anchor.map(|anchor| anchor.height), ..InstallReport::default() };
         let mut lost_block = self.fills.lost_block;
         self.coins.retain(|name, coin| {
             let Some(anchor_coin) = anchor_coins.remove(name) else {
@@ -612,7 +640,7 @@ impl AccountBook {
                 *coin = CoinBook::anchored(height, anchor_coin, coin.version);
                 return true;
             }
-            report.silent_position_changes += coin.merge(height, anchor_coin.positions);
+            coin.merge(name, height, anchor_coin.positions, &mut report);
             true
         });
         self.fills.lost_block = lost_block;
@@ -869,7 +897,12 @@ mod tests {
         // user 2 changed and user 3 closed without an observed fill; user 4 appeared without one
         let report = book.install_anchor(anchor(1_100, &[(PUMP, 0, &[(user(1), 5), (user(2), 8), (user(4), 3)])]));
         assert_eq!(shown(&book, PUMP), [(user(1), 6, 1_200), (user(2), 8, 1_100), (user(4), 3, 1_100)]);
-        assert_eq!(report.silent_position_changes, 3);
+        assert_eq!((report.silent_position_changes, report.previous_anchor), (3, Some(1_000)));
+        let mut samples: Vec<_> =
+            report.silent_samples.iter().map(|change| (change.user, change.projected, change.anchor_size_raw)).collect();
+        samples.sort_unstable();
+        let expected = [(user(2), Some((7, 1_000)), 8), (user(3), Some((1, 1_000)), 0), (user(4), None, 3)];
+        assert_eq!(samples, expected, "changed, closed and opened without a fill");
         let view = book.coin_positions(PUMP).unwrap();
         assert!(view.positions.iter().all(|position| position.anchor_row == Some(row())), "rows come from the new anchor");
     }
@@ -1043,7 +1076,7 @@ mod tests {
     #[test]
     fn marks_keep_the_first_block_and_the_next_anchor_rebuilds_them_from_the_log() {
         let mut book = trusted_book(&[(user(1), 5)]);
-        let ledger = format!(r#"{{"LedgerUpdate":{{"users":["{:#x}","{:#x}"],"delta":{{}}}}}}"#, user(1), user(2));
+        let ledger = format!(r#"{{"LedgerUpdate":{{"users":["{:#x}","{:#x}"],"delta":{{"type":"send"}}}}}}"#, user(1), user(2));
         let funding = format!(r#"{{"Funding":{{"deltas":[{{"user":"{:#x}"}}]}}}}"#, user(1));
         book.apply_misc_events(misc(1_100, &[&ledger]));
         book.apply_misc_events(misc(1_250, &[&ledger]));

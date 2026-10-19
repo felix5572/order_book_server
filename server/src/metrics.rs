@@ -369,7 +369,10 @@ lazy_static! {
         "broadcast_receivers",
         "Number of broadcast channel receivers"
     ).expect("metric can be created");
+}
 
+// The account view's metrics, in a block of their own (one block this long exceeds the macro recursion limit).
+lazy_static! {
     // ==================== ACCOUNTS (design 000419) ====================
 
     /// 1 while the account view may be served (anchor installed, every loss covered, inputs alive).
@@ -431,6 +434,12 @@ lazy_static! {
     pub static ref ACCOUNTS_DATA_LOSS_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_accounts_data_loss_total", "Account stream data losses"),
         &["stream", "reason"]
+    ).expect("metric can be created");
+
+    /// First-hand evidence of rare events logged as `ACCOUNTS_EVIDENCE` lines, by kind.
+    pub static ref ACCOUNTS_EVIDENCE_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_accounts_evidence_total", "Rare-event evidence lines logged by the account view"),
+        &["kind"]
     ).expect("metric can be created");
 
     /// coinPositions frames broadcast by kind (snapshot / changes / withdrawn).
@@ -507,6 +516,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ACCOUNTS_DATA_LOSS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_FRAMES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_EVIDENCE_TOTAL.clone())).ok();
 
     // File watcher metrics
     REGISTRY.register(Box::new(FILE_EVENTS_TOTAL.clone())).ok();

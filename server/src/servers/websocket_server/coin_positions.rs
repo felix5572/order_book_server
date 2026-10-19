@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast::{self, error::RecvError};
 
-use super::Outbound;
+use super::{Outbound, gzip_body};
 use crate::{
     accounts::{
         book::QueryError,
@@ -166,27 +166,45 @@ pub(super) struct CoinPositionsQuery {
 }
 
 /// `GET /coinPositions?coin=`: 200 with the view, 404 for a coin outside the anchor universe, 503 with the reason while
-/// the view is unavailable.
+/// the view is unavailable. The view is gzipped when the client accepts it (PUMP's is ~2 MB of JSON), as `/l4Book`.
 pub(super) async fn coin_positions_handler(
     axum::extract::Query(query): axum::extract::Query<CoinPositionsQuery>,
+    headers: axum::http::HeaderMap,
     accounts: AccountsHandle,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
-    let (status, body) = match accounts.coin_positions(&query.coin).await {
-        Ok(view) => (StatusCode::OK, CoinPositionsDto::new(&view).to_json()),
+    let view = match accounts.coin_positions(&query.coin).await {
+        Ok(view) => view,
         Err(err) => {
             let status = match err {
                 QueryError::UnknownCoin => StatusCode::NOT_FOUND,
                 QueryError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             };
-            (status, json!({"error": query_error_text(&query.coin, &err)}).to_string())
+            return json_response(status, None, json!({"error": query_error_text(&query.coin, &err)}).to_string().into());
         }
     };
-    axum::response::Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(body.into())
-        .unwrap_or_else(|_| axum::response::Response::new(String::new().into()))
+    let body = bytes::Bytes::from(CoinPositionsDto::new(&view).to_json());
+    let accepts_gzip = headers
+        .get(axum::http::header::ACCEPT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("gzip"));
+    if accepts_gzip {
+        let plain = body.clone();
+        // a gzip write failure falls back to the plain body, as for /l4Book
+        if let Ok(Some(gzipped)) = tokio::task::spawn_blocking(move || gzip_body(&plain)).await {
+            return json_response(StatusCode::OK, Some("gzip"), gzipped.into());
+        }
+    }
+    json_response(StatusCode::OK, None, body)
+}
+
+fn json_response(status: axum::http::StatusCode, encoding: Option<&str>, body: bytes::Bytes) -> axum::response::Response {
+    let builder = axum::response::Response::builder().status(status).header("content-type", "application/json");
+    let builder = match encoding {
+        Some(encoding) => builder.header("content-encoding", encoding),
+        None => builder,
+    };
+    builder.body(body.into()).unwrap_or_else(|_| axum::response::Response::new(String::new().into()))
 }
 
 #[cfg(test)]
@@ -290,7 +308,7 @@ mod tests {
     async fn the_http_view_answers_200_404_and_503() {
         async fn get(owner: &TestOwner, coin: &str) -> (axum::http::StatusCode, serde_json::Value) {
             let query = axum::extract::Query(CoinPositionsQuery { coin: coin.to_string() });
-            let response = coin_positions_handler(query, owner.handle.clone()).await;
+            let response = coin_positions_handler(query, axum::http::HeaderMap::new(), owner.handle.clone()).await;
             let status = response.status();
             let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
             (status, serde_json::from_slice(&body).unwrap())
@@ -306,5 +324,21 @@ mod tests {
         let (status, body) = get(&owner, PUMP).await;
         assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(body["error"].as_str().unwrap().starts_with("fills lost lines"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_http_view_is_gzipped_when_accepted() {
+        use std::io::Read as _;
+        let owner = TestOwner::start(trusted_book(&[(user(1), 5)]));
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(axum::http::header::ACCEPT_ENCODING, "gzip, deflate".parse().unwrap());
+        let query = axum::extract::Query(CoinPositionsQuery { coin: PUMP.to_string() });
+        let response = coin_positions_handler(query, headers, owner.handle.clone()).await;
+        assert_eq!(response.headers()["content-encoding"], "gzip");
+        let gzipped = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let mut plain = String::new();
+        flate2::read::GzDecoder::new(&gzipped[..]).read_to_string(&mut plain).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&plain).unwrap();
+        assert_eq!(body["positions"][0]["szi"], "5.0");
     }
 }

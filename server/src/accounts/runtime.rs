@@ -23,6 +23,7 @@ use super::{
     },
     checkpoint::parse_checkpoint_file,
     misc::MiscEvent,
+    evidence::{LineEvidence, fill_line_reason, misc_line_reason, silent_change_json},
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, Publisher},
 };
 use crate::{
@@ -31,7 +32,7 @@ use crate::{
         utils::list_checkpoints,
     },
     metrics::{
-        ACCOUNTS_ANCHOR_HEIGHT, ACCOUNTS_ANCHOR_PARSE_SECONDS, ACCOUNTS_ANCHOR_SKIPPED_TOTAL,
+        ACCOUNTS_ANCHOR_HEIGHT, ACCOUNTS_ANCHOR_PARSE_SECONDS, ACCOUNTS_ANCHOR_SKIPPED_TOTAL, ACCOUNTS_EVIDENCE_TOTAL,
         ACCOUNTS_CHECKPOINT_FAILURES_TOTAL, ACCOUNTS_DATA_LOSS_TOTAL, ACCOUNTS_HELD_FILLS, ACCOUNTS_OPEN_POSITIONS,
         ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL, ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL, ACCOUNTS_STREAM_HEIGHT,
         ACCOUNTS_TRUSTED, ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL,
@@ -52,9 +53,10 @@ const OWNER_GONE: &str = "account owner task exited";
 /// How much of an unparsable line goes into the error.
 const LINE_PREFIX_CHARS: usize = 300;
 
+/// A parsed line, with the raw line kept when it is rare-event evidence.
 enum Input {
-    Fills(std::result::Result<Batch<NodeDataFill>, LineError>),
-    MiscEvents(std::result::Result<Batch<MiscEvent>, LineError>),
+    Fills(std::result::Result<Batch<NodeDataFill>, LineError>, Option<LineEvidence>),
+    MiscEvents(std::result::Result<Batch<MiscEvent>, LineError>, Option<LineEvidence>),
     /// The watcher did not deliver lines of unknown blocks: the skip while positioning at its start, or a discard.
     Loss(Stream),
 }
@@ -152,7 +154,7 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
                 fills,
                 input_tx.clone(),
                 None,
-                |line| Input::Fills(parse_line(&line)),
+                fills_input,
                 || Input::Loss(Stream::Fills),
             ),
         },
@@ -162,7 +164,7 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
                 misc_events,
                 input_tx,
                 None,
-                |line| Input::MiscEvents(parse_line(&line)),
+                misc_input,
                 || Input::Loss(Stream::MiscEvents),
             ),
         },
@@ -176,6 +178,18 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
     let publisher = Publisher::new(subscriptions, frames);
     let owner = tokio::spawn(run_owner(AccountBook::new(now_ms()), publisher, inputs, anchors, queries, threads));
     Ok((handle, owner))
+}
+
+fn fills_input(line: String) -> Input {
+    let parsed = parse_line(&line);
+    let evidence = parsed.as_ref().ok().and_then(fill_line_reason).map(|reason| LineEvidence { reason, raw_line: line });
+    Input::Fills(parsed, evidence)
+}
+
+fn misc_input(line: String) -> Input {
+    let parsed = parse_line(&line);
+    let evidence = parsed.as_ref().ok().and_then(misc_line_reason).map(|reason| LineEvidence { reason, raw_line: line });
+    Input::MiscEvents(parsed, evidence)
 }
 
 fn parse_line<E: DeserializeOwned>(line: &str) -> std::result::Result<Batch<E>, LineError> {
@@ -277,15 +291,32 @@ async fn run_owner(
 /// Applies one input; returns the rows it changed.
 fn apply_input(book: &mut AccountBook, input: Input) -> Touched {
     match input {
-        Input::Fills(Ok(batch)) => report_fills(book.apply_fills(batch)),
-        Input::MiscEvents(Ok(batch)) => report_misc(book.apply_misc_events(batch)),
-        Input::Fills(Err(err)) => lost(book, Stream::Fills, "parse_error", &err),
-        Input::MiscEvents(Err(err)) => lost(book, Stream::MiscEvents, "parse_error", &err),
+        Input::Fills(Ok(batch), evidence) => {
+            if let Some(evidence) = evidence {
+                record_evidence(&evidence.json(Stream::Fills.label(), batch.block_number()));
+            }
+            report_fills(book.apply_fills(batch))
+        }
+        Input::MiscEvents(Ok(batch), evidence) => {
+            if let Some(evidence) = evidence {
+                record_evidence(&evidence.json(Stream::MiscEvents.label(), batch.block_number()));
+            }
+            report_misc(book.apply_misc_events(batch))
+        }
+        Input::Fills(Err(err), _) => lost(book, Stream::Fills, "parse_error", &err),
+        Input::MiscEvents(Err(err), _) => lost(book, Stream::MiscEvents, "parse_error", &err),
         Input::Loss(stream) => {
             let error = "the watcher skipped lines while positioning at its start, or discarded buffered data".to_string();
             lost(book, stream, "watcher_discard", &LineError { block: None, error })
         }
     }
+}
+
+/// One `ACCOUNTS_EVIDENCE` line (see `evidence.rs`).
+fn record_evidence(evidence: &serde_json::Value) {
+    warn!("ACCOUNTS_EVIDENCE {evidence}");
+    let kind = evidence["kind"].as_str().unwrap_or("unlabelled");
+    ACCOUNTS_EVIDENCE_TOTAL.with_label_values(&[kind]).inc();
 }
 
 fn lost(book: &mut AccountBook, stream: Stream, reason: &str, err: &LineError) -> Touched {
@@ -360,6 +391,9 @@ fn log_install(height: u64, parse_seconds: f64, skipped: usize, report: &Install
          changes, {} held fills covered, {} replayed, {} records of coins that left the universe",
         report.silent_position_changes, report.covered_held_fills, report.replayed_fills, report.dropped_coin_records
     );
+    for change in &report.silent_samples {
+        record_evidence(&silent_change_json(change, report.previous_anchor, height));
+    }
     if report.dropped_coin_records > 0 {
         warn!("accounts: anchor {height} dropped {} records of coins no longer listed", report.dropped_coin_records);
     }
@@ -434,7 +468,7 @@ impl TestOwner {
     }
 
     pub(crate) async fn fills_line(&self, line: &str) {
-        self.inputs.send(Input::Fills(parse_line(line))).await.unwrap();
+        self.inputs.send(fills_input(line.to_string())).await.unwrap();
     }
 
     pub(crate) async fn loss(&self, stream: Stream) {
@@ -468,7 +502,7 @@ mod tests {
 
     fn ledger_line(block: u64) -> String {
         let event = format!(
-            r#"{{"time":"2026-10-19T06:00:00.0","hash":"0x00","inner":{{"LedgerUpdate":{{"users":["{USER}"],"delta":{{}}}}}}}}"#
+            r#"{{"time":"2026-10-19T06:00:00.0","hash":"0x00","inner":{{"LedgerUpdate":{{"users":["{USER}"],"delta":{{"type":"send"}}}}}}}}"#
         );
         batch_line(block, &event)
     }
@@ -509,13 +543,13 @@ mod tests {
             stream,
             tx,
             None,
-            |line| Input::MiscEvents(parse_line(&line)),
+            misc_input,
             || Input::Loss(Stream::MiscEvents),
         );
         // let the watcher register its inotify watch before the first append
         thread::sleep(Duration::from_millis(200));
         let mut book = AccountBook::new(0);
-        apply_input(&mut book, Input::Fills(parse_line(&batch_line(1_200, ""))));
+        apply_input(&mut book, fills_input(batch_line(1_200, "")));
         book.install_anchor(empty_anchor(1_300, now_ms()));
 
         append(&file, &ledger_line(1_500));
@@ -524,7 +558,7 @@ mod tests {
         apply_input(&mut book, skipped);
         append(&file, &ledger_line(1_600));
         let next = recv_within(&mut inputs, Duration::from_secs(2));
-        assert!(matches!(next, Input::MiscEvents(Ok(_))), "lines after the skip flow");
+        assert!(matches!(next, Input::MiscEvents(Ok(_), None)), "lines after the skip flow");
         apply_input(&mut book, next);
         assert!(matches!(
             book.availability(),
@@ -532,6 +566,16 @@ mod tests {
         ));
         book.install_anchor(empty_anchor(1_700, now_ms() + CLOCK_MARGIN_MS));
         assert!(book.availability().is_ok());
+    }
+
+    #[test]
+    fn only_a_rare_line_keeps_its_raw_text() {
+        use crate::accounts::test_support::{PUMP, fills_line, user};
+        let ordinary = fills_line(1_100, &[(user(1), PUMP, "B", 1, "0.0", "1.0")]);
+        assert!(matches!(fills_input(ordinary.clone()), Input::Fills(Ok(_), None)));
+        let rare = ordinary.replace("\"Open Long\"", "\"Auto-Deleveraging\"");
+        let Input::Fills(Ok(_), Some(evidence)) = fills_input(rare.clone()) else { panic!("rare line without evidence") };
+        assert_eq!(evidence, LineEvidence { reason: "fill dir \"Auto-Deleveraging\"".to_string(), raw_line: rare });
     }
 
     #[test]

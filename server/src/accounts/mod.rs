@@ -8,6 +8,7 @@
 mod anchor;
 pub(crate) mod book;
 mod checkpoint;
+mod evidence;
 pub(crate) mod follow;
 mod liquidation;
 mod margin;

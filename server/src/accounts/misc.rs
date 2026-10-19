@@ -2,8 +2,9 @@
 //!
 //! Each event is `{"time", "hash", "inner": {<Kind>: {...}}}`. Only the accounts an event touches are read, and only
 //! for the two kinds that move margin: `LedgerUpdate` (`users`: every account of the transfer) and `Funding` (one
-//! line per dex, `deltas[].user`; may be empty). The other kinds seen on 2026-10-19 (staking, validator rewards,
-//! sub-account creation, gossip auction) are skipped; a kind outside both lists is reported as unknown.
+//! line per dex, `deltas[].user`; may be empty). A ledger update also keeps its `delta.type`, for the evidence of rare
+//! types. The other kinds seen on 2026-10-19 (staking, validator rewards, sub-account creation, gossip auction) are
+//! skipped; a kind outside both lists is reported as unknown.
 
 use std::fmt;
 
@@ -19,7 +20,7 @@ const IRRELEVANT_KINDS: [&str; 6] =
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MiscEvent {
-    Ledger(Vec<Address>),
+    Ledger { users: Vec<Address>, delta_type: String },
     Funding(Vec<Address>),
     Irrelevant,
     Unknown(String),
@@ -38,6 +39,13 @@ impl<'de> Deserialize<'de> for MiscEvent {
 #[derive(Deserialize)]
 struct LedgerUpdate {
     users: Vec<Address>,
+    delta: LedgerDelta,
+}
+
+#[derive(Deserialize)]
+struct LedgerDelta {
+    #[serde(rename = "type")]
+    delta_type: String,
 }
 
 #[derive(Deserialize)]
@@ -72,7 +80,10 @@ impl<'de> Visitor<'de> for InnerVisitor {
         use serde::de::Error as _;
         let kind: String = map.next_key()?.ok_or_else(|| A::Error::custom("empty misc event `inner`"))?;
         let event = match kind.as_str() {
-            "LedgerUpdate" => MiscEvent::Ledger(map.next_value::<LedgerUpdate>()?.users),
+            "LedgerUpdate" => {
+                let LedgerUpdate { users, delta } = map.next_value()?;
+                MiscEvent::Ledger { users, delta_type: delta.delta_type }
+            }
             "Funding" => MiscEvent::Funding(map.next_value::<Funding>()?.deltas.into_iter().map(|delta| delta.user).collect()),
             known if IRRELEVANT_KINDS.contains(&known) => {
                 map.next_value::<IgnoredAny>()?;
@@ -119,7 +130,8 @@ mod tests {
         let ledger = format!(
             r#"{{"LedgerUpdate":{{"users":["{USER_A}","{USER_B}"],"delta":{{"type":"send","usdc":"1.0","extra":[1]}}}}}}"#
         );
-        assert_eq!(parse(&ledger), Ok(MiscEvent::Ledger(vec![address(USER_A), address(USER_B)])));
+        let users = vec![address(USER_A), address(USER_B)];
+        assert_eq!(parse(&ledger), Ok(MiscEvent::Ledger { users, delta_type: "send".to_string() }));
         let funding = format!(
             r#"{{"Funding":{{"deltas":[{{"user":"{USER_B}","coin":"HYPE","funding_amount":"1.311558","szi":"-2159.89","funding_rate":"0.0000076023"}}]}}}}"#
         );
@@ -136,9 +148,10 @@ mod tests {
 
     #[test]
     fn a_known_kind_with_a_broken_body_fails() {
-        assert!(parse(r#"{"LedgerUpdate":{"delta":{}}}"#).is_err(), "missing users");
+        assert!(parse(r#"{"LedgerUpdate":{"delta":{"type":"send"}}}"#).is_err(), "missing users");
+        assert!(parse(&format!(r#"{{"LedgerUpdate":{{"users":["{USER_A}"],"delta":{{}}}}}}"#)).is_err(), "missing type");
         assert!(parse(r#"{"Funding":{"deltas":[{"coin":"BTC"}]}}"#).is_err(), "delta without user");
-        assert!(parse(r#"{"LedgerUpdate":{"users":["not an address"]}}"#).is_err());
+        assert!(parse(r#"{"LedgerUpdate":{"users":["not an address"],"delta":{"type":"send"}}}"#).is_err());
         assert!(parse("{}").is_err(), "no kind");
         assert!(parse(r#"{"CDeposit":{},"Funding":{"deltas":[]}}"#).is_err(), "two kinds");
     }
