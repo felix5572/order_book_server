@@ -1900,6 +1900,8 @@ impl ActiveSubs {
             // Low-frequency side stream: the listener broadcasts it whenever any receiver
             // exists (it never touches the book), so it registers no gated family.
             Subscription::Oracle { .. } => Vec::new(),
+            // Pushed by the account view's own broadcast, never through the book.
+            Subscription::CoinPositions { .. } => Vec::new(),
         }
     }
 
@@ -1940,13 +1942,7 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
     if config.replay_cache_events > 0 {
         listener.lock().await.set_cache_event_cap(config.replay_cache_events);
     }
-    let dir = match config.data_dir.clone() {
-        Some(d) => d,
-        None => dirs::home_dir().ok_or(
-            "Could not resolve a data directory: pass --data-dir explicitly. The default \
-             requires a usable HOME environment variable, which was not set or is invalid.",
-        )?,
-    };
+    let dir = config.resolved_data_dir()?;
 
     info!("Starting HFT-optimized listener");
     info!("Data directory: {:?}", dir);

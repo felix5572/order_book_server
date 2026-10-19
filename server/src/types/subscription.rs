@@ -49,6 +49,9 @@ pub(crate) enum Subscription {
     /// HIP-3 deployer oracle updates for the listed coins.
     #[serde(rename_all = "camelCase")]
     Oracle { coins: Vec<String> },
+    /// The account view's positions of one coin (design 000419): a snapshot, then changes; needs `--accounts`.
+    #[serde(rename_all = "camelCase")]
+    CoinPositions { coin: String },
 }
 
 impl Subscription {
@@ -119,6 +122,9 @@ impl Subscription {
                 debug!("Valid {} subscription for user: {}", self.type_label(), user);
                 true
             }
+            // Coins of the account anchor's universe, which the book universe does not bound (it is market-filtered);
+            // the owner answers an unknown coin when the snapshot is taken.
+            Self::CoinPositions { coin } => !coin.is_empty(),
         }
     }
 }
@@ -147,6 +153,7 @@ impl Subscription {
             Self::UserFills { .. } => "userFills",
             Self::BookDiffs { .. } => "bookDiffs",
             Self::Oracle { .. } => "oracleUpdates",
+            Self::CoinPositions { .. } => "coinPositions",
         }
     }
 }

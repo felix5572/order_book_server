@@ -214,12 +214,15 @@ impl PositionRecord {
 struct CoinBook {
     size_decimals: u32,
     records: FxHashMap<Address, PositionRecord>,
+    /// Bumped by every frame pushed for this coin (a `changes` batch or the snapshot after an anchor install); a new
+    /// subscriber's snapshot carries it without bumping (design 000419 r2 4.2).
+    version: u64,
 }
 
 impl CoinBook {
-    fn anchored(height: u64, coin: AnchorCoin) -> Self {
+    fn anchored(height: u64, coin: AnchorCoin, version: u64) -> Self {
         let records = coin.positions.into_iter().map(|(user, position)| (user, PositionRecord::anchored(height, position)));
-        Self { size_decimals: coin.size_decimals, records: records.collect() }
+        Self { size_decimals: coin.size_decimals, records: records.collect(), version }
     }
 
     /// Keeps records set after `height`, takes the anchor's value for the rest and returns how many of those the
@@ -314,12 +317,16 @@ pub(crate) struct FillsReport {
     pub(crate) hold_overflowed: bool,
     /// Fills of universe coins that violate the size contract (recorded as a fills data loss).
     pub(crate) errors: Vec<String>,
+    /// Accounts the batch touched (their rows in every coin may have changed).
+    pub(crate) users: Vec<Address>,
 }
 
 /// What one misc events batch did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct MiscReport {
     pub(crate) stale: bool,
+    /// Accounts the batch touched.
+    pub(crate) users: Vec<Address>,
     pub(crate) unknown_events: usize,
     /// Unknown kinds seen for the first time.
     pub(crate) new_unknown_kinds: Vec<String>,
@@ -356,12 +363,27 @@ pub(crate) struct PositionView {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CoinPositions {
     pub(crate) coin: String,
+    /// The coin's version (see `CoinBook::version`).
+    pub(crate) version: u64,
     pub(crate) anchor: AnchorInfo,
     pub(crate) fills_height: u64,
     pub(crate) misc_events_height: u64,
     pub(crate) size_decimals: u32,
     /// Open positions, by user.
     pub(crate) positions: Vec<PositionView>,
+}
+
+/// The rows of one coin a batch touched: the frame body of a `changes` push.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CoinChanges {
+    pub(crate) coin: String,
+    pub(crate) version: u64,
+    pub(crate) anchor: AnchorInfo,
+    pub(crate) fills_height: u64,
+    pub(crate) misc_events_height: u64,
+    pub(crate) size_decimals: u32,
+    /// Touched holders by user: the open position, or `None` once it is closed.
+    pub(crate) rows: Vec<(Address, Option<PositionView>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -425,6 +447,7 @@ impl AccountBook {
         for NodeDataFill(user, fill) in batch.events() {
             raise(&mut self.accounts.entry(user).or_default().marks.fill, block);
             self.apply_or_hold(block, user, ObservedFill::new(fill), &mut report);
+            report.users.push(user);
         }
         report
     }
@@ -473,11 +496,13 @@ impl AccountBook {
                 MiscEvent::Ledger(users) => {
                     for user in users {
                         raise(&mut self.accounts.entry(user).or_default().marks.ledger, block);
+                        report.users.push(user);
                     }
                 }
                 MiscEvent::Funding(users) => {
                     for user in users {
                         raise(&mut self.accounts.entry(user).or_default().marks.funding, block);
+                        report.users.push(user);
                     }
                 }
                 MiscEvent::Irrelevant => {}
@@ -518,14 +543,14 @@ impl AccountBook {
                 if let Some(newest) = newest {
                     raise(&mut lost_block, newest);
                 }
-                *coin = CoinBook::anchored(height, anchor_coin);
+                *coin = CoinBook::anchored(height, anchor_coin, coin.version);
                 return true;
             }
             report.silent_position_changes += coin.merge(height, anchor_coin.positions);
             true
         });
         self.fills.lost_block = lost_block;
-        self.coins.extend(anchor_coins.into_iter().map(|(name, coin)| (name, CoinBook::anchored(height, coin))));
+        self.coins.extend(anchor_coins.into_iter().map(|(name, coin)| (name, CoinBook::anchored(height, coin, 0))));
         self.accounts.retain(|_, account| {
             account.mode = None;
             account.marks = account.marks.after(height);
@@ -608,21 +633,12 @@ impl AccountBook {
             .records
             .iter()
             .filter(|(_, record)| record.size_raw != 0)
-            .map(|(user, record)| {
-                let account = self.accounts.get(user);
-                PositionView {
-                    user: *user,
-                    size_raw: record.size_raw,
-                    position_height: record.version_block,
-                    account_mode: account.and_then(|account| account.mode.clone()),
-                    anchor_row: record.anchor_row.clone(),
-                    changes: account.map_or_else(ChangeMarks::default, |account| account.marks),
-                }
-            })
+            .map(|(user, record)| self.position_view(*user, record))
             .collect();
         positions.sort_unstable_by_key(|position| position.user);
         Ok(CoinPositions {
             coin: name.to_string(),
+            version: coin.version,
             anchor: available.anchor,
             fills_height: available.fills_height,
             misc_events_height: available.misc_events_height,
@@ -630,82 +646,63 @@ impl AccountBook {
             positions,
         })
     }
+
+    /// The view right after an anchor install, pushed to the coin's subscribers: bumps the coin's version.
+    pub(crate) fn push_snapshot(&mut self, name: &str) -> Result<CoinPositions, QueryError> {
+        let coin = self.coins.get_mut(name).ok_or(QueryError::UnknownCoin)?;
+        coin.version += 1;
+        self.coin_positions(name)
+    }
+
+    /// The rows of `name` held by `users` (closed ones as `None`), for a `changes` push; bumps the coin's version when
+    /// any. `None` when no touched user holds a record of the coin.
+    pub(crate) fn push_changes(&mut self, name: &str, users: &FxHashSet<Address>) -> Result<Option<CoinChanges>, QueryError> {
+        let available = self.availability().map_err(QueryError::Unavailable)?;
+        let coin = self.coins.get(name).ok_or(QueryError::UnknownCoin)?;
+        let touched: Vec<(Address, &PositionRecord)> = if users.len() < coin.records.len() {
+            users.iter().filter_map(|user| coin.records.get(user).map(|record| (*user, record))).collect()
+        } else {
+            coin.records.iter().filter(|(user, _)| users.contains(*user)).map(|(user, record)| (*user, record)).collect()
+        };
+        if touched.is_empty() {
+            return Ok(None);
+        }
+        let mut rows: Vec<(Address, Option<PositionView>)> = touched
+            .into_iter()
+            .map(|(user, record)| (user, (record.size_raw != 0).then(|| self.position_view(user, record))))
+            .collect();
+        rows.sort_unstable_by_key(|(user, _)| *user);
+        let size_decimals = coin.size_decimals;
+        let coin = self.coins.get_mut(name).ok_or(QueryError::UnknownCoin)?;
+        coin.version += 1;
+        Ok(Some(CoinChanges {
+            coin: name.to_string(),
+            version: coin.version,
+            anchor: available.anchor,
+            fills_height: available.fills_height,
+            misc_events_height: available.misc_events_height,
+            size_decimals,
+            rows,
+        }))
+    }
+
+    fn position_view(&self, user: Address, record: &PositionRecord) -> PositionView {
+        let account = self.accounts.get(&user);
+        PositionView {
+            user,
+            size_raw: record.size_raw,
+            position_height: record.version_block,
+            account_mode: account.and_then(|account| account.mode.clone()),
+            anchor_row: record.anchor_row.clone(),
+            changes: account.map_or_else(ChangeMarks::default, |account| account.marks),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accounts::liquidation::LiquidationPx;
-
-    const PUMP: &str = "PUMP";
-
-    fn user(byte: u8) -> Address {
-        Address::repeat_byte(byte)
-    }
-
-    /// One fill line: `(user, coin, side "B"/"A", tid, startPosition, sz)`.
-    type FillSpec<'a> = (Address, &'a str, &'a str, u64, &'a str, &'a str);
-
-    fn fills(block: u64, specs: &[FillSpec<'_>]) -> Batch<NodeDataFill> {
-        let events: Vec<String> = specs
-            .iter()
-            .map(|(user, coin, side, tid, start, sz)| {
-                format!(
-                    r#"["{user:#x}",{{"coin":"{coin}","px":"1.0","sz":"{sz}","side":"{side}","time":1,"startPosition":"{start}","dir":"Open Long","closedPnl":"0","hash":"0xabc","oid":7,"crossed":true,"fee":"0","tid":{tid},"feeToken":"USDC"}}]"#
-                )
-            })
-            .collect();
-        sonic_rs::from_str(&batch_line(block, &events.join(","))).unwrap()
-    }
-
-    fn misc(block: u64, inners: &[&str]) -> Batch<MiscEvent> {
-        let events: Vec<String> =
-            inners.iter().map(|inner| format!(r#"{{"time":"2026-10-19T06:00:00.0","hash":"0x00","inner":{inner}}}"#)).collect();
-        sonic_rs::from_str(&batch_line(block, &events.join(","))).unwrap()
-    }
-
-    fn batch_line(block: u64, events: &str) -> String {
-        format!(
-            r#"{{"local_time":"2026-10-19T06:00:00.1","block_time":"2026-10-19T06:00:00.0","block_number":{block},"events":[{events}]}}"#
-        )
-    }
-
-    fn row() -> AnchorRow {
-        AnchorRow { isolated: false, pool_positions: Some(1), liquidation_px: LiquidationPx::Computed(0.004) }
-    }
-
-    /// `(coin, szDecimals, [(user, size_raw)])`.
-    type CoinSpec<'a> = (&'a str, u32, &'a [(Address, i64)]);
-
-    /// An anchor of these coins; every holder is a unified account.
-    fn anchor(height: u64, coins: &[CoinSpec<'_>]) -> Anchor {
-        let mut account_modes = FxHashMap::default();
-        let coins = coins
-            .iter()
-            .map(|(name, size_decimals, holders)| {
-                let positions = holders
-                    .iter()
-                    .map(|(user, size_raw)| {
-                        account_modes.insert(*user, AccountMode::Unified);
-                        (*user, AnchorPosition { size_raw: *size_raw, row: row() })
-                    })
-                    .collect();
-                ((*name).to_string(), AnchorCoin { size_decimals: *size_decimals, positions })
-            })
-            .collect();
-        Anchor { height, time_ms: height * 1_000, coins, account_modes }
-    }
-
-    /// Watchers started at unix ms 0 and both streams read block 100, then the anchor at 1000 (block time 1,000,000 ms)
-    /// installs: trusted.
-    fn trusted_book(holders: &[(Address, i64)]) -> AccountBook {
-        let mut book = AccountBook::new(0);
-        book.apply_fills(fills(100, &[]));
-        book.apply_misc_events(misc(100, &[]));
-        book.install_anchor(anchor(1_000, &[(PUMP, 0, holders)]));
-        assert_eq!(book.availability().map(|available| available.anchor.height), Ok(1_000));
-        book
-    }
+    use crate::accounts::test_support::{PUMP, anchor, fills, misc, row, trusted_book, user};
 
     const fn fills_lost_up_to(block: u64) -> Unavailable {
         Unavailable::DataLoss { stream: Stream::Fills, bound: LossBound::Block(block) }
@@ -893,6 +890,44 @@ mod tests {
         book.install_anchor(anchor(1_050, &[(PUMP, 0, &[]), ("STRK", 1, &[(user(1), 859_820_891)])]));
         book.apply_fills(fills(1_100, &[(user(1), "STRK", "B", 1, "85982089.099999994", "197.4")]));
         assert_eq!(shown(&book, "STRK"), [(user(1), 859_822_865, 1_100)]);
+    }
+
+    // ---- pushes (design 000419 r2 4.2) ----
+
+    #[test]
+    fn every_push_bumps_the_coin_version_and_a_query_does_not() {
+        let mut book = trusted_book(&[(user(1), 5), (user(2), 3)]);
+        assert_eq!(book.coin_positions(PUMP).unwrap().version, 0);
+        let report = book.apply_fills(fills(1_100, &[(user(1), PUMP, "A", 1, "5.0", "5.0")]));
+        let touched: FxHashSet<Address> = report.users.into_iter().collect();
+        let changes = book.push_changes(PUMP, &touched).unwrap().unwrap();
+        assert_eq!((changes.version, changes.rows), (1, vec![(user(1), None)]), "the close is a removed row");
+        assert_eq!(book.coin_positions(PUMP).unwrap().version, 1, "a subscriber's snapshot carries the version as is");
+        let untouched: FxHashSet<Address> = std::iter::once(user(9)).collect();
+        assert_eq!(book.push_changes(PUMP, &untouched), Ok(None), "no holder touched: no frame, no bump");
+        book.install_anchor(anchor(1_200, &[(PUMP, 0, &[(user(2), 3)])]));
+        assert_eq!(book.push_snapshot(PUMP).map(|view| view.version), Ok(2));
+        assert_eq!(book.push_snapshot("BTC").map(|view| view.version), Err(QueryError::UnknownCoin));
+    }
+
+    #[test]
+    fn a_funding_batch_changes_the_rows_of_every_touched_holder() {
+        let mut book = trusted_book(&[(user(1), 5), (user(2), -3), (user(3), 1)]);
+        let funding = format!(r#"{{"Funding":{{"deltas":[{{"user":"{:#x}"}},{{"user":"{:#x}"}}]}}}}"#, user(1), user(2));
+        let report = book.apply_misc_events(misc(1_100, &[&funding]));
+        let touched: FxHashSet<Address> = report.users.into_iter().collect();
+        let changes = book.push_changes(PUMP, &touched).unwrap().unwrap();
+        let rows: Vec<(Address, Option<u64>)> =
+            changes.rows.iter().map(|(user, row)| (*user, row.as_ref().and_then(|row| row.changes.funding))).collect();
+        assert_eq!(rows, [(user(1), Some(1_100)), (user(2), Some(1_100))]);
+    }
+
+    #[test]
+    fn a_size_decimals_reset_keeps_the_coin_version() {
+        let mut book = trusted_book(&[(user(1), 5)]);
+        book.push_snapshot(PUMP).unwrap();
+        book.install_anchor(anchor(1_100, &[(PUMP, 1, &[(user(1), 50)])]));
+        assert_eq!(book.coins[PUMP].version, 1, "subscribers must never see a version go back");
     }
 
     // ---- change marks ----

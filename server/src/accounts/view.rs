@@ -1,11 +1,11 @@
-//! The served JSON of `coinPositions` (design 000419 r2 4.1, with the r3/r4 field changes), built from a book view.
-//! One shape for the HTTP response, the WS snapshot and the follow probe's dumps.
+//! The served JSON of `coinPositions` (design 000419 r2 4.1 / 4.2, with the r3/r4 field changes), built from book
+//! views. One position shape for the HTTP response, the WS frames and the follow probe's dumps.
 
 use alloy::primitives::Address;
 use serde::Serialize;
 
 use super::{
-    book::{ChangeMarks, CoinPositions, PositionView},
+    book::{AnchorInfo, ChangeMarks, CoinChanges, CoinPositions, PositionView},
     checkpoint::AccountMode,
     liquidation::{LiquidationPx, UnsupportedReason},
     size::format_size_raw,
@@ -64,12 +64,78 @@ impl CoinPositionsDto {
             fills_height: view.fills_height,
             misc_events_height: view.misc_events_height,
             anchor: AnchorDto { height: view.anchor.height, time: view.anchor.time_ms },
-            positions: view.positions.iter().map(|position| position_dto(view, position)).collect(),
+            positions: view
+                .positions
+                .iter()
+                .map(|position| position_dto(view.size_decimals, view.anchor, position))
+                .collect(),
         }
     }
 }
 
-fn position_dto(view: &CoinPositions, position: &PositionView) -> PositionDto {
+impl CoinPositionsDto {
+    /// The HTTP body.
+    #[expect(clippy::expect_used, reason = "these DTOs have string keys and finite numbers only; serializing cannot fail")]
+    pub(crate) fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("serializable DTOs")
+    }
+}
+
+/// One WS frame's `data` (design 000419 r2 4.2).
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub(crate) enum CoinPositionsFrame {
+    /// The full view: on subscribe (current version) and after every anchor install (version bumped).
+    Snapshot {
+        version: u64,
+        #[serde(flatten)]
+        view: CoinPositionsDto,
+    },
+    /// The rows a batch touched; `position` is `null` once closed.
+    Changes { coin: String, version: u64, fills_height: u64, misc_events_height: u64, changes: Vec<ChangeRowDto> },
+    /// The subscription ended; resubscribe once the view is available again.
+    Withdrawn { coin: String, reason: String },
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChangeRowDto {
+    user: String,
+    position: Option<PositionDto>,
+}
+
+impl CoinPositionsFrame {
+    pub(crate) fn snapshot(view: &CoinPositions) -> Self {
+        Self::Snapshot { version: view.version, view: CoinPositionsDto::new(view) }
+    }
+
+    pub(crate) fn changes(changes: &CoinChanges) -> Self {
+        let rows = changes.rows.iter().map(|(user, position)| ChangeRowDto {
+            user: user_text(*user),
+            position: position.as_ref().map(|position| position_dto(changes.size_decimals, changes.anchor, position)),
+        });
+        Self::Changes {
+            coin: changes.coin.clone(),
+            version: changes.version,
+            fills_height: changes.fills_height,
+            misc_events_height: changes.misc_events_height,
+            changes: rows.collect(),
+        }
+    }
+
+    /// The wire frame `{"channel":"coinPositions","data":<frame>}`, the envelope every `ServerResponse` has.
+    #[expect(clippy::expect_used, reason = "these DTOs have string keys and finite numbers only; serializing cannot fail")]
+    pub(crate) fn to_wire(&self) -> bytes::Bytes {
+        #[derive(Serialize)]
+        struct Envelope<'a> {
+            channel: &'static str,
+            data: &'a CoinPositionsFrame,
+        }
+        let wire = serde_json::to_vec(&Envelope { channel: "coinPositions", data: self }).expect("serializable DTOs");
+        bytes::Bytes::from(wire)
+    }
+}
+
+fn position_dto(size_decimals: u32, anchor: AnchorInfo, position: &PositionView) -> PositionDto {
     let row = position.anchor_row.as_ref();
     let (liquidation_px_status, liquidation_px, unsupported_reason) = match row.map(|row| &row.liquidation_px) {
         None => ("pending", None, None),
@@ -79,7 +145,7 @@ fn position_dto(view: &CoinPositions, position: &PositionView) -> PositionDto {
     };
     PositionDto {
         user: user_text(position.user),
-        szi: format_size_raw(position.size_raw, view.size_decimals),
+        szi: format_size_raw(position.size_raw, size_decimals),
         position_height: position.position_height,
         margin_mode: row.map(|row| if row.isolated { "isolated" } else { "cross" }),
         account_mode: position.account_mode.as_ref().map(account_mode_name),
@@ -87,7 +153,7 @@ fn position_dto(view: &CoinPositions, position: &PositionView) -> PositionDto {
         liquidation_px,
         liquidation_px_status,
         unsupported_reason,
-        liquidation_px_height: row.map(|_| view.anchor.height),
+        liquidation_px_height: row.map(|_| anchor.height),
         changed_since_liquidation_px: changes(position.changes),
     }
 }
@@ -164,6 +230,7 @@ mod tests {
         };
         let view = CoinPositions {
             coin: "PUMP".to_string(),
+            version: 7,
             anchor: AnchorInfo { height: 1_000, time_ms: 1_792_384_440_000 },
             fills_height: 1_011,
             misc_events_height: 1_009,

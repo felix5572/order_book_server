@@ -6,19 +6,22 @@
 
 use std::{
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use alloy::primitives::Address;
 use log::{error, info, warn};
 use serde::{Deserialize, de::DeserializeOwned};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::{
     anchor::Anchor,
     book::{AccountBook, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport, QueryError, Stream, Unavailable},
     checkpoint::parse_checkpoint_file,
     misc::MiscEvent,
+    publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, Publisher},
 };
 use crate::{
     listeners::order_book::{
@@ -76,13 +79,26 @@ enum Query {
     Status { reply: oneshot::Sender<BookStatus> },
 }
 
-/// Queries the owner task.
+/// Queries the owner task and joins its `coinPositions` push.
 #[derive(Clone)]
 pub(crate) struct AccountsHandle {
     queries: mpsc::Sender<Query>,
+    subscriptions: CoinSubscriptions,
+    /// Weak: only the owner's publisher keeps the broadcast open, so its exit closes every receiver (review 000423 P2).
+    frames: broadcast::WeakSender<Arc<AccountsFrame>>,
 }
 
 impl AccountsHandle {
+    /// Every frame the owner broadcasts from now on; `None` once the owner is gone.
+    pub(crate) fn frames(&self) -> Option<broadcast::Receiver<Arc<AccountsFrame>>> {
+        self.frames.upgrade().map(|frames| frames.subscribe())
+    }
+
+    /// Counts a subscriber of `coin`, so the owner builds its frames; take it before asking for the snapshot.
+    pub(crate) fn acquire(&self, coin: &str) -> CoinSubscriptionGuard {
+        self.subscriptions.acquire(coin)
+    }
+
     pub(crate) async fn coin_positions(&self, coin: &str) -> std::result::Result<CoinPositions, QueryError> {
         let (reply, answer) = oneshot::channel();
         let gone = || QueryError::Unavailable(Unavailable::Stopped(OWNER_GONE.to_string()));
@@ -111,6 +127,8 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
     let (input_tx, inputs) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
     let (anchor_tx, anchors) = mpsc::channel(1);
     let (queries_tx, queries) = mpsc::channel(64);
+    let subscriptions = CoinSubscriptions::default();
+    let (frames, _) = broadcast::channel(FRAME_CHANNEL_CAPACITY);
     let fills = LineStream {
         name: "AccountFills",
         lag_label: "accounts_fills",
@@ -152,8 +170,10 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
         },
     ];
     info!("accounts started; first anchor is the first checkpoint above {start_height}");
-    let owner = tokio::spawn(run_owner(AccountBook::new(now_ms()), inputs, anchors, queries, threads));
-    Ok((AccountsHandle { queries: queries_tx }, owner))
+    let handle = AccountsHandle { queries: queries_tx, subscriptions: subscriptions.clone(), frames: frames.downgrade() };
+    let publisher = Publisher::new(subscriptions, frames);
+    let owner = tokio::spawn(run_owner(AccountBook::new(now_ms()), publisher, inputs, anchors, queries, threads));
+    Ok((handle, owner))
 }
 
 fn parse_line<E: DeserializeOwned>(line: &str) -> std::result::Result<Batch<E>, LineError> {
@@ -214,16 +234,28 @@ fn spawn_checkpoint_poller(
 
 async fn run_owner(
     mut book: AccountBook,
+    mut publisher: Publisher,
     mut inputs: mpsc::Receiver<Input>,
     mut anchors: mpsc::Receiver<AnchorMessage>,
     mut queries: mpsc::Receiver<Query>,
     threads: Vec<Supervised>,
 ) {
     let mut supervision = tokio::time::interval(SUPERVISION_INTERVAL);
+    publisher.track(&book);
     loop {
         tokio::select! {
-            Some(input) = inputs.recv() => apply_input(&mut book, input),
-            Some(message) = anchors.recv() => apply_anchor(&mut book, message),
+            Some(input) = inputs.recv() => {
+                let users = apply_input(&mut book, input);
+                if publisher.track(&book) {
+                    publisher.push_changes(&mut book, &users);
+                }
+            }
+            Some(message) = anchors.recv() => {
+                let installed = apply_anchor(&mut book, message);
+                if publisher.track(&book) && installed {
+                    publisher.push_snapshots(&mut book);
+                }
+            }
             query = queries.recv() => {
                 let Some(query) = query else {
                     info!("accounts: every handle dropped, owner exits");
@@ -233,26 +265,28 @@ async fn run_owner(
             }
             _ = supervision.tick() => {
                 supervise(&mut book, &threads);
+                publisher.track(&book);
                 export_status(&book.status());
             }
         }
     }
 }
 
-fn apply_input(book: &mut AccountBook, input: Input) {
+/// Applies one input; returns the accounts it touched.
+fn apply_input(book: &mut AccountBook, input: Input) -> Vec<Address> {
     match input {
         Input::Fills(Ok(batch)) => report_fills(book.apply_fills(batch)),
-        Input::MiscEvents(Ok(batch)) => report_misc(&book.apply_misc_events(batch)),
+        Input::MiscEvents(Ok(batch)) => report_misc(book.apply_misc_events(batch)),
         Input::Fills(Err(err)) => lost(book, Stream::Fills, "parse_error", &err),
         Input::MiscEvents(Err(err)) => lost(book, Stream::MiscEvents, "parse_error", &err),
         Input::Loss(stream) => {
             let error = "the watcher skipped lines while positioning at its start, or discarded buffered data".to_string();
-            lost(book, stream, "watcher_discard", &LineError { block: None, error });
+            lost(book, stream, "watcher_discard", &LineError { block: None, error })
         }
     }
 }
 
-fn lost(book: &mut AccountBook, stream: Stream, reason: &str, err: &LineError) {
+fn lost(book: &mut AccountBook, stream: Stream, reason: &str, err: &LineError) -> Vec<Address> {
     let at = err.block.map_or_else(|| "of unknown blocks".to_string(), |block| format!("of block {block}"));
     error!("accounts {} data loss ({reason}) {at}: {}", stream.label(), err.error);
     ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), reason]).inc();
@@ -260,9 +294,10 @@ fn lost(book: &mut AccountBook, stream: Stream, reason: &str, err: &LineError) {
         Some(block) => book.record_lost_block(stream, block),
         None => book.record_unknown_loss(stream, now_ms()),
     }
+    Vec::new()
 }
 
-fn report_fills(report: FillsReport) {
+fn report_fills(report: FillsReport) -> Vec<Address> {
     if report.stale {
         ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL.inc();
     }
@@ -274,16 +309,19 @@ fn report_fills(report: FillsReport) {
         error!("accounts fills data loss (size_contract): {err}");
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Fills.label(), "size_contract"]).inc();
     }
+    report.users
 }
 
-fn report_misc(report: &MiscReport) {
+fn report_misc(report: MiscReport) -> Vec<Address> {
     ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL.inc_by(report.unknown_events as u64);
     for kind in &report.new_unknown_kinds {
         warn!("accounts: unknown misc event kind {kind:?} (skipped; counted from now on)");
     }
+    report.users
 }
 
-fn apply_anchor(book: &mut AccountBook, message: AnchorMessage) {
+/// Applies a poller message; returns whether an anchor was installed.
+fn apply_anchor(book: &mut AccountBook, message: AnchorMessage) -> bool {
     match message {
         AnchorMessage::Parsed { anchor, parse_seconds, skipped } => {
             let height = anchor.height;
@@ -293,11 +331,13 @@ fn apply_anchor(book: &mut AccountBook, message: AnchorMessage) {
             ACCOUNTS_ANCHOR_PARSE_SECONDS.set(parse_seconds);
             ACCOUNTS_ANCHOR_SKIPPED_TOTAL.inc_by(skipped as u64);
             ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL.inc_by(report.silent_position_changes);
+            true
         }
         AnchorMessage::Failed { height, error } => {
             error!("accounts: checkpoint {height} failed to parse, withholding the view: {error}");
             ACCOUNTS_CHECKPOINT_FAILURES_TOTAL.inc();
             book.record_checkpoint_failure(height, error);
+            false
         }
     }
 }
@@ -347,6 +387,50 @@ fn export_status(status: &BookStatus) {
         if let Some(height) = height {
             ACCOUNTS_STREAM_HEIGHT.with_label_values(&[stream.label()]).set(height.cast_signed());
         }
+    }
+}
+
+/// An owner without watchers or poller, fed directly by the test.
+#[cfg(test)]
+pub(crate) struct TestOwner {
+    pub(crate) handle: AccountsHandle,
+    inputs: mpsc::Sender<Input>,
+    anchors: mpsc::Sender<AnchorMessage>,
+    owner: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(test)]
+impl TestOwner {
+    /// Spawns the owner on the current tokio runtime.
+    pub(crate) fn start(book: AccountBook) -> Self {
+        let (inputs, input_rx) = mpsc::channel(16);
+        let (anchors, anchor_rx) = mpsc::channel(1);
+        let (queries, query_rx) = mpsc::channel(16);
+        let subscriptions = CoinSubscriptions::default();
+        let (frames, _) = broadcast::channel(FRAME_CHANNEL_CAPACITY);
+        let handle = AccountsHandle { queries, subscriptions: subscriptions.clone(), frames: frames.downgrade() };
+        let owner = tokio::spawn(run_owner(book, Publisher::new(subscriptions, frames), input_rx, anchor_rx, query_rx, Vec::new()));
+        Self { handle, inputs, anchors, owner }
+    }
+
+    /// Ends the owner task (as a panic would) and waits until it is gone.
+    pub(crate) async fn kill(&self) {
+        self.owner.abort();
+        while !self.owner.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub(crate) async fn fills_line(&self, line: &str) {
+        self.inputs.send(Input::Fills(parse_line(line))).await.unwrap();
+    }
+
+    pub(crate) async fn loss(&self, stream: Stream) {
+        self.inputs.send(Input::Loss(stream)).await.unwrap();
+    }
+
+    pub(crate) async fn anchor(&self, anchor: Anchor) {
+        self.anchors.send(AnchorMessage::Parsed { anchor, parse_seconds: 0.0, skipped: 0 }).await.unwrap();
     }
 }
 
@@ -446,6 +530,24 @@ mod tests {
         let truncated = r#"{"local_time":"2026-10-19T06:00:00.1","block_time":"2026-10-19T06:00:00.0","block_number":1500,"events":[["0x"#;
         assert_eq!(parse_line::<NodeDataFill>(truncated).expect_err("not JSON").block, None);
         assert!(parse_line::<MiscEvent>("{}").expect_err("no header").block.is_none());
+    }
+
+    /// Review 000423 P2: a real owner exit closes the push for every receiver (handles only hold a weak sender) and
+    /// fails every later query.
+    #[tokio::test]
+    async fn the_owner_exit_closes_the_push_and_fails_queries() {
+        use tokio::sync::broadcast::error::RecvError;
+
+        use crate::accounts::test_support::{PUMP, trusted_book, user};
+        let owner = TestOwner::start(trusted_book(&[(user(1), 5)]));
+        let mut frames = owner.handle.frames().expect("the owner runs");
+        assert!(owner.handle.coin_positions(PUMP).await.is_ok());
+        owner.kill().await;
+        let closed = tokio::time::timeout(Duration::from_secs(2), frames.recv()).await.expect("closed, not pending");
+        assert!(matches!(closed, Err(RecvError::Closed)), "{closed:?}");
+        let gone = QueryError::Unavailable(Unavailable::Stopped(OWNER_GONE.to_string()));
+        assert_eq!(owner.handle.coin_positions(PUMP).await, Err(gone));
+        assert!(owner.handle.frames().is_none(), "no receiver from a gone owner");
     }
 
     /// Review 000422 P3-1: the poller stops at its next poll once the owner is gone, not after the next checkpoint.

@@ -246,6 +246,33 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
 - 内部广播跟不上(Lagged)时, 持有 `userFills` 的连接直接关闭(被覆盖的成交补不回, 让订阅方看到缺口按断线处理);
   只订盘口的连接照旧等下一张完整快照(审查 000333 P2)。
 
+## 2026-10-19 账户视图: 按币持仓与锚点清算价(`--accounts`, 设计 000419)
+
+**用途**: 不经官方接口、不经节点 3001, 由本进程自己给出全市场每个币的持仓和预计清算价(主仓库 `.review/000419`
+设计 r1–r4, 规则核实见主仓库 `analyze/research/hl_account_state_verify_20261019/README.md`)。默认关闭。
+
+**改动**(`server/src/accounts/`, 三批: 000421 / 000422 / 第 3 批):
+- **锚点**: 自己流式解析节点 checkpoint(`periodic_abci_states/<day>/<height>.rmp`, MessagePack), 只读需要的字段;
+  每份算出全部仓位的清算价(普通账户按 dex 分池、统一账户按抵押币分池、逐仓独立; 档位按清算价处名义取;
+  仓位缺 `M` = 单档 20 倍; mark 取 `pxs2[1]`; 账户类型取 `ust.a`)。只解析最新一份, 约 5–6 s、峰值 RSS 约 750 MB。
+- **持仓投影**(`AccountBook`): 锚点 + 之后的成交(`startPosition ± sz`, 块内按 `(tid, side)` 去重, 旧块跳过,
+  归零保留版本); universe 外的成交(现货、HIP-4 结果币、锚点之后才上的币、首个锚点之前的一切)暂存到下个锚点重放。
+- **变化标记**: 按账户记成交 / 账本 / 资金费的最新块, 下个锚点修剪。
+- **可信**: 丢失分已知块号(锚点高度 ≥ 它才覆盖)与未知块号(发现时间, 锚点块时间 ≥ 发现时间 + 1s 才覆盖;
+  包括启动前的数据和读取线程定位到 EOF 时跳过的内容); checkpoint 解析失败、任一线程退出也失信; 失信时 HTTP 503。
+- **读取层**: 原 `spawn_file_watcher` 抽成通用 `spawn_line_watcher`(单行上限按源, misc 主站资金费一行 42 MB 所以用
+  256 MiB; 通道关闭即退出; 可选上报定位跳过)。订单簿的读取行为不变。
+- **接口**: `GET /coinPositions?coin=`、订阅 `coinPositions`(snapshot / changes / withdrawn, 按币 version;
+  只给有订阅的币生成帧, 走独立广播, 不占盘口通道; 积压或断号即撤订阅)。见 README "Account view"。
+- **验收工具**: `accounts_checkpoint_probe`(单份 checkpoint 全部仓位)、`accounts_follow_probe`(独立跑视图并定时落盘,
+  供主仓库 `follow_vs_node.py` 对照节点)。
+
+**实测**(10-19, bm): 对齐的单仓位池清算价与节点 0.1bp 以内(另有 3 个节点只给 4–5 位有效数字的显示精度差);
+锚点之间约 40 万个仓位按成交推出的数量与下一份 checkpoint 逐个相同。只核对了 USDC 抵押池。
+
+**已知边界**: 两次锚点之间清算价不随 mark 更新(实时 mark 规则未复现); 组合保证金不支持; 后备清算 / ADL 是否
+产生成交未核实(进入交易判断前的阶段门); 逐仓调款、模式切换、提现发起读不到, 空变化标记不能证明账户没变。
+
 ## 已移植(2026-07-05, 底座 47ce696 之上)
 
 1. **官方 PR#9:新单进簿价用 diff 的 px**(status px 对 trigger/转化单可能不同)。

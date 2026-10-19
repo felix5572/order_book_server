@@ -1,4 +1,9 @@
+mod coin_positions;
+
+use coin_positions::{CoinPositionsSession, coin_positions_handler};
+
 use crate::{
+    accounts::runtime::{AccountsHandle, start_accounts},
     listeners::order_book::{
         ActiveL2Params, ActiveSubGuard, ActiveSubs, BookTrust, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey,
         L2ParamGuard, L2SnapshotParams, OrderBookListener, hl_listen_hft,
@@ -140,6 +145,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     // Lock-free trust mirror for the send paths below (design 000249 B).
     let book_trust = listener.book_trust();
     let listener = Arc::new(Mutex::new(listener));
+    let accounts = start_account_view(&config)?;
     let listener_task = {
         let listener = listener.clone();
         let config = config.clone();
@@ -176,6 +182,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                 let listener = listener.clone();
                 let l4_cache = l4_cache.clone();
                 let book_trust = book_trust.clone();
+                let accounts = accounts.clone();
                 move |ws_upgrade| async move {
                     ws_handler(
                         ws_upgrade,
@@ -183,6 +190,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                         listener.clone(),
                         l4_cache.clone(),
                         book_trust.clone(),
+                        accounts.clone(),
                         bbo_only,
                         l2book_heartbeat_ms,
                         bbo_heartbeat_ms,
@@ -258,6 +266,16 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                 axum::response::Response::builder().header("content-type", "application/json").body(body).unwrap()
             }),
         );
+    let app = match &accounts {
+        Some(accounts) => app.route(
+            "/coinPositions",
+            get({
+                let accounts = accounts.clone();
+                move |query| coin_positions_handler(query, accounts.clone())
+            }),
+        ),
+        None => app,
+    };
 
     let tcp_listener = TcpListener::bind(&config.address).await?;
     info!("WebSocket server running at ws://{}", config.address);
@@ -279,6 +297,20 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Starts the account view when `--accounts` is set. Its owner ending leaves the view answering 503 (design 000419 r3
+/// revision 4); the book keeps serving.
+fn start_account_view(config: &ServerConfig) -> Result<Option<AccountsHandle>> {
+    if !config.accounts {
+        return Ok(None);
+    }
+    let (accounts, owner) = start_accounts(&config.resolved_data_dir()?)?;
+    tokio::spawn(async move {
+        let ended = owner.await;
+        error!("Accounts owner task ended; the account view stays unavailable until restart: {ended:?}");
+    });
+    Ok(Some(accounts))
 }
 
 /// Negotiate permessage-deflate only when a nonzero level is configured.
@@ -325,6 +357,7 @@ fn ws_handler(
     listener: Arc<Mutex<OrderBookListener>>,
     l4_cache: Arc<L4SnapshotCache>,
     book_trust: BookTrust,
+    accounts: Option<AccountsHandle>,
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
@@ -355,6 +388,7 @@ fn ws_handler(
             listener,
             l4_cache,
             book_trust,
+            accounts,
             bbo_only,
             l2book_heartbeat_ms,
             bbo_heartbeat_ms,
@@ -372,6 +406,7 @@ async fn handle_socket(
     listener: Arc<Mutex<OrderBookListener>>,
     l4_cache: Arc<L4SnapshotCache>,
     book_trust: BookTrust,
+    accounts: Option<AccountsHandle>,
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
@@ -419,6 +454,8 @@ async fn handle_socket(
     // One guard set per live subscription; dropping the map on disconnect
     // releases everything, mirroring l2_param_guards.
     let mut sub_guards: HashMap<Subscription, Vec<ActiveSubGuard>> = HashMap::new();
+    // Joined at connect time, like the book's broadcast above.
+    let mut coin_positions = accounts.map(CoinPositionsSession::new);
 
     // Split the socket into an owned write half (driven by the writer task) and
     // a read half polled by this session task. Every send enqueues onto a
@@ -448,6 +485,7 @@ async fn handle_socket(
             &mut l2_param_guards,
             &active_subs,
             &mut sub_guards,
+            &mut coin_positions,
             &listener,
             &l4_cache,
             &book_trust,
@@ -509,6 +547,7 @@ async fn run_session(
     l2_param_guards: &mut HashMap<L2SnapshotParams, L2ParamGuard>,
     active_subs: &ActiveSubs,
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
+    coin_positions: &mut Option<CoinPositionsSession>,
     listener: &Arc<Mutex<OrderBookListener>>,
     l4_cache: &Arc<L4SnapshotCache>,
     book_trust: &BookTrust,
@@ -691,6 +730,12 @@ async fn run_session(
                 }
             }
 
+            frame = next_coin_positions_frame(coin_positions) => {
+                if let Some(session) = coin_positions.as_mut() {
+                    alive &= session.on_frame(outbound, manager, frame).await;
+                }
+            }
+
             _ = heartbeat_tick(&mut heartbeat_ticker) => {
                 let now = Instant::now();
                 let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
@@ -762,7 +807,7 @@ async fn run_session(
                                         alive &= outbound.send_pong();
                                     }
                                     _ => {
-                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards).await;
+                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions).await;
                                     }
                                 }
                             }
@@ -810,6 +855,7 @@ async fn receive_client_message(
     l2_param_guards: &mut HashMap<L2SnapshotParams, L2ParamGuard>,
     active_subs: &ActiveSubs,
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
+    coin_positions: &mut Option<CoinPositionsSession>,
 ) -> bool {
     let subscription = match &client_message {
         ClientMessage::Unsubscribe { subscription } | ClientMessage::Subscribe { subscription } => subscription.clone(),
@@ -827,6 +873,14 @@ async fn receive_client_message(
     let sub = serde_json::to_string(&subscription).unwrap_or_default();
     if !subscription.validate(universe) {
         return outbound.send_message(ServerResponse::Error(format!("Invalid subscription: {sub}"))).await;
+    }
+    if let Subscription::CoinPositions { coin } = &subscription {
+        let Some(session) = coin_positions.as_mut() else {
+            return outbound
+                .send_message(ServerResponse::Error("coinPositions needs the server started with --accounts".to_string()))
+                .await;
+        };
+        return session.on_client_message(outbound, manager, client_message, coin).await;
     }
 
     let (word, success) = match &client_message {
@@ -914,6 +968,16 @@ async fn receive_client_message(
         true
     } else {
         outbound.send_message(ServerResponse::Error(format!("Already {word}subscribed: {sub}"))).await
+    }
+}
+
+/// The next account view frame of a connection; pending forever without `--accounts`. Cancel-safe.
+async fn next_coin_positions_frame(
+    session: &mut Option<CoinPositionsSession>,
+) -> std::result::Result<Arc<crate::accounts::publish::AccountsFrame>, tokio::sync::broadcast::error::RecvError> {
+    match session {
+        Some(session) => session.next_frame().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1981,6 +2045,111 @@ mod tests {
         server: tokio::task::JoinHandle<()>,
     }
 
+    /// A loopback server (127.0.0.1 only) on a ready book, with the account view `accounts`; a connected client.
+    async fn coin_positions_server(accounts: Option<AccountsHandle>) -> (WebSocket, tokio::task::JoinHandle<()>) {
+        let (tx, _rx) = channel(32);
+        let mut state = OrderBookListener::new(Some(tx.clone()), false, ActiveL2Params::new(), (true, true, true));
+        state.init_from_snapshot(btc_bid_snapshot(PX_100), 10);
+        let trust = state.book_trust();
+        let listener = Arc::new(Mutex::new(state));
+        let cache = Arc::new(L4SnapshotCache::new(Arc::new(tokio::sync::Semaphore::new(L4_SNAPSHOT_BUILD_PERMITS))));
+        let app = Router::new().route(
+            "/ws",
+            get(move |incoming| {
+                let (listener, tx, cache, trust, accounts) =
+                    (listener.clone(), tx.clone(), cache.clone(), trust.clone(), accounts.clone());
+                async move { ws_handler(incoming, tx, listener, cache, trust, accounts, false, 0, 0, yawc::Options::default()) }
+            }),
+        );
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(tcp, app).await.unwrap() });
+        let ws = WebSocket::connect(format!("ws://{addr}/ws").parse().unwrap()).await.unwrap();
+        (ws, server)
+    }
+
+    async fn next_json(ws: &mut WebSocket) -> serde_json::Value {
+        let frame = tokio::time::timeout(Duration::from_secs(2), ws.next()).await.unwrap().unwrap();
+        serde_json::from_slice(&frame.payload).unwrap()
+    }
+
+    const SUBSCRIBE_PUMP: &str = r#"{"method":"subscribe","subscription":{"type":"coinPositions","coin":"PUMP"}}"#;
+
+    /// Design 000419 r2 4.2 end to end: snapshot on subscribe, a changes frame per touching batch, withdrawal when the
+    /// view stops being available, and no new subscription until it is back.
+    #[tokio::test]
+    #[allow(clippy::future_not_send)]
+    async fn test_coin_positions_snapshot_changes_and_withdrawal() {
+        use crate::accounts::{
+            book::Stream,
+            runtime::TestOwner,
+            test_support::{PUMP, anchor, fills_line, trusted_book, user},
+        };
+        let owner = TestOwner::start(trusted_book(&[(user(1), 5)]));
+        let (mut ws, server) = coin_positions_server(Some(owner.handle.clone())).await;
+        ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
+        assert_eq!(next_json(&mut ws).await["channel"], "subscriptionResponse");
+        let snapshot = next_json(&mut ws).await;
+        assert_eq!((snapshot["channel"].as_str(), snapshot["data"]["kind"].as_str()), (Some("coinPositions"), Some("snapshot")));
+        assert_eq!((snapshot["data"]["version"].as_u64(), snapshot["data"]["positions"][0]["szi"].as_str()), (Some(0), Some("5.0")));
+
+        owner.fills_line(&fills_line(1_100, &[(user(1), PUMP, "B", 1, "5.0", "1.0")])).await;
+        let changes = next_json(&mut ws).await["data"].clone();
+        assert_eq!((changes["kind"].as_str(), changes["version"].as_u64()), (Some("changes"), Some(1)));
+        assert_eq!(changes["changes"][0]["position"]["szi"], "6.0");
+        assert_eq!(changes["changes"][0]["position"]["positionHeight"], 1_100);
+        assert_eq!(changes["changes"][0]["user"], format!("{:#x}", user(1)));
+
+        owner.anchor(anchor(1_200, &[(PUMP, 0, &[(user(1), 7)])])).await;
+        let pushed = next_json(&mut ws).await["data"].clone();
+        assert_eq!((pushed["kind"].as_str(), pushed["version"].as_u64()), (Some("snapshot"), Some(2)));
+        assert_eq!((pushed["anchor"]["height"].as_u64(), pushed["positions"][0]["szi"].as_str()), (Some(1_200), Some("7.0")));
+
+        owner.loss(Stream::Fills).await;
+        let withdrawn = next_json(&mut ws).await["data"].clone();
+        assert_eq!((withdrawn["kind"].as_str(), withdrawn["coin"].as_str()), (Some("withdrawn"), Some(PUMP)));
+        assert!(withdrawn["reason"].as_str().unwrap().starts_with("fills lost lines"), "{withdrawn}");
+        ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
+        let refused = next_json(&mut ws).await;
+        assert_eq!(refused["channel"], "error");
+        assert!(refused["data"].as_str().unwrap().starts_with("Unable to grab coinPositions snapshot"), "{refused}");
+        server.abort();
+    }
+
+    /// Review 000423 P2: a subscription is withdrawn when the owner really exits; the connection itself lives on.
+    #[tokio::test]
+    #[allow(clippy::future_not_send)]
+    async fn test_coin_positions_withdrawn_when_the_owner_exits() {
+        use crate::accounts::{
+            runtime::TestOwner,
+            test_support::{PUMP, trusted_book, user},
+        };
+        let owner = TestOwner::start(trusted_book(&[(user(1), 5)]));
+        let (mut ws, server) = coin_positions_server(Some(owner.handle.clone())).await;
+        ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
+        assert_eq!(next_json(&mut ws).await["channel"], "subscriptionResponse");
+        assert_eq!(next_json(&mut ws).await["data"]["kind"], "snapshot");
+        owner.kill().await;
+        let withdrawn = next_json(&mut ws).await["data"].clone();
+        assert_eq!(withdrawn, serde_json::json!({"kind": "withdrawn", "coin": PUMP, "reason": "account owner task exited"}));
+        ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
+        let refused = next_json(&mut ws).await;
+        assert_eq!(refused["data"], "Unable to grab coinPositions snapshot: stopped: account owner task exited");
+        ws.send(FrameView::text(r#"{"method":"ping"}"#.as_bytes().to_vec())).await.unwrap();
+        assert_eq!(next_json(&mut ws).await["channel"], "pong", "the connection stays up");
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::future_not_send)]
+    async fn test_coin_positions_needs_the_account_view() {
+        let (mut ws, server) = coin_positions_server(None).await;
+        ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
+        let refused = next_json(&mut ws).await;
+        assert_eq!((refused["channel"].as_str(), refused["data"].as_str()), (Some("error"), Some("coinPositions needs the server started with --accounts")));
+        server.abort();
+    }
+
     // Test-only, driven by the single-threaded #[tokio::test] runtime: the yawc
     // client socket held across awaits need not be Send.
     #[allow(clippy::future_not_send)]
@@ -1998,7 +2167,7 @@ mod tests {
                     let (listener, tx) = (listener.clone(), tx.clone());
                     move |incoming| {
                         let (listener, tx, cache, trust) = (listener.clone(), tx.clone(), cache.clone(), trust.clone());
-                        async move { ws_handler(incoming, tx, listener, cache, trust, false, 0, 50, yawc::Options::default()) }
+                        async move { ws_handler(incoming, tx, listener, cache, trust, None, false, 0, 50, yawc::Options::default()) }
                     }
                 }),
             );

@@ -1,17 +1,23 @@
 //! Live acceptance probe: runs the account view standalone (no order book, no API) and dumps the `coinPositions` JSON
 //! of chosen coins right after every anchor install and at a fixed interval, for comparison with the node offline.
+//! It also subscribes those coins to the push and logs what it receives (frame counts, bytes, version continuity), so
+//! the push runs at production volume without the WS server.
 
 use std::{
+    collections::{BTreeMap, HashMap},
     io::Write,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use log::info;
+use log::{error, info};
 use serde_json::json;
+use tokio::sync::broadcast::{self, error::RecvError};
 
 use super::{
     book::{QueryError, Unavailable},
+    publish::{AccountsFrame, CoinSubscriptionGuard},
     runtime::{AccountsHandle, start_accounts},
     view::CoinPositionsDto,
 };
@@ -34,6 +40,8 @@ pub async fn run_accounts_follow(
     out: &mut (dyn Write + Send),
 ) -> Result<()> {
     let (accounts, owner) = start_accounts(data_dir)?;
+    let guards: Vec<CoinSubscriptionGuard> = options.coins.iter().map(|coin| accounts.acquire(coin)).collect();
+    tokio::spawn(watch_push(accounts.frames().ok_or("account owner task exited")?, guards));
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     let mut dumped_anchor = None;
     let mut last_dump = Instant::now();
@@ -79,4 +87,68 @@ async fn dump_coin(accounts: &AccountsHandle, coin: &str, out: &mut (dyn Write +
     };
     writeln!(out, "{line}")?;
     Ok(())
+}
+
+/// What the push delivered, logged every `STATUS_LOG_INTERVAL`.
+#[derive(Debug, Default)]
+struct PushStats {
+    frames: BTreeMap<&'static str, u64>,
+    bytes: usize,
+    largest: usize,
+    lagged: u64,
+    gaps: u64,
+}
+
+/// Receives the push for the subscribed coins (kept alive by `guards`) and checks every coin's versions run on by one.
+async fn watch_push(mut frames: broadcast::Receiver<Arc<AccountsFrame>>, guards: Vec<CoinSubscriptionGuard>) {
+    let _guards = guards;
+    let mut versions: HashMap<String, u64> = HashMap::new();
+    let mut stats = PushStats::default();
+    let mut logged = Instant::now();
+    loop {
+        match frames.recv().await {
+            Ok(frame) => observe(&frame, &mut versions, &mut stats),
+            Err(RecvError::Lagged(missed)) => {
+                error!("push: lagged, {missed} frames dropped; restarting the version checks");
+                stats.lagged += 1;
+                versions.clear();
+            }
+            Err(RecvError::Closed) => {
+                info!("push: the owner is gone; final {stats:?}");
+                return;
+            }
+        }
+        if logged.elapsed() >= STATUS_LOG_INTERVAL {
+            info!("push: {stats:?}");
+            stats = PushStats::default();
+            logged = Instant::now();
+        }
+    }
+}
+
+fn observe(frame: &AccountsFrame, versions: &mut HashMap<String, u64>, stats: &mut PushStats) {
+    match frame {
+        AccountsFrame::Coin { coin, version, wire } => {
+            let kind = if wire.starts_with(br#"{"channel":"coinPositions","data":{"kind":"snapshot""#) { "snapshot" } else { "changes" };
+            *stats.frames.entry(kind).or_default() += 1;
+            stats.bytes += wire.len();
+            stats.largest = stats.largest.max(wire.len());
+            if let Some(previous) = versions.insert(coin.clone(), *version)
+                && *version != previous + 1
+            {
+                error!("push: {coin} version {version} after {previous}");
+                stats.gaps += 1;
+            }
+        }
+        AccountsFrame::WithdrawAll { reason } => {
+            info!("push: withdrawn ({reason})");
+            *stats.frames.entry("withdrawn").or_default() += 1;
+            versions.clear();
+        }
+        AccountsFrame::WithdrawCoin { coin, reason } => {
+            info!("push: {coin} withdrawn ({reason})");
+            *stats.frames.entry("withdrawn").or_default() += 1;
+            versions.remove(coin);
+        }
+    }
 }

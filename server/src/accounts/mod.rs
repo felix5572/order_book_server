@@ -6,13 +6,16 @@
 //! - `probe` (one checkpoint) and `follow` (live, standalone): acceptance tools. The API comes in batch 3.
 
 mod anchor;
-mod book;
+pub(crate) mod book;
 mod checkpoint;
 pub(crate) mod follow;
 mod liquidation;
 mod margin;
 mod misc;
 pub(crate) mod probe;
+pub(crate) mod publish;
 pub(crate) mod runtime;
 mod size;
-mod view;
+#[cfg(test)]
+pub(crate) mod test_support;
+pub(crate) mod view;

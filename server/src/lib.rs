@@ -69,4 +69,21 @@ pub struct ServerConfig {
     /// peak event rate or every market-hours re-sync overflows into another
     /// re-sync. 0 = keep the built-in default.
     pub replay_cache_events: usize,
+    /// Run the account view (per-coin positions and anchored liquidation prices, design 000419): parses the node's
+    /// periodic checkpoints and its fills / misc events streams, and serves `GET /coinPositions` and the
+    /// `coinPositions` subscription.
+    pub accounts: bool,
+}
+
+impl ServerConfig {
+    /// The node data directory: `data_dir`, else the home directory.
+    pub(crate) fn resolved_data_dir(&self) -> Result<PathBuf> {
+        match self.data_dir.clone() {
+            Some(dir) => Ok(dir),
+            None => Ok(dirs::home_dir().ok_or(
+                "Could not resolve a data directory: pass --data-dir explicitly. The default \
+                 requires a usable HOME environment variable, which was not set or is invalid.",
+            )?),
+        }
+    }
 }

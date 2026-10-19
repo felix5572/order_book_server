@@ -107,6 +107,12 @@ struct Args {
     /// drops the cache, installs a gapped book, and forces another re-sync.
     #[arg(long, default_value = "4000000")]
     replay_cache_events: usize,
+
+    /// Run the account view: per-coin positions (checkpoint anchors plus fills) and checkpoint-anchored liquidation
+    /// prices, served at GET /coinPositions and the coinPositions subscription. Parses a ~1.8 GB checkpoint every
+    /// ~12 minutes (~6 s of one core, ~750 MB peak RSS) and reads the fills and misc events streams.
+    #[arg(long, default_value = "false")]
+    accounts: bool,
 }
 
 /// Start the Prometheus metrics HTTP server
@@ -172,6 +178,7 @@ async fn main() -> Result<()> {
         bbo_heartbeat_ms: args.bbo_heartbeat_ms,
         no_resync: args.no_resync,
         replay_cache_events: args.replay_cache_events,
+        accounts: args.accounts,
     };
 
     println!("Orderbook Server v{}", env!("CARGO_PKG_VERSION"));
@@ -192,6 +199,9 @@ async fn main() -> Result<()> {
         println!("  Metrics: http://0.0.0.0:{}/metrics", config.metrics_port);
     }
     println!("  Log level: {}", args.log_level);
+    if config.accounts {
+        println!("  Accounts: ON (GET /coinPositions, coinPositions subscription)");
+    }
     if config.no_resync {
         println!("  Re-sync: DISABLED (--no-resync) — drift tolerated, book will NOT self-heal");
     }

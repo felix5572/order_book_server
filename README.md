@@ -142,6 +142,7 @@ The handoff from snapshot to live stream is **gapless** and **checkpoint-aligned
 | `--l2book-heartbeat-ms` | `0` | If > 0, resend the last `l2Book` payload for each active subscription every N ms when nothing has changed. See [Heartbeats](#heartbeats) |
 | `--bbo-heartbeat-ms` | `0` | If > 0, resend the last `bbo` payload for each active subscription every N ms when nothing has changed. See [Heartbeats](#heartbeats) |
 | `--no-resync` | `false` | Tolerate drift instead of re-syncing. Data-loss events are still counted in `orderbook_desyncs_total` but never trigger a snapshot re-fetch. See [Drift tolerance](#drift-tolerance) |
+| `--accounts` | `false` | Run the account view: per-coin positions and checkpoint-anchored liquidation prices at `GET /coinPositions` and the `coinPositions` subscription. Parses a ~1.8 GB checkpoint every ~12 minutes (~6 s of one core, ~750 MB peak RSS). See [Account view](#account-view-coinpositions) |
 
 ### Drift tolerance
 
@@ -316,6 +317,34 @@ Response (`user` echoed as subscribed; each fill carries the modeled fields — 
 { "channel": "userFills", "data": { "user": "0x...", "fills": [{ "coin": "ETH", "px": "2512.0", "sz": "0.1201", "side": "A", "time": 1791829884085, "startPosition": "13.3473", "dir": "Close Long", "closedPnl": "0.134512", "hash": "0x...", "oid": 572293425349, "crossed": false, "fee": "-0.00905", "tid": 706893944732179, "cloid": "0x...", "feeToken": "USDC", "twapId": null }] } }
 ```
 > **Note:** Requires node to run with `--write-fills`. A raw event stream: it continues while the book is withheld. Replayed fills after a node restart are sent as written: deduplicate by the fill identity `(coin, time, tid)` and gate freshness on the consumer side. A connection holding `userFills` is closed when it lags the internal broadcast (overwritten fills cannot be re-sent).
+
+### Account view: coinPositions
+With `--accounts`, the server keeps every perp position of every account (all dexes) from the node itself, without the official API: each periodic checkpoint (`periodic_abci_states`, ~every 12 minutes) is an **anchor**, and the fills stream moves sizes forward in between. Liquidation prices, margin and account modes are the anchor's (computed from the node's own cash, tiers and mark at that checkpoint) and are not re-derived between anchors.
+```
+GET /coinPositions?coin=PUMP
+```
+```json
+{"coin":"PUMP","fillsHeight":1189401234,"miscEventsHeight":1189401230,"anchor":{"height":1189400000,"time":1792404043180},
+ "positions":[{"user":"0x…","szi":"269620.0","positionHeight":1189400000,"marginMode":"cross","accountMode":"unifiedAccount",
+   "poolPositions":1,"liquidationPx":"0.0039515","liquidationPxStatus":"computed","unsupportedReason":null,
+   "liquidationPxHeight":1189400000,"changedSinceLiquidationPx":[{"kind":"funding","height":1189401000}]}]}
+```
+- `szi` is the anchor plus every fill observed since; `positionHeight` is the block that set it.
+- `liquidationPxStatus`: `computed` (a positive price at the anchor), `none` (no positive solution), `unsupported` (`unsupportedReason`: `portfolioMargin`, `unknownAccountMode:<code>`, `missingMark`, `tierCase`), `pending` (opened after the anchor). `liquidationPx` is set only for `computed`; `computed` means the anchor's state, not that the price still holds.
+- `poolPositions` > 1: the price also moves with the other positions of that margin pool.
+- `changedSinceLiquidationPx`: the observed sources (`fill`, `ledger`, `funding`) that touched the account after the anchor, with their latest block. **Empty does not prove the account unchanged**: isolated margin moves, account mode switches and withdrawal requests are block actions the view does not read.
+- Errors: `404` for a coin outside the anchor's universe, `503` with the reason until the first anchor and whenever data was lost that no anchor covers yet (the reason names the stream and the bound).
+
+Subscription:
+```json
+{ "method": "subscribe", "subscription": { "type": "coinPositions", "coin": "PUMP" } }
+```
+Frames on `{"channel":"coinPositions","data":{…}}` with a per-coin `version`:
+- `{"kind":"snapshot","version",…}`: the HTTP shape plus `version`; once on subscribe, and again after every anchor install.
+- `{"kind":"changes","coin","version","fillsHeight","miscEventsHeight","changes":[{"user","position"}]}`: the rows one fills or misc batch touched; `position` is `null` once closed. Hourly funding touches every holder.
+- `{"kind":"withdrawn","coin","reason"}`: the subscription ended (the view became unavailable, the connection fell behind, or a frame was missed); resubscribe for a new snapshot. While the view is unavailable new subscriptions are refused.
+
+Every frame's `version` is the previous one plus one; a subscriber applies frames above its snapshot's version in order. Validated against the node's own `clearinghouseState` on 2026-10-19 (aligned single-position pools within 0.1 bp; sizes equal to the next checkpoint for all ~400k positions); only USDC-collateral pools were checked against live positions.
 
 ### Ping/Pong
 ```json
