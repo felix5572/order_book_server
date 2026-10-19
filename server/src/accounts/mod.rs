@@ -13,6 +13,7 @@ pub(crate) mod follow;
 mod liquidation;
 mod margin;
 mod misc;
+mod portfolio;
 pub(crate) mod probe;
 pub(crate) mod publish;
 pub(crate) mod runtime;

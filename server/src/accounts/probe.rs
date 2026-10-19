@@ -7,8 +7,8 @@ use serde_json::json;
 
 use super::{
     checkpoint::parse_checkpoint_file,
-    liquidation::{LiquidationPx, account_liquidations},
-    view::{account_mode_name, unsupported_reason_name, user_text},
+    liquidation::{AccountLiquidations, LiquidationPx, account_liquidations},
+    view::{PortfolioMarginDto, account_mode_name, unsupported_reason_name, user_text},
 };
 use crate::prelude::Result;
 
@@ -28,7 +28,9 @@ pub fn run_checkpoint_probe(path: &Path, coins: &[String], out: &mut dyn Write) 
     let parse_seconds = started.elapsed().as_secs_f64();
     let mut rows = 0;
     for (user, account) in &checkpoint.accounts {
-        for position in account_liquidations(&checkpoint, account) {
+        let AccountLiquidations { portfolio_margin, positions } = account_liquidations(&checkpoint, account);
+        let portfolio_margin = portfolio_margin.as_ref().map(PortfolioMarginDto::new);
+        for position in positions {
             let dex = &checkpoint.dexes[position.dex];
             let collateral = &checkpoint.collateral[&dex.collateral_token].name;
             let asset = &dex.assets[position.asset];
@@ -53,6 +55,7 @@ pub fn run_checkpoint_probe(path: &Path, coins: &[String], out: &mut dyn Write) 
                 "liquidationPxStatus": status,
                 "liquidationPx": liquidation_px,
                 "unsupportedReason": reason,
+                "portfolioMargin": portfolio_margin,
             });
             writeln!(out, "{row}")?;
             rows += 1;

@@ -56,7 +56,7 @@ pub(crate) fn batch_line(block: u64, events: &str) -> String {
 }
 
 pub(crate) fn row() -> AnchorRow {
-    AnchorRow { isolated: false, pool_positions: Some(1), liquidation_px: LiquidationPx::Computed(0.004) }
+    AnchorRow { isolated: false, pool_positions: Some(1), liquidation_px: LiquidationPx::Computed(0.004), portfolio_margin: None }
 }
 
 /// `(coin, szDecimals, [(user, size_raw)])`.

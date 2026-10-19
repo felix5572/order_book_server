@@ -7,7 +7,8 @@ use rustc_hash::FxHashMap;
 
 use super::{
     checkpoint::{AccountMode, CheckpointAccounts},
-    liquidation::{LiquidationPx, account_liquidations},
+    liquidation::{AccountLiquidations, LiquidationPx, account_liquidations},
+    portfolio::PortfolioMargin,
 };
 
 #[derive(Debug)]
@@ -40,6 +41,8 @@ pub(crate) struct AnchorRow {
     pub(crate) isolated: bool,
     pub(crate) pool_positions: Option<usize>,
     pub(crate) liquidation_px: LiquidationPx,
+    /// The account's portfolio margin at the anchor; `None` for the other modes.
+    pub(crate) portfolio_margin: Option<PortfolioMargin>,
 }
 
 impl Anchor {
@@ -53,12 +56,14 @@ impl Anchor {
         }
         let mut account_modes = FxHashMap::default();
         for (user, account) in &checkpoint.accounts {
-            for position in account_liquidations(checkpoint, account) {
+            let AccountLiquidations { portfolio_margin, positions } = account_liquidations(checkpoint, account);
+            for position in positions {
                 let name = &checkpoint.dexes[position.dex].assets[position.asset].name;
                 let row = AnchorRow {
                     isolated: position.isolated,
                     pool_positions: position.pool_positions,
                     liquidation_px: position.liquidation_px,
+                    portfolio_margin: portfolio_margin.clone(),
                 };
                 let positions = &mut coins
                     .get_mut(name)

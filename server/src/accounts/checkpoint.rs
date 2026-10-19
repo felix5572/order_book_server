@@ -29,6 +29,10 @@ const FIRST_LISTED_TABLE: u32 = 50;
 const PDI_ASSET_STRIDE: u32 = 10_000;
 /// Perp prices carry `MAX_PERP_DECIMALS - szDecimals` decimals, so `szDecimals` cannot exceed it.
 pub(crate) const MAX_PERP_DECIMALS: u32 = 6;
+/// Spot prices (a reserve's `o`) carry `MAX_SPOT_DECIMALS - szDecimals` decimals; USDC (szDecimals 8) stores 1.
+const MAX_SPOT_DECIMALS: u32 = 8;
+/// Borrow-lend pool indices and LTVs are fixed point with this scale.
+const LENDING_SCALE: f64 = 1e14;
 
 // ─── domain types ───────────────────────────────────────────────────────────
 
@@ -39,6 +43,8 @@ pub(crate) struct CheckpointAccounts {
     pub(crate) dexes: Vec<DexMeta>,
     /// Spot token of every dex's collateral (each dex uses exactly one: `meta.collateralToken`).
     pub(crate) collateral: FxHashMap<u32, CollateralToken>,
+    /// Borrow-lend reserves (`blp.r.t`) by spot token: what portfolio-margin accounts borrow and supply.
+    pub(crate) reserves: FxHashMap<u32, LendingReserve>,
     /// Every account holding at least one non-zero position on some dex, with all its dex states (cash-only ones
     /// included: a unified account's pool counts the cash of every same-collateral dex).
     pub(crate) accounts: FxHashMap<Address, Account>,
@@ -66,6 +72,36 @@ pub(crate) struct CollateralToken {
     /// 10^weiDecimals: spot balances `t` of this token divided by this are whole tokens (`scl.meta.token_infos[token]
     /// .spec.weiDecimals`, index = token id; USDC, USDE, USDT0, USDH are all 8 and match the node's spotMeta).
     pub(crate) spot_scale: f64,
+}
+
+/// One borrow-lend reserve (`blp.r.t[token]`) with units applied: indices and LTV divided by 1e14, caps in whole
+/// tokens, the price in USDC. Each meaning was matched against the node's spot answers on 2026-10-19 (research O2
+/// "checkpoint 里的输入"): `o` equals `allBorrowLendReserveStates.oraclePx` digit for digit, caps equal what
+/// `tokenToPortfolio{Borrow,Supply}Ratio` imply.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LendingReserve {
+    /// `l[0].i`: base units (10^-weiDecimals) one borrow share is worth.
+    pub(crate) borrow_index: f64,
+    /// `l[1].i`: base units one supply share is worth.
+    pub(crate) supply_index: f64,
+    /// `l[0].u`, per account, whole tokens; `None` when the side has none (HYPE and UBTC cannot be borrowed).
+    pub(crate) borrow_cap: Option<f64>,
+    /// `l[1].u`, per account, whole tokens.
+    pub(crate) supply_cap: Option<f64>,
+    /// `v`; null (the borrowable tokens) is 0.
+    pub(crate) ltv: f64,
+    /// `o / 10^(8 - szDecimals)`, USDC per token.
+    pub(crate) oracle_px: f64,
+    /// 10^weiDecimals: base units per whole token (spot `t` and shares × index are base units).
+    pub(crate) wei_scale: f64,
+}
+
+/// A portfolio-margin account's shares in one reserve (`blp.u[user].t[token] = [borrow, supply]`, field `s`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Lending {
+    pub(crate) token: u32,
+    pub(crate) borrow_shares: u64,
+    pub(crate) supply_shares: u64,
 }
 
 #[derive(Debug)]
@@ -102,8 +138,11 @@ pub(crate) enum AccountMode {
 #[derive(Debug)]
 pub(crate) struct Account {
     pub(crate) mode: AccountMode,
-    /// Non-zero spot balances of collateral tokens: (token, raw `t` in 10^-weiDecimals).
+    /// Non-zero spot balances, (token, raw `t` in 10^-weiDecimals), sorted by token: the dexes' collateral tokens, and
+    /// for a portfolio-margin account also every reserve token (`t` includes what open spot orders hold).
     pub(crate) spot: Vec<(u32, i64)>,
+    /// Portfolio-margin accounts only: non-zero borrow-lend shares, sorted by token.
+    pub(crate) lending: Vec<Lending>,
     pub(crate) dex_states: Vec<DexAccount>,
 }
 
@@ -247,6 +286,7 @@ struct WireTokenInfo {
 struct WireTokenSpec {
     name: String,
     wei_decimals: u32,
+    sz_decimals: u32,
 }
 
 #[derive(Deserialize)]
@@ -269,21 +309,77 @@ struct WireUserMode {
     a: Option<String>,
 }
 
+/// `blp`: the reserves and every account's shares (about 23,000 accounts on 2026-10-19, so read whole and narrowed
+/// in `build`, in whatever order the section comes).
+#[derive(Deserialize)]
+struct WireLending {
+    r: WireReserves,
+    u: LendingUsers,
+}
+
+/// `blp.u`: shares per account, every token.
+struct LendingUsers(FxHashMap<Address, Vec<WireTokenShares>>);
+
+impl<'de> Deserialize<'de> for LendingUsers {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        Pairs::new(|_: &Address, entry: WireLendingUser| Some(entry.t)).deserialize(deserializer).map(Self)
+    }
+}
+
+/// `blp.r`: the reserves.
+#[derive(Deserialize)]
+struct WireReserves {
+    t: Vec<(u32, WireReserve)>,
+}
+
+#[derive(Deserialize)]
+struct WireReserve {
+    /// [borrow side, supply side].
+    l: (WireReserveSide, WireReserveSide),
+    v: Option<u64>,
+    o: u64,
+}
+
+#[derive(Deserialize)]
+struct WireReserveSide {
+    i: u64,
+    u: Option<u64>,
+}
+
+/// One reserve's (token, (borrow, supply)) shares of an account.
+type WireTokenShares = (u32, (WireShares, WireShares));
+
+/// `blp.u[user]`.
+#[derive(Deserialize)]
+struct WireLendingUser {
+    #[serde(default)]
+    t: Vec<WireTokenShares>,
+}
+
+#[derive(Deserialize)]
+struct WireShares {
+    #[serde(default)]
+    s: u64,
+}
+
 /// One dex's `user_to_state`, kept compact: users with non-zero cash or at least one non-zero position.
 struct DexUsers(FxHashMap<Address, (i64, Vec<(u32, WirePosition)>)>);
 
-/// `exchange.locus`, read in its on-disk order (ctx, cls, scl, ..., ust): once `cls` is read, spot balances keep only
-/// the dexes' collateral tokens and modes only the position holders. Another order fails the parse.
+/// `exchange.locus`, read in its on-disk order (ctx, cls, scl, ..., ust): once `cls` is read, spot balances and modes
+/// keep only the position holders. Another order fails the parse (`blp` may come anywhere).
 struct ParsedLocus {
     ctx: WireCtx,
     cls: Vec<WireClearinghouse>,
     spot: SpotState,
     modes: FxHashMap<Address, Option<String>>,
+    lending: WireLending,
 }
 
 struct SpotState {
-    collateral: FxHashMap<u32, CollateralToken>,
-    /// Non-zero collateral-token balances per user (raw, unsigned on the wire).
+    /// `meta.token_infos[token].spec`, indexed by token id.
+    tokens: Vec<WireTokenSpec>,
+    /// The position holders' non-zero balances, every token (raw, unsigned on the wire): which tokens an account
+    /// keeps depends on its mode, known only once `ust` and `blp` are read (`build` narrows).
     balances: FxHashMap<Address, Vec<(u32, u64)>>,
 }
 
@@ -358,22 +454,22 @@ impl<'de> Visitor<'de> for LocusVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
-        let (mut ctx, mut cls, mut spot, mut modes) = (None, None, None, None);
+        let (mut ctx, mut cls, mut holders, mut spot, mut modes, mut lending) = (None, None, None, None, None, None);
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "ctx" => ctx = Some(map.next_value()?),
-                "cls" => cls = Some(map.next_value::<Vec<WireClearinghouse>>()?),
-                "scl" => {
-                    let dexes = cls.as_deref().ok_or_else(|| A::Error::custom("locus.scl precedes locus.cls"))?;
-                    let collateral: FxHashSet<u32> = dexes.iter().map(|dex| dex.meta.collateral_token).collect();
-                    spot = Some(map.next_value_seed(SpotSeed { collateral: &collateral })?);
+                "cls" => {
+                    let dexes = map.next_value::<Vec<WireClearinghouse>>()?;
+                    holders = Some(holders_of(&dexes));
+                    cls = Some(dexes);
                 }
+                "scl" => spot = Some(map.next_value_seed(SpotSeed { holders: after_cls(holders.as_ref(), "scl")? })?),
                 "ust" => {
-                    let dexes = cls.as_deref().ok_or_else(|| A::Error::custom("locus.ust precedes locus.cls"))?;
-                    let holders = holders(dexes);
-                    let keep = |user: &Address, mode: WireUserMode| holders.contains(user).then_some(mode.a);
+                    let held = after_cls(holders.as_ref(), "ust")?;
+                    let keep = |user: &Address, mode: WireUserMode| held.contains(user).then_some(mode.a);
                     modes = Some(map.next_value_seed(Pairs::new(keep))?);
                 }
+                "blp" => lending = Some(map.next_value::<WireLending>()?),
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -384,12 +480,18 @@ impl<'de> Visitor<'de> for LocusVisitor {
             cls: cls.ok_or_else(|| A::Error::missing_field("cls"))?,
             spot: spot.ok_or_else(|| A::Error::missing_field("scl"))?,
             modes: modes.ok_or_else(|| A::Error::missing_field("ust"))?,
+            lending: lending.ok_or_else(|| A::Error::missing_field("blp"))?,
         })
     }
 }
 
+/// The holders, once `cls` has been read: sections after it keep only their entries.
+fn after_cls<'h, E: serde::de::Error>(holders: Option<&'h FxHashSet<Address>>, key: &str) -> std::result::Result<&'h FxHashSet<Address>, E> {
+    holders.ok_or_else(|| E::custom(format!("locus.{key} precedes locus.cls")))
+}
+
 /// Users with a non-zero position on some dex.
-fn holders(dexes: &[WireClearinghouse]) -> FxHashSet<Address> {
+fn holders_of(dexes: &[WireClearinghouse]) -> FxHashSet<Address> {
     dexes
         .iter()
         .flat_map(|dex| dex.user_states.user_to_state.0.iter())
@@ -398,9 +500,9 @@ fn holders(dexes: &[WireClearinghouse]) -> FxHashSet<Address> {
         .collect()
 }
 
-/// `scl`: the collateral tokens' specs from `meta.token_infos` and their non-zero balances from `user_states`.
+/// `scl`: every token's spec from `meta.token_infos` and the position holders' non-zero balances from `user_states`.
 struct SpotSeed<'a> {
-    collateral: &'a FxHashSet<u32>,
+    holders: &'a FxHashSet<Address>,
 }
 
 impl<'de> DeserializeSeed<'de> for SpotSeed<'_> {
@@ -419,30 +521,20 @@ impl<'de> Visitor<'de> for SpotSeed<'_> {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
-        let (mut collateral, mut balances) = (None, None);
+        let (mut tokens, mut balances) = (None, None);
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "meta" => {
                     let meta: WireSpotMeta = map.next_value()?;
-                    let mut tokens = FxHashMap::default();
-                    for token in self.collateral {
-                        let info = usize::try_from(*token).ok().and_then(|index| meta.token_infos.get(index)).ok_or_else(|| {
-                            A::Error::custom(format!("collateral token {token} missing from scl.meta.token_infos"))
-                        })?;
-                        let decimals = i32::try_from(info.spec.wei_decimals)
-                            .map_err(|err| A::Error::custom(format!("token {token} weiDecimals: {err}")))?;
-                        tokens.insert(*token, CollateralToken { name: info.spec.name.clone(), spot_scale: 10f64.powi(decimals) });
-                    }
-                    collateral = Some(tokens);
+                    tokens = Some(meta.token_infos.into_iter().map(|info| info.spec).collect());
                 }
                 "user_states" => {
-                    let keep = |_: &Address, user: WireSpotUser| {
-                        let kept: Vec<(u32, u64)> = user
-                            .b
-                            .into_iter()
-                            .filter(|(token, balance)| balance.t != 0 && self.collateral.contains(token))
-                            .map(|(token, balance)| (token, balance.t))
-                            .collect();
+                    let keep = |user: &Address, wire: WireSpotUser| {
+                        if !self.holders.contains(user) {
+                            return None;
+                        }
+                        let kept: Vec<(u32, u64)> =
+                            wire.b.into_iter().filter(|(_, balance)| balance.t != 0).map(|(token, balance)| (token, balance.t)).collect();
                         (!kept.is_empty()).then_some(kept)
                     };
                     balances = Some(map.next_value_seed(Pairs::new(keep))?);
@@ -453,7 +545,7 @@ impl<'de> Visitor<'de> for SpotSeed<'_> {
             }
         }
         Ok(SpotState {
-            collateral: collateral.ok_or_else(|| A::Error::missing_field("scl.meta"))?,
+            tokens: tokens.ok_or_else(|| A::Error::missing_field("scl.meta"))?,
             balances: balances.ok_or_else(|| A::Error::missing_field("scl.user_states"))?,
         })
     }
@@ -498,6 +590,9 @@ fn build(locus: ParsedLocus) -> std::result::Result<CheckpointAccounts, String> 
         holders.dedup();
         holders
     };
+    let collateral = collateral_tokens(&dexes, &locus.spot.tokens)?;
+    let reserves = lending_reserves(&locus.lending.r.t, &locus.spot.tokens)?;
+    let mut lending_users = locus.lending.u.0;
     let mut accounts = FxHashMap::default();
     for user in holders {
         let dex_states = dex_users
@@ -505,29 +600,124 @@ fn build(locus: ParsedLocus) -> std::result::Result<CheckpointAccounts, String> 
             .enumerate()
             .filter_map(|(dex, users)| users.remove(&user).map(|state| DexAccount { dex, ..state }))
             .collect();
-        let mode = match locus.modes.get(&user) {
-            None => AccountMode::Unknown("<no ust entry>".to_string()),
-            Some(None) => AccountMode::Default,
-            Some(Some(code)) => match code.as_str() {
-                "i" => AccountMode::Disabled,
-                "u" => AccountMode::Unified,
-                "p" => AccountMode::PortfolioMargin,
-                other => AccountMode::Unknown(other.to_string()),
-            },
+        let mode = account_mode(locus.modes.get(&user));
+        let portfolio = mode == AccountMode::PortfolioMargin;
+        let kept = |token: u32| collateral.contains_key(&token) || (portfolio && reserves.contains_key(&token));
+        let spot = spot_balances(&user, locus.spot.balances.get(&user), kept)?;
+        // an account that never borrowed or supplied has no blp.u entry (the node omits empty values)
+        let lending = match lending_users.remove(&user) {
+            Some(wire) if portfolio => lending_shares(&user, wire, &reserves)?,
+            _ => Vec::new(),
         };
-        let spot = locus
-            .spot
-            .balances
-            .get(&user)
-            .map_or(&[][..], Vec::as_slice)
-            .iter()
-            .map(|(token, t)| {
-                i64::try_from(*t).map(|t| (*token, t)).map_err(|err| format!("{user}: spot balance {t} of token {token}: {err}"))
-            })
-            .collect::<std::result::Result<Vec<_>, String>>()?;
-        accounts.insert(user, Account { mode, spot, dex_states });
+        accounts.insert(user, Account { mode, spot, lending, dex_states });
     }
-    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral: locus.spot.collateral, accounts })
+    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral, reserves, accounts })
+}
+
+fn account_mode(code: Option<&Option<String>>) -> AccountMode {
+    match code {
+        None => AccountMode::Unknown("<no ust entry>".to_string()),
+        Some(None) => AccountMode::Default,
+        Some(Some(code)) => match code.as_str() {
+            "i" => AccountMode::Disabled,
+            "u" => AccountMode::Unified,
+            "p" => AccountMode::PortfolioMargin,
+            other => AccountMode::Unknown(other.to_string()),
+        },
+    }
+}
+
+fn token_spec(tokens: &[WireTokenSpec], token: u32) -> std::result::Result<&WireTokenSpec, String> {
+    usize::try_from(token)
+        .ok()
+        .and_then(|index| tokens.get(index))
+        .ok_or_else(|| format!("token {token} missing from scl.meta.token_infos"))
+}
+
+fn wei_scale(spec: &WireTokenSpec, token: u32) -> std::result::Result<f64, String> {
+    let decimals = i32::try_from(spec.wei_decimals).map_err(|err| format!("token {token} weiDecimals: {err}"))?;
+    Ok(10f64.powi(decimals))
+}
+
+/// The tokens the dexes settle in.
+fn collateral_tokens(dexes: &[DexMeta], tokens: &[WireTokenSpec]) -> std::result::Result<FxHashMap<u32, CollateralToken>, String> {
+    let mut out = FxHashMap::default();
+    for token in dexes.iter().map(|dex| dex.collateral_token) {
+        let spec = token_spec(tokens, token).map_err(|err| format!("collateral {err}"))?;
+        out.insert(token, CollateralToken { name: spec.name.clone(), spot_scale: wei_scale(spec, token)? });
+    }
+    Ok(out)
+}
+
+fn lending_reserves(
+    wire: &[(u32, WireReserve)],
+    tokens: &[WireTokenSpec],
+) -> std::result::Result<FxHashMap<u32, LendingReserve>, String> {
+    wire.iter()
+        .map(|(token, reserve)| {
+            lending_reserve(*token, reserve, tokens).map(|reserve| (*token, reserve)).map_err(|err| format!("blp.r.t[{token}]: {err}"))
+        })
+        .collect()
+}
+
+fn lending_reserve(token: u32, wire: &WireReserve, tokens: &[WireTokenSpec]) -> std::result::Result<LendingReserve, String> {
+    let spec = token_spec(tokens, token)?;
+    let wei_scale = wei_scale(spec, token)?;
+    let price_decimals = MAX_SPOT_DECIMALS
+        .checked_sub(spec.sz_decimals)
+        .ok_or_else(|| format!("szDecimals {} above {MAX_SPOT_DECIMALS}", spec.sz_decimals))?;
+    let (borrow, supply) = &wire.l;
+    if wire.o == 0 || borrow.i == 0 || supply.i == 0 {
+        return Err(format!("zero oracle price {} or pool index {} / {}", wire.o, borrow.i, supply.i));
+    }
+    let cap = |side: &WireReserveSide| side.u.map(|units| units as f64 / wei_scale);
+    Ok(LendingReserve {
+        borrow_index: borrow.i as f64 / LENDING_SCALE,
+        supply_index: supply.i as f64 / LENDING_SCALE,
+        borrow_cap: cap(borrow),
+        supply_cap: cap(supply),
+        ltv: wire.v.map_or(0.0, |ltv| ltv as f64 / LENDING_SCALE),
+        oracle_px: wire.o as f64 / 10f64.powi(price_decimals.cast_signed()),
+        wei_scale,
+    })
+}
+
+/// The holder's non-zero balances of the tokens `kept` selects, sorted by token.
+fn spot_balances(
+    user: &Address,
+    balances: Option<&Vec<(u32, u64)>>,
+    kept: impl Fn(u32) -> bool,
+) -> std::result::Result<Vec<(u32, i64)>, String> {
+    let mut out = balances
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter(|(token, _)| kept(*token))
+        .map(|(token, t)| {
+            i64::try_from(*t).map(|t| (*token, t)).map_err(|err| format!("{user}: spot balance {t} of token {token}: {err}"))
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+    out.sort_unstable_by_key(|(token, _)| *token);
+    Ok(out)
+}
+
+/// A portfolio-margin holder's non-zero shares; a share in a token without a reserve contradicts the checkpoint.
+fn lending_shares(
+    user: &Address,
+    wire: Vec<WireTokenShares>,
+    reserves: &FxHashMap<u32, LendingReserve>,
+) -> std::result::Result<Vec<Lending>, String> {
+    let mut out = Vec::new();
+    for (token, (borrow, supply)) in wire {
+        if borrow.s == 0 && supply.s == 0 {
+            continue;
+        }
+        if !reserves.contains_key(&token) {
+            return Err(format!("{user}: borrow-lend shares in token {token}, which has no reserve"));
+        }
+        out.push(Lending { token, borrow_shares: borrow.s, supply_shares: supply.s });
+    }
+    out.sort_unstable_by_key(|lending| lending.token);
+    Ok(out)
 }
 
 fn build_dex(clearinghouse: WireClearinghouse) -> std::result::Result<(DexMeta, FxHashMap<Address, DexAccount>), String> {
@@ -613,6 +803,9 @@ pub(crate) mod tests {
     const HOLDER: &str = "0x00000000000000000000000000000000000000aa";
     const CASH_ONLY: &str = "0x00000000000000000000000000000000000000bb";
     const ISOLATED: &str = "0x00000000000000000000000000000000000000cc";
+    /// Portfolio margin: borrows 3150 USDC (shares 3e11 at index 1.05), supplies 100 HYPE and holds 10 more in spot
+    /// orders; cross PUMP 5,000,000 on main (cash -20000), xyz cash 1 and an isolated TSLA 1.0 (cash -300).
+    pub(crate) const PORTFOLIO: &str = "0x00000000000000000000000000000000000000dd";
 
     /// Two USDC dexes in the measured layout: main (pdi 0) and xyz (pdi 1, asset ids 10000 + i), unknown keys mixed in.
     pub(crate) fn fixture() -> Vec<u8> {
@@ -648,7 +841,8 @@ pub(crate) mod tests {
                                         [0, {"l": {"C": 3}, "M": 5}]
                                     ]}, "S": {"s": 1}}],
                                     [CASH_ONLY, {"u": 3_000_000}],
-                                    [ISOLATED, {"p": {"p": [[1, {"s": -2_000_000, "l": {"I": {"l": 3, "u": 12_000_000_000_i64}}, "M": 52}]]}}]
+                                    [ISOLATED, {"p": {"p": [[1, {"s": -2_000_000, "l": {"I": {"l": 3, "u": 12_000_000_000_i64}}, "M": 52}]]}}],
+                                    [PORTFOLIO, {"u": -20_000_000_000_i64, "p": {"p": [[1, {"s": 5_000_000, "l": {"C": 10}, "M": 52}]]}}]
                                 ],
                                 "users_with_positions": []
                             },
@@ -663,7 +857,10 @@ pub(crate) mod tests {
                                 "collateralTokenName": "USDC"
                             },
                             "oracle": {"pxs2": [[{"u": "t", "p": 357_970, "d": 1}, {"u": "t", "p": 358_320, "d": 1}, {"u": "t", "p": 357_970, "d": 1}]]},
-                            "user_states": {"user_to_state": [[HOLDER, {"u": 30_269_700}]]}
+                            "user_states": {"user_to_state": [
+                                [HOLDER, {"u": 30_269_700}],
+                                [PORTFOLIO, {"u": 1_000_000, "p": {"p": [[10_000, {"s": 1000, "l": {"I": {"u": -300_000_000_i64}}, "M": 10}]]}}]
+                            ]}
                         },
                         {
                             "meta": {
@@ -679,27 +876,54 @@ pub(crate) mod tests {
                     ],
                     "scl": {"meta": {}, "user_states": [
                         [HOLDER, {"b": [[0, {"t": 20_000_000_000_i64}], [150, {"t": 5, "e": 2}], [360, {"t": 5_000_000_000_i64}]]}],
-                        [CASH_ONLY, {"b": [[0, {"t": 1}]]}]
+                        [CASH_ONLY, {"b": [[0, {"t": 1}]]}],
+                        [PORTFOLIO, {"b": [[0, {}], [150, {"t": 1_000_000_000}], [299, {"t": 7, "e": 1}]]}]
                     ]},
-                    "ust": [[HOLDER, {"a": "u", "C": 1, "s": "v"}], [CASH_ONLY, {"s": "v"}], [ISOLATED, {"P": 1}]],
-                    "blp": {"e": true}
+                    "ust": [[HOLDER, {"a": "u", "C": 1, "s": "v"}], [CASH_ONLY, {"s": "v"}], [ISOLATED, {"P": 1}], [PORTFOLIO, {"a": "p"}]]
                 }
             }
         });
         let mut checkpoint = checkpoint;
-        // token_infos is indexed by token id; only the collateral tokens' specs are read
+        checkpoint["exchange"]["locus"]["blp"] = lending_fixture();
+        // token_infos is indexed by token id; USDC's 8 size decimals make its stored reserve price 1 mean 1.0
         let token_infos: Vec<serde_json::Value> = (0..=360)
             .map(|token| {
-                let name = match token {
-                    0 => "USDC".to_string(),
-                    360 => "USDH".to_string(),
-                    other => format!("T{other}"),
+                let (name, size_decimals) = match token {
+                    0 => ("USDC".to_string(), 8),
+                    150 => ("HYPE".to_string(), 2),
+                    360 => ("USDH".to_string(), 2),
+                    other => (format!("T{other}"), 2),
                 };
-                json!({"spec": {"name": name, "szDecimals": 2, "weiDecimals": 8}, "spots": []})
+                json!({"spec": {"name": name, "szDecimals": size_decimals, "weiDecimals": 8}, "spots": []})
             })
             .collect();
         checkpoint["exchange"]["locus"]["scl"]["meta"] = json!({"token_infos": token_infos, "spot_infos": []});
         rmp_serde::to_vec(&checkpoint).unwrap()
+    }
+
+    /// The 10-19 reserve layout: `l` = [borrow side, supply side] with pool index `i` and per-account cap `u`.
+    fn lending_fixture() -> serde_json::Value {
+        json!({"u": [
+            [HOLDER, {"t": [[0, [{}, {"b": 5, "s": 5}]]]}],
+            [PORTFOLIO, {"o": {"n": 1}, "t": [
+                [0, [{"b": 290_000_000_000_i64, "s": 300_000_000_000_i64}, {}]],
+                [150, [{}, {"b": 10_000_000_000_i64, "s": 10_000_000_000_i64}]],
+                [360, [{}, {}]]
+            ]}]
+        ], "r": {"u": true, "p": 10_000_000_000_000_i64, "t": [
+            [0, {"T": "2026-10-19T06:37:23.5", "m": 1, "o": 1, "v": null, "l": [
+                {"t": 1, "m": 1, "u": 5_000_000_000_000_000_i64, "i": 105_000_000_000_000_i64},
+                {"t": 1, "m": 1, "u": 20_000_000_000_000_000_i64, "i": 101_000_000_000_000_i64}]}],
+            [150, {"o": 80_000_000, "v": 65_000_000_000_000_i64, "l": [
+                {"i": 104_000_000_000_000_i64},
+                {"t": 1, "m": 1, "u": 100_000_000_000_000_i64, "i": 100_000_000_000_000_i64}]}],
+            [268, {"o": 998_880, "v": null, "l": [
+                {"u": 100_000_000_000_000_i64, "i": 102_000_000_000_000_i64},
+                {"u": 500_000_000_000_000_i64, "i": 101_000_000_000_000_i64}]}],
+            [360, {"o": 1_000_000, "v": null, "l": [
+                {"u": 1, "i": 104_000_000_000_000_i64},
+                {"u": 150_000_000_000_000_i64, "i": 100_000_000_000_000_i64}]}]
+        ]}, "e": true})
     }
 
     pub(crate) fn user(text: &str) -> Address {
@@ -778,6 +1002,54 @@ pub(crate) mod tests {
             let error = parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap_err().to_string();
             assert!(error.contains(expected), "{pointer}: {error}");
         }
+    }
+
+    #[test]
+    fn reserves_are_read_in_whole_tokens_and_usdc() {
+        let parsed = parse_checkpoint_bytes(&fixture()).unwrap();
+        let usdc = &parsed.reserves[&0];
+        assert_eq!((usdc.oracle_px, usdc.ltv, usdc.borrow_cap, usdc.supply_cap), (1.0, 0.0, Some(5e7), Some(2e8)));
+        assert_eq!((usdc.borrow_index, usdc.supply_index, usdc.wei_scale), (1.05, 1.01, 1e8));
+        let hype = &parsed.reserves[&150];
+        assert_eq!((hype.oracle_px, hype.ltv, hype.borrow_cap, hype.supply_cap), (80.0, 0.65, None, Some(1e6)));
+        assert_eq!(parsed.reserves[&268].oracle_px, 0.998_88);
+        assert_eq!(parsed.reserves[&360].borrow_cap, Some(1e-8));
+    }
+
+    #[test]
+    fn a_portfolio_margin_account_keeps_its_reserve_balances_and_lending_shares() {
+        let parsed = parse_checkpoint_bytes(&fixture()).unwrap();
+        let account = &parsed.accounts[&user(PORTFOLIO)];
+        assert_eq!(account.mode, AccountMode::PortfolioMargin);
+        // HYPE is a reserve token, kept; token 299 is neither a reserve nor a collateral token
+        assert_eq!(account.spot, vec![(150, 1_000_000_000)]);
+        assert_eq!(
+            account.lending,
+            vec![
+                Lending { token: 0, borrow_shares: 300_000_000_000, supply_shares: 0 },
+                Lending { token: 150, borrow_shares: 0, supply_shares: 10_000_000_000 },
+            ]
+        );
+        // a unified account's shares are not kept
+        assert_eq!(parsed.accounts[&user(HOLDER)].lending, Vec::new());
+    }
+
+    #[test]
+    fn shares_in_a_token_without_a_reserve_fail_the_parse() {
+        let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        let shares = checkpoint.pointer_mut("/exchange/locus/blp/u/1/1/t").unwrap().as_array_mut().unwrap();
+        shares.push(json!([197, [{"s": 1}, {}]]));
+        let error = parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap_err().to_string();
+        assert!(error.contains("token 197, which has no reserve"), "{error}");
+    }
+
+    #[test]
+    fn a_missing_borrow_lend_section_fails_the_parse() {
+        let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        checkpoint["exchange"]["locus"]["blp"].as_object_mut().unwrap().remove("r");
+        assert!(parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).is_err());
+        checkpoint["exchange"]["locus"].as_object_mut().unwrap().remove("blp");
+        assert!(parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).is_err());
     }
 
     #[test]

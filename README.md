@@ -327,13 +327,18 @@ GET /coinPositions?coin=PUMP
 {"coin":"PUMP","fillsHeight":1189401234,"miscEventsHeight":1189401230,"anchor":{"height":1189400000,"time":1792404043180},
  "positions":[{"user":"0x…","szi":"269620.0","positionHeight":1189400000,"marginMode":"cross","accountMode":"unifiedAccount",
    "poolPositions":1,"liquidationPx":"0.0039515","liquidationPxStatus":"computed","unsupportedReason":null,
-   "liquidationPxHeight":1189400000,"changedSinceLiquidationPx":[{"kind":"funding","height":1189401000}]}]}
+   "liquidationPxHeight":1189400000,"changedSinceLiquidationPx":[{"kind":"funding","height":1189401000}],
+   "portfolioMargin":null}]}
 ```
 - `szi` is the anchor plus every fill observed since; `positionHeight` is the block that set it.
-- `liquidationPxStatus`: `computed` (a positive price at the anchor), `none` (no positive solution), `unsupported` (`unsupportedReason`: `portfolioMargin`, `unknownAccountMode:<code>`, `missingMark`, `tierCase`), `pending` (opened after the anchor). `liquidationPx` is set only for `computed`; `computed` means the anchor's state, not that the price still holds.
+- `liquidationPxStatus`: `computed` (a positive price at the anchor), `none` (no positive solution), `unsupported` (`unsupportedReason`: `unknownAccountMode:<code>`, `missingMark`, `tierCase`, `portfolioMarginNonUsdcDex`, `portfolioMarginSupplyCap`, `portfolioMarginBorrowCap`), `pending` (opened after the anchor). `liquidationPx` is set only for `computed`; `computed` means the anchor's state, not that the price still holds.
+- Portfolio-margin accounts (`accountMode: "portfolioMargin"`): a cross position's `liquidationPx` means what the node's `clearinghouseState.liquidationPx` means — the mark at which the USDC pool's availability after maintenance reaches 0 with every other price frozen, collateral oracles included (ratio about 1). It is **not** the official page's "ratio above 0.95" trigger, which the view does not compute. The pool counts spot USDC, borrow-lend supply minus borrow, the cross cash of every USDC dex and the borrow headroom against the supplied collateral (from 1 USDC). Isolated positions use their own margin as in every mode.
+- `portfolioMargin`: the anchor's account ratio, the node's `portfolioMarginRatio`: `{"status":"computed","ratio":"0.1823"}`, or `{"status":"unsupported","reason":…}` (state on a dex not settled in USDC, collateral above the per-account supply cap, a needed borrow cap missing); `null` for the other modes and for `pending` rows. A ratio of `"0"` (nothing borrowed, no cross maintenance) is a computed value.
 - `poolPositions` > 1: the price also moves with the other positions of that margin pool.
 - `changedSinceLiquidationPx`: the observed sources (`fill`, `ledger`, `funding`) that touched the account after the anchor, each with the **first** block after the anchor (from there the anchor's liquidation price may be stale). Once a source has a mark, later events of that source no longer change the row by themselves (an account trading every block is not pushed every block); an earlier block arriving late still moves the mark back, and position changes in the coin are pushed as always. **Empty does not prove the account unchanged**: isolated margin moves, account mode switches and withdrawal requests are block actions the view does not read.
 - Errors: `404` for a coin outside the anchor's universe, `503` with the reason until the first anchor and whenever data was lost that no anchor covers yet (the reason names the stream and the bound).
+- Send `Accept-Encoding: gzip` (curl: `--compressed`): PUMP is ~2 MB of JSON.
+- Rare events are logged as first-hand evidence: one `ACCOUNTS_EVIDENCE <json>` WARN line each, counted in `orderbook_accounts_evidence_total{kind}`. `rareLine` keeps the raw line of a liquidation fill whose method is not `market`, a fill direction or ledger type not seen before, and an unknown misc event; `silentPositionChange` (at most 100 per install) records an anchor that disagrees with the size the fills had led to.
 
 Subscription:
 ```json

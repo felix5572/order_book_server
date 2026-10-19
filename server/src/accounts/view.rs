@@ -8,6 +8,7 @@ use super::{
     book::{AnchorInfo, ChangeMarks, CoinChanges, CoinPositions, PositionView},
     checkpoint::AccountMode,
     liquidation::{LiquidationPx, UnsupportedReason},
+    portfolio::PortfolioMargin,
     size::format_size_raw,
 };
 
@@ -48,6 +49,25 @@ struct PositionDto {
     liquidation_px_height: Option<u64>,
     /// Observed sources that touched the account after the anchor; empty does not prove it unchanged.
     changed_since_liquidation_px: Vec<ChangeDto>,
+    /// The anchor's portfolio-margin ratio of a portfolio-margin account (node `portfolioMarginRatio`, not the official
+    /// 0.95 trigger); `null` for the other modes and for pending rows.
+    portfolio_margin: Option<PortfolioMarginDto>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub(crate) enum PortfolioMarginDto {
+    Computed { ratio: String },
+    Unsupported { reason: String },
+}
+
+impl PortfolioMarginDto {
+    pub(crate) fn new(portfolio_margin: &PortfolioMargin) -> Self {
+        match portfolio_margin {
+            PortfolioMargin::Computed { ratio } => Self::Computed { ratio: ratio.to_string() },
+            PortfolioMargin::Unsupported(reason) => Self::Unsupported { reason: unsupported_reason_name(reason) },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -155,6 +175,7 @@ fn position_dto(size_decimals: u32, anchor: AnchorInfo, position: &PositionView)
         unsupported_reason,
         liquidation_px_height: row.map(|_| anchor.height),
         changed_since_liquidation_px: changes(position.changes),
+        portfolio_margin: row.and_then(|row| row.portfolio_margin.as_ref()).map(PortfolioMarginDto::new),
     }
 }
 
@@ -182,8 +203,10 @@ pub(crate) fn account_mode_name(mode: &AccountMode) -> String {
 
 pub(crate) fn unsupported_reason_name(reason: &UnsupportedReason) -> String {
     match reason {
-        UnsupportedReason::PortfolioMargin => "portfolioMargin".to_string(),
         UnsupportedReason::UnknownAccountMode(code) => format!("unknownAccountMode:{code}"),
+        UnsupportedReason::PortfolioMarginNonUsdcDex => "portfolioMarginNonUsdcDex".to_string(),
+        UnsupportedReason::PortfolioMarginSupplyCap => "portfolioMarginSupplyCap".to_string(),
+        UnsupportedReason::PortfolioMarginBorrowCap => "portfolioMarginBorrowCap".to_string(),
         UnsupportedReason::MissingMark => "missingMark".to_string(),
         UnsupportedReason::TierCase => "tierCase".to_string(),
     }
@@ -197,16 +220,23 @@ mod tests {
     use crate::accounts::{anchor::AnchorRow, book::AnchorInfo};
 
     #[test]
+    fn an_unsupported_portfolio_margin_names_its_reason() {
+        let dto = PortfolioMarginDto::new(&PortfolioMargin::Unsupported(UnsupportedReason::PortfolioMarginSupplyCap));
+        assert_eq!(serde_json::to_value(dto).unwrap(), json!({"status": "unsupported", "reason": "portfolioMarginSupplyCap"}));
+    }
+
+    #[test]
     fn serializes_anchored_and_pending_rows() {
         let anchored = PositionView {
             user: Address::repeat_byte(0xab),
             size_raw: -2_696_200,
             position_height: 1_000,
-            account_mode: Some(AccountMode::Unified),
+            account_mode: Some(AccountMode::PortfolioMargin),
             anchor_row: Some(AnchorRow {
                 isolated: false,
                 pool_positions: Some(2),
                 liquidation_px: LiquidationPx::Computed(0.003_951_5),
+                portfolio_margin: Some(PortfolioMargin::Computed { ratio: 0.25 }),
             }),
             changes: ChangeMarks { fill: None, ledger: Some(1_005), funding: Some(1_003) },
         };
@@ -223,6 +253,7 @@ mod tests {
                 isolated: true,
                 pool_positions: None,
                 liquidation_px: LiquidationPx::Unsupported(UnsupportedReason::UnknownAccountMode("x".to_string())),
+                portfolio_margin: None,
             }),
             account_mode: Some(AccountMode::Unknown("x".to_string())),
             changes: ChangeMarks::default(),
@@ -246,17 +277,18 @@ mod tests {
                 "anchor": {"height": 1_000, "time": 1_792_384_440_000u64},
                 "positions": [
                     {"user": ab, "szi": "-269620.0", "positionHeight": 1_000, "marginMode": "cross",
-                     "accountMode": "unifiedAccount", "poolPositions": 2, "liquidationPx": "0.0039515",
+                     "accountMode": "portfolioMargin", "poolPositions": 2, "liquidationPx": "0.0039515",
                      "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxHeight": 1_000,
-                     "changedSinceLiquidationPx": [{"kind": "ledger", "height": 1_005}, {"kind": "funding", "height": 1_003}]},
+                     "changedSinceLiquidationPx": [{"kind": "ledger", "height": 1_005}, {"kind": "funding", "height": 1_003}],
+                     "portfolioMargin": {"status": "computed", "ratio": "0.25"}},
                     {"user": "0x0101010101010101010101010101010101010101", "szi": "0.5", "positionHeight": 1_010,
                      "marginMode": null, "accountMode": null, "poolPositions": null, "liquidationPx": null,
                      "liquidationPxStatus": "pending", "unsupportedReason": null, "liquidationPxHeight": null,
-                     "changedSinceLiquidationPx": [{"kind": "fill", "height": 1_010}]},
+                     "changedSinceLiquidationPx": [{"kind": "fill", "height": 1_010}], "portfolioMargin": null},
                     {"user": ab, "szi": "-269620.0", "positionHeight": 1_000, "marginMode": "isolated",
                      "accountMode": "unknown:x", "poolPositions": null, "liquidationPx": null,
                      "liquidationPxStatus": "unsupported", "unsupportedReason": "unknownAccountMode:x",
-                     "liquidationPxHeight": 1_000, "changedSinceLiquidationPx": []}
+                     "liquidationPxHeight": 1_000, "changedSinceLiquidationPx": [], "portfolioMargin": null}
                 ]
             })
         );
