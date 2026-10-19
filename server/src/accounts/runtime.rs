@@ -1,5 +1,5 @@
-//! Process wiring of the account view (design 000419 r2 3.1 / 3.4): the fills and misc events line watchers, the
-//! checkpoint poller thread and the owner task holding the `AccountBook`. Every input reaches the owner through a
+//! Process wiring of the account view (design 000419 r2 3.1 / 3.4, 000429 r2): the fills, misc events and block
+//! actions line watchers, the checkpoint poller thread and the owner task holding the `AccountBook`. Every input reaches the owner through a
 //! bounded channel whose full state blocks the producer, so a backlog stays in the node's files. Lines are parsed on
 //! the watcher threads; the owner only applies them. A finished watcher or poller stops the view for good (503 until
 //! restart); a gone owner answers every query with the same.
@@ -16,10 +16,11 @@ use serde::{Deserialize, de::DeserializeOwned};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::{
+    actions::{BlockActions, line_height, parse_block_actions},
     anchor::Anchor,
     book::{
-        AccountBook, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport, QueryError, Stream, Touched,
-        Unavailable,
+        AccountBook, BlockActionsReport, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport, QueryError,
+        Stream, Touched, Unavailable,
     },
     checkpoint::parse_checkpoint_file,
     misc::MiscEvent,
@@ -28,7 +29,7 @@ use super::{
 };
 use crate::{
     listeners::order_book::{
-        parallel::{LineStream, spawn_line_watcher},
+        parallel::{FileLayout, LineStream, spawn_line_watcher},
         utils::list_checkpoints,
     },
     metrics::{
@@ -46,6 +47,8 @@ const INPUT_CHANNEL_CAPACITY: usize = 10_000;
 /// One Funding line of the main dex measured 42 MB (2026-10-19), above the book streams' 16 MiB cap.
 const MISC_EVENTS_MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
 const FILLS_MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+/// The largest `replica_cmds` line measured 6.4 MB (bm, 2026-10-19).
+const BLOCK_ACTIONS_MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 /// Checkpoints appear complete (a new file has its final size at first sight, 2026-10-19), every ~12 minutes.
 const CHECKPOINT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SUPERVISION_INTERVAL: Duration = Duration::from_secs(1);
@@ -57,6 +60,7 @@ const LINE_PREFIX_CHARS: usize = 300;
 enum Input {
     Fills(std::result::Result<Batch<NodeDataFill>, LineError>, Option<LineEvidence>),
     MiscEvents(std::result::Result<Batch<MiscEvent>, LineError>, Option<LineEvidence>),
+    BlockActions(std::result::Result<BlockActions, LineError>),
     /// The watcher did not deliver lines of unknown blocks: the skip while positioning at its start, or a discard.
     Loss(Stream),
 }
@@ -139,6 +143,7 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
         dir: data_dir.join("node_fills_streaming"),
         max_line_bytes: FILLS_MAX_LINE_BYTES,
         start_skip_is_loss: true,
+        layout: FileLayout::Hourly,
     };
     let misc_events = LineStream {
         name: "AccountMiscEvents",
@@ -146,6 +151,15 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
         dir: data_dir.join("misc_events_streaming"),
         max_line_bytes: MISC_EVENTS_MAX_LINE_BYTES,
         start_skip_is_loss: true,
+        layout: FileLayout::Hourly,
+    };
+    let block_actions = LineStream {
+        name: "AccountBlockActions",
+        lag_label: "accounts_block_actions",
+        dir: data_dir.join("replica_cmds"),
+        max_line_bytes: BLOCK_ACTIONS_MAX_LINE_BYTES,
+        start_skip_is_loss: true,
+        layout: FileLayout::ReplicaSessions,
     };
     let threads = vec![
         Supervised {
@@ -162,10 +176,20 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
             name: "misc events watcher",
             handle: spawn_line_watcher(
                 misc_events,
-                input_tx,
+                input_tx.clone(),
                 None,
                 misc_input,
                 || Input::Loss(Stream::MiscEvents),
+            ),
+        },
+        Supervised {
+            name: "block actions watcher",
+            handle: spawn_line_watcher(
+                block_actions,
+                input_tx,
+                None,
+                block_actions_input,
+                || Input::Loss(Stream::BlockActions),
             ),
         },
         Supervised {
@@ -192,14 +216,19 @@ fn misc_input(line: String) -> Input {
     Input::MiscEvents(parsed, evidence)
 }
 
+fn block_actions_input(line: String) -> Input {
+    Input::BlockActions(parse_block_actions(&line).map_err(|err| line_error(&line, &err, line_height(&line))))
+}
+
 fn parse_line<E: DeserializeOwned>(line: &str) -> std::result::Result<Batch<E>, LineError> {
     sonic_rs::from_str(line).map_err(|err| {
-        let prefix: String = line.chars().take(LINE_PREFIX_CHARS).collect();
-        LineError {
-            block: sonic_rs::from_str::<LineHeader>(line).ok().map(|header| header.block_number),
-            error: format!("{err} (line of {} bytes starting {prefix:?})", line.len()),
-        }
+        line_error(line, &err, sonic_rs::from_str::<LineHeader>(line).ok().map(|header| header.block_number))
     })
+}
+
+fn line_error(line: &str, err: &dyn std::fmt::Display, block: Option<u64>) -> LineError {
+    let prefix: String = line.chars().take(LINE_PREFIX_CHARS).collect();
+    LineError { block, error: format!("{err} (line of {} bytes starting {prefix:?})", line.len()) }
 }
 
 #[expect(clippy::expect_used, reason = "a host clock before 1970 or past u64 ms is broken; loss bounds depend on it")]
@@ -303,8 +332,10 @@ fn apply_input(book: &mut AccountBook, input: Input) -> Touched {
             }
             report_misc(book.apply_misc_events(batch))
         }
+        Input::BlockActions(Ok(block)) => report_block_actions(book.apply_block_actions(block)),
         Input::Fills(Err(err), _) => lost(book, Stream::Fills, "parse_error", &err),
         Input::MiscEvents(Err(err), _) => lost(book, Stream::MiscEvents, "parse_error", &err),
+        Input::BlockActions(Err(err)) => lost(book, Stream::BlockActions, "parse_error", &err),
         Input::Loss(stream) => {
             let error = "the watcher skipped lines while positioning at its start, or discarded buffered data".to_string();
             lost(book, stream, "watcher_discard", &LineError { block: None, error })
@@ -358,6 +389,15 @@ fn report_misc(report: MiscReport) -> Touched {
     ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL.inc_by(report.unknown_events as u64);
     for kind in &report.new_unknown_kinds {
         warn!("accounts: unknown misc event kind {kind:?} (skipped; counted from now on)");
+    }
+    report_dropped_marks(report.marks_dropped);
+    report.touched
+}
+
+fn report_block_actions(report: BlockActionsReport) -> Touched {
+    if let Some((first, last)) = report.missing {
+        error!("accounts block_actions data loss (height_gap): blocks {first} to {last} never arrived");
+        ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::BlockActions.label(), "height_gap"]).inc();
     }
     report_dropped_marks(report.marks_dropped);
     report.touched
@@ -429,7 +469,12 @@ fn export_status(status: &BookStatus) {
     ACCOUNTS_TRUSTED.set(i64::from(status.availability.is_ok()));
     ACCOUNTS_OPEN_POSITIONS.set((status.open_positions as u64).cast_signed());
     ACCOUNTS_HELD_FILLS.set((status.held_fills as u64).cast_signed());
-    for (stream, height) in [(Stream::Fills, status.fills_height), (Stream::MiscEvents, status.misc_events_height)] {
+    let heights = [
+        (Stream::Fills, status.fills_height),
+        (Stream::MiscEvents, status.misc_events_height),
+        (Stream::BlockActions, status.block_actions_height),
+    ];
+    for (stream, height) in heights {
         if let Some(height) = height {
             ACCOUNTS_STREAM_HEIGHT.with_label_values(&[stream.label()]).set(height.cast_signed());
         }
@@ -538,7 +583,14 @@ mod tests {
         let file = dir.join("10");
         std::fs::write(&file, ledger_line(1_100)).unwrap();
         let (tx, mut inputs) = mpsc::channel(16);
-        let stream = LineStream { name: "TestMisc", lag_label: "test", dir, max_line_bytes: 1 << 20, start_skip_is_loss: true };
+        let stream = LineStream {
+            name: "TestMisc",
+            lag_label: "test",
+            dir,
+            max_line_bytes: 1 << 20,
+            start_skip_is_loss: true,
+            layout: FileLayout::Hourly,
+        };
         let _watcher = spawn_line_watcher(
             stream,
             tx,
@@ -550,6 +602,7 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         let mut book = AccountBook::new(0);
         apply_input(&mut book, fills_input(batch_line(1_200, "")));
+        apply_input(&mut book, Input::BlockActions(Ok(BlockActions { height: 1_200, actions: Vec::new() })));
         book.install_anchor(empty_anchor(1_300, now_ms()));
 
         append(&file, &ledger_line(1_500));
@@ -586,6 +639,17 @@ mod tests {
         let truncated = r#"{"local_time":"2026-10-19T06:00:00.1","block_time":"2026-10-19T06:00:00.0","block_number":1500,"events":[["0x"#;
         assert_eq!(parse_line::<NodeDataFill>(truncated).expect_err("not JSON").block, None);
         assert!(parse_line::<MiscEvent>("{}").expect_err("no header").block.is_none());
+    }
+
+    #[test]
+    fn a_block_actions_line_breaking_the_contract_keeps_its_height() {
+        let empty = r#"{"abci_block":{"signed_action_bundles":[]},"resps":{"Full":[]},"height":8}"#;
+        let Input::BlockActions(Ok(block)) = block_actions_input(empty.to_string()) else { panic!("an empty block reads") };
+        assert_eq!(block, BlockActions { height: 8, actions: Vec::new() });
+        let unpaired = r#"{"abci_block":{"signed_action_bundles":[["0x01",{"signed_actions":[]}]]},"resps":{"Full":[]},"height":7}"#;
+        let Input::BlockActions(Err(err)) = block_actions_input(unpaired.to_string()) else { panic!("no responses") };
+        assert_eq!(err.block, Some(7));
+        assert!(err.error.starts_with("block 7: 1 bundles but 0 response groups (line of "), "{}", err.error);
     }
 
     /// Review 000423 P2: a real owner exit closes the push for every receiver (handles only hold a weak sender) and

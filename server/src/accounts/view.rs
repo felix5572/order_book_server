@@ -18,6 +18,7 @@ pub(crate) struct CoinPositionsDto {
     coin: String,
     fills_height: u64,
     misc_events_height: u64,
+    block_actions_height: u64,
     anchor: AnchorDto,
     positions: Vec<PositionDto>,
 }
@@ -47,7 +48,8 @@ struct PositionDto {
     unsupported_reason: Option<String>,
     /// The anchor height the row was computed at; `null` while `pending`.
     liquidation_px_height: Option<u64>,
-    /// Observed sources that touched the account after the anchor; empty does not prove it unchanged.
+    /// Observed sources that touched the account after the anchor; empty does not prove it unchanged (mark price moves
+    /// of the pool's other positions are not a source).
     changed_since_liquidation_px: Vec<ChangeDto>,
     /// The anchor's portfolio-margin ratio of a portfolio-margin account (node `portfolioMarginRatio`, not the official
     /// 0.95 trigger); `null` for the other modes and for pending rows.
@@ -83,6 +85,7 @@ impl CoinPositionsDto {
             coin: view.coin.clone(),
             fills_height: view.fills_height,
             misc_events_height: view.misc_events_height,
+            block_actions_height: view.block_actions_height,
             anchor: AnchorDto { height: view.anchor.height, time: view.anchor.time_ms },
             positions: view
                 .positions
@@ -112,7 +115,14 @@ pub(crate) enum CoinPositionsFrame {
         view: CoinPositionsDto,
     },
     /// The rows a batch touched; `position` is `null` once closed.
-    Changes { coin: String, version: u64, fills_height: u64, misc_events_height: u64, changes: Vec<ChangeRowDto> },
+    Changes {
+        coin: String,
+        version: u64,
+        fills_height: u64,
+        misc_events_height: u64,
+        block_actions_height: u64,
+        changes: Vec<ChangeRowDto>,
+    },
     /// The subscription ended; resubscribe once the view is available again.
     Withdrawn { coin: String, reason: String },
 }
@@ -138,6 +148,7 @@ impl CoinPositionsFrame {
             version: changes.version,
             fills_height: changes.fills_height,
             misc_events_height: changes.misc_events_height,
+            block_actions_height: changes.block_actions_height,
             changes: rows.collect(),
         }
     }
@@ -180,7 +191,16 @@ fn position_dto(size_decimals: u32, anchor: AnchorInfo, position: &PositionView)
 }
 
 fn changes(marks: ChangeMarks) -> Vec<ChangeDto> {
-    [("fill", marks.fill), ("ledger", marks.ledger), ("funding", marks.funding)]
+    let ChangeMarks { fill, ledger, funding, margin, account_mode, withdrawal } = marks;
+    let kinds = [
+        ("fill", fill),
+        ("ledger", ledger),
+        ("funding", funding),
+        ("margin", margin),
+        ("accountMode", account_mode),
+        ("withdrawal", withdrawal),
+    ];
+    kinds
         .into_iter()
         .filter_map(|(kind, height)| height.map(|height| ChangeDto { kind, height }))
         .collect()
@@ -238,7 +258,14 @@ mod tests {
                 liquidation_px: LiquidationPx::Computed(0.003_951_5),
                 portfolio_margin: Some(PortfolioMargin::Computed { ratio: 0.25 }),
             }),
-            changes: ChangeMarks { fill: None, ledger: Some(1_005), funding: Some(1_003) },
+            changes: ChangeMarks {
+                ledger: Some(1_005),
+                funding: Some(1_003),
+                margin: Some(1_002),
+                account_mode: Some(1_004),
+                withdrawal: Some(1_001),
+                ..ChangeMarks::default()
+            },
         };
         let pending = PositionView {
             user: Address::repeat_byte(0x01),
@@ -265,6 +292,7 @@ mod tests {
             anchor: AnchorInfo { height: 1_000, time_ms: 1_792_384_440_000 },
             fills_height: 1_011,
             misc_events_height: 1_009,
+            block_actions_height: 1_012,
             size_decimals: 1,
             positions: vec![anchored, pending, unsupported],
         };
@@ -273,13 +301,17 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "coin": "PUMP", "fillsHeight": 1_011, "miscEventsHeight": 1_009,
+                "coin": "PUMP", "fillsHeight": 1_011, "miscEventsHeight": 1_009, "blockActionsHeight": 1_012,
                 "anchor": {"height": 1_000, "time": 1_792_384_440_000u64},
                 "positions": [
                     {"user": ab, "szi": "-269620.0", "positionHeight": 1_000, "marginMode": "cross",
                      "accountMode": "portfolioMargin", "poolPositions": 2, "liquidationPx": "0.0039515",
                      "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxHeight": 1_000,
-                     "changedSinceLiquidationPx": [{"kind": "ledger", "height": 1_005}, {"kind": "funding", "height": 1_003}],
+                     "changedSinceLiquidationPx": [
+                         {"kind": "ledger", "height": 1_005}, {"kind": "funding", "height": 1_003},
+                         {"kind": "margin", "height": 1_002}, {"kind": "accountMode", "height": 1_004},
+                         {"kind": "withdrawal", "height": 1_001}
+                     ],
                      "portfolioMargin": {"status": "computed", "ratio": "0.25"}},
                     {"user": "0x0101010101010101010101010101010101010101", "szi": "0.5", "positionHeight": 1_010,
                      "marginMode": null, "accountMode": null, "poolPositions": null, "liquidationPx": null,

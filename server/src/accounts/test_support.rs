@@ -4,6 +4,7 @@ use alloy::primitives::Address;
 use rustc_hash::FxHashMap;
 
 use super::{
+    actions::{BlockActionKind, BlockActions},
     anchor::{Anchor, AnchorCoin, AnchorPosition, AnchorRow},
     book::AccountBook,
     checkpoint::AccountMode,
@@ -49,6 +50,11 @@ pub(crate) fn misc(block: u64, inners: &[&str]) -> Batch<MiscEvent> {
     sonic_rs::from_str(&misc_line(block, inners)).unwrap()
 }
 
+/// A parsed `replica_cmds` block of these kept actions (the line format is tested in `actions`).
+pub(crate) fn block_actions(height: u64, actions: &[(BlockActionKind, Address)]) -> BlockActions {
+    BlockActions { height, actions: actions.to_vec() }
+}
+
 pub(crate) fn batch_line(block: u64, events: &str) -> String {
     format!(
         r#"{{"local_time":"2026-10-19T06:00:00.1","block_time":"2026-10-19T06:00:00.0","block_number":{block},"events":[{events}]}}"#
@@ -81,12 +87,13 @@ pub(crate) fn anchor(height: u64, coins: &[CoinSpec<'_>]) -> Anchor {
     Anchor { height, time_ms: height * 1_000, coins, account_modes }
 }
 
-/// Watchers started at unix ms 0 and both streams read block 100, then the anchor at 1000 (block time 1,000,000 ms)
-/// with these PUMP holders installs: trusted.
+/// Watchers started at unix ms 0, fills and misc events read block 100 and the block actions block 1000 (they run on
+/// by one from there), then the anchor at 1000 (block time 1,000,000 ms) with these PUMP holders installs: trusted.
 pub(crate) fn trusted_book(holders: &[(Address, i64)]) -> AccountBook {
     let mut book = AccountBook::new(0);
     book.apply_fills(fills(100, &[]));
     book.apply_misc_events(misc(100, &[]));
+    book.apply_block_actions(block_actions(1_000, &[]));
     book.install_anchor(anchor(1_000, &[(PUMP, 0, holders)]));
     assert_eq!(book.availability().map(|available| available.anchor.height), Ok(1_000));
     book

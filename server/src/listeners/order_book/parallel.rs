@@ -11,7 +11,7 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     os::unix::fs::MetadataExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
@@ -69,6 +69,32 @@ fn observe_read_lag(label: &str, lines: &[String]) {
     }
 }
 
+/// How a stream lays out its files below its directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileLayout {
+    /// `hourly/<YYYYMMDD>/<H>`: the newest day by name, then its most recently modified file.
+    Hourly,
+    /// `<session>/<YYYYMMDD>/<first height>` (`replica_cmds`; a node restart opens a new session, named by its ISO start
+    /// time): the newest session and day by name, then the greatest first height.
+    ReplicaSessions,
+}
+
+/// The child directory with the greatest name.
+fn newest_child_dir(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir).ok()?.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).max()
+}
+
+/// See `FileLayout::ReplicaSessions`; names that are not a height are not stream files.
+fn latest_replica_file(base_dir: &Path) -> Option<PathBuf> {
+    let day_dir = newest_child_dir(&newest_child_dir(base_dir)?)?;
+    std::fs::read_dir(day_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| Some((entry.file_name().to_str()?.parse::<u64>().ok()?, entry.path())))
+        .max_by_key(|(first_height, _)| *first_height)
+        .map(|(_, path)| path)
+}
+
 /// File reader state for a single source
 struct FileReader {
     current_path: Option<PathBuf>,
@@ -95,6 +121,7 @@ struct FileReader {
     open_file_id: Option<(u64, u64)>,
     // Cap on one un-terminated line (MAX_PARTIAL_LINE_BYTES for the book streams).
     max_line_bytes: usize,
+    layout: FileLayout,
 }
 
 /// (dev, ino) identity of a metadata handle.
@@ -103,7 +130,7 @@ fn file_id(meta: &std::fs::Metadata) -> (u64, u64) {
 }
 
 impl FileReader {
-    fn new(base_dir: PathBuf, max_line_bytes: usize) -> Self {
+    fn new(base_dir: PathBuf, max_line_bytes: usize, layout: FileLayout) -> Self {
         Self {
             current_path: None,
             file: None,
@@ -114,6 +141,7 @@ impl FileReader {
             open_error_path: None,
             open_file_id: None,
             max_line_bytes,
+            layout,
         }
     }
 
@@ -122,28 +150,17 @@ impl FileReader {
         std::mem::take(&mut self.desynced)
     }
 
-    /// Find the latest file in the streaming directory tree
-    /// Scans hourly/YYYYMMDD/HH structure and returns the most recently modified file
+    /// Find the latest file in the streaming directory tree (see `FileLayout`).
     fn find_latest_file(&self) -> Option<PathBuf> {
-        let hourly_dir = self.base_dir.join("hourly");
-        if !hourly_dir.exists() {
-            return None;
+        match self.layout {
+            FileLayout::Hourly => self.latest_hourly_file(),
+            FileLayout::ReplicaSessions => latest_replica_file(&self.base_dir),
         }
+    }
 
-        // Find the latest day directory
-        let mut latest_day: Option<PathBuf> = None;
-        if let Ok(entries) = std::fs::read_dir(&hourly_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    if latest_day.is_none() || path > latest_day.clone().unwrap() {
-                        latest_day = Some(path);
-                    }
-                }
-            }
-        }
-
-        let day_dir = latest_day?;
+    /// Scans hourly/YYYYMMDD/HH structure and returns the most recently modified file
+    fn latest_hourly_file(&self) -> Option<PathBuf> {
+        let day_dir = newest_child_dir(&self.base_dir.join("hourly"))?;
 
         // Find the latest hour file in this day
         let mut latest_file: Option<PathBuf> = None;
@@ -372,8 +389,10 @@ impl FileReader {
         lines
     }
 
-    /// Switch to a new file (on create event)
-    fn on_create(&mut self, path: &PathBuf) -> Vec<String> {
+    /// Switch to a new file (on create event), first handing the old file's remaining lines to `deliver` one bounded
+    /// read at a time, so the drain holds one read plus one line however much is left (review 000429 r1 P2).
+    /// `deliver` returns false once the consumer is gone: the switch is then abandoned and false returned.
+    fn on_create(&mut self, path: &PathBuf, mut deliver: impl FnMut(Vec<String>) -> bool) -> bool {
         // A handle-less tracked file that vanished OR was recreated in place
         // (same path, new inode) is unrecoverable: everything past our last
         // read is gone, and a drain would open the NEW inode at a stale
@@ -403,11 +422,12 @@ impl FileReader {
         // READ_CHUNK_BYTES read inside one long line advances the position and
         // returns nothing, and stopping there would clear `partial_line` below
         // and silently drop the rest of the old file (review 000212).
-        let mut old_lines = Vec::new();
         if !stale_handleless {
             loop {
                 let position_before = self.file_position;
-                old_lines.extend(self.on_modify());
+                if !deliver(self.on_modify()) {
+                    return false;
+                }
                 if self.file_position == position_before {
                     break;
                 }
@@ -420,8 +440,7 @@ impl FileReader {
         self.file_position = 0;
         self.partial_line.clear();
         self.open_file_id = None; // position 0 is valid in any inode; id set on open
-
-        old_lines
+        true
     }
 
     /// Track an existing file (first event we see for it)
@@ -461,6 +480,7 @@ pub(super) fn spawn_file_watcher(
         dir,
         max_line_bytes: MAX_PARTIAL_LINE_BYTES,
         start_skip_is_loss: false,
+        layout: FileLayout::Hourly,
     };
     spawn_line_watcher(stream, tx, Some(last_event), move |line| file_event(source, line), move || FileEvent::Desync(source))
 }
@@ -480,13 +500,15 @@ pub(crate) struct LineStream {
     pub(crate) name: &'static str,
     /// `NODE_LINE_LAG` stream label.
     pub(crate) lag_label: &'static str,
-    /// Streaming directory (hourly files below it).
+    /// Streaming directory, its files laid out as `layout` says.
     pub(crate) dir: PathBuf,
     /// Cap on one un-terminated line; a longer one is discarded and `desync` is sent.
     pub(crate) max_line_bytes: usize,
     /// The watcher positions at the end of the current file on its first modify event, skipping the content written
     /// before that moment (including the line that triggered it); when set, it sends `desync` right then.
     pub(crate) start_skip_is_loss: bool,
+    /// Which file below `dir` is the newest one.
+    pub(crate) layout: FileLayout,
 }
 
 /// Watch one node stream from the end of its current file, sending every complete line wrapped by `wrap`
@@ -505,11 +527,26 @@ where
     F: Fn(String) -> E + Send + 'static,
     D: Fn() -> E + Send + 'static,
 {
-    let LineStream { name, lag_label, dir, max_line_bytes, start_skip_is_loss } = stream;
+    let LineStream { name, lag_label, dir, max_line_bytes, start_skip_is_loss, layout } = stream;
     thread::spawn(move || {
         info!("{} watcher thread started for {:?}", name, dir);
 
-        let mut reader = FileReader::new(dir.clone(), max_line_bytes);
+        let mut reader = FileReader::new(dir.clone(), max_line_bytes, layout);
+        // Every read's lines go out here, in order, blocking while the channel is full; false once the consumer is gone.
+        let send = |lines: Vec<String>| {
+            observe_read_lag(lag_label, &lines);
+            for line in lines {
+                if tx.blocking_send(wrap(line)).is_err() {
+                    error!("{name} channel closed, exiting");
+                    return false;
+                }
+                // Update health timestamp
+                if let Some(last_event) = &last_event {
+                    last_event.store(now_unix_ms(), AtomicOrdering::Relaxed);
+                }
+            }
+            true
+        };
 
         // Create watcher with callback
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -553,13 +590,8 @@ where
 
                         if event.kind.is_create() {
                             info!("{} new file: {:?}", name, path.file_name());
-                            let old_lines = reader.on_create(path);
-                            for line in old_lines {
-                                let evt = wrap(line);
-                                if tx.blocking_send(evt).is_err() {
-                                    error!("{} channel closed, exiting", name);
-                                    return;
-                                }
+                            if !reader.on_create(path, &send) {
+                                return;
                             }
                         } else if reader.current_path.is_none() {
                             // First time seeing this file
@@ -572,20 +604,8 @@ where
                         }
 
                         // EVENT-DRIVEN: Read data when inotify fires modify event
-                        let lines = reader.on_modify();
-                        observe_read_lag(lag_label, &lines);
-                        for line in lines {
-                            let event = wrap(line);
-
-                            if tx.blocking_send(event).is_err() {
-                                error!("{} channel closed, exiting", name);
-                                return;
-                            }
-
-                            // Update health timestamp
-                            if let Some(last_event) = &last_event {
-                                last_event.store(now_unix_ms(), AtomicOrdering::Relaxed);
-                            }
+                        if !send(reader.on_modify()) {
+                            return;
                         }
                     }
                 }
@@ -595,19 +615,8 @@ where
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Fallback polling - safety net for missed events
                     // This runs every 500ms instead of every 10ms
-                    let lines = reader.on_modify();
-                    observe_read_lag(lag_label, &lines);
-                    for line in lines {
-                        let event = wrap(line);
-
-                        if tx.blocking_send(event).is_err() {
-                            error!("{} channel closed, exiting", name);
-                            return;
-                        }
-
-                        if let Some(last_event) = &last_event {
-                            last_event.store(now_unix_ms(), AtomicOrdering::Relaxed);
-                        }
+                    if !send(reader.on_modify()) {
+                        return;
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -645,13 +654,8 @@ where
                 if let Some(newer_file) = reader.check_for_newer_file() {
                     info!("{} detected newer file (day rotation?): {:?}", name, newer_file.file_name());
                     // Switch to the new file
-                    let old_lines = reader.on_create(&newer_file);
-                    for line in old_lines {
-                        let evt = wrap(line);
-                        if tx.blocking_send(evt).is_err() {
-                            error!("{} channel closed, exiting", name);
-                            return;
-                        }
+                    if !reader.on_create(&newer_file, &send) {
+                        return;
                     }
                 }
             }
@@ -753,6 +757,21 @@ mod tests {
         std::fs::rename(&tmp, path).unwrap();
     }
 
+    fn test_stream(dir: PathBuf, start_skip_is_loss: bool) -> LineStream {
+        let max_line_bytes = MAX_PARTIAL_LINE_BYTES;
+        LineStream { name: "Test", lag_label: "test", dir, max_line_bytes, start_skip_is_loss, layout: FileLayout::Hourly }
+    }
+
+    /// `on_create` with a consumer that takes every delivery.
+    fn switch_collecting(reader: &mut FileReader, path: &PathBuf) -> Vec<String> {
+        let mut lines = Vec::new();
+        assert!(reader.on_create(path, |delivered| {
+            lines.extend(delivered);
+            true
+        }));
+        lines
+    }
+
     /// The skip of the content present at the first modify event is reported only when asked for (review 000422 r2).
     #[test]
     fn test_line_watcher_reports_the_positioning_skip_only_when_asked() {
@@ -761,7 +780,7 @@ mod tests {
             let path = dir.join("10");
             append(&path, "{\"old\":0}\n");
             let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
-            let stream = LineStream { name: "Test", lag_label: "test", dir, max_line_bytes: MAX_PARTIAL_LINE_BYTES, start_skip_is_loss };
+            let stream = test_stream(dir, start_skip_is_loss);
             let _watcher = spawn_line_watcher(stream, tx, None, |line| line, || "DESYNC".to_string());
             thread::sleep(Duration::from_millis(200));
             append(&path, "{\"skipped\":1}\n");
@@ -786,8 +805,7 @@ mod tests {
     fn test_line_watcher_exits_once_its_consumer_is_gone_without_new_lines() {
         let dir = test_dir("consumer_gone");
         let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
-        let stream =
-            LineStream { name: "Test", lag_label: "test", dir, max_line_bytes: MAX_PARTIAL_LINE_BYTES, start_skip_is_loss: false };
+        let stream = test_stream(dir, false);
         let handle = spawn_line_watcher(stream, tx, None, |line| line, String::new);
         drop(rx);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -802,7 +820,7 @@ mod tests {
         let dir = test_dir("appended");
         let path = dir.join("0");
         append(&path, "");
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&path); // position = EOF (0 bytes so far)
 
         append(&path, "{\"a\":1}\n{\"b\":2}\n{\"c\":");
@@ -823,7 +841,7 @@ mod tests {
         let dir = test_dir("eof");
         let path = dir.join("0");
         append(&path, "{\"old\":1}\n");
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&path);
         assert!(reader.on_modify().is_empty(), "pre-existing content is skipped (covered by the snapshot)");
         append(&path, "{\"new\":2}\n");
@@ -837,12 +855,12 @@ mod tests {
         let old = dir.join("0");
         let new = dir.join("1");
         append(&old, "");
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&old);
 
         append(&old, "{\"tail\":1}\n");
         append(&new, "{\"first\":2}\n");
-        let old_lines = reader.on_create(&new);
+        let old_lines = switch_collecting(&mut reader, &new);
         assert_eq!(old_lines, vec!["{\"tail\":1}".to_string()], "old file's tail is drained before switching");
         // After the switch the new file is read from position 0.
         assert_eq!(reader.on_modify(), vec!["{\"first\":2}".to_string()]);
@@ -858,7 +876,7 @@ mod tests {
         let dir = test_dir("malformed_mid");
         let path = dir.join("0");
         append(&path, "");
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&path);
 
         append(&path, "{\"a\":1}\ngarbage\n{\"b\":2}\n");
@@ -883,7 +901,7 @@ mod tests {
         let dir = test_dir("chunked_catchup");
         let path = dir.join("0");
         append(&path, "");
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&path);
 
         let ascii = "x".repeat(6 * 1024 * 1024); // even length: boundary is odd within the é-run
@@ -906,7 +924,7 @@ mod tests {
         let dir = test_dir("overflow");
         let path = dir.join("0");
         append(&path, "");
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&path);
 
         // A single unterminated line larger than the cap must be discarded and
@@ -945,7 +963,7 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let old = day.join("0");
         append(&old, &format!("{}\n", bn_line(10)));
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&old);
 
         std::fs::remove_file(&old).unwrap();
@@ -961,7 +979,7 @@ mod tests {
         assert!(reader.take_desynced(), "skipping over a vanished file is potential data loss");
 
         // The switch itself works end-to-end: new file is read from the start.
-        reader.on_create(&new);
+        switch_collecting(&mut reader, &new);
         assert_eq!(reader.on_modify(), vec![bn_line(20)]);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -976,7 +994,7 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let old = day.join("0");
         append(&old, "");
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&old);
         append(&old, &format!("{}\n", bn_line(10)));
         assert_eq!(reader.on_modify(), vec![bn_line(10)]); // opens + holds the fd
@@ -986,7 +1004,7 @@ mod tests {
         std::fs::remove_file(&old).unwrap();
         let new = day.join("1");
         append(&new, &format!("{}\n", bn_line(12)));
-        assert_eq!(reader.on_create(&new), vec![bn_line(11)], "tail of the deleted inode is drained");
+        assert_eq!(switch_collecting(&mut reader, &new), vec![bn_line(11)], "tail of the deleted inode is drained");
         assert!(!reader.take_desynced(), "a provably gapless handoff must not force a re-sync");
         assert_eq!(reader.on_modify(), vec![bn_line(12)]);
         std::fs::remove_dir_all(&dir).ok();
@@ -1002,13 +1020,13 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let old = day.join("0");
         append(&old, &format!("{}\n", bn_line(10)));
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&old); // tracks position, opens no handle
 
         std::fs::remove_file(&old).unwrap();
         let new = day.join("1");
         append(&new, &format!("{}\n", bn_line(20)));
-        assert!(reader.on_create(&new).is_empty(), "nothing to drain from the vanished file");
+        assert!(switch_collecting(&mut reader, &new).is_empty(), "nothing to drain from the vanished file");
         assert!(reader.take_desynced(), "unread tail of the vanished file is unrecoverable");
         assert_eq!(reader.on_modify(), vec![bn_line(20)]);
         std::fs::remove_dir_all(&dir).ok();
@@ -1026,7 +1044,7 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let path = day.join("12");
         append(&path, &format!("{}\n", bn_line(10)));
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&path); // stale position, no handle
 
         replace_file(&path, &format!("{}\n", bn_line(20)));
@@ -1046,7 +1064,7 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let path = day.join("12");
         append(&path, "");
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&path);
         append(&path, &format!("{}\n", bn_line(10)));
         assert_eq!(reader.on_modify(), vec![bn_line(10)]); // opens + holds the fd
@@ -1054,7 +1072,7 @@ mod tests {
         replace_file(&path, &format!("{}\n", bn_line(20)));
         assert!(reader.on_modify().is_empty(), "held fd still reads the drained old inode");
         assert_eq!(reader.check_for_newer_file(), Some(path.clone()), "inode swap must force a switch");
-        assert!(reader.on_create(&path).is_empty(), "old inode was already drained");
+        assert!(switch_collecting(&mut reader, &path).is_empty(), "old inode was already drained");
         assert!(!reader.take_desynced(), "a fully drained handoff must not force a re-sync");
         assert_eq!(reader.on_modify(), vec![bn_line(20)]);
         std::fs::remove_dir_all(&dir).ok();
@@ -1070,13 +1088,117 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let path = day.join("12");
         append(&path, &format!("{}\n", bn_line(10)));
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&path); // stale position, no handle
 
         replace_file(&path, &format!("{}\n", bn_line(20)));
-        assert!(reader.on_create(&path).is_empty(), "no drain through a stale offset");
+        assert!(switch_collecting(&mut reader, &path).is_empty(), "no drain through a stale offset");
         assert!(reader.take_desynced(), "the old inode's unread tail is unrecoverable");
         assert_eq!(reader.on_modify(), vec![bn_line(20)]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review 000429 r1 P2: the rotation drain hands over one bounded read at a time, in order, and gives up (without
+    /// switching) once the consumer is gone.
+    #[test]
+    fn test_rotation_drain_delivers_one_read_at_a_time() {
+        let dir = test_dir("rotation_chunked_delivery");
+        let old = dir.join("0");
+        let new = dir.join("1");
+        append(&old, "");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&old);
+        let lines: Vec<String> = (0..20).map(|n| format!("{{\"n\":{n},\"x\":\"{}\"}}", "a".repeat(1 << 20))).collect();
+        append(&old, &(lines.join("\n") + "\n"));
+        append(&new, "{\"new\":1}\n");
+        let mut deliveries: Vec<Vec<String>> = Vec::new();
+        assert!(reader.on_create(&new, |delivered| {
+            deliveries.push(delivered);
+            true
+        }));
+        let largest = deliveries.iter().map(|chunk| chunk.iter().map(|line| line.len() + 1).sum::<usize>()).max();
+        assert!(deliveries.len() >= 3, "{} deliveries", deliveries.len());
+        let bound = usize::try_from(READ_CHUNK_BYTES).unwrap() + lines[0].len() + 1;
+        assert!(largest.unwrap() <= bound, "one read plus the line it split");
+        assert_eq!(deliveries.concat(), lines, "every line, in order");
+        assert_eq!(reader.on_modify(), vec!["{\"new\":1}".to_string()]);
+
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&new);
+        append(&new, &(lines.join("\n") + "\n"));
+        let mut calls = 0;
+        assert!(!reader.on_create(&old, |_| {
+            calls += 1;
+            false
+        }));
+        assert_eq!((calls, reader.current_path.as_ref()), (1, Some(&new)), "no switch once the consumer is gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A rotation backlog reaches a consumer behind a one-slot channel complete and in order, then the watcher exits
+    /// once the consumer is gone.
+    #[test]
+    fn test_line_watcher_hands_a_rotation_backlog_to_a_slow_consumer() {
+        let dir = test_dir("slow_consumer");
+        let old = dir.join("0");
+        append(&old, "");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
+        let handle = spawn_line_watcher(test_stream(dir.clone(), false), tx, None, |line| line, || "DESYNC".to_string());
+        thread::sleep(Duration::from_millis(200));
+        append(&old, "{\"skipped\":0}\n");
+        thread::sleep(Duration::from_millis(200));
+        let backlog: Vec<String> = (0..40).map(|n| format!("{{\"n\":{n},\"x\":\"{}\"}}", "b".repeat(1 << 19))).collect();
+        append(&old, &(backlog.join("\n") + "\n"));
+        append(&dir.join("1"), "{\"new\":1}\n");
+        let expected: Vec<String> = backlog.into_iter().chain(["{\"new\":1}".to_string()]).collect();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut received = Vec::new();
+        while received.len() < expected.len() && std::time::Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(line) => received.push(line),
+                Err(_) => thread::sleep(Duration::from_millis(2)),
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(received.len(), expected.len());
+        assert!(received == expected, "every line once, in order");
+        drop(rx);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !handle.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(handle.is_finished(), "the watcher exits once the consumer is gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `replica_cmds`: the newest session and day by name, then the greatest first height (not the greatest name).
+    #[test]
+    fn test_replica_layout_follows_files_and_sessions() {
+        let dir = test_dir("replica_layout");
+        let day = dir.join("2026-10-13T00:38:01Z").join("20261019");
+        std::fs::create_dir_all(&day).unwrap();
+        append(&day.join("999"), "");
+        append(&day.join("1000"), "");
+        append(&day.join("notes"), "");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::ReplicaSessions);
+        assert_eq!(reader.find_latest_file(), Some(day.join("1000")), "heights compare as numbers");
+        reader.start_tracking(&day.join("1000"));
+        thread::sleep(Duration::from_millis(20));
+        append(&day.join("1010"), "{\"height\":1010}\n");
+        assert_eq!(reader.check_for_newer_file(), Some(day.join("1010")), "next file of the session");
+        assert_eq!(switch_collecting(&mut reader, &day.join("1010")), Vec::<String>::new());
+
+        let session = dir.join("2026-10-19T21:00:00Z");
+        std::fs::create_dir_all(&session).unwrap();
+        assert_eq!(reader.check_for_newer_file(), None, "a new session without files yet");
+        let restarted = session.join("20261019");
+        std::fs::create_dir_all(&restarted).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        append(&restarted.join("1020"), "{\"height\":1020}\n");
+        assert_eq!(reader.check_for_newer_file(), Some(restarted.join("1020")), "the newest session");
+        assert_eq!(switch_collecting(&mut reader, &restarted.join("1020")), vec!["{\"height\":1010}".to_string()]);
+        assert_eq!(reader.on_modify(), vec!["{\"height\":1020}".to_string()]);
+        assert!(!reader.take_desynced());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1089,7 +1211,7 @@ mod tests {
         let old = dir.join("0");
         let new = dir.join("1");
         append(&old, "");
-        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
         reader.start_tracking(&old);
         // The first complete row fills exactly one read; the next one spans two
         // reads (still below the partial-line cap); a short row follows.
@@ -1098,7 +1220,7 @@ mod tests {
         let second = format!("{{\"x\":\"{}\"}}\n", "b".repeat(9 * 1024 * 1024));
         append(&old, &(first + &second + "{\"tail\":1}\n"));
         append(&new, "{\"new\":1}\n");
-        let drained = reader.on_create(&new);
+        let drained = switch_collecting(&mut reader, &new);
         let loss_reported = reader.take_desynced();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(drained.len(), 3, "all three old rows survive the switch");

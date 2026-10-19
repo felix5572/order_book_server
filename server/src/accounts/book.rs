@@ -9,18 +9,20 @@
 //!   covers are dropped. The hold is bounded: overflowing it is a fills data loss.
 //! - **Anchor rows** (margin mode, pool size, liquidation price) and account modes are the anchor's own and are never
 //!   re-derived between anchors.
-//! - **Change marks**: per account, the first block after the anchor of each observed source (fill, ledger, funding):
-//!   from there on the anchor's liquidation price may be stale. A mark is set once per anchor interval, so an account
-//!   trading every block changes its rows once, not per block (review of the push volume, 10-19). The mark events since
-//!   the anchor are logged so the next anchor can rebuild the first marks after itself. An empty set does not prove the
-//!   account unchanged: isolated margin moves, mode switches and withdrawal requests are block actions this view does
-//!   not read.
-//! - **Trust**: served only with an anchor covering every recorded loss of both streams, no newer checkpoint that
+//! - **Change marks**: per account, the first block after the anchor of each observed source (fill, ledger, funding,
+//!   and the block actions margin, account mode, withdrawal): from there on the anchor's liquidation price may be
+//!   stale. A mark is set once per anchor interval, so an account trading every block changes its rows once, not per
+//!   block (review of the push volume, 10-19). The mark events since the anchor are logged so the next anchor can
+//!   rebuild the first marks after itself. A block-action mark means a successful action that may invalidate the
+//!   anchor, not that the state changed (setting the mode an account already has marks it too). An empty set does not
+//!   prove the account unchanged: the marks cover the sources above, not mark price moves of other positions.
+//! - **Trust**: served only with an anchor covering every recorded loss of the three streams, no newer checkpoint that
 //!   failed to parse, and live inputs. A loss of known blocks (an unparsable line whose header still reads, a fill
-//!   breaking the size contract, an overflowing hold) is covered by an anchor at or above its highest block. A loss of
-//!   unknown blocks (data the watcher discarded, a line without a readable header, and everything written before the
-//!   watcher started) was written by the time it was detected, so it is covered by an anchor whose block time is
-//!   `CLOCK_MARGIN_MS` past the detection: block heights grow with block time, whatever order the lines came in.
+//!   breaking the size contract, an overflowing hold, a gap in the block heights of `replica_cmds`) is covered by an
+//!   anchor at or above its highest block. A loss of unknown blocks (data the watcher discarded, a line without a
+//!   readable header, and everything written before the watcher started) was written by the time it was detected, so
+//!   it is covered by an anchor whose block time is `CLOCK_MARGIN_MS` past the detection: block heights grow with block
+//!   time, whatever order the lines came in.
 
 use std::{
     cmp::Ordering,
@@ -32,6 +34,7 @@ use alloy::primitives::Address;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
+    actions::{BlockActionKind, BlockActions},
     anchor::{Anchor, AnchorCoin, AnchorPosition, AnchorRow},
     checkpoint::AccountMode,
     misc::MiscEvent,
@@ -50,8 +53,8 @@ use crate::{
 /// loss detection therefore lies above every block lost by then.
 pub(crate) const CLOCK_MARGIN_MS: u64 = 1_000;
 
-/// Mark events kept to rebuild the marks after the next anchor: one anchor interval is ~80k fills plus, across an hour
-/// boundary, ~400k funding deltas; this is hours without an anchor. Overflowing drops the oldest event, a loss up to
+/// Mark events kept to rebuild the marks after the next anchor: one anchor interval is ~80k fills, ~6k block actions
+/// plus, across an hour boundary, ~400k funding deltas; this is hours without an anchor. Overflowing drops the oldest event, a loss up to
 /// its block on its stream.
 const MAX_MARK_LOG: usize = 2_000_000;
 
@@ -67,6 +70,8 @@ const MAX_HELD_FILLS: usize = 500_000;
 pub(crate) enum Stream {
     Fills,
     MiscEvents,
+    /// `replica_cmds`: every block, with its actions and their responses.
+    BlockActions,
 }
 
 impl Stream {
@@ -74,6 +79,7 @@ impl Stream {
         match self {
             Self::Fills => "fills",
             Self::MiscEvents => "misc_events",
+            Self::BlockActions => "block_actions",
         }
     }
 }
@@ -90,6 +96,7 @@ pub(crate) struct Available {
     pub(crate) anchor: AnchorInfo,
     pub(crate) fills_height: u64,
     pub(crate) misc_events_height: u64,
+    pub(crate) block_actions_height: u64,
 }
 
 /// Why the view may not be served.
@@ -145,6 +152,9 @@ pub(crate) struct ChangeMarks {
     pub(crate) fill: Option<u64>,
     pub(crate) ledger: Option<u64>,
     pub(crate) funding: Option<u64>,
+    pub(crate) margin: Option<u64>,
+    pub(crate) account_mode: Option<u64>,
+    pub(crate) withdrawal: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +162,7 @@ enum MarkKind {
     Fill,
     Ledger,
     Funding,
+    Action(BlockActionKind),
 }
 
 impl MarkKind {
@@ -159,6 +170,7 @@ impl MarkKind {
         match self {
             Self::Fill => Stream::Fills,
             Self::Ledger | Self::Funding => Stream::MiscEvents,
+            Self::Action(_) => Stream::BlockActions,
         }
     }
 }
@@ -170,6 +182,9 @@ impl ChangeMarks {
             MarkKind::Fill => &mut self.fill,
             MarkKind::Ledger => &mut self.ledger,
             MarkKind::Funding => &mut self.funding,
+            MarkKind::Action(BlockActionKind::Margin) => &mut self.margin,
+            MarkKind::Action(BlockActionKind::AccountMode) => &mut self.account_mode,
+            MarkKind::Action(BlockActionKind::Withdrawal) => &mut self.withdrawal,
         };
         if let Some(first) = *slot
             && first <= block
@@ -181,7 +196,13 @@ impl ChangeMarks {
     }
 
     const fn is_empty(self) -> bool {
-        self.fill.is_none() && self.ledger.is_none() && self.funding.is_none()
+        let Self { fill, ledger, funding, margin, account_mode, withdrawal } = self;
+        fill.is_none()
+            && ledger.is_none()
+            && funding.is_none()
+            && margin.is_none()
+            && account_mode.is_none()
+            && withdrawal.is_none()
     }
 }
 
@@ -380,6 +401,17 @@ pub(crate) struct FillsReport {
     pub(crate) marks_dropped: usize,
 }
 
+/// What one `replica_cmds` block did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct BlockActionsReport {
+    pub(crate) stale: bool,
+    /// Blocks between the previous height read and this one that never arrived (recorded as a loss up to the last).
+    pub(crate) missing: Option<(u64, u64)>,
+    pub(crate) touched: Touched,
+    /// Oldest mark events dropped for room (recorded as losses up to their blocks).
+    pub(crate) marks_dropped: usize,
+}
+
 /// What one misc events batch did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct MiscReport {
@@ -444,6 +476,7 @@ pub(crate) struct CoinPositions {
     pub(crate) anchor: AnchorInfo,
     pub(crate) fills_height: u64,
     pub(crate) misc_events_height: u64,
+    pub(crate) block_actions_height: u64,
     pub(crate) size_decimals: u32,
     /// Open positions, by user.
     pub(crate) positions: Vec<PositionView>,
@@ -457,6 +490,7 @@ pub(crate) struct CoinChanges {
     pub(crate) anchor: AnchorInfo,
     pub(crate) fills_height: u64,
     pub(crate) misc_events_height: u64,
+    pub(crate) block_actions_height: u64,
     pub(crate) size_decimals: u32,
     /// Touched holders by user: the open position, or `None` once it is closed.
     pub(crate) rows: Vec<(Address, Option<PositionView>)>,
@@ -467,6 +501,7 @@ pub(crate) struct BookStatus {
     pub(crate) availability: Result<Available, Unavailable>,
     pub(crate) fills_height: Option<u64>,
     pub(crate) misc_events_height: Option<u64>,
+    pub(crate) block_actions_height: Option<u64>,
     pub(crate) open_positions: usize,
     pub(crate) held_fills: usize,
 }
@@ -482,6 +517,7 @@ pub(crate) struct AccountBook {
     mark_log: VecDeque<(u64, MarkKind, Address)>,
     fills: StreamProgress,
     misc_events: StreamProgress,
+    block_actions: StreamProgress,
     checkpoint_failure: Option<(u64, String)>,
     stopped: Option<String>,
     unknown_misc_kinds: FxHashSet<String>,
@@ -498,6 +534,7 @@ impl AccountBook {
             mark_log: VecDeque::new(),
             fills: StreamProgress::starting(started_ms),
             misc_events: StreamProgress::starting(started_ms),
+            block_actions: StreamProgress::starting(started_ms),
             checkpoint_failure: None,
             stopped: None,
             unknown_misc_kinds: FxHashSet::default(),
@@ -512,6 +549,7 @@ impl AccountBook {
         match stream {
             Stream::Fills => &mut self.fills,
             Stream::MiscEvents => &mut self.misc_events,
+            Stream::BlockActions => &mut self.block_actions,
         }
     }
 
@@ -589,8 +627,14 @@ impl AccountBook {
         }
         for event in batch.events() {
             match event {
-                MiscEvent::Ledger { users, .. } => self.mark_all(users, MarkKind::Ledger, block, &mut report),
-                MiscEvent::Funding(users) => self.mark_all(users, MarkKind::Funding, block, &mut report),
+                MiscEvent::Ledger { users, .. } => {
+                    let marks = users.into_iter().map(|user| (MarkKind::Ledger, user));
+                    self.mark_all(marks, block, &mut report.touched, &mut report.marks_dropped);
+                }
+                MiscEvent::Funding(users) => {
+                    let marks = users.into_iter().map(|user| (MarkKind::Funding, user));
+                    self.mark_all(marks, block, &mut report.touched, &mut report.marks_dropped);
+                }
                 MiscEvent::Irrelevant => {}
                 MiscEvent::Unknown(kind) => {
                     report.unknown_events += 1;
@@ -603,12 +647,39 @@ impl AccountBook {
         report
     }
 
-    fn mark_all(&mut self, users: Vec<Address>, kind: MarkKind, block: u64, report: &mut MiscReport) {
-        for user in users {
-            if self.mark(user, kind, block, &mut report.marks_dropped) {
-                report.touched.accounts.push(user);
+    /// Marks each account at `block`; the accounts whose marks changed go to `touched`.
+    fn mark_all(
+        &mut self,
+        marks: impl IntoIterator<Item = (MarkKind, Address)>,
+        block: u64,
+        touched: &mut Touched,
+        dropped: &mut usize,
+    ) {
+        for (kind, user) in marks {
+            if self.mark(user, kind, block, dropped) {
+                touched.accounts.push(user);
             }
         }
+    }
+
+    /// Every block has a line, so a height past the next one is a loss of the blocks between.
+    pub(crate) fn apply_block_actions(&mut self, block: BlockActions) -> BlockActionsReport {
+        let BlockActions { height, actions } = block;
+        let mut report = BlockActionsReport::default();
+        if let Some(previous) = self.block_actions.height
+            && height > previous + 1
+        {
+            raise(&mut self.block_actions.lost_block, height - 1);
+            report.missing = Some((previous + 1, height - 1));
+        }
+        raise(&mut self.block_actions.height, height);
+        if self.covered(height) {
+            report.stale = true;
+            return report;
+        }
+        let marks = actions.into_iter().map(|(kind, user)| (MarkKind::Action(kind), user));
+        self.mark_all(marks, height, &mut report.touched, &mut report.marks_dropped);
+        report
     }
 
     /// Installs a newer anchor. Heights only increase: the poller sends each checkpoint once, newest first.
@@ -717,7 +788,8 @@ impl AccountBook {
         let anchor = self.anchor.ok_or(Unavailable::Initializing)?;
         let fills_height = self.fills.check(Stream::Fills, anchor)?;
         let misc_events_height = self.misc_events.check(Stream::MiscEvents, anchor)?;
-        Ok(Available { anchor, fills_height, misc_events_height })
+        let block_actions_height = self.block_actions.check(Stream::BlockActions, anchor)?;
+        Ok(Available { anchor, fills_height, misc_events_height, block_actions_height })
     }
 
     pub(crate) fn status(&self) -> BookStatus {
@@ -725,6 +797,7 @@ impl AccountBook {
             availability: self.availability(),
             fills_height: self.fills.height,
             misc_events_height: self.misc_events.height,
+            block_actions_height: self.block_actions.height,
             open_positions: self.coins.values().flat_map(|coin| coin.records.values()).filter(|r| r.size_raw != 0).count(),
             held_fills: self.held_fills.len(),
         }
@@ -746,6 +819,7 @@ impl AccountBook {
             anchor: available.anchor,
             fills_height: available.fills_height,
             misc_events_height: available.misc_events_height,
+            block_actions_height: available.block_actions_height,
             size_decimals: coin.size_decimals,
             positions,
         })
@@ -794,6 +868,7 @@ impl AccountBook {
             anchor: available.anchor,
             fills_height: available.fills_height,
             misc_events_height: available.misc_events_height,
+            block_actions_height: available.block_actions_height,
             size_decimals,
             rows,
         }))
@@ -815,7 +890,7 @@ impl AccountBook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accounts::test_support::{PUMP, anchor, fills, misc, row, trusted_book, user};
+    use crate::accounts::test_support::{PUMP, anchor, block_actions, fills, misc, row, trusted_book, user};
 
     const fn fills_lost_up_to(block: u64) -> Unavailable {
         Unavailable::DataLoss { stream: Stream::Fills, bound: LossBound::Block(block) }
@@ -949,6 +1024,7 @@ mod tests {
         let mut book = AccountBook::new(0);
         book.apply_fills(fills(500, &[(user(1), PUMP, "B", 1, "0.0", "2.0")]));
         book.apply_misc_events(misc(600, &[]));
+        book.apply_block_actions(block_actions(600, &[]));
         book.apply_fills(fills(1_200, &[(user(1), PUMP, "B", 2, "2.0", "1.0"), (user(1), "@107", "B", 3, "0.0", "0.123456789")]));
         assert_eq!(book.availability(), Err(Unavailable::Initializing));
         let report = book.install_anchor(anchor(1_000, &[(PUMP, 0, &[(user(1), 2)])]));
@@ -1083,10 +1159,10 @@ mod tests {
         book.apply_misc_events(misc(1_300, &[&ledger, &funding]));
         assert!(book.apply_misc_events(misc(900, &[&ledger])).stale);
         let marks = book.coin_positions(PUMP).unwrap().positions[0].changes;
-        assert_eq!(marks, ChangeMarks { fill: None, ledger: Some(1_100), funding: Some(1_300) }, "first after 1000");
+        assert_eq!(marks, ChangeMarks { ledger: Some(1_100), funding: Some(1_300), ..ChangeMarks::default() }, "first after 1000");
         book.install_anchor(anchor(1_200, &[(PUMP, 0, &[(user(1), 5)])]));
         let marks = book.coin_positions(PUMP).unwrap().positions[0].changes;
-        assert_eq!(marks, ChangeMarks { fill: None, ledger: Some(1_250), funding: Some(1_300) }, "first after 1200");
+        assert_eq!(marks, ChangeMarks { ledger: Some(1_250), funding: Some(1_300), ..ChangeMarks::default() }, "first after 1200");
         book.install_anchor(anchor(1_300, &[(PUMP, 0, &[(user(1), 5)])]));
         assert_eq!(book.coin_positions(PUMP).unwrap().positions[0].changes, ChangeMarks::default());
         assert!(!book.accounts.contains_key(&user(2)), "a covered account without a position is forgotten");
@@ -1115,6 +1191,62 @@ mod tests {
         assert_eq!((dropped, book.mark_log.len()), (1, MAX_MARK_LOG));
         let lost = Unavailable::DataLoss { stream: Stream::MiscEvents, bound: LossBound::Block(1_100) };
         assert_eq!(book.availability(), Err(lost), "the dropped ledger event bounds a misc events loss");
+        // review 000429 r2: a block action pushing out a ledger event is a loss of the ledger's stream, not its own
+        book.mark(user(1), MarkKind::Action(BlockActionKind::Margin), 5_000_001, &mut dropped);
+        assert_eq!((book.misc_events.lost_block, book.block_actions.lost_block), (Some(1_101), None));
+        for tid in 0..MAX_MARK_LOG as u64 {
+            book.mark(user(1), MarkKind::Ledger, 6_000_000 + tid, &mut dropped);
+        }
+        assert_eq!(book.block_actions.lost_block, Some(5_000_001), "the dropped block action bounds its own stream");
+    }
+
+    /// Design 000429 r2: the first block of each block-action kind after the anchor, rebuilt by the next anchor.
+    #[test]
+    fn block_actions_mark_the_first_block_of_each_kind() {
+        use BlockActionKind::{AccountMode, Margin, Withdrawal};
+        let mut book = trusted_book(&[(user(1), 5)]);
+        let first = book.apply_block_actions(block_actions(1_001, &[(Margin, user(1)), (Margin, user(2))]));
+        assert_eq!(first.touched.accounts, [user(1), user(2)]);
+        assert_eq!(push(&mut book, &first.touched).unwrap().rows.len(), 1, "only the PUMP holder has a row");
+        book.apply_block_actions(block_actions(1_002, &[(AccountMode, user(1))]));
+        let later = book.apply_block_actions(block_actions(1_003, &[(Margin, user(1)), (Withdrawal, user(1))]));
+        assert_eq!(later.touched.accounts, [user(1)], "only the withdrawal is a new mark");
+        let marks = book.coin_positions(PUMP).unwrap().positions[0].changes;
+        let expected =
+            ChangeMarks { margin: Some(1_001), account_mode: Some(1_002), withdrawal: Some(1_003), ..ChangeMarks::default() };
+        assert_eq!(marks, expected);
+        book.install_anchor(anchor(1_002, &[(PUMP, 0, &[(user(1), 5)])]));
+        let marks = book.coin_positions(PUMP).unwrap().positions[0].changes;
+        assert_eq!(marks, ChangeMarks { margin: Some(1_003), withdrawal: Some(1_003), ..ChangeMarks::default() });
+        assert_eq!(book.coin_positions(PUMP).unwrap().block_actions_height, 1_003);
+        assert_eq!(book.apply_block_actions(block_actions(1_004, &[])).touched, Touched::default());
+    }
+
+    /// Every block has a `replica_cmds` line: a skipped height is a loss up to the last missing block; a replay is not.
+    #[test]
+    fn a_gap_in_the_block_heights_is_a_loss_up_to_the_last_missing_block() {
+        let mut book = trusted_book(&[(user(1), 5)]);
+        assert_eq!(book.apply_block_actions(block_actions(1_001, &[])).missing, None);
+        let report = book.apply_block_actions(block_actions(1_005, &[(BlockActionKind::Margin, user(1))]));
+        assert_eq!(report.missing, Some((1_002, 1_004)));
+        let lost = Unavailable::DataLoss { stream: Stream::BlockActions, bound: LossBound::Block(1_004) };
+        assert_eq!(book.availability(), Err(lost.clone()));
+        let replay = book.apply_block_actions(block_actions(1_003, &[]));
+        assert_eq!((replay.missing, book.status().block_actions_height), (None, Some(1_005)), "a replay raises nothing");
+        book.install_anchor(anchor(1_003, &[(PUMP, 0, &[(user(1), 5)])]));
+        assert_eq!(book.availability(), Err(lost));
+        book.install_anchor(anchor(1_004, &[(PUMP, 0, &[(user(1), 5)])]));
+        assert_eq!(book.coin_positions(PUMP).unwrap().positions[0].changes.margin, Some(1_005));
+    }
+
+    /// The first block-actions line after the start or a discard has no previous height to compare: the unknown loss
+    /// already bounds it.
+    #[test]
+    fn a_block_action_gap_needs_a_previous_height() {
+        let mut book = AccountBook::new(0);
+        assert_eq!(book.apply_block_actions(block_actions(5_000, &[])).missing, None);
+        book.record_unknown_loss(Stream::BlockActions, 1_000);
+        assert_eq!(book.apply_block_actions(block_actions(5_001, &[])).missing, None);
     }
 
     #[test]
@@ -1141,6 +1273,7 @@ mod tests {
         let mut book = AccountBook::new(started_ms);
         book.apply_fills(fills(2_000, &[]));
         book.apply_misc_events(misc(2_000, &[]));
+        book.apply_block_actions(block_actions(2_000, &[]));
         assert_eq!(book.availability(), Err(Unavailable::Initializing));
         // within the margin of the start: lines written just before it may belong to blocks above this anchor
         book.install_anchor(Anchor { time_ms: started_ms + CLOCK_MARGIN_MS - 1, ..anchor(2_000, &[(PUMP, 0, &[])]) });
@@ -1164,6 +1297,7 @@ mod tests {
         let mut book = AccountBook::new(0);
         book.apply_fills(fills(1_200, &[]));
         book.apply_misc_events(misc(1_200, &[]));
+        book.apply_block_actions(block_actions(1_200, &[]));
         book.install_anchor(anchor(1_300, &[(PUMP, 0, &[(user(1), 5)])]));
         // the close at 1500 is lost (its body broke the schema, its header still reads), then 1100 is replayed
         book.record_lost_block(Stream::Fills, 1_500);
