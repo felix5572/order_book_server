@@ -1,4 +1,5 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::significant_drop_tightening))]
+mod accounts;
 mod listeners;
 pub mod metrics;
 mod order_book;
@@ -10,6 +11,7 @@ use std::path::PathBuf;
 
 use clap::ValueEnum;
 
+pub use accounts::probe::{ProbeSummary, run_checkpoint_probe};
 pub use prelude::Result;
 pub use servers::websocket_server::run_websocket_server;
 
