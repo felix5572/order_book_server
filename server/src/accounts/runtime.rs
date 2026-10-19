@@ -11,14 +11,16 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use alloy::primitives::Address;
 use log::{error, info, warn};
 use serde::{Deserialize, de::DeserializeOwned};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::{
     anchor::Anchor,
-    book::{AccountBook, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport, QueryError, Stream, Unavailable},
+    book::{
+        AccountBook, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport, QueryError, Stream, Touched,
+        Unavailable,
+    },
     checkpoint::parse_checkpoint_file,
     misc::MiscEvent,
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, Publisher},
@@ -245,9 +247,9 @@ async fn run_owner(
     loop {
         tokio::select! {
             Some(input) = inputs.recv() => {
-                let users = apply_input(&mut book, input);
+                let touched = apply_input(&mut book, input);
                 if publisher.track(&book) {
-                    publisher.push_changes(&mut book, &users);
+                    publisher.push_changes(&mut book, &touched);
                 }
             }
             Some(message) = anchors.recv() => {
@@ -272,8 +274,8 @@ async fn run_owner(
     }
 }
 
-/// Applies one input; returns the accounts it touched.
-fn apply_input(book: &mut AccountBook, input: Input) -> Vec<Address> {
+/// Applies one input; returns the rows it changed.
+fn apply_input(book: &mut AccountBook, input: Input) -> Touched {
     match input {
         Input::Fills(Ok(batch)) => report_fills(book.apply_fills(batch)),
         Input::MiscEvents(Ok(batch)) => report_misc(book.apply_misc_events(batch)),
@@ -286,7 +288,7 @@ fn apply_input(book: &mut AccountBook, input: Input) -> Vec<Address> {
     }
 }
 
-fn lost(book: &mut AccountBook, stream: Stream, reason: &str, err: &LineError) -> Vec<Address> {
+fn lost(book: &mut AccountBook, stream: Stream, reason: &str, err: &LineError) -> Touched {
     let at = err.block.map_or_else(|| "of unknown blocks".to_string(), |block| format!("of block {block}"));
     error!("accounts {} data loss ({reason}) {at}: {}", stream.label(), err.error);
     ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), reason]).inc();
@@ -294,10 +296,10 @@ fn lost(book: &mut AccountBook, stream: Stream, reason: &str, err: &LineError) -
         Some(block) => book.record_lost_block(stream, block),
         None => book.record_unknown_loss(stream, now_ms()),
     }
-    Vec::new()
+    Touched::default()
 }
 
-fn report_fills(report: FillsReport) -> Vec<Address> {
+fn report_fills(report: FillsReport) -> Touched {
     if report.stale {
         ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL.inc();
     }
@@ -309,15 +311,25 @@ fn report_fills(report: FillsReport) -> Vec<Address> {
         error!("accounts fills data loss (size_contract): {err}");
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Fills.label(), "size_contract"]).inc();
     }
-    report.users
+    report_dropped_marks(report.marks_dropped);
+    report.touched
 }
 
-fn report_misc(report: MiscReport) -> Vec<Address> {
+/// Oldest change-mark events dropped for room: hours without an anchor (losses up to their blocks are recorded).
+fn report_dropped_marks(dropped: usize) {
+    if dropped > 0 {
+        error!("accounts data loss (mark_log_overflow): {dropped} oldest change-mark events dropped");
+        ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&["marks", "mark_log_overflow"]).inc_by(dropped as u64);
+    }
+}
+
+fn report_misc(report: MiscReport) -> Touched {
     ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL.inc_by(report.unknown_events as u64);
     for kind in &report.new_unknown_kinds {
         warn!("accounts: unknown misc event kind {kind:?} (skipped; counted from now on)");
     }
-    report.users
+    report_dropped_marks(report.marks_dropped);
+    report.touched
 }
 
 /// Applies a poller message; returns whether an anchor was installed.

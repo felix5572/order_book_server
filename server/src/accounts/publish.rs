@@ -13,7 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::broadcast;
 
 use super::{
-    book::{AccountBook, QueryError},
+    book::{AccountBook, QueryError, Touched},
     view::CoinPositionsFrame,
 };
 use crate::metrics::ACCOUNTS_FRAMES_TOTAL;
@@ -97,18 +97,20 @@ impl Publisher {
         self.available
     }
 
-    /// After an input batch: a changes frame for every subscribed coin a touched account holds.
-    pub(crate) fn push_changes(&self, book: &mut AccountBook, users: &[Address]) {
-        if users.is_empty() {
+    /// After an input batch: a changes frame for every subscribed coin with a changed row.
+    pub(crate) fn push_changes(&self, book: &mut AccountBook, touched: &Touched) {
+        if touched.accounts.is_empty() && touched.positions.is_empty() {
             return;
         }
         let coins = self.subscriptions.subscribed();
         if coins.is_empty() {
             return;
         }
-        let users: FxHashSet<Address> = users.iter().copied().collect();
+        let accounts: FxHashSet<Address> = touched.accounts.iter().copied().collect();
         for coin in coins {
-            match book.push_changes(&coin, &users) {
+            let positions: Vec<Address> =
+                touched.positions.iter().filter(|(name, _)| *name == coin).map(|(_, user)| *user).collect();
+            match book.push_changes(&coin, &accounts, &positions) {
                 Ok(Some(changes)) => {
                     let wire = CoinPositionsFrame::changes(&changes).to_wire();
                     self.send(AccountsFrame::Coin { coin, version: changes.version, wire }, "changes");
@@ -165,10 +167,11 @@ mod tests {
         let (frames, mut received) = broadcast::channel(16);
         let mut publisher = Publisher::new(subscriptions.clone(), frames);
         assert!(publisher.track(&book));
-        publisher.push_changes(&mut book, &[user(1)]);
+        let touched = Touched { accounts: vec![user(1)], positions: Vec::new() };
+        publisher.push_changes(&mut book, &touched);
         assert!(received.try_recv().is_err(), "nobody subscribed");
         let _guard = subscriptions.acquire(PUMP);
-        publisher.push_changes(&mut book, &[user(1)]);
+        publisher.push_changes(&mut book, &touched);
         let frame = received.try_recv().unwrap();
         assert!(matches!(frame.as_ref(), AccountsFrame::Coin { coin, version: 1, .. } if coin == PUMP));
         let json = wire_json(&frame);

@@ -53,7 +53,7 @@ struct PositionDto {
 #[derive(Debug, Serialize)]
 struct ChangeDto {
     kind: &'static str,
-    /// The latest block of this kind.
+    /// The first block of this kind after the anchor.
     height: u64,
 }
 
