@@ -27,6 +27,8 @@ pub(crate) const OMITTED_POSITION_TABLE: u32 = 20;
 const FIRST_LISTED_TABLE: u32 = 50;
 /// Asset ids inside a clearinghouse's user states are `PDI_ASSET_STRIDE * pdi + index`.
 const PDI_ASSET_STRIDE: u32 = 10_000;
+/// Perp prices carry `MAX_PERP_DECIMALS - szDecimals` decimals, so `szDecimals` cannot exceed it.
+pub(crate) const MAX_PERP_DECIMALS: u32 = 6;
 
 // ─── domain types ───────────────────────────────────────────────────────────
 
@@ -69,11 +71,18 @@ pub(crate) struct CollateralToken {
 #[derive(Debug)]
 pub(crate) struct AssetMeta {
     pub(crate) name: String,
-    /// 10^szDecimals: a raw size divided by this is the size in base units.
-    pub(crate) size_scale: f64,
+    /// `szDecimals`: raw sizes are integers in 10^-size_decimals base units (at most `MAX_PERP_DECIMALS`).
+    pub(crate) size_decimals: u32,
     /// `oracle.pxs2[asset][1]`: the node's applied mark at the checkpoint (slots are [oracle, mark, external perp];
     /// slot 1 matched the node mark for 10/10 main and 306/306 HIP-3 coins). `None` when the asset stores no price.
     pub(crate) mark_px: Option<f64>,
+}
+
+impl AssetMeta {
+    /// Signed size in base units.
+    pub(crate) fn size(&self, size_raw: i64) -> f64 {
+        size_raw as f64 / 10f64.powi(self.size_decimals.cast_signed())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -532,15 +541,17 @@ fn build_dex(clearinghouse: WireClearinghouse) -> std::result::Result<(DexMeta, 
         .into_iter()
         .zip(oracle.pxs2)
         .map(|(asset, pxs)| {
-            let decimals = i32::try_from(asset.sz_decimals).map_err(|err| format!("{}: szDecimals: {err}", asset.name))?;
+            let price_decimals = MAX_PERP_DECIMALS
+                .checked_sub(asset.sz_decimals)
+                .ok_or_else(|| format!("{}: szDecimals {} above {MAX_PERP_DECIMALS}", asset.name, asset.sz_decimals))?;
             // stored prices are integers in 10^-(6 - szDecimals)
             let mark_px = match pxs.as_slice() {
                 [] => None,
-                [_, mark, ..] if mark.p > 0 => Some(mark.p as f64 / 10f64.powi(6 - decimals)),
+                [_, mark, ..] if mark.p > 0 => Some(mark.p as f64 / 10f64.powi(price_decimals.cast_signed())),
                 [_, mark, ..] => return Err(format!("{}: stored mark {} is not positive", asset.name, mark.p)),
                 [_] => return Err(format!("{}: pxs2 has one slot, the mark is slot 1", asset.name)),
             };
-            Ok(AssetMeta { name: asset.name, size_scale: 10f64.powi(decimals), mark_px })
+            Ok(AssetMeta { name: asset.name, size_decimals: asset.sz_decimals, mark_px })
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
     let mut tables = FxHashMap::default();

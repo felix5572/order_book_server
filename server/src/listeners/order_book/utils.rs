@@ -40,14 +40,14 @@ pub(super) struct SnapshotConfig {
 /// the newest checkpoint - it is not dumped directly because the node can swap
 /// it to a newer checkpoint mid-dump, and the dump carries no height of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Checkpoint {
+pub(crate) struct Checkpoint {
     pub height: u64,
     pub path: PathBuf,
 }
 
 /// Checkpoints currently on disk, ascending by height. Entries that are not
 /// `<digits>.rmp` files are ignored.
-pub(super) fn list_checkpoints(data_dir: &Path) -> Result<Vec<Checkpoint>> {
+pub(crate) fn list_checkpoints(data_dir: &Path) -> Result<Vec<Checkpoint>> {
     let root = data_dir.join("periodic_abci_states");
     let days = fs::read_dir(&root).map_err(|err| format!("read {}: {err}", root.display()))?;
     let mut checkpoints = Vec::new();

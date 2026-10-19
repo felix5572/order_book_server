@@ -8,7 +8,8 @@
 
 use lazy_static::lazy_static;
 use prometheus::{
-    Counter, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
+    Counter, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry,
 };
 
 lazy_static! {
@@ -369,6 +370,74 @@ lazy_static! {
         "Number of broadcast channel receivers"
     ).expect("metric can be created");
 
+    // ==================== ACCOUNTS (design 000419) ====================
+
+    /// 1 while the account view may be served (anchor installed, every loss covered, inputs alive).
+    pub static ref ACCOUNTS_TRUSTED: IntGauge = IntGauge::new(
+        "orderbook_accounts_trusted",
+        "1 while the account view is trusted"
+    ).expect("metric can be created");
+
+    pub static ref ACCOUNTS_ANCHOR_HEIGHT: IntGauge = IntGauge::new(
+        "orderbook_accounts_anchor_height",
+        "Height of the installed account anchor checkpoint"
+    ).expect("metric can be created");
+
+    /// Wall time to parse the last installed checkpoint and compute its liquidation rows.
+    pub static ref ACCOUNTS_ANCHOR_PARSE_SECONDS: Gauge = Gauge::new(
+        "orderbook_accounts_anchor_parse_seconds",
+        "Seconds to parse the last installed account anchor"
+    ).expect("metric can be created");
+
+    /// Checkpoints that appeared while another was parsing and were never parsed (only the newest is).
+    pub static ref ACCOUNTS_ANCHOR_SKIPPED_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_accounts_anchor_skipped_total",
+        "Checkpoints skipped by the account poller"
+    ).expect("metric can be created");
+
+    pub static ref ACCOUNTS_CHECKPOINT_FAILURES_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_accounts_checkpoint_failures_total",
+        "Checkpoints the account poller failed to parse"
+    ).expect("metric can be created");
+
+    pub static ref ACCOUNTS_OPEN_POSITIONS: IntGauge = IntGauge::new(
+        "orderbook_accounts_open_positions",
+        "Open positions in the account view"
+    ).expect("metric can be created");
+
+    /// Fills of coins outside the anchor universe waiting for the next anchor.
+    pub static ref ACCOUNTS_HELD_FILLS: IntGauge = IntGauge::new(
+        "orderbook_accounts_held_fills",
+        "Fills held outside the account anchor universe"
+    ).expect("metric can be created");
+
+    pub static ref ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_accounts_stale_fill_batches_skipped_total",
+        "Fill batches at or below the installed account anchor"
+    ).expect("metric can be created");
+
+    /// Diagnostic, not a completeness proof: anchor sizes that contradict the fill projection.
+    pub static ref ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_accounts_silent_position_changes_total",
+        "Positions an anchor changed without an observed fill"
+    ).expect("metric can be created");
+
+    /// Highest block read per account stream.
+    pub static ref ACCOUNTS_STREAM_HEIGHT: IntGaugeVec = IntGaugeVec::new(
+        Opts::new("orderbook_accounts_stream_height", "Highest block read by the account streams"),
+        &["stream"]
+    ).expect("metric can be created");
+
+    pub static ref ACCOUNTS_DATA_LOSS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_accounts_data_loss_total", "Account stream data losses"),
+        &["stream", "reason"]
+    ).expect("metric can be created");
+
+    pub static ref ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_accounts_unknown_misc_events_total",
+        "Misc events of a kind the account view does not know"
+    ).expect("metric can be created");
+
 }
 
 /// Register all metrics with the registry
@@ -417,6 +486,20 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(CHECKPOINT_MISSED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(SNAPSHOT_CHECKPOINT_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(INSERT_BEFORE_HONORED_TOTAL.clone())).ok();
+
+    // Accounts
+    REGISTRY.register(Box::new(ACCOUNTS_TRUSTED.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_ANCHOR_HEIGHT.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_ANCHOR_PARSE_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_ANCHOR_SKIPPED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_CHECKPOINT_FAILURES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_OPEN_POSITIONS.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_HELD_FILLS.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_STREAM_HEIGHT.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_DATA_LOSS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL.clone())).ok();
 
     // File watcher metrics
     REGISTRY.register(Box::new(FILE_EVENTS_TOTAL.clone())).ok();

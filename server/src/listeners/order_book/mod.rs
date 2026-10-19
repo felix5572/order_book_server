@@ -60,9 +60,9 @@ use utils::{
 const MAX_CACHED_EVENTS: usize = 4_000_000;
 
 mod l2_conflation;
-mod parallel;
+pub(crate) mod parallel;
 mod state;
-mod utils;
+pub(crate) mod utils;
 
 /// Blocks a target checkpoint must lie beyond the streams when chosen, so the
 /// replay cache can still be opened before the streams reach it.

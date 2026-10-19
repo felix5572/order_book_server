@@ -6,8 +6,9 @@ use std::{io::Write, path::Path, time::Instant};
 use serde_json::json;
 
 use super::{
-    checkpoint::{AccountMode, parse_checkpoint_file},
-    liquidation::{LiquidationPx, UnsupportedReason, account_liquidations},
+    checkpoint::parse_checkpoint_file,
+    liquidation::{LiquidationPx, account_liquidations},
+    view::{account_mode_name, unsupported_reason_name, user_text},
 };
 use crate::prelude::Result;
 
@@ -30,23 +31,24 @@ pub fn run_checkpoint_probe(path: &Path, coins: &[String], out: &mut dyn Write) 
         for position in account_liquidations(&checkpoint, account) {
             let dex = &checkpoint.dexes[position.dex];
             let collateral = &checkpoint.collateral[&dex.collateral_token].name;
-            let coin = &dex.assets[position.asset].name;
+            let asset = &dex.assets[position.asset];
+            let coin = &asset.name;
             if !coins.is_empty() && !coins.contains(coin) {
                 continue;
             }
             let (status, liquidation_px, reason) = match &position.liquidation_px {
                 LiquidationPx::Computed(price) => ("computed", Some(*price), None),
                 LiquidationPx::NoPositiveSolution => ("none", None, None),
-                LiquidationPx::Unsupported(reason) => ("unsupported", None, Some(unsupported_reason(reason))),
+                LiquidationPx::Unsupported(reason) => ("unsupported", None, Some(unsupported_reason_name(reason))),
             };
             let row = json!({
-                "user": user.to_string().to_lowercase(),
+                "user": user_text(*user),
                 "dex": dex.name,
                 "collateral": collateral,
                 "coin": coin,
-                "szi": position.size,
+                "szi": asset.size(position.size_raw),
                 "marginMode": if position.isolated { "isolated" } else { "cross" },
-                "accountMode": account_mode(&account.mode),
+                "accountMode": account_mode_name(&account.mode),
                 "poolPositions": position.pool_positions,
                 "liquidationPxStatus": status,
                 "liquidationPx": liquidation_px,
@@ -63,24 +65,4 @@ pub fn run_checkpoint_probe(path: &Path, coins: &[String], out: &mut dyn Write) 
         accounts: checkpoint.accounts.len(),
         rows,
     })
-}
-
-/// The official `userAbstraction` names.
-fn account_mode(mode: &AccountMode) -> String {
-    match mode {
-        AccountMode::Default => "default".to_string(),
-        AccountMode::Disabled => "disabled".to_string(),
-        AccountMode::Unified => "unifiedAccount".to_string(),
-        AccountMode::PortfolioMargin => "portfolioMargin".to_string(),
-        AccountMode::Unknown(code) => format!("unknown:{code}"),
-    }
-}
-
-fn unsupported_reason(reason: &UnsupportedReason) -> String {
-    match reason {
-        UnsupportedReason::PortfolioMargin => "portfolioMargin".to_string(),
-        UnsupportedReason::UnknownAccountMode(code) => format!("unknownAccountMode:{code}"),
-        UnsupportedReason::MissingMark => "missingMark".to_string(),
-        UnsupportedReason::TierCase => "tierCase".to_string(),
-    }
 }

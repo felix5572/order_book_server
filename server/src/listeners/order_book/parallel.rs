@@ -63,9 +63,9 @@ pub(super) fn seconds_since_node_write(node_unix_nanos: i64) -> f64 {
 }
 
 /// How fresh the data is when the watcher sees it: lag of the newest line read.
-fn observe_read_lag(source: EventSource, lines: &[String]) {
+fn observe_read_lag(label: &str, lines: &[String]) {
     if let Some(node_ns) = lines.last().and_then(|line| line_local_time_unix_nanos(line)) {
-        NODE_LINE_LAG.with_label_values(&["read", source.metric_label()]).observe(seconds_since_node_write(node_ns));
+        NODE_LINE_LAG.with_label_values(&["read", label]).observe(seconds_since_node_write(node_ns));
     }
 }
 
@@ -93,6 +93,8 @@ struct FileReader {
     // recreates the very hour file retention pruned - same path, new inode,
     // where our position is meaningless.
     open_file_id: Option<(u64, u64)>,
+    // Cap on one un-terminated line (MAX_PARTIAL_LINE_BYTES for the book streams).
+    max_line_bytes: usize,
 }
 
 /// (dev, ino) identity of a metadata handle.
@@ -101,7 +103,7 @@ fn file_id(meta: &std::fs::Metadata) -> (u64, u64) {
 }
 
 impl FileReader {
-    fn new(base_dir: PathBuf) -> Self {
+    fn new(base_dir: PathBuf, max_line_bytes: usize) -> Self {
         Self {
             current_path: None,
             file: None,
@@ -111,6 +113,7 @@ impl FileReader {
             desynced: false,
             open_error_path: None,
             open_file_id: None,
+            max_line_bytes,
         }
     }
 
@@ -336,10 +339,10 @@ impl FileReader {
                                         // mid-JSON (corrupt flush, mmap weirdness, multi-MB single line),
                                         // we'd otherwise grow `partial_line` until we OOM. Drop, flag the
                                         // data loss so the book re-syncs, and resync on the next newline.
-                                        if self.partial_line.len() > MAX_PARTIAL_LINE_BYTES {
+                                        if self.partial_line.len() > self.max_line_bytes {
                                             error!(
                                                 "partial_line exceeded {} bytes ({} bytes buffered); discarding and resyncing",
-                                                MAX_PARTIAL_LINE_BYTES,
+                                                self.max_line_bytes,
                                                 self.partial_line.len()
                                             );
                                             self.partial_line.clear();
@@ -445,17 +448,68 @@ pub(super) fn spawn_file_watcher(
     tx: tokio::sync::mpsc::Sender<FileEvent>,
     last_event: Arc<AtomicU64>,
 ) -> thread::JoinHandle<()> {
-    let source_name = match source {
+    let name = match source {
         EventSource::OrderStatuses => "OrderStatuses",
         EventSource::Fills => "Fills",
         EventSource::OrderDiffs => "OrderDiffs",
         EventSource::OracleUpdates => "OracleUpdates",
     };
+    // The book's start contract is a future snapshot, so the lines skipped while positioning are not a loss to it.
+    let stream = LineStream {
+        name,
+        lag_label: source.metric_label(),
+        dir,
+        max_line_bytes: MAX_PARTIAL_LINE_BYTES,
+        start_skip_is_loss: false,
+    };
+    spawn_line_watcher(stream, tx, Some(last_event), move |line| file_event(source, line), move || FileEvent::Desync(source))
+}
 
+const fn file_event(source: EventSource, line: String) -> FileEvent {
+    match source {
+        EventSource::OrderStatuses => FileEvent::OrderStatus(line),
+        EventSource::OrderDiffs => FileEvent::OrderDiff(line),
+        EventSource::Fills => FileEvent::Fill(line),
+        EventSource::OracleUpdates => FileEvent::OracleUpdate(line),
+    }
+}
+
+/// One newline-delimited node stream for `spawn_line_watcher`.
+pub(crate) struct LineStream {
+    /// Log name.
+    pub(crate) name: &'static str,
+    /// `NODE_LINE_LAG` stream label.
+    pub(crate) lag_label: &'static str,
+    /// Streaming directory (hourly files below it).
+    pub(crate) dir: PathBuf,
+    /// Cap on one un-terminated line; a longer one is discarded and `desync` is sent.
+    pub(crate) max_line_bytes: usize,
+    /// The watcher positions at the end of the current file on its first modify event, skipping the content written
+    /// before that moment (including the line that triggered it); when set, it sends `desync` right then.
+    pub(crate) start_skip_is_loss: bool,
+}
+
+/// Watch one node stream from the end of its current file, sending every complete line wrapped by `wrap`
+/// (blocking on a full channel, so a slow consumer back-pressures the reader) and `desync()` whenever buffered data
+/// had to be discarded; `last_event` (unix ms of the last line sent) feeds the book's health monitor. The thread
+/// returns when the channel closes (checked every poll) or the inotify watch cannot be set up.
+pub(crate) fn spawn_line_watcher<E, F, D>(
+    stream: LineStream,
+    tx: tokio::sync::mpsc::Sender<E>,
+    last_event: Option<Arc<AtomicU64>>,
+    wrap: F,
+    desync: D,
+) -> thread::JoinHandle<()>
+where
+    E: Send + 'static,
+    F: Fn(String) -> E + Send + 'static,
+    D: Fn() -> E + Send + 'static,
+{
+    let LineStream { name, lag_label, dir, max_line_bytes, start_skip_is_loss } = stream;
     thread::spawn(move || {
-        info!("{} watcher thread started for {:?}", source_name, dir);
+        info!("{} watcher thread started for {:?}", name, dir);
 
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), max_line_bytes);
 
         // Create watcher with callback
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -464,13 +518,13 @@ pub(super) fn spawn_file_watcher(
         }) {
             Ok(w) => w,
             Err(err) => {
-                error!("{} watcher failed to create: {}", source_name, err);
+                error!("{} watcher failed to create: {}", name, err);
                 return;
             }
         };
 
         if let Err(err) = watcher.watch(&dir, RecursiveMode::Recursive) {
-            error!("{} watcher failed to start: {}", source_name, err);
+            error!("{} watcher failed to start: {}", name, err);
             return;
         }
 
@@ -482,6 +536,11 @@ pub(super) fn spawn_file_watcher(
         let mut poll_count = 0u64;
         loop {
             poll_count += 1;
+            // The consumer is gone: stop now rather than at the next line (a quiet stream may have none for long).
+            if tx.is_closed() {
+                info!("{name} channel closed, exiting");
+                return;
+            }
 
             // Wait for inotify events (with fallback timeout)
             match event_rx.recv_timeout(poll_interval) {
@@ -493,81 +552,74 @@ pub(super) fn spawn_file_watcher(
                         }
 
                         if event.kind.is_create() {
-                            info!("{} new file: {:?}", source_name, path.file_name());
+                            info!("{} new file: {:?}", name, path.file_name());
                             let old_lines = reader.on_create(path);
                             for line in old_lines {
-                                let evt = match source {
-                                    EventSource::OrderStatuses => FileEvent::OrderStatus(line),
-                                    EventSource::OrderDiffs => FileEvent::OrderDiff(line),
-                                    EventSource::Fills => FileEvent::Fill(line),
-                                    EventSource::OracleUpdates => FileEvent::OracleUpdate(line),
-                                };
+                                let evt = wrap(line);
                                 if tx.blocking_send(evt).is_err() {
-                                    error!("{} channel closed, exiting", source_name);
+                                    error!("{} channel closed, exiting", name);
                                     return;
                                 }
                             }
                         } else if reader.current_path.is_none() {
                             // First time seeing this file
-                            info!("{} tracking: {:?}", source_name, path.file_name());
+                            info!("{} tracking: {:?}", name, path.file_name());
                             reader.start_tracking(path);
+                            if start_skip_is_loss && tx.blocking_send(desync()).is_err() {
+                                error!("{name} channel closed, exiting");
+                                return;
+                            }
                         }
 
                         // EVENT-DRIVEN: Read data when inotify fires modify event
                         let lines = reader.on_modify();
-                        observe_read_lag(source, &lines);
+                        observe_read_lag(lag_label, &lines);
                         for line in lines {
-                            let event = match source {
-                                EventSource::OrderStatuses => FileEvent::OrderStatus(line),
-                                EventSource::OrderDiffs => FileEvent::OrderDiff(line),
-                                EventSource::Fills => FileEvent::Fill(line),
-                                EventSource::OracleUpdates => FileEvent::OracleUpdate(line),
-                            };
+                            let event = wrap(line);
 
                             if tx.blocking_send(event).is_err() {
-                                error!("{} channel closed, exiting", source_name);
+                                error!("{} channel closed, exiting", name);
                                 return;
                             }
 
                             // Update health timestamp
-                            last_event.store(now_unix_ms(), AtomicOrdering::Relaxed);
+                            if let Some(last_event) = &last_event {
+                                last_event.store(now_unix_ms(), AtomicOrdering::Relaxed);
+                            }
                         }
                     }
                 }
                 Ok(Err(err)) => {
-                    error!("{} watcher error: {}", source_name, err);
+                    error!("{} watcher error: {}", name, err);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Fallback polling - safety net for missed events
                     // This runs every 500ms instead of every 10ms
                     let lines = reader.on_modify();
-                    observe_read_lag(source, &lines);
+                    observe_read_lag(lag_label, &lines);
                     for line in lines {
-                        let event = match source {
-                            EventSource::OrderStatuses => FileEvent::OrderStatus(line),
-                            EventSource::OrderDiffs => FileEvent::OrderDiff(line),
-                            EventSource::Fills => FileEvent::Fill(line),
-                            EventSource::OracleUpdates => FileEvent::OracleUpdate(line),
-                        };
+                        let event = wrap(line);
 
                         if tx.blocking_send(event).is_err() {
-                            error!("{} channel closed, exiting", source_name);
+                            error!("{} channel closed, exiting", name);
                             return;
                         }
 
-                        last_event.store(now_unix_ms(), AtomicOrdering::Relaxed);
+                        if let Some(last_event) = &last_event {
+                            last_event.store(now_unix_ms(), AtomicOrdering::Relaxed);
+                        }
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    error!("{} event channel closed, exiting", source_name);
+                    error!("{} event channel closed, exiting", name);
                     return;
                 }
             }
 
             // If the reader had to discard buffered data, tell the listener so it
             // can re-sync the book from a fresh snapshot.
-            if reader.take_desynced() && tx.blocking_send(FileEvent::Desync(source)).is_err() {
-                error!("{source_name} channel closed, exiting");
+            if reader.take_desynced() && tx.blocking_send(desync()).is_err() {
+                error!("{name} channel closed, exiting");
                 return;
             }
 
@@ -578,7 +630,7 @@ pub(super) fn spawn_file_watcher(
                         if let Ok(metadata) = file.metadata() {
                             log::debug!(
                                 "{} poll {} - pos {} / size {}",
-                                source_name,
+                                name,
                                 poll_count,
                                 reader.file_position,
                                 metadata.len()
@@ -591,18 +643,13 @@ pub(super) fn spawn_file_watcher(
             // Every 10000 polls (~10 seconds), check for newer files (handles day rotation)
             if poll_count % 10_000 == 0 {
                 if let Some(newer_file) = reader.check_for_newer_file() {
-                    info!("{} detected newer file (day rotation?): {:?}", source_name, newer_file.file_name());
+                    info!("{} detected newer file (day rotation?): {:?}", name, newer_file.file_name());
                     // Switch to the new file
                     let old_lines = reader.on_create(&newer_file);
                     for line in old_lines {
-                        let evt = match source {
-                            EventSource::OrderStatuses => FileEvent::OrderStatus(line),
-                            EventSource::OrderDiffs => FileEvent::OrderDiff(line),
-                            EventSource::Fills => FileEvent::Fill(line),
-                            EventSource::OracleUpdates => FileEvent::OracleUpdate(line),
-                        };
+                        let evt = wrap(line);
                         if tx.blocking_send(evt).is_err() {
-                            error!("{} channel closed, exiting", source_name);
+                            error!("{} channel closed, exiting", name);
                             return;
                         }
                     }
@@ -706,12 +753,56 @@ mod tests {
         std::fs::rename(&tmp, path).unwrap();
     }
 
+    /// The skip of the content present at the first modify event is reported only when asked for (review 000422 r2).
+    #[test]
+    fn test_line_watcher_reports_the_positioning_skip_only_when_asked() {
+        for start_skip_is_loss in [true, false] {
+            let dir = test_dir(&format!("start_skip_{start_skip_is_loss}"));
+            let path = dir.join("10");
+            append(&path, "{\"old\":0}\n");
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+            let stream = LineStream { name: "Test", lag_label: "test", dir, max_line_bytes: MAX_PARTIAL_LINE_BYTES, start_skip_is_loss };
+            let _watcher = spawn_line_watcher(stream, tx, None, |line| line, || "DESYNC".to_string());
+            thread::sleep(Duration::from_millis(200));
+            append(&path, "{\"skipped\":1}\n");
+            thread::sleep(Duration::from_millis(200));
+            append(&path, "{\"read\":2}\n");
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            let mut received = Vec::new();
+            while !received.contains(&"{\"read\":2}".to_string()) && std::time::Instant::now() < deadline {
+                match rx.try_recv() {
+                    Ok(line) => received.push(line),
+                    Err(_) => thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            let expected: Vec<String> =
+                if start_skip_is_loss { vec!["DESYNC".into(), "{\"read\":2}".into()] } else { vec!["{\"read\":2}".into()] };
+            assert_eq!(received, expected, "start_skip_is_loss = {start_skip_is_loss}");
+        }
+    }
+
+    /// Review 000422 P3-1: a quiet stream must not keep a watcher whose consumer is gone alive.
+    #[test]
+    fn test_line_watcher_exits_once_its_consumer_is_gone_without_new_lines() {
+        let dir = test_dir("consumer_gone");
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
+        let stream =
+            LineStream { name: "Test", lag_label: "test", dir, max_line_bytes: MAX_PARTIAL_LINE_BYTES, start_skip_is_loss: false };
+        let handle = spawn_line_watcher(stream, tx, None, |line| line, String::new);
+        drop(rx);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !handle.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(handle.is_finished(), "the watcher should notice the closed channel within a poll");
+    }
+
     #[test]
     fn test_on_modify_reads_appended_lines_and_buffers_partials() {
         let dir = test_dir("appended");
         let path = dir.join("0");
         append(&path, "");
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&path); // position = EOF (0 bytes so far)
 
         append(&path, "{\"a\":1}\n{\"b\":2}\n{\"c\":");
@@ -732,7 +823,7 @@ mod tests {
         let dir = test_dir("eof");
         let path = dir.join("0");
         append(&path, "{\"old\":1}\n");
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&path);
         assert!(reader.on_modify().is_empty(), "pre-existing content is skipped (covered by the snapshot)");
         append(&path, "{\"new\":2}\n");
@@ -746,7 +837,7 @@ mod tests {
         let old = dir.join("0");
         let new = dir.join("1");
         append(&old, "");
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&old);
 
         append(&old, "{\"tail\":1}\n");
@@ -767,7 +858,7 @@ mod tests {
         let dir = test_dir("malformed_mid");
         let path = dir.join("0");
         append(&path, "");
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&path);
 
         append(&path, "{\"a\":1}\ngarbage\n{\"b\":2}\n");
@@ -792,7 +883,7 @@ mod tests {
         let dir = test_dir("chunked_catchup");
         let path = dir.join("0");
         append(&path, "");
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&path);
 
         let ascii = "x".repeat(6 * 1024 * 1024); // even length: boundary is odd within the é-run
@@ -815,7 +906,7 @@ mod tests {
         let dir = test_dir("overflow");
         let path = dir.join("0");
         append(&path, "");
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&path);
 
         // A single unterminated line larger than the cap must be discarded and
@@ -854,7 +945,7 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let old = day.join("0");
         append(&old, &format!("{}\n", bn_line(10)));
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&old);
 
         std::fs::remove_file(&old).unwrap();
@@ -885,7 +976,7 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let old = day.join("0");
         append(&old, "");
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&old);
         append(&old, &format!("{}\n", bn_line(10)));
         assert_eq!(reader.on_modify(), vec![bn_line(10)]); // opens + holds the fd
@@ -911,7 +1002,7 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let old = day.join("0");
         append(&old, &format!("{}\n", bn_line(10)));
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&old); // tracks position, opens no handle
 
         std::fs::remove_file(&old).unwrap();
@@ -935,7 +1026,7 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let path = day.join("12");
         append(&path, &format!("{}\n", bn_line(10)));
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&path); // stale position, no handle
 
         replace_file(&path, &format!("{}\n", bn_line(20)));
@@ -955,7 +1046,7 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let path = day.join("12");
         append(&path, "");
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&path);
         append(&path, &format!("{}\n", bn_line(10)));
         assert_eq!(reader.on_modify(), vec![bn_line(10)]); // opens + holds the fd
@@ -979,7 +1070,7 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let path = day.join("12");
         append(&path, &format!("{}\n", bn_line(10)));
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&path); // stale position, no handle
 
         replace_file(&path, &format!("{}\n", bn_line(20)));
@@ -998,7 +1089,7 @@ mod tests {
         let old = dir.join("0");
         let new = dir.join("1");
         append(&old, "");
-        let mut reader = FileReader::new(dir.clone());
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES);
         reader.start_tracking(&old);
         // The first complete row fills exactly one read; the next one spans two
         // reads (still below the partial-line cap); a short row follows.

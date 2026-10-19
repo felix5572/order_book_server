@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use clap::ValueEnum;
 
 pub use accounts::probe::{ProbeSummary, run_checkpoint_probe};
+pub use accounts::follow::{FollowOptions, run_accounts_follow};
 pub use prelude::Result;
 pub use servers::websocket_server::run_websocket_server;
 

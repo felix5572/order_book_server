@@ -36,8 +36,8 @@ pub(crate) enum UnsupportedReason {
 pub(crate) struct PositionLiquidation {
     pub(crate) dex: usize,
     pub(crate) asset: usize,
-    /// Signed size in base units.
-    pub(crate) size: f64,
+    /// Signed size in the asset's raw units (10^-szDecimals), as the checkpoint stores it.
+    pub(crate) size_raw: i64,
     pub(crate) isolated: bool,
     /// Positions sharing the pool (more than 1: the price also moves with the other positions' marks); `None` when
     /// the account's pool rule is unknown (portfolio margin, unknown mode).
@@ -72,16 +72,21 @@ fn position_liquidation(
     state: &DexAccount,
     position: &Position,
 ) -> PositionLiquidation {
-    let dex = &checkpoint.dexes[state.dex];
     let isolated = matches!(position.margin, PositionMargin::Isolated { .. });
-    let size = position.size_raw as f64 / dex.assets[position.asset].size_scale;
     let pool = pool_of(checkpoint, account, state, position);
     let pool_positions = pool.as_ref().ok().map(|(_, members)| members.len());
     let liquidation_px = match pool {
         Err(reason) => LiquidationPx::Unsupported(reason),
         Ok((cash, members)) => solve_pool(checkpoint, position, cash, &members),
     };
-    PositionLiquidation { dex: state.dex, asset: position.asset, size, isolated, pool_positions, liquidation_px }
+    PositionLiquidation {
+        dex: state.dex,
+        asset: position.asset,
+        size_raw: position.size_raw,
+        isolated,
+        pool_positions,
+        liquidation_px,
+    }
 }
 
 /// Pool cash (collateral token) and members (dex index, position) of the pool `position` belongs to.
@@ -135,7 +140,7 @@ fn solve_pool(
         };
         valued.push(Valued {
             position,
-            size: position.size_raw as f64 / asset.size_scale,
+            size: asset.size(position.size_raw),
             mark,
             table: dex.table(position.table_id),
         });
