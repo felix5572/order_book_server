@@ -64,6 +64,14 @@ impl DexMeta {
     pub(crate) fn table(&self, table_id: u32) -> &MarginTable {
         &self.tables[&table_id]
     }
+
+    /// The node's maintenance of `position` held at the stored mark, micro-USD: raw size (10^-szDecimals) times stored
+    /// mark (10^-(6 - szDecimals)) is the exact notional in micro-USD. `None` without a stored mark.
+    pub(crate) fn maintenance_micro(&self, position: &Position) -> Option<i128> {
+        let mark_raw = self.assets[position.asset].mark_raw?;
+        let notional_micro = u128::from(position.size_raw.unsigned_abs()) * u128::from(mark_raw);
+        Some(self.table(position.table_id).maintenance_micro(notional_micro))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,12 +117,19 @@ pub(crate) struct AssetMeta {
     pub(crate) name: String,
     /// `szDecimals`: raw sizes are integers in 10^-size_decimals base units (at most `MAX_PERP_DECIMALS`).
     pub(crate) size_decimals: u32,
-    /// `oracle.pxs2[asset][1]`: the node's applied mark at the checkpoint (slots are [oracle, mark, external perp];
-    /// slot 1 matched the node mark for 10/10 main and 306/306 HIP-3 coins). `None` when the asset stores no price.
-    pub(crate) mark_px: Option<f64>,
+    /// `oracle.pxs2[asset][1].p`: the node's applied mark at the checkpoint, an integer in 10^-(6 - szDecimals) USD
+    /// (slots are [oracle, mark, external perp]; slot 1 matched the node mark for 10/10 main and 306/306 HIP-3 coins).
+    /// `None` when the asset stores no price.
+    pub(crate) mark_raw: Option<u64>,
 }
 
 impl AssetMeta {
+    /// The stored mark in USD.
+    pub(crate) fn mark_px(&self) -> Option<f64> {
+        let price_decimals = MAX_PERP_DECIMALS - self.size_decimals;
+        self.mark_raw.map(|raw| raw as f64 / 10f64.powi(price_decimals.cast_signed()))
+    }
+
     /// Signed size in base units.
     pub(crate) fn size(&self, size_raw: i64) -> f64 {
         size_raw as f64 / 10f64.powi(self.size_decimals.cast_signed())
@@ -731,17 +746,18 @@ fn build_dex(clearinghouse: WireClearinghouse) -> std::result::Result<(DexMeta, 
         .into_iter()
         .zip(oracle.pxs2)
         .map(|(asset, pxs)| {
-            let price_decimals = MAX_PERP_DECIMALS
-                .checked_sub(asset.sz_decimals)
-                .ok_or_else(|| format!("{}: szDecimals {} above {MAX_PERP_DECIMALS}", asset.name, asset.sz_decimals))?;
+            // AssetMeta::mark_px relies on szDecimals <= MAX_PERP_DECIMALS
+            if asset.sz_decimals > MAX_PERP_DECIMALS {
+                return Err(format!("{}: szDecimals {} above {MAX_PERP_DECIMALS}", asset.name, asset.sz_decimals));
+            }
             // stored prices are integers in 10^-(6 - szDecimals)
-            let mark_px = match pxs.as_slice() {
+            let mark_raw = match pxs.as_slice() {
                 [] => None,
-                [_, mark, ..] if mark.p > 0 => Some(mark.p as f64 / 10f64.powi(price_decimals.cast_signed())),
+                [_, mark, ..] if mark.p > 0 => Some(mark.p.unsigned_abs()),
                 [_, mark, ..] => return Err(format!("{}: stored mark {} is not positive", asset.name, mark.p)),
                 [_] => return Err(format!("{}: pxs2 has one slot, the mark is slot 1", asset.name)),
             };
-            Ok(AssetMeta { name: asset.name, size_decimals: asset.sz_decimals, mark_px })
+            Ok(AssetMeta { name: asset.name, size_decimals: asset.sz_decimals, mark_raw })
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
     let mut tables = FxHashMap::default();
@@ -938,9 +954,9 @@ pub(crate) mod tests {
         assert_eq!(parsed.dexes[0].name, "");
         assert_eq!(parsed.dexes[1].name, "xyz");
         // the mark is pxs2 slot 1, in 10^-(6 - szDecimals)
-        assert_eq!(parsed.dexes[0].assets[0].mark_px, Some(82_857.6));
-        assert_eq!(parsed.dexes[0].assets[1].mark_px, Some(0.004_477));
-        assert_eq!(parsed.dexes[1].assets[0].mark_px, Some(358.32));
+        assert_eq!(parsed.dexes[0].assets[0].mark_px(), Some(82_857.6));
+        assert_eq!(parsed.dexes[0].assets[1].mark_px(), Some(0.004_477));
+        assert_eq!(parsed.dexes[1].assets[0].mark_px(), Some(358.32));
     }
 
     #[test]
@@ -965,7 +981,7 @@ pub(crate) mod tests {
         let positions = &parsed.accounts[&user(HOLDER)].dex_states[0].positions;
         let btc = positions.iter().find(|position| position.asset == 0).unwrap();
         assert_eq!(btc.table_id, OMITTED_POSITION_TABLE);
-        assert_eq!(parsed.dexes[0].table(btc.table_id).maintenance_usd(1000.0), 25.0);
+        assert_eq!(parsed.dexes[0].table(btc.table_id).maintenance_micro(1_000_000_000), 25_000_000);
         let pump = positions.iter().find(|position| position.asset == 1).unwrap();
         assert_eq!(pump.table_id, 52);
     }

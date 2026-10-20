@@ -104,13 +104,13 @@ struct Inputs {
     usdc_dex_cash: f64,
     /// Signed notional (`szi * mark`) of the cross positions on USDC dexes.
     usdc_cross_value: f64,
-    /// Maintenance margin of those positions.
+    /// Maintenance margin of those positions, each the node's integer one at its mark.
     usdc_maintenance: f64,
 }
 
 impl Inputs {
     fn gather(checkpoint: &CheckpointAccounts, account: &Account) -> Result<Self, UnsupportedReason> {
-        let (mut usdc_dex_cash, mut usdc_cross_value, mut usdc_maintenance) = (0.0, 0.0, 0.0);
+        let (mut usdc_dex_cash, mut usdc_cross_value, mut usdc_maintenance_micro) = (0.0, 0.0, 0_i128);
         for state in &account.dex_states {
             let dex = &checkpoint.dexes[state.dex];
             if dex.collateral_token != USDC {
@@ -119,10 +119,10 @@ impl Inputs {
             usdc_dex_cash += state.cash_micro as f64 / 1e6;
             for position in state.positions.iter().filter(|position| position.margin == PositionMargin::Cross) {
                 let asset = &dex.assets[position.asset];
-                let mark = asset.mark_px.ok_or(UnsupportedReason::MissingMark)?;
+                let mark = asset.mark_px().ok_or(UnsupportedReason::MissingMark)?;
                 let size = asset.size(position.size_raw);
                 usdc_cross_value = size.mul_add(mark, usdc_cross_value);
-                usdc_maintenance += dex.table(position.table_id).maintenance_usd(size.abs() * mark);
+                usdc_maintenance_micro += dex.maintenance_micro(position).ok_or(UnsupportedReason::MissingMark)?;
             }
         }
         let mut tokens: Vec<TokenBook> = checkpoint
@@ -145,7 +145,7 @@ impl Inputs {
             })
             .collect();
         tokens.sort_unstable_by_key(|book| book.token);
-        Ok(Self { tokens, usdc_dex_cash, usdc_cross_value, usdc_maintenance })
+        Ok(Self { tokens, usdc_dex_cash, usdc_cross_value, usdc_maintenance: usdc_maintenance_micro as f64 / 1e6 })
     }
 
     /// C: supplied collateral (with its spot) weighted by the liquidation threshold 0.5 + 0.5 × LTV.

@@ -57,11 +57,12 @@ pub(crate) struct PositionLiquidation {
 /// Pool cash (in the collateral token) and its members (dex index, position).
 type Pool<'a> = (f64, Vec<(usize, &'a Position)>);
 
-/// A valued pool member.
+/// A valued pool member: its maintenance at the mark is the node's integer one.
 struct Valued<'a> {
     position: &'a Position,
     size: f64,
     mark: f64,
+    maintenance_micro: i128,
     table: &'a MarginTable,
 }
 
@@ -187,24 +188,26 @@ fn solve_pool(
     for (dex_index, position) in members {
         let dex = &checkpoint.dexes[*dex_index];
         let asset = &dex.assets[position.asset];
-        let Some(mark) = asset.mark_px else {
+        let (Some(mark), Some(maintenance_micro)) = (asset.mark_px(), dex.maintenance_micro(position)) else {
             return LiquidationPx::Unsupported(UnsupportedReason::MissingMark);
         };
         valued.push(Valued {
             position,
             size: asset.size(position.size_raw),
             mark,
+            maintenance_micro,
             table: dex.table(position.table_id),
         });
     }
     let Some(own) = valued.iter().find(|member| std::ptr::eq(member.position, target)) else {
         unreachable!("a pool always contains its own position");
     };
+    // the node solves the target continuously in its price and holds the others at their integer maintenance
     let others = valued.iter().filter(|member| !std::ptr::eq(member.position, target));
-    let (others_value, others_mm) = others.fold((0.0, 0.0), |(value, mm), member| {
-        (member.size.mul_add(member.mark, value), mm + member.table.maintenance_usd(member.size.abs() * member.mark))
+    let (others_value, others_mm_micro) = others.fold((0.0, 0_i128), |(value, mm), member| {
+        (member.size.mul_add(member.mark, value), mm + member.maintenance_micro)
     });
-    solve(cash + others_value, others_mm, own.size, own.table)
+    solve(cash + others_value, others_mm_micro as f64 / 1e6, own.size, own.table)
 }
 
 /// Price `p` with `fixed + size * p == others_mm + maintenance(|size| * p)`, the maintenance tier taken at `p`.
@@ -291,6 +294,23 @@ mod pool_tests {
             LiquidationPx::Computed(price) => assert!((price / expected - 1.0).abs() < 1e-12, "{price} vs {expected}"),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// The node holds the pool's other positions at their integer maintenance (floored per position to micro-USD) and
+    /// solves the target continuously (bm 2026-10-19, research README "维持保证金的整数规则"): BTC 0.10001 at 82857.6
+    /// is 8,286,588,576 micro-USD of notional, 207,164,714 micro-USD at 20x (207.1647144 continuous).
+    #[test]
+    fn other_positions_count_their_integer_maintenance() {
+        let mut checkpoint = parsed();
+        let holder = crate::accounts::checkpoint::tests::user("0x00000000000000000000000000000000000000aa");
+        let main = checkpoint.accounts.get_mut(&holder).unwrap().dex_states.iter_mut().find(|state| state.dex == 0).unwrap();
+        main.positions.iter_mut().find(|position| position.asset == 0).unwrap().size_raw = 10_001;
+        let pump = liquidation_of(&checkpoint, "0x00000000000000000000000000000000000000aa", 0, 1);
+        let fixed = 0.100_01_f64.mul_add(82_857.6, 200.0 - 12_000.0 + 30.2697);
+        let expected = (207.164_714 - fixed) / (1_000_000.0 * 0.95);
+        assert_computed(&pump.liquidation_px, expected);
+        let continuous = (0.100_01 * 82_857.6 / 40.0 - fixed) / (1_000_000.0 * 0.95);
+        assert!((expected / continuous - 1.0).abs() > 1e-11, "the case must separate the two rules");
     }
 
     #[test]
