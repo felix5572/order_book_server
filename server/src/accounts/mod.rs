@@ -23,6 +23,7 @@ mod portfolio;
 pub(crate) mod probe;
 pub(crate) mod publish;
 mod replay;
+mod replica;
 pub(crate) mod runtime;
 mod size;
 mod usdc;

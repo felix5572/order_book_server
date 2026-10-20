@@ -21,22 +21,23 @@ use serde::{Deserialize, de::DeserializeOwned};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::{
-    actions::{BlockActions, line_height, parse_block_actions},
+    actions::{BlockActions, block_actions},
+    replica::{ReplicaLine, line_height},
     anchor::Anchor,
-    blocks::{Assembly, BlockAssembler, LineKey},
+    blocks::{Assembly, BlockAssembler, CompletedBlock, LineKey},
     book::{
         AccountBook, BlockActionsReport, BlockReport, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport,
         QueryError, ReplayCheck, RowCheck, Stream, Touched, Unavailable,
     },
     checkpoint::parse_checkpoint_file,
     marks::{
-        CheckpointGrid, MarkInputs, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild,
-        book::is_main_perp, seed::MarkSeed,
+        CheckpointGrid, MARK_STREAMS, MarkInputs, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild,
+        actions::MarkActions, execution::BlockFill, seed::MarkSeed,
     },
     misc::MiscEvent,
     evidence::{
-        LineEvidence, book_mismatch_json, fill_line_reason, hip3_mark_mismatch_json, misc_line_reason, replay_mismatch_json,
-        replay_row_mismatch_json, silent_change_json,
+        LineEvidence, ambiguous_cut_json, book_mismatch_json, fill_line_reason, hip3_mark_mismatch_json, misc_line_reason,
+        price_mismatch_json, replay_mismatch_json, replay_row_mismatch_json, silent_change_json,
     },
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, Publisher},
 };
@@ -53,10 +54,10 @@ use crate::{
         ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL, ACCOUNTS_STREAM_HEIGHT, ACCOUNTS_TRUSTED, ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL,
         NODE_MARKS_AVAILABLE, NODE_MARKS_CHECKED_TOTAL, NODE_MARKS_CHECKS_SKIPPED_TOTAL, NODE_MARKS_HEIGHT,
         NODE_MARKS_LOGGED_INPUTS, NODE_MARKS_REBUILDS_TOTAL, NODE_MARKS_SEED_FAILURES_TOTAL, NODE_MARKS_SEED_HEIGHT,
-        NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL,
+        NODE_MARKS_AMBIGUOUS_CUTS_TOTAL, NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL,
     },
     prelude::Result,
-    types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, OracleUpdateEvent},
+    types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus, OracleUpdateEvent},
 };
 
 /// Same bound as the book's watchers. A Funding line (one per dex per hour) is the largest item: ~300k users.
@@ -68,6 +69,8 @@ const FILLS_MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 const HIP3_ORACLE_UPDATES_MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// One diff per line: 277 bytes median, 318 at most over 43,224,015 lines (2026-10-20 11 UTC).
 const BOOK_DIFFS_MAX_LINE_BYTES: usize = 1024 * 1024;
+/// One status per line: 604 bytes median over 76,031,570 lines (2026-10-20 12 UTC).
+const ORDER_STATUSES_MAX_LINE_BYTES: usize = 1024 * 1024;
 /// The largest `replica_cmds` line measured 6.4 MB (bm, 2026-10-19).
 const BLOCK_ACTIONS_MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 /// Checkpoints appear complete (a new file has its final size at first sight, 2026-10-19), every ~12 minutes.
@@ -84,10 +87,12 @@ enum Input {
     MiscEvents(std::result::Result<(Batch<MiscEvent>, LineKey), LineError>, Option<LineEvidence>),
     /// With the line's identity within its block.
     Hip3OracleUpdates(std::result::Result<(Batch<OracleUpdateEvent>, LineKey), LineError>),
-    /// A line's main-dex diffs with the line's identity; `None` for a line of another market.
-    BookDiffs(std::result::Result<Option<(Batch<NodeDataOrderDiff>, LineKey)>, LineError>),
-    /// With the instant the line was read.
-    BlockActions(std::result::Result<BlockActions, LineError>, Instant),
+    /// With the line's identity within its block.
+    BookDiffs(std::result::Result<(Batch<NodeDataOrderDiff>, LineKey), LineError>),
+    /// A status the node marks read, with the line's identity; `None` for any other line.
+    OrderStatuses(std::result::Result<Option<(Batch<NodeDataOrderStatus>, LineKey)>, LineError>),
+    /// The account view's and the node marks' reading of the line (the latter fails apart), with the instant it was read.
+    BlockActions(std::result::Result<(BlockActions, std::result::Result<MarkActions, String>), LineError>, Instant),
     /// The stream's reader proved that every line written before the instant reached the owner (design 000433 r3).
     ReadThrough(Stream, Instant),
     /// The watcher did not deliver lines of unknown blocks: the skip while positioning at its start, or a discard.
@@ -188,6 +193,12 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
     );
     let book_diffs =
         hourly("AccountBookDiffs", "accounts_book_diffs", data_dir.join("node_raw_book_diffs_streaming"), BOOK_DIFFS_MAX_LINE_BYTES);
+    let order_statuses = hourly(
+        "AccountOrderStatuses",
+        "accounts_order_statuses",
+        data_dir.join("node_order_statuses_streaming"),
+        ORDER_STATUSES_MAX_LINE_BYTES,
+    );
     let block_actions = LineStream {
         name: "AccountBlockActions",
         lag_label: "accounts_block_actions",
@@ -201,6 +212,7 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
         proving_watcher("misc events watcher", misc_events, Stream::MiscEvents, misc_input, input_tx.clone()),
         proving_watcher("HIP-3 oracle updates watcher", hip3_oracle_updates, Stream::Hip3OracleUpdates, hip3_input, input_tx.clone()),
         proving_watcher("book diffs watcher", book_diffs, Stream::BookDiffs, book_diffs_input, input_tx.clone()),
+        proving_watcher("order statuses watcher", order_statuses, Stream::OrderStatuses, order_statuses_input, input_tx.clone()),
         Supervised {
             name: "block actions watcher",
             handle: spawn_line_watcher(
@@ -266,13 +278,22 @@ fn hip3_input(line: String) -> Input {
     }))
 }
 
-/// The main-dex diffs of a book diffs line (the marks read no other market), with the line's identity.
+/// Every market's diffs: the node marks keep the main dex's books, and every diff anchors the execution points.
 fn book_diffs_input(line: String) -> Input {
-    Input::BookDiffs(parse_line::<NodeDataOrderDiff>(&line).and_then(|mut batch| {
-        batch.retain_events(|diff| is_main_perp(diff.coin_name()));
-        if batch.events_len() == 0 {
-            return Ok(None);
-        }
+    Input::BookDiffs(parse_line::<NodeDataOrderDiff>(&line).and_then(|batch| {
+        let key = line_key(&line, batch.block_number())?;
+        Ok((batch, key))
+    }))
+}
+
+/// A status the marks read: a cancel of an order with a cloid (it resolves a `cancelByCloid`) or a trigger. One status
+/// per line, ~21,000 a second, of which ~6,800 qualify (2026-10-20 12 UTC): the text decides before the parse.
+fn order_statuses_input(line: String) -> Input {
+    let wanted = line.contains(r#""status":"triggered""#) || (line.contains(r#""status":"canceled""#) && line.contains(r#""cloid":"0x"#));
+    if !wanted {
+        return Input::OrderStatuses(Ok(None));
+    }
+    Input::OrderStatuses(parse_line::<NodeDataOrderStatus>(&line).and_then(|batch| {
         let key = line_key(&line, batch.block_number())?;
         Ok(Some((batch, key)))
     }))
@@ -292,7 +313,8 @@ fn line_key(line: &str, block: u64) -> std::result::Result<LineKey, LineError> {
 
 fn block_actions_input(line: String) -> Input {
     let read_at = Instant::now();
-    Input::BlockActions(parse_block_actions(&line).map_err(|err| line_error(&line, &err, line_height(&line))), read_at)
+    let parsed = ReplicaLine::parse(&line).and_then(|replica| Ok((block_actions(&replica)?, MarkActions::of(&replica))));
+    Input::BlockActions(parsed.map_err(|err| line_error(&line, &err, line_height(&line))), read_at)
 }
 
 fn parse_line<E: DeserializeOwned>(line: &str) -> std::result::Result<Batch<E>, LineError> {
@@ -424,14 +446,16 @@ fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut Bl
             assembler.receive_misc_events(batch, key)
         }
         Input::Hip3OracleUpdates(Ok((batch, key))) => assembler.receive_hip3_oracle_updates(batch, key),
-        Input::BookDiffs(Ok(Some((batch, key)))) => assembler.receive_book_diffs(batch, key),
-        Input::BookDiffs(Ok(None)) => return Touched::default(),
-        Input::BlockActions(Ok(block), read_at) => assembler.receive_block_actions(block, read_at),
+        Input::BookDiffs(Ok((batch, key))) => assembler.receive_book_diffs(batch, key),
+        Input::OrderStatuses(Ok(Some((batch, key)))) => assembler.receive_order_statuses(batch, key),
+        Input::OrderStatuses(Ok(None)) => return Touched::default(),
+        Input::BlockActions(Ok((block, mark_actions)), read_at) => assembler.receive_block_actions(block, mark_actions, read_at),
         Input::ReadThrough(stream, at) => assembler.receive_read_through(stream, at),
         Input::Fills(Err(err), _) => return lost(book, marks, Stream::Fills, "parse_error", &err),
         Input::MiscEvents(Err(err), _) => return lost(book, marks, Stream::MiscEvents, "parse_error", &err),
         Input::Hip3OracleUpdates(Err(err)) => return lost(book, marks, Stream::Hip3OracleUpdates, "parse_error", &err),
         Input::BookDiffs(Err(err)) => return lost(book, marks, Stream::BookDiffs, "parse_error", &err),
+        Input::OrderStatuses(Err(err)) => return lost(book, marks, Stream::OrderStatuses, "parse_error", &err),
         Input::BlockActions(Err(err), _) => return lost(book, marks, Stream::BlockActions, "parse_error", &err),
         Input::Loss(stream) => {
             let error = "the watcher skipped lines while positioning at its start, or discarded buffered data".to_string();
@@ -441,8 +465,8 @@ fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut Bl
     apply_assembly(book, marks, assembler, assembly)
 }
 
-const ASSEMBLED_STREAMS: [Stream; 5] =
-    [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::BlockActions];
+const ASSEMBLED_STREAMS: [Stream; 6] =
+    [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses, Stream::BlockActions];
 
 /// Records what the assembly could not apply, then applies the released blocks in order: the marks first, so the
 /// account view's block finds them at its height (design 000439 r1 4.1).
@@ -476,14 +500,13 @@ fn apply_assembly(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &Blo
         }
     }
     let mut touched = Touched::default();
-    for mut block in completed {
-        let height = block.actions.height;
-        let inputs = MarkInputs {
-            hip3_oracle_updates: std::mem::take(&mut block.hip3_oracle_updates),
-            book_diffs: std::mem::take(&mut block.book_diffs),
-        };
+    for block in completed {
+        let CompletedBlock { actions, fills, misc_events, hip3_oracle_updates, book_diffs, mark_actions, order_statuses } = block;
+        let height = actions.height;
+        let mark_fills = fills.iter().flat_map(Batch::events_ref).map(BlockFill::of).collect();
+        let inputs = MarkInputs { hip3_oracle_updates, book_diffs, mark_actions, order_statuses, fills: mark_fills };
         report_marks_block(height, marks.apply_block(height, inputs));
-        touched.absorb(report_block(book.apply_block(block)));
+        touched.absorb(report_block(book.apply_block(actions, fills, misc_events)));
         ACCOUNTS_APPLIED_HEIGHT.set(height.cast_signed());
     }
     ACCOUNTS_PENDING_BLOCKS.set((assembler.pending_blocks() as u64).cast_signed());
@@ -530,13 +553,18 @@ fn record_lost_block(book: &mut AccountBook, marks: &mut NodeMarks, stream: Stre
 }
 
 fn report_marks_block(height: u64, report: MarksBlockReport) {
-    let MarksBlockReport { unknown_coin_updates, unknown_coin_diffs, errors, log_overflowed } = report;
+    let MarksBlockReport { unknown_coin_updates, unknown_coin_diffs, errors, log_overflowed, ambiguous_cuts, ambiguous_samples } =
+        report;
     NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label()]).inc_by(unknown_coin_updates as u64);
     NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.with_label_values(&[Stream::BookDiffs.label()]).inc_by(unknown_coin_diffs as u64);
+    NODE_MARKS_AMBIGUOUS_CUTS_TOTAL.inc_by(ambiguous_cuts);
+    for cut in &ambiguous_samples {
+        record_evidence(&ambiguous_cut_json(height, cut));
+    }
     report_contract_errors(&errors, "");
     if log_overflowed {
         error!("node marks data loss (mark_log_overflow): the input log overflowed at block {height}");
-        for stream in [Stream::Hip3OracleUpdates, Stream::BookDiffs] {
+        for stream in MARK_STREAMS {
             ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), "mark_log_overflow"]).inc();
         }
     }
@@ -667,7 +695,7 @@ fn log_marks_install(height: u64, report: &MarksInstallReport) {
             info!("node marks: seed {height} (previous {previous_seed:?}) not checked ({reason}); rebuild {rebuild:?}");
             NODE_MARKS_CHECKS_SKIPPED_TOTAL.with_label_values(&[reason]).inc();
         }
-        MarksCheck::Checked { hip3, books } => {
+        MarksCheck::Checked { hip3, books, prices } => {
             info!(
                 "node marks: seed {height} (previous {previous_seed:?}) against the snapshot: HIP-3 {} equal, {} differ, {} \
                  unknown; main books {} equal, {} differ, {} unknown (orders {} equal, {} differ, {} missing, {} extra); \
@@ -695,6 +723,25 @@ fn log_marks_install(height: u64, report: &MarksInstallReport) {
             }
             for mismatch in &books.samples {
                 record_evidence(&book_mismatch_json(mismatch, *previous_seed, height));
+            }
+            let fields: Vec<String> =
+                prices.fields.iter().map(|(field, equal, differ)| format!("{field} {equal}/{}", equal + differ)).collect();
+            let unsupported: Vec<String> =
+                prices.unsupported.iter().map(|(reason, coins)| format!("{reason} {} ({})", coins.len(), coins.join(", "))).collect();
+            info!(
+                "node marks: seed {height} main prices equal: {}; not replayed: {}",
+                fields.join(", "),
+                if unsupported.is_empty() { "none".to_string() } else { unsupported.join(", ") }
+            );
+            for (field, equal, differ) in &prices.fields {
+                NODE_MARKS_CHECKED_TOTAL.with_label_values(&[field, "equal"]).inc_by(*equal);
+                NODE_MARKS_CHECKED_TOTAL.with_label_values(&[field, "differ"]).inc_by(*differ);
+            }
+            for (reason, coins) in &prices.unsupported {
+                NODE_MARKS_CHECKED_TOTAL.with_label_values(&["nativeUnsupported", reason]).inc_by(coins.len() as u64);
+            }
+            for (coin, field) in &prices.samples {
+                record_evidence(&price_mismatch_json(coin, field, *previous_seed, height));
             }
         }
     }
@@ -884,7 +931,8 @@ impl TestOwner {
             self.inputs.send(fills_input(line.clone())).await.unwrap();
         }
         for block in [height, height + 1] {
-            self.inputs.send(Input::BlockActions(Ok(BlockActions { height: block, actions: Vec::new() }), Instant::now())).await.unwrap();
+            let line = Ok((BlockActions { height: block, actions: Vec::new() }, Err("an account test line".to_string())));
+            self.inputs.send(Input::BlockActions(line, Instant::now())).await.unwrap();
         }
         let after = Instant::now() + Duration::from_micros(1);
         for stream in PROVING_STREAMS {
@@ -903,7 +951,8 @@ impl TestOwner {
 
 /// The streams whose readers send read-through proofs.
 #[cfg(test)]
-const PROVING_STREAMS: [Stream; 4] = [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs];
+const PROVING_STREAMS: [Stream; 5] =
+    [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses];
 
 #[cfg(test)]
 mod tests {
@@ -970,7 +1019,8 @@ mod tests {
         blocks: std::ops::RangeInclusive<u64>,
     ) {
         for height in blocks {
-            let line = Input::BlockActions(Ok(BlockActions { height, actions: Vec::new() }), Instant::now());
+            let parsed = (BlockActions { height, actions: Vec::new() }, Err("an account test line".to_string()));
+            let line = Input::BlockActions(Ok(parsed), Instant::now());
             apply_input(book, marks, assembler, line);
         }
         let after = Instant::now() + Duration::from_micros(1);
@@ -1084,26 +1134,27 @@ mod tests {
         assert!(err.error.starts_with("no \"events\": text to take the line's identity from"), "{}", err.error);
     }
 
-    /// The marks read only the main dex's diffs: a line of another market reaches the owner as nothing.
+    /// The marks read cancels of orders with a cloid and triggers; any other status reaches the owner as nothing.
     #[test]
-    fn a_book_diffs_line_keeps_only_a_main_perp_diff() {
-        let line = |coin: &str| {
+    fn an_order_statuses_line_is_kept_only_for_a_cloid_cancel_or_a_trigger() {
+        let line = |status: &str, cloid: &str| {
             format!(
-                r#"{{"local_time":"2026-10-20T11:00:00.1","block_time":"2026-10-20T11:00:00.0","block_number":9,"events":[{{"user":"0x00000000000000000000000000000000000000aa","oid":1,"side":"B","px":"1.0","coin":"{coin}","raw_book_diff":"remove"}}]}}"#
+                r#"{{"local_time":"2026-10-20T12:00:00.1","block_time":"2026-10-20T12:00:00.0","block_number":9,"events":[{{"time":"2026-10-20T12:00:00.0","user":"0x00000000000000000000000000000000000000aa","hash":null,"builder":null,"status":"{status}","order":{{"coin":"BTC","side":"B","limitPx":"82850.0","sz":"0.0","oid":7,"timestamp":1,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"0.001","tif":"Alo","cloid":{cloid}}}}}]}}"#
             )
         };
-        let Input::BookDiffs(Ok(Some((batch, _)))) = book_diffs_input(line("BTC")) else { panic!("a main perp's diff is kept") };
-        assert_eq!((batch.block_number(), batch.events_len()), (9, 1));
-        for other in ["@107", "PURR/USDC", "#114920", "xyz:TSLA"] {
-            assert!(matches!(book_diffs_input(line(other)), Input::BookDiffs(Ok(None))), "{other}");
+        for (status, cloid) in [("canceled", r#""0x0a""#), ("triggered", "null")] {
+            let Input::OrderStatuses(Ok(Some((batch, _)))) = order_statuses_input(line(status, cloid)) else { panic!("{status} kept") };
+            assert_eq!(batch.events_len(), 1);
         }
-        assert!(matches!(book_diffs_input("{\"block_number\":9".to_string()), Input::BookDiffs(Err(_))));
+        for (status, cloid) in [("canceled", "null"), ("open", r#""0x0a""#), ("filled", r#""0x0a""#)] {
+            assert!(matches!(order_statuses_input(line(status, cloid)), Input::OrderStatuses(Ok(None))), "{status} {cloid}");
+        }
     }
 
     #[test]
     fn a_block_actions_line_breaking_the_contract_keeps_its_height() {
         let empty = r#"{"abci_block":{"signed_action_bundles":[]},"resps":{"Full":[]},"height":8}"#;
-        let Input::BlockActions(Ok(block), _) = block_actions_input(empty.to_string()) else { panic!("an empty block reads") };
+        let Input::BlockActions(Ok((block, _)), _) = block_actions_input(empty.to_string()) else { panic!("an empty block reads") };
         assert_eq!(block, BlockActions { height: 8, actions: Vec::new() });
         let unpaired = r#"{"abci_block":{"signed_action_bundles":[["0x01",{"signed_actions":[]}]]},"resps":{"Full":[]},"height":7}"#;
         let Input::BlockActions(Err(err), _) = block_actions_input(unpaired.to_string()) else { panic!("no responses") };

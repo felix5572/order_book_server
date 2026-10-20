@@ -1,20 +1,15 @@
-//! `replica_cmds` lines (design 000429 r2): one line per block, so the heights run on by one.
-//!
-//! `{"abci_block": {"signed_action_bundles": [[hash, {"signed_actions": [{"action": {"type", ...}, ...}], ...}]], ...},
-//! "resps": {"Full": [[hash, [{"user", "res": {"status", "response"}}]]]}, "height"}`. A response belongs to the action
-//! at the same index of the bundle with the same hash. Its `user` is the account acted on: the `vaultAddress` when one
-//! is given (bm 2026-10-19: 1,387 of 1,387), `null` when the signer is unknown.
+//! The account view's actions of a `replica_cmds` line (design 000429 r2): one line per block, so the heights run on by
+//! one; the line's format and the pairing of actions with responses are `replica`'s.
 //!
 //! Only the successful actions that move a pool's cash or rules without a fill or misc event are kept. Transfers such
-//! as `usdClassTransfer` and `send` are not: their ledger events already mark the account. A kept action's payload is
-//! read only once its type is known (other action types use the same field names with other value types).
+//! as `usdClassTransfer` and `send` are not: their ledger events already mark the account.
 
 use alloy::primitives::Address;
-use rustc_hash::FxHashMap;
-use serde::{Deserialize, de::DeserializeOwned};
-use sonic_rs::LazyValue;
 
-use super::usdc::usdc_wei;
+use super::{
+    replica::{Action, ReplicaLine, Response},
+    usdc::usdc_wei,
+};
 
 /// The block actions that may invalidate an anchor's liquidation price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,136 +86,31 @@ pub(crate) struct BlockActions {
     pub(crate) actions: Vec<KeptAction>,
 }
 
-#[derive(Deserialize)]
-struct ReplicaLine<'a> {
-    #[serde(borrow)]
-    abci_block: AbciBlock<'a>,
-    #[serde(borrow)]
-    resps: Responses<'a>,
-    height: u64,
-}
-
-#[derive(Deserialize)]
-struct AbciBlock<'a> {
-    #[serde(borrow)]
-    signed_action_bundles: Vec<(&'a str, Bundle<'a>)>,
-}
-
-#[derive(Deserialize)]
-struct Bundle<'a> {
-    #[serde(borrow)]
-    signed_actions: Vec<SignedAction<'a>>,
-}
-
-#[derive(Deserialize)]
-struct SignedAction<'a> {
-    #[serde(borrow)]
-    action: Action<'a>,
-}
-
-/// An action's type, and the raw payload fields a kept type reads.
-#[derive(Deserialize)]
-struct Action<'a> {
-    #[serde(rename = "type")]
-    action_type: &'a str,
-    #[serde(borrow)]
-    asset: Option<LazyValue<'a>>,
-    #[serde(borrow)]
-    ntli: Option<LazyValue<'a>>,
-    #[serde(borrow, rename = "isCross")]
-    is_cross: Option<LazyValue<'a>>,
-    #[serde(borrow)]
-    amount: Option<LazyValue<'a>>,
-}
-
-impl Action<'_> {
-    fn field<T: DeserializeOwned>(&self, raw: Option<&LazyValue<'_>>, name: &str) -> Result<T, String> {
-        let raw = raw.ok_or_else(|| format!("{} without {name}", self.action_type))?;
-        sonic_rs::from_str(raw.as_raw_str()).map_err(|err| format!("{} {name} {}: {err}", self.action_type, raw.as_raw_str()))
-    }
-}
-
-#[derive(Deserialize)]
-struct Responses<'a> {
-    #[serde(rename = "Full", borrow)]
-    full: Vec<(&'a str, Vec<Response<'a>>)>,
-}
-
-#[derive(Deserialize)]
-struct Response<'a> {
-    user: Option<&'a str>,
-    #[serde(borrow)]
-    res: ResponseResult<'a>,
-}
-
-#[derive(Deserialize)]
-struct ResponseResult<'a> {
-    status: &'a str,
-}
-
-#[derive(Deserialize)]
-struct ReplicaHeader {
-    height: u64,
-}
-
-/// The block's height, when the line still reads that far: the loss bound of a line that failed to parse.
-pub(crate) fn line_height(line: &str) -> Option<u64> {
-    sonic_rs::from_str::<ReplicaHeader>(line).ok().map(|header| header.height)
-}
-
 /// Parses one line; an error names the height once the structure read (a response that does not pair with its action,
 /// or a kept action whose status or user breaks the contract).
+#[cfg(test)]
 pub(crate) fn parse_block_actions(line: &str) -> Result<BlockActions, String> {
-    let replica: ReplicaLine<'_> = sonic_rs::from_str(line).map_err(|err| err.to_string())?;
+    block_actions(&ReplicaLine::parse(line)?)
+}
+
+/// The kept actions of a parsed line.
+pub(crate) fn block_actions(replica: &ReplicaLine<'_>) -> Result<BlockActions, String> {
     let height = replica.height;
-    let actions = replica.kept_actions().map_err(|err| format!("block {height}: {err}"))?;
-    Ok(BlockActions { height, actions })
-}
-
-impl ReplicaLine<'_> {
-    fn kept_actions(&self) -> Result<Vec<KeptAction>, String> {
-        let responses = self.responses_by_bundle()?;
-        let mut kept = Vec::new();
-        for (hash, bundle) in &self.abci_block.signed_action_bundles {
-            let group = responses.get(hash).ok_or_else(|| format!("bundle {hash} has no responses"))?;
-            bundle.keep_actions(group, &mut kept).map_err(|err| format!("bundle {hash}: {err}"))?;
+    let mut kept = Vec::new();
+    for paired in replica.paired().map_err(|err| format!("block {height}: {err}"))? {
+        let action_type = paired.action.action_type;
+        if BlockActionKind::of(action_type).is_none() {
+            continue;
         }
-        Ok(kept)
+        let read = || -> Result<Option<KeptAction>, String> {
+            let Some(user) = succeeded(action_type, paired.response)? else { return Ok(None) };
+            Ok(Some((BlockAction::read(paired.action)?, user)))
+        };
+        if let Some(action) = read().map_err(|err| format!("block {height}: bundle {}: {err}", paired.bundle_hash))? {
+            kept.push(action);
+        }
     }
-
-    /// Every bundle's responses by its hash; the groups match the bundles one to one.
-    fn responses_by_bundle(&self) -> Result<FxHashMap<&str, &[Response<'_>]>, String> {
-        let (bundles, groups) = (self.abci_block.signed_action_bundles.len(), self.resps.full.len());
-        if bundles != groups {
-            return Err(format!("{bundles} bundles but {groups} response groups"));
-        }
-        let mut responses = FxHashMap::default();
-        for (hash, group) in &self.resps.full {
-            if responses.insert(*hash, group.as_slice()).is_some() {
-                return Err(format!("responses of bundle {hash} appear twice"));
-            }
-        }
-        Ok(responses)
-    }
-}
-
-impl Bundle<'_> {
-    /// Appends the kept actions that succeeded, each with its response's user.
-    fn keep_actions(&self, responses: &[Response<'_>], kept: &mut Vec<KeptAction>) -> Result<(), String> {
-        if responses.len() != self.signed_actions.len() {
-            return Err(format!("{} actions but {} responses", self.signed_actions.len(), responses.len()));
-        }
-        for (signed, response) in self.signed_actions.iter().zip(responses) {
-            let action_type = signed.action.action_type;
-            if BlockActionKind::of(action_type).is_none() {
-                continue;
-            }
-            if let Some(user) = succeeded(action_type, response)? {
-                kept.push((BlockAction::read(&signed.action)?, user));
-            }
-        }
-        Ok(())
-    }
+    Ok(BlockActions { height, actions: kept })
 }
 
 /// The account a kept action acted on; `None` when it failed.
@@ -236,8 +126,9 @@ fn succeeded(action_type: &str, response: &Response<'_>) -> Result<Option<Addres
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::accounts::replica::line_height;
 
     /// A real line (block 1189931524, bm 2026-10-19) cut to three actions of its first bundle and its second bundle:
     /// a vault `cancelByCloid` (ok), a vault `updateIsolatedMargin` (err), a vault `updateLeverage` (ok), and a

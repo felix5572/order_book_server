@@ -1,7 +1,8 @@
 //! The node's marks, block by block (design 000439 r2). HIP-3 coins come from the node's oracle update stream, which
 //! writes each mark the node applies (research `hl_node_mark_state_20261019` "HIP-3：直接读节点的流": 930/930 stored
-//! marks and times equal the last written ones). The main dex takes a per-action replay in batch 2; its first part
-//! (here) keeps the main dex's books order by order from the seed and the node's raw book diffs.
+//! marks and times equal the last written ones). The main dex's prices are replayed action by action (`native`): its
+//! books follow the node's raw book diffs order by order (`book`), each price action reads them at its place in the
+//! block (`execution`), and the node's rules move the prices (`rules`).
 //!
 //! `NodeMarks` lives in the account view's owner task and gets every completed block before the account view does, so
 //! both stand at one height. Trust (revision 2):
@@ -15,28 +16,38 @@
 //! - a loss on a stream the marks read, a seed breaking its contract or a log overflow withholds the marks until a later
 //!   checkpoint rebuilds them from a complete log.
 
+pub(crate) mod actions;
 pub(crate) mod book;
 pub(crate) mod decimal;
+pub(crate) mod execution;
+pub(crate) mod native;
+pub(crate) mod rules;
 pub(crate) mod seed;
 
 use rustc_hash::FxHashMap;
 
 use self::{
-    book::{BookDiff, BooksCheck, NativeBooks},
+    actions::{MarkActions, Rank},
+    book::{Applied, BookDiff, BooksCheck, NativeBooks},
+    execution::{BlockFill, BlockStatuses, BookCuts, price_points},
+    native::{CoinCut, NativePrices, PricesCheck},
+    rules::wire_units,
     seed::{Hip3Coin, MarkSeed, StoredMark, exact_price_units},
 };
 use super::{
     book::{AnchorInfo, Stream, StreamProgress, Unavailable},
     checkpoint::node_time_ns,
 };
-use crate::types::node_data::{Batch, NodeDataOrderDiff, OracleUpdateEvent};
+use crate::types::node_data::{Batch, NodeDataOrderDiff, NodeDataOrderStatus, OracleUpdateEvent};
 
-/// Logged inputs (HIP-3 mark updates and main-dex diffs) at most. About 7,400 diffs and 60 updates are written a second
-/// (2026-10-20 11 UTC); the log spans a grid height to that checkpoint's install (~13 s on bm, ~100k inputs), so this
-/// is ~4.5 minutes of a checkpoint late or skipped, not a normal state.
+/// Logged inputs (HIP-3 mark updates, diffs, block times, actions, statuses, fills) at most. About 12,000 diffs, 6,800
+/// statuses and a few hundred others are written a second (2026-10-20); the log spans a grid height to that checkpoint's
+/// install (~13 s on bm, ~250k inputs), so this is ~2.5 minutes of a checkpoint late or skipped, not a normal state.
 pub(crate) const MAX_LOG_INPUTS: usize = 2_000_000;
-/// Mismatches listed per check (all are counted).
+/// Mismatches listed per check (all are counted), and ambiguous cuts listed per seed interval.
 const MAX_CHECK_SAMPLES: usize = 20;
+/// The streams the marks read; a log overflow is a loss of each.
+pub(crate) const MARK_STREAMS: [Stream; 5] = [Stream::Fills, Stream::BlockActions, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses];
 
 /// The node's checkpoint heights: `anchor + k * interval` (`checkpoint_grid`, the two newest on disk at start).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,11 +73,17 @@ struct Hip3MarkUpdate {
 }
 
 /// A completed block's lines of the streams the marks read.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct MarkInputs {
     pub(crate) hip3_oracle_updates: Vec<Batch<OracleUpdateEvent>>,
-    /// The main dex's diffs, in the node's execution order.
+    /// Every market's diffs, in the node's execution order.
     pub(crate) book_diffs: Vec<Batch<NodeDataOrderDiff>>,
+    /// The marks' reading of the block's `replica_cmds` line; an error is a loss of that stream for the marks.
+    pub(crate) mark_actions: Result<MarkActions, String>,
+    /// Cancels of orders with a cloid and triggers.
+    pub(crate) order_statuses: Vec<Batch<NodeDataOrderStatus>>,
+    /// Every fill of the block, in order.
+    pub(crate) fills: Vec<BlockFill>,
 }
 
 /// One block's mark inputs as logged and applied.
@@ -74,6 +91,10 @@ pub(crate) struct MarkInputs {
 struct BlockInputs {
     hip3: Vec<Hip3MarkUpdate>,
     diffs: Vec<BookDiff>,
+    /// `None` when the line broke the marks' contract.
+    actions: Option<MarkActions>,
+    statuses: BlockStatuses,
+    fills: Vec<BlockFill>,
 }
 
 impl BlockInputs {
@@ -94,11 +115,19 @@ impl BlockInputs {
                 Err(err) => report.errors.push((Stream::BookDiffs, format!("block {height} {}: {err}", diff.coin_name()))),
             }
         }
+        match inputs.mark_actions {
+            Ok(actions) => out.actions = Some(actions),
+            Err(err) => report.errors.push((Stream::BlockActions, err)),
+        }
+        out.statuses = BlockStatuses::of(inputs.order_statuses.into_iter().flat_map(Batch::events));
+        out.fills = inputs.fills;
         out
     }
 
-    const fn len(&self) -> usize {
-        self.hip3.len() + self.diffs.len()
+    /// The block's time counts as one: it refreshes the reference caches with no action at all (review 000444 r1 P2-1).
+    fn len(&self) -> usize {
+        let actions = self.actions.as_ref().map_or(0, |actions| 1 + actions.actions.len());
+        self.hip3.len() + self.diffs.len() + actions + self.statuses.len() + self.fills.len()
     }
 }
 
@@ -111,22 +140,46 @@ struct MarkState {
     height: u64,
     hip3: FxHashMap<String, Hip3Coin>,
     books: NativeBooks,
-    /// A diff did not fit the books: they stay as they were until a seed replaces them (the loss withholds the marks).
+    prices: NativePrices,
+    /// A diff did not fit the books, or the block's price actions broke the contract: the books, or the prices, stay
+    /// as they were until a seed replaces them (the loss withholds the marks).
     books_broken: bool,
+    prices_broken: bool,
 }
 
 impl MarkState {
-    /// The main dex's price state other than its books is not kept before the per-action replay.
     fn seeded(seed: MarkSeed) -> Self {
         let MarkSeed { height, time_ms, native, hip3 } = seed;
+        let prices = NativePrices::seeded(&native);
         let books = NativeBooks::seeded(native);
-        Self { seed: AnchorInfo { height, time_ms }, height, hip3, books, books_broken: false }
+        Self { seed: AnchorInfo { height, time_ms }, height, hip3, books, prices, books_broken: false, prices_broken: false }
     }
 
     /// Applies block `height`; coins outside the seed's universe (listed since) are counted and skipped, a value that
-    /// does not convert or a diff that does not fit breaks the contract.
+    /// does not convert, a diff that does not fit or a price action that contradicts the block breaks the contract.
     fn apply(&mut self, height: u64, inputs: &BlockInputs, report: &mut MarksBlockReport) {
-        for update in &inputs.hip3 {
+        self.apply_hip3(height, &inputs.hip3, report);
+        if let Some(actions) = &inputs.actions {
+            self.prices.begin_block(actions.time_ns);
+        }
+        let cuts = self.apply_diffs(height, &inputs.diffs, report);
+        let trades = self.block_trades(height, &inputs.fills, report);
+        if let Some(actions) = inputs.actions.as_ref().filter(|_| !self.books_broken && !self.prices_broken)
+            && let Err(err) = self.apply_prices(actions, inputs, &cuts, &trades, report)
+        {
+            report.errors.push((Stream::BlockActions, format!("block {height}: {err}")));
+            self.prices_broken = true;
+        }
+        for (asset, trades) in trades {
+            if let Some((_, px)) = trades.last() {
+                self.prices.trade(asset, *px);
+            }
+        }
+        self.height = height;
+    }
+
+    fn apply_hip3(&mut self, height: u64, updates: &[Hip3MarkUpdate], report: &mut MarksBlockReport) {
+        for update in updates {
             let Some(coin) = self.hip3.get_mut(&update.coin) else {
                 report.unknown_coin_updates += 1;
                 continue;
@@ -136,20 +189,72 @@ impl MarkState {
                 Err(err) => report.errors.push((Stream::Hip3OracleUpdates, format!("block {height} {}: {err}", update.coin))),
             }
         }
-        for diff in &inputs.diffs {
+    }
+
+    /// Applies the block's diffs in order, recording each line that moved a book's best prices.
+    fn apply_diffs(&mut self, height: u64, diffs: &[BookDiff], report: &mut MarksBlockReport) -> BookCuts {
+        let mut cuts = BookCuts::default();
+        for (line, diff) in diffs.iter().enumerate() {
             if self.books_broken {
                 break;
             }
+            let before = self.books.asset(diff.coin()).map(|asset| self.books.best(asset));
             match self.books.apply(diff) {
-                Ok(true) => {}
-                Ok(false) => report.unknown_coin_diffs += 1,
+                Ok(Applied::Book(asset)) => {
+                    let after = self.books.best(asset);
+                    if let Some(before) = before.filter(|before| *before != after) {
+                        cuts.record(asset, line, before, after);
+                    }
+                }
+                Ok(Applied::OtherMarket) => {}
+                Ok(Applied::UnknownCoin) => report.unknown_coin_diffs += 1,
                 Err(err) => {
                     report.errors.push((Stream::BookDiffs, format!("block {height} {err}")));
                     self.books_broken = true;
                 }
             }
         }
-        self.height = height;
+        cuts
+    }
+
+    /// Per main-dex asset, the block's crossed fills: (fill index, price units).
+    fn block_trades(&self, height: u64, fills: &[BlockFill], report: &mut MarksBlockReport) -> FxHashMap<usize, Vec<(usize, u64)>> {
+        let mut trades: FxHashMap<usize, Vec<(usize, u64)>> = FxHashMap::default();
+        for (index, fill) in fills.iter().enumerate().filter(|(_, fill)| fill.crossed) {
+            let Some(asset) = self.prices.asset(&fill.coin) else { continue };
+            match wire_units(&fill.px, self.prices.size_decimals(asset)) {
+                Ok(px) => trades.entry(asset).or_default().push((index, px)),
+                Err(err) => report.errors.push((Stream::Fills, format!("block {height} {} tid {}: {err}", fill.coin, fill.tid))),
+            }
+        }
+        trades
+    }
+
+    /// The block's price actions in execution order, each at its cut.
+    fn apply_prices(
+        &mut self,
+        actions: &MarkActions,
+        inputs: &BlockInputs,
+        cuts: &BookCuts,
+        trades: &FxHashMap<usize, Vec<(usize, u64)>>,
+        report: &mut MarksBlockReport,
+    ) -> Result<(), String> {
+        let books = &self.books;
+        for point in price_points(actions, &inputs.statuses, &inputs.diffs, &inputs.fills)? {
+            if point.cut.lo < point.cut.hi {
+                report.ambiguous_cuts += 1;
+                report.ambiguous_samples.push(AmbiguousCut { rank: point.action.rank, lo: point.cut.lo, hi: point.cut.hi });
+            }
+            let cut_of = |asset: usize| CoinCut {
+                best: cuts.at(asset, point.cut.lo, books.best(asset)),
+                block_trade: trades
+                    .get(&asset)
+                    .and_then(|trades| trades.iter().take_while(|(index, _)| *index < point.cut.fills_lo).last())
+                    .map(|(_, px)| *px),
+            };
+            self.prices.apply(&point.action.action, point.action.user, actions.time_ns, cut_of)?;
+        }
+        Ok(())
     }
 }
 
@@ -210,26 +315,61 @@ impl InputLog {
     }
 }
 
-/// The progress of the streams the marks read.
+/// The progress of the streams the marks read: every assembled one but the misc events.
 #[derive(Debug)]
 struct MarkStreams {
+    fills: StreamProgress,
+    block_actions: StreamProgress,
     hip3_oracle_updates: StreamProgress,
     book_diffs: StreamProgress,
+    order_statuses: StreamProgress,
 }
 
 impl MarkStreams {
+    const fn starting(started_ms: u64) -> Self {
+        Self {
+            fills: StreamProgress::starting(started_ms),
+            block_actions: StreamProgress::starting(started_ms),
+            hip3_oracle_updates: StreamProgress::starting(started_ms),
+            book_diffs: StreamProgress::starting(started_ms),
+            order_statuses: StreamProgress::starting(started_ms),
+        }
+    }
+
     const fn get_mut(&mut self, stream: Stream) -> Option<&mut StreamProgress> {
         match stream {
+            Stream::Fills => Some(&mut self.fills),
+            Stream::BlockActions => Some(&mut self.block_actions),
             Stream::Hip3OracleUpdates => Some(&mut self.hip3_oracle_updates),
             Stream::BookDiffs => Some(&mut self.book_diffs),
-            Stream::Fills | Stream::MiscEvents | Stream::BlockActions => None,
+            Stream::OrderStatuses => Some(&mut self.order_statuses),
+            Stream::MiscEvents => None,
         }
     }
 
     fn check(&self, seed: AnchorInfo) -> Result<(), Unavailable> {
+        self.fills.check(Stream::Fills, seed)?;
+        self.block_actions.check(Stream::BlockActions, seed)?;
         self.hip3_oracle_updates.check(Stream::Hip3OracleUpdates, seed)?;
         self.book_diffs.check(Stream::BookDiffs, seed)?;
+        self.order_statuses.check(Stream::OrderStatuses, seed)?;
         Ok(())
+    }
+
+    /// The streams a block's inputs show read up to it (`replica_cmds` has a line for every block).
+    fn record_read(&mut self, height: u64, inputs: &MarkInputs) {
+        self.block_actions.record_read(height);
+        let read = [
+            (&mut self.fills, inputs.fills.is_empty()),
+            (&mut self.hip3_oracle_updates, inputs.hip3_oracle_updates.is_empty()),
+            (&mut self.book_diffs, inputs.book_diffs.is_empty()),
+            (&mut self.order_statuses, inputs.order_statuses.is_empty()),
+        ];
+        for (progress, empty) in read {
+            if !empty {
+                progress.record_read(height);
+            }
+        }
     }
 }
 
@@ -242,14 +382,27 @@ pub(crate) struct MarksBlockReport {
     pub(crate) unknown_coin_diffs: usize,
     /// Contract violations by stream; each is a loss of that stream up to the block.
     pub(crate) errors: Vec<(Stream, String)>,
-    /// The log overflowed with this block, a loss of both streams up to it.
+    /// The log overflowed with this block, a loss of every stream the marks read up to it.
     pub(crate) log_overflowed: bool,
+    /// Price actions whose lines before them are not pinned to one count: each reads the book at `lo`, the first line
+    /// not known to run before it (design 000439 r1 3, r2 revision 5). All are counted.
+    pub(crate) ambiguous_cuts: u64,
+    /// The first of them while the seed interval's `MAX_CHECK_SAMPLES` last (review 000444 r1 P3).
+    pub(crate) ambiguous_samples: Vec<AmbiguousCut>,
+}
+
+/// A price action's ambiguous cut: the diff lines `[lo, hi)` may run before or after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AmbiguousCut {
+    pub(crate) rank: Rank,
+    pub(crate) lo: usize,
+    pub(crate) hi: usize,
 }
 
 /// The snapshot at a checkpoint's height against the checkpoint (design 000439 r2 revision 2).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MarksCheck {
-    Checked { hip3: Hip3Check, books: BooksCheck },
+    Checked { hip3: Hip3Check, books: BooksCheck, prices: PricesCheck },
     /// `noSnapshot`: no trusted state was kept at the checkpoint's height (the first after start, the marks were
     /// unavailable there, a node grid other than the inferred one, or a later grid height replaced it).
     Skipped(&'static str),
@@ -313,24 +466,23 @@ pub(crate) struct NodeMarks {
     seed_failure: Option<(u64, String)>,
     /// Permanent: an input thread or the poller is gone (`AccountBook::stop`'s reason).
     stopped: Option<String>,
+    /// Ambiguous cuts still listed before the next install.
+    ambiguous_samples_left: usize,
 }
 
 impl NodeMarks {
     /// `started_ms`: nothing written before it was read.
     pub(crate) const fn new(grid: CheckpointGrid, started_ms: u64) -> Self {
-        let streams = MarkStreams {
-            hip3_oracle_updates: StreamProgress::starting(started_ms),
-            book_diffs: StreamProgress::starting(started_ms),
-        };
         Self {
             grid,
             applied: None,
-            streams,
+            streams: MarkStreams::starting(started_ms),
             state: None,
             snapshot: None,
             log: InputLog::new(MAX_LOG_INPUTS),
             seed_failure: None,
             stopped: None,
+            ambiguous_samples_left: MAX_CHECK_SAMPLES,
         }
     }
 
@@ -359,20 +511,18 @@ impl NodeMarks {
     pub(crate) fn apply_block(&mut self, height: u64, inputs: MarkInputs) -> MarksBlockReport {
         let mut report = MarksBlockReport::default();
         self.applied = Some(height);
-        if !inputs.hip3_oracle_updates.is_empty() {
-            self.streams.hip3_oracle_updates.record_read(height);
-        }
-        if !inputs.book_diffs.is_empty() {
-            self.streams.book_diffs.record_read(height);
-        }
+        self.streams.record_read(height, &inputs);
         let block = BlockInputs::of(height, inputs, &mut report);
         if let Some(state) = self.state.as_mut().filter(|state| state.height < height) {
             state.apply(height, &block, &mut report);
         }
+        report.ambiguous_samples.truncate(self.ambiguous_samples_left);
+        self.ambiguous_samples_left -= report.ambiguous_samples.len();
         if !self.log.push(height, block) {
             report.log_overflowed = true;
-            self.streams.hip3_oracle_updates.record_lost_block(height);
-            self.streams.book_diffs.record_lost_block(height);
+            for stream in MARK_STREAMS {
+                self.record_lost_block(stream, height);
+            }
         }
         for (stream, _) in &report.errors {
             self.record_lost_block(*stream, height);
@@ -429,6 +579,7 @@ impl NodeMarks {
             Some(snapshot) if snapshot.height == height => MarksCheck::Checked {
                 hip3: check_hip3(&snapshot.hip3, &seed.hip3),
                 books: snapshot.books.check_against(&seed.native),
+                prices: snapshot.prices.check_against(&seed.native),
             },
             _ => MarksCheck::Skipped("noSnapshot"),
         };
@@ -476,6 +627,7 @@ impl NodeMarks {
             }
         };
         self.log.stop();
+        self.ambiguous_samples_left = MAX_CHECK_SAMPLES;
         rebuild
     }
 }
@@ -510,8 +662,9 @@ mod tests {
             book::{BookMismatch, tests::diff_line},
             seed::RestingOrder,
         },
-        test_support::{HIP3_LINE_TIME_NS, hip3_line as line},
+        test_support::{HIP3_LINE_TIME_NS, hip3_line as line, status_line},
     };
+    use alloy::primitives::Address;
     use crate::order_book::Side;
 
     const GRID: CheckpointGrid = CheckpointGrid { anchor: 1_000, interval: 100 };
@@ -536,9 +689,29 @@ mod tests {
         StoredMark { px, time_ns: HIP3_LINE_TIME_NS }
     }
 
+    /// A block whose `replica_cmds` line holds no price or book action: no stream but `replica_cmds` read.
+    impl Default for MarkInputs {
+        fn default() -> Self {
+            let mark_actions = Ok(MarkActions { height: 0, time_ns: 0, actions: Vec::new() });
+            Self { hip3_oracle_updates: Vec::new(), book_diffs: Vec::new(), mark_actions, order_statuses: Vec::new(), fills: Vec::new() }
+        }
+    }
+
     /// Only HIP-3 lines.
     fn hip3_only(lines: Vec<Batch<OracleUpdateEvent>>) -> MarkInputs {
-        MarkInputs { hip3_oracle_updates: lines, book_diffs: Vec::new() }
+        MarkInputs { hip3_oracle_updates: lines, ..MarkInputs::default() }
+    }
+
+    /// A fill and a status that touch nothing the tests check: the fills and statuses streams are read.
+    fn quiet_fill_and_status(height: u64) -> (Vec<BlockFill>, Vec<Batch<NodeDataOrderStatus>>) {
+        let fill = BlockFill { coin: "PUMP".into(), px: "0.004".into(), sz: "1".into(), crossed: true, oid: 1, tid: height, twap: false };
+        (vec![fill], vec![status_line(height, "triggered", Address::repeat_byte(1), 1, None)])
+    }
+
+    /// The prices of the fixture's seed against themselves: every field equal on both coins.
+    fn seed_prices() -> PricesCheck {
+        let native = seed(0).native;
+        NativePrices::seeded(&native).check_against(&native)
     }
 
     /// A PUMP order placed and removed in block `height`: the books read a diff and stay as they were.
@@ -554,14 +727,18 @@ mod tests {
         BooksCheck { books_equal: 2, orders_equal: 2, ..BooksCheck::default() }
     }
 
-    /// Marks applied through `blocks`, with xyz:TSLA lines at the given heights; those blocks also carry `no_op_diffs`,
-    /// so the books stream is read with the HIP-3 one and only blocks with a line are logged.
+    /// Marks applied through `blocks`, with xyz:TSLA lines at the given heights; those blocks also carry `no_op_diffs`
+    /// and `quiet_fill_and_status`, so every stream is read with the HIP-3 one.
     fn run(marks: &mut NodeMarks, blocks: std::ops::RangeInclusive<u64>, lines: &[(u64, &str)]) {
         for height in blocks {
             let hip3_oracle_updates: Vec<_> =
                 lines.iter().filter(|(at, _)| *at == height).map(|(at, px)| line(*at, &[("xyz:TSLA", px)])).collect();
-            let book_diffs = if hip3_oracle_updates.is_empty() { Vec::new() } else { no_op_diffs(height) };
-            let inputs = MarkInputs { hip3_oracle_updates, book_diffs };
+            let mut inputs = MarkInputs::default();
+            if !hip3_oracle_updates.is_empty() {
+                (inputs.fills, inputs.order_statuses) = quiet_fill_and_status(height);
+                inputs.book_diffs = no_op_diffs(height);
+                inputs.hip3_oracle_updates = hip3_oracle_updates;
+            }
             assert_eq!(marks.apply_block(height, inputs), MarksBlockReport::default(), "block {height}");
         }
     }
@@ -596,8 +773,9 @@ mod tests {
         let mut checkpoint = seed(1_000);
         checkpoint.hip3.get_mut("xyz:TSLA").unwrap().mark = Some(written(360_000));
         let report = marks.install(checkpoint);
-        assert_eq!(report.check, MarksCheck::Checked { hip3: Hip3Check { equal: 2, ..Hip3Check::default() }, books: seed_books() });
-        assert_eq!(report.rebuild, Rebuild::Replayed { blocks: 1 }, "block 1002 replayed onto the seed");
+        let hip3 = Hip3Check { equal: 2, ..Hip3Check::default() };
+        assert_eq!(report.check, MarksCheck::Checked { hip3, books: seed_books(), prices: seed_prices() });
+        assert_eq!(report.rebuild, Rebuild::Replayed { blocks: 3 }, "blocks 1001 to 1003 replayed onto the seed");
         assert_eq!((marks.availability(), tsla(&marks)), (Ok(1_003), Some(written(361_500))));
     }
 
@@ -614,7 +792,7 @@ mod tests {
             checkpoint: Some(StoredMark { px: 358_320, time_ns: 1_792_391_842_000_000_000 }),
         };
         let hip3 = Hip3Check { equal: 1, differ: 1, unknown: 0, samples: vec![mismatch] };
-        assert_eq!(report.check, MarksCheck::Checked { hip3, books: seed_books() });
+        assert_eq!(report.check, MarksCheck::Checked { hip3, books: seed_books(), prices: seed_prices() });
         assert_eq!(tsla(&marks).map(|mark| mark.px), Some(358_320), "the checkpoint's value, nothing logged above it");
     }
 
@@ -624,15 +802,15 @@ mod tests {
         run(&mut marks, 995..=995, &[]);
         marks.install(seed(995));
         run(&mut marks, 996..=1_010, &[(996, "359.0")]);
-        marks.record_lost_block(Stream::Fills, 1_005);
-        assert_eq!(marks.availability(), Ok(1_010), "the marks do not read fills");
+        marks.record_lost_block(Stream::MiscEvents, 1_005);
+        assert_eq!(marks.availability(), Ok(1_010), "the marks do not read the misc events");
         marks.record_lost_block(Stream::Hip3OracleUpdates, 1_005);
         let lost = Unavailable::DataLoss { stream: Stream::Hip3OracleUpdates, bound: LossBound::Block(1_005) };
         assert_eq!(marks.availability(), Err(lost));
         assert!(marks.seed_ready(1_100), "unavailable: a seed installs at once");
         run(&mut marks, 1_011..=1_012, &[(1_012, "362.0")]);
         let report = marks.install(seed(1_010));
-        assert_eq!((report.check, report.rebuild), (MarksCheck::Skipped("noSnapshot"), Rebuild::Replayed { blocks: 1 }));
+        assert_eq!((report.check, report.rebuild), (MarksCheck::Skipped("noSnapshot"), Rebuild::Replayed { blocks: 2 }));
         assert_eq!((marks.availability(), tsla(&marks)), (Ok(1_012), Some(written(362_000))));
     }
 
@@ -646,7 +824,7 @@ mod tests {
         marks.record_lost_block(Stream::Hip3OracleUpdates, 998);
         run(&mut marks, 997..=1_001, &[]);
         let report = marks.install(seed(1_000));
-        assert_eq!((report.check, report.rebuild), (MarksCheck::Skipped("noSnapshot"), Rebuild::Replayed { blocks: 0 }));
+        assert_eq!((report.check, report.rebuild), (MarksCheck::Skipped("noSnapshot"), Rebuild::Replayed { blocks: 1 }));
         assert_eq!(marks.availability(), Ok(1_001), "the seed covers the loss at 998");
     }
 
@@ -670,7 +848,7 @@ mod tests {
         assert_eq!(tsla(&marks), Some(written(361_000)), "kept as it was");
         let report = marks.install(seed(1_100));
         assert!(matches!(report.check, MarksCheck::Checked { hip3: Hip3Check { differ: 1, .. }, .. }), "{:?}", report.check);
-        assert_eq!(report.rebuild, Rebuild::Replayed { blocks: 1 });
+        assert_eq!(report.rebuild, Rebuild::Replayed { blocks: 5 });
     }
 
     #[test]
@@ -720,12 +898,13 @@ mod tests {
         run(&mut marks, 990..=999, &[(992, "359.0")]);
         assert_eq!((marks.log.base, marks.log.inputs), (None, 0), "nothing before the first grid height");
         run(&mut marks, 1_000..=1_003, &[(1_002, "359.5")]);
-        assert_eq!((marks.log.base, marks.log.inputs), (Some(1_000), 3), "block 1002: one update and two diffs");
+        let logged = "the times of 1001 to 1003; at 1002 an update, two diffs, a fill, a status";
+        assert_eq!((marks.log.base, marks.log.inputs), (Some(1_000), 8), "{logged}");
         marks.install(seed(1_000));
         run(&mut marks, 1_004..=1_099, &[(1_050, "360.0")]);
         assert_eq!((marks.log.base, marks.log.inputs), (None, 0), "the installed seed covers what a later one needs");
         run(&mut marks, 1_100..=1_101, &[(1_101, "360.5")]);
-        assert_eq!((marks.log.base, marks.log.inputs), (Some(1_100), 3));
+        assert_eq!((marks.log.base, marks.log.inputs), (Some(1_100), 6), "1101: its time and five inputs");
         let mut ahead = NodeMarks::new(GRID, STARTED_MS);
         run(&mut ahead, 1_098..=1_098, &[]);
         assert_eq!(ahead.install(seed(1_100)).rebuild, Rebuild::Ahead);
@@ -739,7 +918,7 @@ mod tests {
         run(&mut marks, 995..=995, &[]);
         marks.install(seed(995));
         run(&mut marks, 996..=996, &[(996, "359.0")]);
-        let started = Unavailable::DataLoss { stream: Stream::Hip3OracleUpdates, bound: LossBound::WrittenBy(SEED_TIME_MS + 1_000) };
+        let started = Unavailable::DataLoss { stream: Stream::Fills, bound: LossBound::WrittenBy(SEED_TIME_MS + 1_000) };
         assert_eq!(marks.availability(), Err(started));
         let covering = 1_000 + CLOCK_MARGIN_MS;
         run(&mut marks, 997..=covering + 1, &[]);
@@ -770,7 +949,7 @@ mod tests {
         run(&mut marks, 997..=1_201, &[]);
         assert_eq!(marks.install(seed(1_100)).rebuild, Rebuild::LogDoesNotReach, "the log starts at 1200");
         assert!(matches!(marks.availability(), Err(Unavailable::CheckpointFailed { height: 1_000, .. })));
-        assert_eq!(marks.install(seed(1_200)).rebuild, Rebuild::Replayed { blocks: 0 });
+        assert_eq!(marks.install(seed(1_200)).rebuild, Rebuild::Replayed { blocks: 1 });
         assert_eq!(marks.availability(), Ok(1_201));
     }
 
@@ -849,17 +1028,79 @@ mod tests {
         assert_eq!(marks.apply_block(1_002, MarkInputs { book_diffs: vec![unknown], ..MarkInputs::default() }).unknown_coin_diffs, 1);
     }
 
+    /// Design 000439 r1 section 3: a `SetGlobalAction` reads the book at its place in the block. An order placed before
+    /// it moves the bid it reads; one placed after does not.
+    #[test]
+    fn a_set_global_action_reads_the_book_at_its_place_in_the_block() {
+        use self::actions::{BookAnchors, MarkAction, RankedAction};
+        let mut marks = NodeMarks::new(GRID, STARTED_MS);
+        run(&mut marks, 995..=995, &[]);
+        marks.install(seed(995));
+        let time_ns = 1_792_391_844_000_000_000;
+        let placed = |rank, oid| RankedAction {
+            rank,
+            user: Some(Address::repeat_byte(1)),
+            action: MarkAction::Book(BookAnchors { created: vec![oid], ..BookAnchors::default() }),
+        };
+        let set_global = RankedAction {
+            rank: (1, 3, 0),
+            user: None,
+            action: MarkAction::SetGlobal(vec![Some(("82890.0".to_string(), "82870.0".to_string())), None]),
+        };
+        let actions = MarkActions { height: 996, time_ns, actions: vec![placed((0, 1, 0), 11), set_global, placed((2, 1, 0), 12)] };
+        let inputs = MarkInputs {
+            book_diffs: vec![
+                diff_line(996, "BTC", 11, "B", "82860.0", r#"{"new":{"sz":"0.001"}}"#),
+                diff_line(996, "BTC", 12, "B", "82865.0", r#"{"new":{"sz":"0.001"}}"#),
+            ],
+            mark_actions: Ok(actions),
+            ..MarkInputs::default()
+        };
+        assert_eq!(marks.apply_block(996, inputs), MarksBlockReport::default());
+        let (mark, unsupported) = marks.state.as_ref().unwrap().prices.mark_of(0);
+        assert_eq!(unsupported, None);
+        // L = median(bid 828600 at the cut, ask 828700, last trade 828600); at the block's end the bid is 828650
+        assert_eq!(mark, StoredMark { px: 828_600, time_ns }, "median(828700, Mark cache 828590, L 828600)");
+    }
+
+    /// Review 000444 r1 P3: a price action whose cut is not unique (order 13's line is anchored by no action) is counted
+    /// in every block and listed while the seed interval's samples last.
+    #[test]
+    fn an_ambiguous_cut_is_counted_and_listed_while_samples_last() {
+        use self::actions::{BookAnchors, MarkAction, RankedAction};
+        let mut marks = NodeMarks::new(GRID, STARTED_MS);
+        run(&mut marks, 995..=995, &[]);
+        marks.install(seed(995));
+        let placed = |rank, oid| RankedAction {
+            rank,
+            user: Some(Address::repeat_byte(1)),
+            action: MarkAction::Book(BookAnchors { created: vec![oid], ..BookAnchors::default() }),
+        };
+        let block = |height, oid| {
+            let set_global = RankedAction { rank: (1, 3, 0), user: None, action: MarkAction::SetGlobal(Vec::new()) };
+            let actions = vec![placed((0, 1, 0), oid), set_global, placed((2, 1, 0), oid + 2)];
+            let new = r#"{"new":{"sz":"0.001"}}"#;
+            let book_diffs = [oid, oid + 1, oid + 2].map(|placed| diff_line(height, "BTC", placed, "B", "82860.0", new)).to_vec();
+            MarkInputs { book_diffs, mark_actions: Ok(MarkActions { height, time_ns: 1_792_391_844_000_000_000, actions }), ..MarkInputs::default() }
+        };
+        marks.ambiguous_samples_left = 1;
+        let first = marks.apply_block(996, block(996, 11));
+        assert_eq!((first.ambiguous_cuts, first.ambiguous_samples), (1, vec![AmbiguousCut { rank: (1, 3, 0), lo: 1, hi: 2 }]));
+        let second = marks.apply_block(997, block(997, 21));
+        assert_eq!((second.ambiguous_cuts, second.ambiguous_samples.len(), second.errors.len()), (1, 0, 0), "counted only");
+    }
+
     #[test]
     fn an_overflowing_log_is_a_loss_of_both_streams() {
         let mut marks = NodeMarks::new(GRID, STARTED_MS);
         run(&mut marks, 995..=995, &[]);
         marks.install(seed(995));
         run(&mut marks, 996..=996, &[(996, "359.0")]);
-        marks.log = InputLog::new(3);
+        marks.log = InputLog::new(6);
         marks.log.restart(996);
         run(&mut marks, 997..=997, &[(997, "359.5")]);
         let report = marks.apply_block(998, MarkInputs { book_diffs: no_op_diffs(998), ..MarkInputs::default() });
-        assert!(report.log_overflowed, "3 inputs at 997, 2 more at 998");
+        assert!(report.log_overflowed, "6 inputs at 997 (its time included), 3 more at 998");
         let seed_at = AnchorInfo { height: 995, time_ms: SEED_TIME_MS + 995 };
         for stream in [Stream::Hip3OracleUpdates, Stream::BookDiffs] {
             let lost = Unavailable::DataLoss { stream, bound: LossBound::Block(998) };
@@ -868,13 +1109,54 @@ mod tests {
         assert_eq!((marks.log.base, marks.log.inputs), (Some(998), 0), "starts over after the block");
     }
 
+    /// Review 000444 r1 P2-1: a block with no input but its time moves BTC's Spot cache into a new bucket (its member is
+    /// fresh); a seed of the grid height below it rebuilds the same cache, not the one before the block.
+    #[test]
+    fn a_rebuild_replays_the_cache_refresh_of_a_block_without_inputs() {
+        const T0: u64 = 1_792_391_843_000_000_000;
+        const T1: u64 = T0 + 1_000_000_000;
+        let mut checkpoint = seed(995);
+        checkpoint.time_ms = T0 / 1_000_000;
+        for asset in &mut checkpoint.native.assets {
+            for cache in [&mut asset.references.spot, &mut asset.references.external_perp, &mut asset.references.mark] {
+                cache.last_bucket = T0 / 3_000_000_000;
+            }
+        }
+        let spot = &mut checkpoint.native.assets[0].references.spot;
+        spot.median = Some(828_000);
+        spot.members = vec![(Address::repeat_byte(1), 828_720, T0)];
+        let mut marks = NodeMarks::new(GRID, 0);
+        marks.install(checkpoint.clone());
+        for stream in [Stream::Fills, Stream::BlockActions, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses] {
+            marks.streams.get_mut(stream).unwrap().record_read(1_000);
+        }
+        let empty = |height, time_ns| MarkInputs {
+            mark_actions: Ok(MarkActions { height, time_ns, actions: Vec::new() }),
+            ..MarkInputs::default()
+        };
+        assert_eq!(marks.apply_block(1_000, empty(1_000, T0)).errors, []);
+        assert_eq!(marks.apply_block(1_001, empty(1_001, T1)).errors, []);
+        let mut refreshed = checkpoint.native.clone();
+        refreshed.assets[0].references.spot.median = Some(828_720);
+        refreshed.assets[0].references.spot.last_bucket = T1 / 3_000_000_000;
+        let spot_cache = |marks: &NodeMarks| {
+            let check = marks.state.as_ref().unwrap().prices.check_against(&refreshed);
+            check.fields.into_iter().find(|(field, _, _)| *field == "spotCache")
+        };
+        assert_eq!(spot_cache(&marks), Some(("spotCache", 2, 0)), "the block's time refreshed the cache");
+        checkpoint.height = 1_000;
+        let report = marks.install(checkpoint);
+        assert_eq!(report.rebuild, Rebuild::Replayed { blocks: 1 });
+        assert_eq!((marks.availability(), spot_cache(&marks)), (Ok(1_001), Some(("spotCache", 2, 0))));
+    }
+
     #[test]
     fn an_overflowing_log_is_a_loss_and_starts_over() {
         let mut log = InputLog::new(2);
         log.restart(9);
         let update = Hip3MarkUpdate { coin: "xyz:TSLA".to_string(), px: "1.0".to_string(), time_ns: 1 };
-        assert!(log.push(10, BlockInputs { hip3: vec![update.clone(); 2], diffs: Vec::new() }));
-        assert!(!log.push(11, BlockInputs { hip3: vec![update], diffs: Vec::new() }), "one more overflows");
+        assert!(log.push(10, BlockInputs { hip3: vec![update.clone(); 2], ..BlockInputs::default() }));
+        assert!(!log.push(11, BlockInputs { hip3: vec![update], ..BlockInputs::default() }), "one more overflows");
         assert_eq!((log.base, log.inputs, log.reaches(10), log.reaches(11)), (Some(11), 0, false, true));
     }
 }

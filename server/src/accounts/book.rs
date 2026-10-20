@@ -36,7 +36,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{
     actions::{BlockActionKind, BlockActions},
     anchor::{Anchor, AnchorCoin, AnchorPosition, AnchorRow},
-    blocks::CompletedBlock,
     checkpoint::AccountMode,
     misc::{FundingDelta, MiscEvent},
     liquidation::LiquidationPx,
@@ -77,8 +76,10 @@ pub(crate) enum Stream {
     BlockActions,
     /// `hip3_oracle_updates_streaming`: read by the node marks (design 000439), not by the account view.
     Hip3OracleUpdates,
-    /// `node_raw_book_diffs_streaming`, the main dex's diffs: read by the node marks, not by the account view.
+    /// `node_raw_book_diffs_streaming`: read by the node marks, not by the account view.
     BookDiffs,
+    /// `node_order_statuses_streaming`, cancels by cloid and triggers: read by the node marks, not by the account view.
+    OrderStatuses,
 }
 
 impl Stream {
@@ -89,6 +90,7 @@ impl Stream {
             Self::BlockActions => "block_actions",
             Self::Hip3OracleUpdates => "hip3_oracle_updates",
             Self::BookDiffs => "book_diffs",
+            Self::OrderStatuses => "order_statuses",
         }
     }
 }
@@ -763,14 +765,18 @@ impl AccountBook {
             Stream::Fills => Some(&mut self.fills),
             Stream::MiscEvents => Some(&mut self.misc_events),
             Stream::BlockActions => Some(&mut self.block_actions),
-            Stream::Hip3OracleUpdates | Stream::BookDiffs => None,
+            Stream::Hip3OracleUpdates | Stream::BookDiffs | Stream::OrderStatuses => None,
         }
     }
 
     /// The one entry of a released block (design 000433 r3, 3.4): its `replica_cmds` actions, then its fills, then its
-    /// misc events, each through the stream's own application below. Its HIP-3 oracle updates are the node marks'.
-    pub(crate) fn apply_block(&mut self, block: CompletedBlock) -> BlockReport {
-        let CompletedBlock { actions, fills, misc_events, hip3_oracle_updates: _, book_diffs: _ } = block;
+    /// misc events, each through the stream's own application below (the block's other streams are the node marks').
+    pub(crate) fn apply_block(
+        &mut self,
+        actions: BlockActions,
+        fills: Vec<Batch<NodeDataFill>>,
+        misc_events: Vec<Batch<MiscEvent>>,
+    ) -> BlockReport {
         BlockReport {
             block_actions: self.apply_block_actions(actions),
             fills: fills.into_iter().map(|batch| self.apply_fills(batch)).collect(),
@@ -1805,12 +1811,8 @@ mod tests {
     #[test]
     fn a_fill_in_the_block_that_switched_its_asset_stops_the_replay() {
         let isolated = checkpoint_user(ISOLATED);
-        let block = |height, actions: &[(BlockAction, Address)], fills_specs: &[FillSpec<'_>]| CompletedBlock {
-            actions: block_actions(height, actions),
-            fills: vec![fills(height, fills_specs)],
-            misc_events: Vec::new(),
-            hip3_oracle_updates: Vec::new(),
-            book_diffs: Vec::new(),
+        let apply = |book: &mut AccountBook, height, actions: &[(BlockAction, Address)], fills_specs: &[FillSpec<'_>]| {
+            book.apply_block(block_actions(height, actions), vec![fills(height, fills_specs)], Vec::new())
         };
         let mut book = AccountBook::new(0);
         book.apply_fills(fills(100, &[]));
@@ -1821,11 +1823,11 @@ mod tests {
         book.install_anchor(first);
         let to_cross = |asset| (BlockAction::Leverage { asset, is_cross: true }, isolated);
         // BTC (asset 0, set isolated without a position) back to cross, a BTC fill one block later: cross
-        book.apply_block(block(1_001, &[to_cross(0)], &[]));
-        book.apply_block(block(1_002, &[], &[(isolated, "BTC", "B", 1, "0.0", "0.001")]));
+        apply(&mut book, 1_001, &[to_cross(0)], &[]);
+        apply(&mut book, 1_002, &[], &[(isolated, "BTC", "B", 1, "0.0", "0.001")]);
         assert_eq!(book.replay.as_ref().unwrap().current.stop_reason(&isolated), None);
         // the isolated PUMP short closed and PUMP switched to cross in one block
-        book.apply_block(block(1_003, &[to_cross(1)], &[(isolated, PUMP, "B", 2, "-2000000.0", "2000000.0")]));
+        apply(&mut book, 1_003, &[to_cross(1)], &[(isolated, PUMP, "B", 2, "-2000000.0", "2000000.0")]);
         assert_eq!(book.replay.as_ref().unwrap().current.stop_reason(&isolated), Some(&StopReason::IsolatedFill));
     }
 

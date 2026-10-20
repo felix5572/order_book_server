@@ -544,6 +544,12 @@ lazy_static! {
         "Checkpoints whose node mark seed broke its contract"
     ).expect("metric can be created");
 
+    /// Price actions whose cut is not unique; each reads the book at the first line not known to run before it.
+    pub static ref NODE_MARKS_AMBIGUOUS_CUTS_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_node_marks_ambiguous_cuts_total",
+        "Main-dex price actions whose place among the block's diff lines is not unique"
+    ).expect("metric can be created");
+
     /// Inputs of coins outside the seed's universe (listed since it), by stream.
     pub static ref NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_node_marks_unknown_coin_inputs_total", "Node mark inputs of coins outside the seed's universe"),
@@ -630,6 +636,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(NODE_MARKS_REBUILDS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_SEED_FAILURES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_AMBIGUOUS_CUTS_TOTAL.clone())).ok();
 
     // File watcher metrics
     REGISTRY.register(Box::new(FILE_EVENTS_TOTAL.clone())).ok();

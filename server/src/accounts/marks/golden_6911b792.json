@@ -1,0 +1,2413 @@
+{
+  "schema_version": 1,
+  "binary_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+  "source_hashes": {
+    "meta.json": "3770b0a06c56ef3f6cd66b0b3cc5f75cc2a38052139aea570a7d88956416986d",
+    "oracle_1189230000.json": "0c6e15682d57be582321361cb5b6b9d0e458e3b6e7c83632035313a0d6b90fd7",
+    "books_1189230000.json": "c50f28051d0046852173067df1000a639040636f048caac8464a6529da675571",
+    "price_actions_morning.jsonl.gz": "22eb41ed48e6a6391bae73917d656a24fc80f26ff4727cc8b75ec49b254c0d2e"
+  },
+  "checkpoint_height": 1189230000,
+  "setglobal_height": 1189229997,
+  "setglobal_time": "2026-10-19T06:37:23.290319220",
+  "book_offset_after_setglobal_ms": 265.681447,
+  "scope": "Observed checkpoint normal-path examples. Book is 266ms later; not full action-point replay.",
+  "wire": [
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229953,
+      "signer": "0x3e5b2598a32ebf003ad5a7254faa3d04ff41d9fe",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.31",
+      "sz_decimals": 4,
+      "expected_units": 243431,
+      "height": 1189229953,
+      "signer": "0x3e5b2598a32ebf003ad5a7254faa3d04ff41d9fe",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061515",
+      "sz_decimals": 0,
+      "expected_units": 61515,
+      "height": 1189229953,
+      "signer": "0x3e5b2598a32ebf003ad5a7254faa3d04ff41d9fe",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229953,
+      "signer": "0x3e5b2598a32ebf003ad5a7254faa3d04ff41d9fe",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.8125",
+      "sz_decimals": 2,
+      "expected_units": 11628125,
+      "height": 1189229953,
+      "signer": "0x3e5b2598a32ebf003ad5a7254faa3d04ff41d9fe",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229953,
+      "signer": "0x3e5b2598a32ebf003ad5a7254faa3d04ff41d9fe",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.2349999999997",
+      "sz_decimals": 4,
+      "expected_units": 243323,
+      "height": 1189229953,
+      "signer": "0x3e5b2598a32ebf003ad5a7254faa3d04ff41d9fe",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229953,
+      "signer": "0x3e5b2598a32ebf003ad5a7254faa3d04ff41d9fe",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229953,
+      "signer": "0x3e5b2598a32ebf003ad5a7254faa3d04ff41d9fe",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.495",
+      "sz_decimals": 2,
+      "expected_units": 11624950,
+      "height": 1189229953,
+      "signer": "0x3e5b2598a32ebf003ad5a7254faa3d04ff41d9fe",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229954,
+      "signer": "0x30c66ebc7f5ef4f340b424a26e4d944f60129815",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.31",
+      "sz_decimals": 4,
+      "expected_units": 243431,
+      "height": 1189229954,
+      "signer": "0x30c66ebc7f5ef4f340b424a26e4d944f60129815",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06152",
+      "sz_decimals": 0,
+      "expected_units": 61520,
+      "height": 1189229954,
+      "signer": "0x30c66ebc7f5ef4f340b424a26e4d944f60129815",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229954,
+      "signer": "0x30c66ebc7f5ef4f340b424a26e4d944f60129815",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.79",
+      "sz_decimals": 2,
+      "expected_units": 11627900,
+      "height": 1189229954,
+      "signer": "0x30c66ebc7f5ef4f340b424a26e4d944f60129815",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229954,
+      "signer": "0x30c66ebc7f5ef4f340b424a26e4d944f60129815",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.2349999999997",
+      "sz_decimals": 4,
+      "expected_units": 243323,
+      "height": 1189229954,
+      "signer": "0x30c66ebc7f5ef4f340b424a26e4d944f60129815",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229954,
+      "signer": "0x30c66ebc7f5ef4f340b424a26e4d944f60129815",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229954,
+      "signer": "0x30c66ebc7f5ef4f340b424a26e4d944f60129815",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.4850000000001",
+      "sz_decimals": 2,
+      "expected_units": 11624850,
+      "height": 1189229954,
+      "signer": "0x30c66ebc7f5ef4f340b424a26e4d944f60129815",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229955,
+      "signer": "0xf8efb4cb844a8458114994203d7b0bfe2422a288",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.31",
+      "sz_decimals": 4,
+      "expected_units": 243431,
+      "height": 1189229955,
+      "signer": "0xf8efb4cb844a8458114994203d7b0bfe2422a288",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06152",
+      "sz_decimals": 0,
+      "expected_units": 61520,
+      "height": 1189229955,
+      "signer": "0xf8efb4cb844a8458114994203d7b0bfe2422a288",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229955,
+      "signer": "0xf8efb4cb844a8458114994203d7b0bfe2422a288",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.79",
+      "sz_decimals": 2,
+      "expected_units": 11627900,
+      "height": 1189229955,
+      "signer": "0xf8efb4cb844a8458114994203d7b0bfe2422a288",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229955,
+      "signer": "0xf8efb4cb844a8458114994203d7b0bfe2422a288",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.2349999999997",
+      "sz_decimals": 4,
+      "expected_units": 243323,
+      "height": 1189229955,
+      "signer": "0xf8efb4cb844a8458114994203d7b0bfe2422a288",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229955,
+      "signer": "0xf8efb4cb844a8458114994203d7b0bfe2422a288",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229955,
+      "signer": "0xf8efb4cb844a8458114994203d7b0bfe2422a288",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.4850000000001",
+      "sz_decimals": 2,
+      "expected_units": 11624850,
+      "height": 1189229955,
+      "signer": "0xf8efb4cb844a8458114994203d7b0bfe2422a288",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229959,
+      "signer": "0xe45c96a6a32318e5df7347477963bf0de38ff7ff",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.22",
+      "sz_decimals": 4,
+      "expected_units": 243422,
+      "height": 1189229959,
+      "signer": "0xe45c96a6a32318e5df7347477963bf0de38ff7ff",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061525",
+      "sz_decimals": 0,
+      "expected_units": 61525,
+      "height": 1189229959,
+      "signer": "0xe45c96a6a32318e5df7347477963bf0de38ff7ff",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229959,
+      "signer": "0xe45c96a6a32318e5df7347477963bf0de38ff7ff",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.735",
+      "sz_decimals": 2,
+      "expected_units": 11627350,
+      "height": 1189229959,
+      "signer": "0xe45c96a6a32318e5df7347477963bf0de38ff7ff",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229959,
+      "signer": "0xe45c96a6a32318e5df7347477963bf0de38ff7ff",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.2349999999997",
+      "sz_decimals": 4,
+      "expected_units": 243323,
+      "height": 1189229959,
+      "signer": "0xe45c96a6a32318e5df7347477963bf0de38ff7ff",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229959,
+      "signer": "0xe45c96a6a32318e5df7347477963bf0de38ff7ff",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229959,
+      "signer": "0xe45c96a6a32318e5df7347477963bf0de38ff7ff",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.4450000000002",
+      "sz_decimals": 2,
+      "expected_units": 11624450,
+      "height": 1189229959,
+      "signer": "0xe45c96a6a32318e5df7347477963bf0de38ff7ff",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229960,
+      "signer": "0x420a4ed7b6bb361da586868adec2f2bb9ab75e66",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.22",
+      "sz_decimals": 4,
+      "expected_units": 243422,
+      "height": 1189229960,
+      "signer": "0x420a4ed7b6bb361da586868adec2f2bb9ab75e66",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061525",
+      "sz_decimals": 0,
+      "expected_units": 61525,
+      "height": 1189229960,
+      "signer": "0x420a4ed7b6bb361da586868adec2f2bb9ab75e66",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229960,
+      "signer": "0x420a4ed7b6bb361da586868adec2f2bb9ab75e66",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.7425",
+      "sz_decimals": 2,
+      "expected_units": 11627425,
+      "height": 1189229960,
+      "signer": "0x420a4ed7b6bb361da586868adec2f2bb9ab75e66",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229960,
+      "signer": "0x420a4ed7b6bb361da586868adec2f2bb9ab75e66",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.2349999999997",
+      "sz_decimals": 4,
+      "expected_units": 243323,
+      "height": 1189229960,
+      "signer": "0x420a4ed7b6bb361da586868adec2f2bb9ab75e66",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229960,
+      "signer": "0x420a4ed7b6bb361da586868adec2f2bb9ab75e66",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229960,
+      "signer": "0x420a4ed7b6bb361da586868adec2f2bb9ab75e66",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.4450000000002",
+      "sz_decimals": 2,
+      "expected_units": 11624450,
+      "height": 1189229960,
+      "signer": "0x420a4ed7b6bb361da586868adec2f2bb9ab75e66",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229961,
+      "signer": "0x8f02ade62c1c1cf34daa855ccf1245aaf90d3056",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.22",
+      "sz_decimals": 4,
+      "expected_units": 243422,
+      "height": 1189229961,
+      "signer": "0x8f02ade62c1c1cf34daa855ccf1245aaf90d3056",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061525",
+      "sz_decimals": 0,
+      "expected_units": 61525,
+      "height": 1189229961,
+      "signer": "0x8f02ade62c1c1cf34daa855ccf1245aaf90d3056",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229961,
+      "signer": "0x8f02ade62c1c1cf34daa855ccf1245aaf90d3056",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.7625",
+      "sz_decimals": 2,
+      "expected_units": 11627625,
+      "height": 1189229961,
+      "signer": "0x8f02ade62c1c1cf34daa855ccf1245aaf90d3056",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229961,
+      "signer": "0x8f02ade62c1c1cf34daa855ccf1245aaf90d3056",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.2349999999997",
+      "sz_decimals": 4,
+      "expected_units": 243323,
+      "height": 1189229961,
+      "signer": "0x8f02ade62c1c1cf34daa855ccf1245aaf90d3056",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229961,
+      "signer": "0x8f02ade62c1c1cf34daa855ccf1245aaf90d3056",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229961,
+      "signer": "0x8f02ade62c1c1cf34daa855ccf1245aaf90d3056",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.4450000000002",
+      "sz_decimals": 2,
+      "expected_units": 11624450,
+      "height": 1189229961,
+      "signer": "0x8f02ade62c1c1cf34daa855ccf1245aaf90d3056",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229965,
+      "signer": "0x65baa675fa9e5f6c7ae4541ebdb16c526de06f1f",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.22",
+      "sz_decimals": 4,
+      "expected_units": 243422,
+      "height": 1189229965,
+      "signer": "0x65baa675fa9e5f6c7ae4541ebdb16c526de06f1f",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06154",
+      "sz_decimals": 0,
+      "expected_units": 61540,
+      "height": 1189229965,
+      "signer": "0x65baa675fa9e5f6c7ae4541ebdb16c526de06f1f",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229965,
+      "signer": "0x65baa675fa9e5f6c7ae4541ebdb16c526de06f1f",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.7575",
+      "sz_decimals": 2,
+      "expected_units": 11627575,
+      "height": 1189229965,
+      "signer": "0x65baa675fa9e5f6c7ae4541ebdb16c526de06f1f",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229965,
+      "signer": "0x65baa675fa9e5f6c7ae4541ebdb16c526de06f1f",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.2349999999997",
+      "sz_decimals": 4,
+      "expected_units": 243323,
+      "height": 1189229965,
+      "signer": "0x65baa675fa9e5f6c7ae4541ebdb16c526de06f1f",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229965,
+      "signer": "0x65baa675fa9e5f6c7ae4541ebdb16c526de06f1f",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229965,
+      "signer": "0x65baa675fa9e5f6c7ae4541ebdb16c526de06f1f",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.4450000000002",
+      "sz_decimals": 2,
+      "expected_units": 11624450,
+      "height": 1189229965,
+      "signer": "0x65baa675fa9e5f6c7ae4541ebdb16c526de06f1f",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229970,
+      "signer": "0x8a5dbdf69b282bf2e8fb9f29fd34891f79c5dfd4",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.15",
+      "sz_decimals": 4,
+      "expected_units": 243415,
+      "height": 1189229970,
+      "signer": "0x8a5dbdf69b282bf2e8fb9f29fd34891f79c5dfd4",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06154",
+      "sz_decimals": 0,
+      "expected_units": 61540,
+      "height": 1189229970,
+      "signer": "0x8a5dbdf69b282bf2e8fb9f29fd34891f79c5dfd4",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229970,
+      "signer": "0x8a5dbdf69b282bf2e8fb9f29fd34891f79c5dfd4",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.715",
+      "sz_decimals": 2,
+      "expected_units": 11627150,
+      "height": 1189229970,
+      "signer": "0x8a5dbdf69b282bf2e8fb9f29fd34891f79c5dfd4",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229970,
+      "signer": "0x8a5dbdf69b282bf2e8fb9f29fd34891f79c5dfd4",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.105",
+      "sz_decimals": 4,
+      "expected_units": 243310,
+      "height": 1189229970,
+      "signer": "0x8a5dbdf69b282bf2e8fb9f29fd34891f79c5dfd4",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229970,
+      "signer": "0x8a5dbdf69b282bf2e8fb9f29fd34891f79c5dfd4",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229970,
+      "signer": "0x8a5dbdf69b282bf2e8fb9f29fd34891f79c5dfd4",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.4450000000002",
+      "sz_decimals": 2,
+      "expected_units": 11624450,
+      "height": 1189229970,
+      "signer": "0x8a5dbdf69b282bf2e8fb9f29fd34891f79c5dfd4",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229970,
+      "signer": "0x914d7f841b5ee14d1cd3852c7b2601b6ff6a8c52",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.15",
+      "sz_decimals": 4,
+      "expected_units": 243415,
+      "height": 1189229970,
+      "signer": "0x914d7f841b5ee14d1cd3852c7b2601b6ff6a8c52",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06154",
+      "sz_decimals": 0,
+      "expected_units": 61540,
+      "height": 1189229970,
+      "signer": "0x914d7f841b5ee14d1cd3852c7b2601b6ff6a8c52",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229970,
+      "signer": "0x914d7f841b5ee14d1cd3852c7b2601b6ff6a8c52",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.715",
+      "sz_decimals": 2,
+      "expected_units": 11627150,
+      "height": 1189229970,
+      "signer": "0x914d7f841b5ee14d1cd3852c7b2601b6ff6a8c52",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229970,
+      "signer": "0x914d7f841b5ee14d1cd3852c7b2601b6ff6a8c52",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.105",
+      "sz_decimals": 4,
+      "expected_units": 243310,
+      "height": 1189229970,
+      "signer": "0x914d7f841b5ee14d1cd3852c7b2601b6ff6a8c52",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229970,
+      "signer": "0x914d7f841b5ee14d1cd3852c7b2601b6ff6a8c52",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229970,
+      "signer": "0x914d7f841b5ee14d1cd3852c7b2601b6ff6a8c52",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.4450000000002",
+      "sz_decimals": 2,
+      "expected_units": 11624450,
+      "height": 1189229970,
+      "signer": "0x914d7f841b5ee14d1cd3852c7b2601b6ff6a8c52",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229976,
+      "signer": "0xb00c116f72eb55f52ca80196b63014a42cc72de1",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.15",
+      "sz_decimals": 4,
+      "expected_units": 243415,
+      "height": 1189229976,
+      "signer": "0xb00c116f72eb55f52ca80196b63014a42cc72de1",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06154",
+      "sz_decimals": 0,
+      "expected_units": 61540,
+      "height": 1189229976,
+      "signer": "0xb00c116f72eb55f52ca80196b63014a42cc72de1",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229976,
+      "signer": "0xb00c116f72eb55f52ca80196b63014a42cc72de1",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.665",
+      "sz_decimals": 2,
+      "expected_units": 11626650,
+      "height": 1189229976,
+      "signer": "0xb00c116f72eb55f52ca80196b63014a42cc72de1",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229976,
+      "signer": "0xb00c116f72eb55f52ca80196b63014a42cc72de1",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.105",
+      "sz_decimals": 4,
+      "expected_units": 243310,
+      "height": 1189229976,
+      "signer": "0xb00c116f72eb55f52ca80196b63014a42cc72de1",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229976,
+      "signer": "0xb00c116f72eb55f52ca80196b63014a42cc72de1",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229976,
+      "signer": "0xb00c116f72eb55f52ca80196b63014a42cc72de1",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.355",
+      "sz_decimals": 2,
+      "expected_units": 11623550,
+      "height": 1189229976,
+      "signer": "0xb00c116f72eb55f52ca80196b63014a42cc72de1",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229977,
+      "signer": "0x000000000056f99d36b6f2e0c51fd41496bbacb8",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.15",
+      "sz_decimals": 4,
+      "expected_units": 243415,
+      "height": 1189229977,
+      "signer": "0x000000000056f99d36b6f2e0c51fd41496bbacb8",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061545",
+      "sz_decimals": 0,
+      "expected_units": 61545,
+      "height": 1189229977,
+      "signer": "0x000000000056f99d36b6f2e0c51fd41496bbacb8",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229977,
+      "signer": "0x000000000056f99d36b6f2e0c51fd41496bbacb8",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.665",
+      "sz_decimals": 2,
+      "expected_units": 11626650,
+      "height": 1189229977,
+      "signer": "0x000000000056f99d36b6f2e0c51fd41496bbacb8",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229977,
+      "signer": "0x000000000056f99d36b6f2e0c51fd41496bbacb8",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.105",
+      "sz_decimals": 4,
+      "expected_units": 243310,
+      "height": 1189229977,
+      "signer": "0x000000000056f99d36b6f2e0c51fd41496bbacb8",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229977,
+      "signer": "0x000000000056f99d36b6f2e0c51fd41496bbacb8",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229977,
+      "signer": "0x000000000056f99d36b6f2e0c51fd41496bbacb8",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.355",
+      "sz_decimals": 2,
+      "expected_units": 11623550,
+      "height": 1189229977,
+      "signer": "0x000000000056f99d36b6f2e0c51fd41496bbacb8",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229979,
+      "signer": "0x8b8c3966870321866e7b7091c382308a6a97e9b1",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.15",
+      "sz_decimals": 4,
+      "expected_units": 243415,
+      "height": 1189229979,
+      "signer": "0x8b8c3966870321866e7b7091c382308a6a97e9b1",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061545",
+      "sz_decimals": 0,
+      "expected_units": 61545,
+      "height": 1189229979,
+      "signer": "0x8b8c3966870321866e7b7091c382308a6a97e9b1",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229979,
+      "signer": "0x8b8c3966870321866e7b7091c382308a6a97e9b1",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.665",
+      "sz_decimals": 2,
+      "expected_units": 11626650,
+      "height": 1189229979,
+      "signer": "0x8b8c3966870321866e7b7091c382308a6a97e9b1",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229979,
+      "signer": "0x8b8c3966870321866e7b7091c382308a6a97e9b1",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.105",
+      "sz_decimals": 4,
+      "expected_units": 243310,
+      "height": 1189229979,
+      "signer": "0x8b8c3966870321866e7b7091c382308a6a97e9b1",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229979,
+      "signer": "0x8b8c3966870321866e7b7091c382308a6a97e9b1",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229979,
+      "signer": "0x8b8c3966870321866e7b7091c382308a6a97e9b1",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.355",
+      "sz_decimals": 2,
+      "expected_units": 11623550,
+      "height": 1189229979,
+      "signer": "0x8b8c3966870321866e7b7091c382308a6a97e9b1",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229979,
+      "signer": "0x4e256d24da830290d10f425b44f3e9439394385a",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.15",
+      "sz_decimals": 4,
+      "expected_units": 243415,
+      "height": 1189229979,
+      "signer": "0x4e256d24da830290d10f425b44f3e9439394385a",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061545",
+      "sz_decimals": 0,
+      "expected_units": 61545,
+      "height": 1189229979,
+      "signer": "0x4e256d24da830290d10f425b44f3e9439394385a",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229979,
+      "signer": "0x4e256d24da830290d10f425b44f3e9439394385a",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.665",
+      "sz_decimals": 2,
+      "expected_units": 11626650,
+      "height": 1189229979,
+      "signer": "0x4e256d24da830290d10f425b44f3e9439394385a",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229979,
+      "signer": "0x4e256d24da830290d10f425b44f3e9439394385a",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.105",
+      "sz_decimals": 4,
+      "expected_units": 243310,
+      "height": 1189229979,
+      "signer": "0x4e256d24da830290d10f425b44f3e9439394385a",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229979,
+      "signer": "0x4e256d24da830290d10f425b44f3e9439394385a",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229979,
+      "signer": "0x4e256d24da830290d10f425b44f3e9439394385a",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.355",
+      "sz_decimals": 2,
+      "expected_units": 11623550,
+      "height": 1189229979,
+      "signer": "0x4e256d24da830290d10f425b44f3e9439394385a",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229982,
+      "signer": "0xb8f45222a3246a2b0104696a1df26842007c5bc5",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.15",
+      "sz_decimals": 4,
+      "expected_units": 243415,
+      "height": 1189229982,
+      "signer": "0xb8f45222a3246a2b0104696a1df26842007c5bc5",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061555",
+      "sz_decimals": 0,
+      "expected_units": 61555,
+      "height": 1189229982,
+      "signer": "0xb8f45222a3246a2b0104696a1df26842007c5bc5",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229982,
+      "signer": "0xb8f45222a3246a2b0104696a1df26842007c5bc5",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.716",
+      "sz_decimals": 2,
+      "expected_units": 11627160,
+      "height": 1189229982,
+      "signer": "0xb8f45222a3246a2b0104696a1df26842007c5bc5",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229982,
+      "signer": "0xb8f45222a3246a2b0104696a1df26842007c5bc5",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.065",
+      "sz_decimals": 4,
+      "expected_units": 243306,
+      "height": 1189229982,
+      "signer": "0xb8f45222a3246a2b0104696a1df26842007c5bc5",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229982,
+      "signer": "0xb8f45222a3246a2b0104696a1df26842007c5bc5",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229982,
+      "signer": "0xb8f45222a3246a2b0104696a1df26842007c5bc5",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.375",
+      "sz_decimals": 2,
+      "expected_units": 11623750,
+      "height": 1189229982,
+      "signer": "0xb8f45222a3246a2b0104696a1df26842007c5bc5",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.8",
+      "sz_decimals": 5,
+      "expected_units": 828908,
+      "height": 1189229984,
+      "signer": "0x497beec89958848126c2ea65934ce430e1410ad2",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.15",
+      "sz_decimals": 4,
+      "expected_units": 243415,
+      "height": 1189229984,
+      "signer": "0x497beec89958848126c2ea65934ce430e1410ad2",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06156",
+      "sz_decimals": 0,
+      "expected_units": 61560,
+      "height": 1189229984,
+      "signer": "0x497beec89958848126c2ea65934ce430e1410ad2",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229984,
+      "signer": "0x497beec89958848126c2ea65934ce430e1410ad2",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.6925",
+      "sz_decimals": 2,
+      "expected_units": 11626925,
+      "height": 1189229984,
+      "signer": "0x497beec89958848126c2ea65934ce430e1410ad2",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229984,
+      "signer": "0x497beec89958848126c2ea65934ce430e1410ad2",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.065",
+      "sz_decimals": 4,
+      "expected_units": 243306,
+      "height": 1189229984,
+      "signer": "0x497beec89958848126c2ea65934ce430e1410ad2",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061155",
+      "sz_decimals": 0,
+      "expected_units": 61155,
+      "height": 1189229984,
+      "signer": "0x497beec89958848126c2ea65934ce430e1410ad2",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229984,
+      "signer": "0x497beec89958848126c2ea65934ce430e1410ad2",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.355",
+      "sz_decimals": 2,
+      "expected_units": 11623550,
+      "height": 1189229984,
+      "signer": "0x497beec89958848126c2ea65934ce430e1410ad2",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82890.1",
+      "sz_decimals": 5,
+      "expected_units": 828901,
+      "height": 1189229989,
+      "signer": "0xa23b4556090260828ff3f939d2dbdd4f318b5f1f",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.13",
+      "sz_decimals": 4,
+      "expected_units": 243413,
+      "height": 1189229989,
+      "signer": "0xa23b4556090260828ff3f939d2dbdd4f318b5f1f",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06155",
+      "sz_decimals": 0,
+      "expected_units": 61550,
+      "height": 1189229989,
+      "signer": "0xa23b4556090260828ff3f939d2dbdd4f318b5f1f",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229989,
+      "signer": "0xa23b4556090260828ff3f939d2dbdd4f318b5f1f",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.63",
+      "sz_decimals": 2,
+      "expected_units": 11626300,
+      "height": 1189229989,
+      "signer": "0xa23b4556090260828ff3f939d2dbdd4f318b5f1f",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229989,
+      "signer": "0xa23b4556090260828ff3f939d2dbdd4f318b5f1f",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.065",
+      "sz_decimals": 4,
+      "expected_units": 243306,
+      "height": 1189229989,
+      "signer": "0xa23b4556090260828ff3f939d2dbdd4f318b5f1f",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061215",
+      "sz_decimals": 0,
+      "expected_units": 61215,
+      "height": 1189229989,
+      "signer": "0xa23b4556090260828ff3f939d2dbdd4f318b5f1f",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229989,
+      "signer": "0xa23b4556090260828ff3f939d2dbdd4f318b5f1f",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.355",
+      "sz_decimals": 2,
+      "expected_units": 11623550,
+      "height": 1189229989,
+      "signer": "0xa23b4556090260828ff3f939d2dbdd4f318b5f1f",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82886.4",
+      "sz_decimals": 5,
+      "expected_units": 828864,
+      "height": 1189229990,
+      "signer": "0x15458aed3c7a49b215fbfa863c6ff550c31e1a31",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.13",
+      "sz_decimals": 4,
+      "expected_units": 243413,
+      "height": 1189229990,
+      "signer": "0x15458aed3c7a49b215fbfa863c6ff550c31e1a31",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06155",
+      "sz_decimals": 0,
+      "expected_units": 61550,
+      "height": 1189229990,
+      "signer": "0x15458aed3c7a49b215fbfa863c6ff550c31e1a31",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229990,
+      "signer": "0x15458aed3c7a49b215fbfa863c6ff550c31e1a31",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.63",
+      "sz_decimals": 2,
+      "expected_units": 11626300,
+      "height": 1189229990,
+      "signer": "0x15458aed3c7a49b215fbfa863c6ff550c31e1a31",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229990,
+      "signer": "0x15458aed3c7a49b215fbfa863c6ff550c31e1a31",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.035",
+      "sz_decimals": 4,
+      "expected_units": 243304,
+      "height": 1189229990,
+      "signer": "0x15458aed3c7a49b215fbfa863c6ff550c31e1a31",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061215",
+      "sz_decimals": 0,
+      "expected_units": 61215,
+      "height": 1189229990,
+      "signer": "0x15458aed3c7a49b215fbfa863c6ff550c31e1a31",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229990,
+      "signer": "0x15458aed3c7a49b215fbfa863c6ff550c31e1a31",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.355",
+      "sz_decimals": 2,
+      "expected_units": 11623550,
+      "height": 1189229990,
+      "signer": "0x15458aed3c7a49b215fbfa863c6ff550c31e1a31",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82886.4",
+      "sz_decimals": 5,
+      "expected_units": 828864,
+      "height": 1189229990,
+      "signer": "0xd6a72f04b9868d5d6050376d5d7b729f47305cec",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.13",
+      "sz_decimals": 4,
+      "expected_units": 243413,
+      "height": 1189229990,
+      "signer": "0xd6a72f04b9868d5d6050376d5d7b729f47305cec",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06155",
+      "sz_decimals": 0,
+      "expected_units": 61550,
+      "height": 1189229990,
+      "signer": "0xd6a72f04b9868d5d6050376d5d7b729f47305cec",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229990,
+      "signer": "0xd6a72f04b9868d5d6050376d5d7b729f47305cec",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.63",
+      "sz_decimals": 2,
+      "expected_units": 11626300,
+      "height": 1189229990,
+      "signer": "0xd6a72f04b9868d5d6050376d5d7b729f47305cec",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229990,
+      "signer": "0xd6a72f04b9868d5d6050376d5d7b729f47305cec",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.035",
+      "sz_decimals": 4,
+      "expected_units": 243304,
+      "height": 1189229990,
+      "signer": "0xd6a72f04b9868d5d6050376d5d7b729f47305cec",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061215",
+      "sz_decimals": 0,
+      "expected_units": 61215,
+      "height": 1189229990,
+      "signer": "0xd6a72f04b9868d5d6050376d5d7b729f47305cec",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229990,
+      "signer": "0xd6a72f04b9868d5d6050376d5d7b729f47305cec",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.355",
+      "sz_decimals": 2,
+      "expected_units": 11623550,
+      "height": 1189229990,
+      "signer": "0xd6a72f04b9868d5d6050376d5d7b729f47305cec",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82884.3",
+      "sz_decimals": 5,
+      "expected_units": 828843,
+      "height": 1189229991,
+      "signer": "0xeb544ceea5f9d387742d4ccec40131f82258985b",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.07",
+      "sz_decimals": 4,
+      "expected_units": 243407,
+      "height": 1189229991,
+      "signer": "0xeb544ceea5f9d387742d4ccec40131f82258985b",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06155",
+      "sz_decimals": 0,
+      "expected_units": 61550,
+      "height": 1189229991,
+      "signer": "0xeb544ceea5f9d387742d4ccec40131f82258985b",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229991,
+      "signer": "0xeb544ceea5f9d387742d4ccec40131f82258985b",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.53",
+      "sz_decimals": 2,
+      "expected_units": 11625300,
+      "height": 1189229991,
+      "signer": "0xeb544ceea5f9d387742d4ccec40131f82258985b",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229991,
+      "signer": "0xeb544ceea5f9d387742d4ccec40131f82258985b",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.035",
+      "sz_decimals": 4,
+      "expected_units": 243304,
+      "height": 1189229991,
+      "signer": "0xeb544ceea5f9d387742d4ccec40131f82258985b",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061215",
+      "sz_decimals": 0,
+      "expected_units": 61215,
+      "height": 1189229991,
+      "signer": "0xeb544ceea5f9d387742d4ccec40131f82258985b",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229991,
+      "signer": "0xeb544ceea5f9d387742d4ccec40131f82258985b",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.355",
+      "sz_decimals": 2,
+      "expected_units": 11623550,
+      "height": 1189229991,
+      "signer": "0xeb544ceea5f9d387742d4ccec40131f82258985b",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82884.3",
+      "sz_decimals": 5,
+      "expected_units": 828843,
+      "height": 1189229991,
+      "signer": "0x48f1da3e3ec2814fbb3dcf57125001089b067402",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2434.1",
+      "sz_decimals": 4,
+      "expected_units": 243410,
+      "height": 1189229991,
+      "signer": "0x48f1da3e3ec2814fbb3dcf57125001089b067402",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06155",
+      "sz_decimals": 0,
+      "expected_units": 61550,
+      "height": 1189229991,
+      "signer": "0x48f1da3e3ec2814fbb3dcf57125001089b067402",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.865",
+      "sz_decimals": 2,
+      "expected_units": 1058650,
+      "height": 1189229991,
+      "signer": "0x48f1da3e3ec2814fbb3dcf57125001089b067402",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.5275",
+      "sz_decimals": 2,
+      "expected_units": 11625275,
+      "height": 1189229991,
+      "signer": "0x48f1da3e3ec2814fbb3dcf57125001089b067402",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82855.45",
+      "sz_decimals": 5,
+      "expected_units": 828554,
+      "height": 1189229991,
+      "signer": "0x48f1da3e3ec2814fbb3dcf57125001089b067402",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.035",
+      "sz_decimals": 4,
+      "expected_units": 243304,
+      "height": 1189229991,
+      "signer": "0x48f1da3e3ec2814fbb3dcf57125001089b067402",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061215",
+      "sz_decimals": 0,
+      "expected_units": 61215,
+      "height": 1189229991,
+      "signer": "0x48f1da3e3ec2814fbb3dcf57125001089b067402",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.815",
+      "sz_decimals": 2,
+      "expected_units": 1058150,
+      "height": 1189229991,
+      "signer": "0x48f1da3e3ec2814fbb3dcf57125001089b067402",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.355",
+      "sz_decimals": 2,
+      "expected_units": 11623550,
+      "height": 1189229991,
+      "signer": "0x48f1da3e3ec2814fbb3dcf57125001089b067402",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82872.9",
+      "sz_decimals": 5,
+      "expected_units": 828729,
+      "height": 1189229993,
+      "signer": "0xabcdeff4b3727b83a23697500eef089020df2cd2",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.78",
+      "sz_decimals": 4,
+      "expected_units": 243378,
+      "height": 1189229993,
+      "signer": "0xabcdeff4b3727b83a23697500eef089020df2cd2",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06155",
+      "sz_decimals": 0,
+      "expected_units": 61550,
+      "height": 1189229993,
+      "signer": "0xabcdeff4b3727b83a23697500eef089020df2cd2",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.845",
+      "sz_decimals": 2,
+      "expected_units": 1058450,
+      "height": 1189229993,
+      "signer": "0xabcdeff4b3727b83a23697500eef089020df2cd2",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.485",
+      "sz_decimals": 2,
+      "expected_units": 11624850,
+      "height": 1189229993,
+      "signer": "0xabcdeff4b3727b83a23697500eef089020df2cd2",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82846.05",
+      "sz_decimals": 5,
+      "expected_units": 828460,
+      "height": 1189229993,
+      "signer": "0xabcdeff4b3727b83a23697500eef089020df2cd2",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.005",
+      "sz_decimals": 4,
+      "expected_units": 243300,
+      "height": 1189229993,
+      "signer": "0xabcdeff4b3727b83a23697500eef089020df2cd2",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061215",
+      "sz_decimals": 0,
+      "expected_units": 61215,
+      "height": 1189229993,
+      "signer": "0xabcdeff4b3727b83a23697500eef089020df2cd2",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.805",
+      "sz_decimals": 2,
+      "expected_units": 1058050,
+      "height": 1189229993,
+      "signer": "0xabcdeff4b3727b83a23697500eef089020df2cd2",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.255",
+      "sz_decimals": 2,
+      "expected_units": 11622550,
+      "height": 1189229993,
+      "signer": "0xabcdeff4b3727b83a23697500eef089020df2cd2",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82868.9",
+      "sz_decimals": 5,
+      "expected_units": 828689,
+      "height": 1189230000,
+      "signer": "0xeeee86f718f9da3e7250624a460f6ea710e9c006",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2433.67",
+      "sz_decimals": 4,
+      "expected_units": 243367,
+      "height": 1189230000,
+      "signer": "0xeeee86f718f9da3e7250624a460f6ea710e9c006",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.06154",
+      "sz_decimals": 0,
+      "expected_units": 61540,
+      "height": 1189230000,
+      "signer": "0xeeee86f718f9da3e7250624a460f6ea710e9c006",
+      "kind": "Spot"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.845",
+      "sz_decimals": 2,
+      "expected_units": 1058450,
+      "height": 1189230000,
+      "signer": "0xeeee86f718f9da3e7250624a460f6ea710e9c006",
+      "kind": "Spot"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.3125",
+      "sz_decimals": 2,
+      "expected_units": 11623125,
+      "height": 1189230000,
+      "signer": "0xeeee86f718f9da3e7250624a460f6ea710e9c006",
+      "kind": "Spot"
+    },
+    {
+      "coin": "BTC",
+      "wire": "82838.65",
+      "sz_decimals": 5,
+      "expected_units": 828386,
+      "height": 1189230000,
+      "signer": "0xeeee86f718f9da3e7250624a460f6ea710e9c006",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ETH",
+      "wire": "2432.545",
+      "sz_decimals": 4,
+      "expected_units": 243254,
+      "height": 1189230000,
+      "signer": "0xeeee86f718f9da3e7250624a460f6ea710e9c006",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SAND",
+      "wire": "0.061215",
+      "sz_decimals": 0,
+      "expected_units": 61215,
+      "height": 1189230000,
+      "signer": "0xeeee86f718f9da3e7250624a460f6ea710e9c006",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "SOL",
+      "wire": "105.785",
+      "sz_decimals": 2,
+      "expected_units": 1057850,
+      "height": 1189230000,
+      "signer": "0xeeee86f718f9da3e7250624a460f6ea710e9c006",
+      "kind": "ExternalPerp"
+    },
+    {
+      "coin": "ZEC",
+      "wire": "1162.005",
+      "sz_decimals": 2,
+      "expected_units": 11620050,
+      "height": 1189230000,
+      "signer": "0xeeee86f718f9da3e7250624a460f6ea710e9c006",
+      "kind": "ExternalPerp"
+    }
+  ],
+  "selectors": [
+    {
+      "coin": "BTC",
+      "sz_decimals": 5,
+      "submitted_wire": "82859",
+      "cached_reference_units": 828576,
+      "book_units": [
+        828310,
+        828320,
+        828320
+      ],
+      "expected_units": 828576
+    },
+    {
+      "coin": "ETH",
+      "sz_decimals": 4,
+      "submitted_wire": "2433.1",
+      "cached_reference_units": 243340,
+      "book_units": [
+        243260,
+        243270,
+        243310
+      ],
+      "expected_units": 243310
+    },
+    {
+      "coin": "SOL",
+      "sz_decimals": 2,
+      "submitted_wire": "105.82",
+      "cached_reference_units": 1058200,
+      "book_units": [
+        1057800,
+        1057900,
+        1058000
+      ],
+      "expected_units": 1058200
+    },
+    {
+      "coin": "SAND",
+      "sz_decimals": 0,
+      "submitted_wire": "0.06098",
+      "cached_reference_units": 60963,
+      "book_units": [
+        60954,
+        60987,
+        60960
+      ],
+      "expected_units": 60963
+    },
+    {
+      "coin": "ZEC",
+      "sz_decimals": 2,
+      "submitted_wire": "1162.7",
+      "cached_reference_units": 11629267,
+      "book_units": [
+        11622000,
+        11623000,
+        11625000
+      ],
+      "expected_units": 11627000
+    }
+  ],
+  "caches": [
+    {
+      "coin": "BTC",
+      "kind": "Spot",
+      "block_ts_ms": 1792391841000,
+      "previous_values": [
+        828963,
+        828908,
+        828963,
+        828908,
+        828908,
+        828908,
+        828908,
+        828908,
+        828908,
+        828908,
+        828908,
+        828908,
+        828908,
+        828908,
+        828908,
+        828908,
+        828932,
+        828908,
+        828908,
+        828908,
+        828994,
+        828908
+      ],
+      "expected_units": 828908
+    },
+    {
+      "coin": "BTC",
+      "kind": "ExternalPerp",
+      "block_ts_ms": 1792391841000,
+      "previous_values": [
+        828598,
+        828554,
+        828738,
+        828554,
+        828554,
+        828554,
+        828554,
+        828554,
+        828554,
+        828554,
+        828554,
+        828554,
+        828554,
+        828598,
+        828554,
+        828554,
+        828598,
+        828554,
+        828554,
+        828554,
+        828738,
+        828598
+      ],
+      "expected_units": 828554
+    },
+    {
+      "coin": "ETH",
+      "kind": "Spot",
+      "block_ts_ms": 1792391841000,
+      "previous_values": [
+        243476,
+        243422,
+        243484,
+        243459,
+        243459,
+        243459,
+        243431,
+        243459,
+        243422,
+        243422,
+        243457,
+        243457,
+        243422,
+        243461,
+        243431,
+        243459,
+        243473,
+        243431,
+        243459,
+        243431,
+        243486,
+        243461
+      ],
+      "expected_units": 243459
+    },
+    {
+      "coin": "ETH",
+      "kind": "ExternalPerp",
+      "block_ts_ms": 1792391841000,
+      "previous_values": [
+        243368,
+        243323,
+        243368,
+        243331,
+        243331,
+        243331,
+        243323,
+        243328,
+        243323,
+        243323,
+        243331,
+        243331,
+        243323,
+        243368,
+        243323,
+        243331,
+        243368,
+        243323,
+        243331,
+        243323,
+        243381,
+        243368
+      ],
+      "expected_units": 243331
+    },
+    {
+      "coin": "SOL",
+      "kind": "Spot",
+      "block_ts_ms": 1792391841000,
+      "previous_values": [
+        1058850,
+        1058650,
+        1058950,
+        1058750,
+        1058750,
+        1058750,
+        1058650,
+        1058750,
+        1058650,
+        1058650,
+        1058750,
+        1058750,
+        1058650,
+        1058850,
+        1058650,
+        1058750,
+        1058850,
+        1058650,
+        1058750,
+        1058650,
+        1059002,
+        1058850
+      ],
+      "expected_units": 1058750
+    },
+    {
+      "coin": "SOL",
+      "kind": "ExternalPerp",
+      "block_ts_ms": 1792391841000,
+      "previous_values": [
+        1058350,
+        1058150,
+        1058550,
+        1058350,
+        1058250,
+        1058250,
+        1058150,
+        1058250,
+        1058150,
+        1058150,
+        1058250,
+        1058250,
+        1058150,
+        1058350,
+        1058150,
+        1058350,
+        1058350,
+        1058150,
+        1058250,
+        1058150,
+        1058550,
+        1058350
+      ],
+      "expected_units": 1058250
+    },
+    {
+      "coin": "SAND",
+      "kind": "Spot",
+      "block_ts_ms": 1792391841000,
+      "previous_values": [
+        61515,
+        61540,
+        61510,
+        61525,
+        61515,
+        61515,
+        61515,
+        61515,
+        61525,
+        61525,
+        61515,
+        61515,
+        61525,
+        61515,
+        61520,
+        61525,
+        61515,
+        61520,
+        61515,
+        61515,
+        61510,
+        61515
+      ],
+      "expected_units": 61515
+    },
+    {
+      "coin": "SAND",
+      "kind": "ExternalPerp",
+      "block_ts_ms": 1792391841000,
+      "previous_values": [
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61155,
+        61275,
+        61155
+      ],
+      "expected_units": 61155
+    },
+    {
+      "coin": "ZEC",
+      "kind": "Spot",
+      "block_ts_ms": 1792391841000,
+      "previous_values": [
+        11630325,
+        11627575,
+        11630693,
+        11629775,
+        11629600,
+        11629625,
+        11628125,
+        11629650,
+        11627425,
+        11627350,
+        11629125,
+        11629650,
+        11627625,
+        11630150,
+        11627900,
+        11629772,
+        11630150,
+        11627900,
+        11629650,
+        11628125,
+        11632850,
+        11630150
+      ],
+      "expected_units": 11629637
+    },
+    {
+      "coin": "ZEC",
+      "kind": "ExternalPerp",
+      "block_ts_ms": 1792391841000,
+      "previous_values": [
+        11628250,
+        11624450,
+        11628850,
+        11626650,
+        11626450,
+        11626450,
+        11624950,
+        11626550,
+        11624450,
+        11624450,
+        11626450,
+        11626550,
+        11624450,
+        11626650,
+        11624850,
+        11626650,
+        11627850,
+        11624850,
+        11626550,
+        11624950,
+        11630450,
+        11626650
+      ],
+      "expected_units": 11626500
+    }
+  ],
+  "ema_snapshots": [
+    {
+      "coin": "BTC",
+      "raw_msoe": {
+        "num": -0.15065319275405767,
+        "denom": 371.53616242793123,
+        "decay_duration": 120.0,
+        "last_sample_time": "2026-10-19T06:37:23.290319220",
+        "n_samples": 2226392
+      }
+    },
+    {
+      "coin": "ETH",
+      "raw_msoe": {
+        "num": -0.16930081224579652,
+        "denom": 371.53616242793123,
+        "decay_duration": 120.0,
+        "last_sample_time": "2026-10-19T06:37:23.290319220",
+        "n_samples": 2226392
+      }
+    },
+    {
+      "coin": "SOL",
+      "raw_msoe": {
+        "num": -0.19387090235561216,
+        "denom": 371.53616242793123,
+        "decay_duration": 120.0,
+        "last_sample_time": "2026-10-19T06:37:23.290319220",
+        "n_samples": 2226392
+      }
+    },
+    {
+      "coin": "SAND",
+      "raw_msoe": {
+        "num": -3.3333660119946233,
+        "denom": 371.53616242793123,
+        "decay_duration": 120.0,
+        "last_sample_time": "2026-10-19T06:37:23.290319220",
+        "n_samples": 2226392
+      }
+    },
+    {
+      "coin": "ZEC",
+      "raw_msoe": {
+        "num": -0.013576574913149904,
+        "denom": 371.53616242793123,
+        "decay_duration": 120.0,
+        "last_sample_time": "2026-10-19T06:37:23.290319220",
+        "n_samples": 2226392
+      }
+    }
+  ]
+}

@@ -12,7 +12,7 @@ use super::{
     misc::MiscEvent,
     replay::MarginStates,
 };
-use crate::types::node_data::{Batch, NodeDataFill, OracleUpdateEvent};
+use crate::types::node_data::{Batch, NodeDataFill, NodeDataOrderStatus, OracleUpdateEvent};
 
 pub(crate) const PUMP: &str = "PUMP";
 /// The table of a test anchor's positions, and the coins' current table (the fixture's PUMP: 52, a 10x table).
@@ -36,6 +36,16 @@ pub(crate) fn hip3_line(block: u64, marks: &[(&str, &str)]) -> Batch<OracleUpdat
     );
     sonic_rs::from_str(&format!(
         r#"{{"local_time":"{time}","block_time":"{time}","block_number":{block},"events":[{event}]}}"#
+    ))
+    .unwrap()
+}
+
+/// A `node_order_statuses_streaming` line of block `height`: one BTC order's `status` (`canceled`, `triggered`, ...),
+/// in the field set of 2026-10-20.
+pub(crate) fn status_line(height: u64, status: &str, user: Address, oid: u64, cloid: Option<&str>) -> Batch<NodeDataOrderStatus> {
+    let cloid = cloid.map_or_else(|| "null".to_string(), |cloid| format!(r#""{cloid}""#));
+    sonic_rs::from_str(&format!(
+        r#"{{"local_time":"2026-10-19T06:40:00.6","block_time":"2026-10-19T06:40:00.5","block_number":{height},"events":[{{"time":"2026-10-19T06:40:00.5","user":"{user:#x}","hash":null,"builder":null,"status":"{status}","order":{{"coin":"BTC","side":"B","limitPx":"82850.0","sz":"0.0","oid":{oid},"timestamp":1,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"0.001","tif":"Alo","cloid":{cloid}}}}}]}}"#
     ))
     .unwrap()
 }

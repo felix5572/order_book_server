@@ -6,6 +6,8 @@
 //! Prices are exact decimals; sizes are printed from binary floating point like the fills' (`2460032.6000000001`, W,
 //! block 1190760017 on bm 2026-10-20), so they go through the fills' rule, `size::parse_size_raw`.
 
+use std::collections::BTreeMap;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
@@ -45,7 +47,54 @@ enum BookChange {
     Remove,
 }
 
+/// What a diff line does, as the execution points read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiffKind {
+    New,
+    /// `to_zero`: the order's remaining size went to zero (a fill took it all; its `remove` follows).
+    Update { to_zero: bool },
+    Remove,
+}
+
+/// The best bid and ask; `None` for an empty side.
+pub(crate) type BestPrices = (Option<u64>, Option<u64>);
+
+/// What applying a diff did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Applied {
+    /// It moved the book of this asset index.
+    Book(usize),
+    /// A spot, outcome or HIP-3 market: the marks keep no book of it.
+    OtherMarket,
+    /// A main-dex perp outside the seed's universe (listed since).
+    UnknownCoin,
+}
+
 impl BookDiff {
+    pub(crate) const fn oid(&self) -> u64 {
+        self.oid
+    }
+
+    pub(crate) fn coin(&self) -> &str {
+        &self.coin
+    }
+
+    /// An update's (from, to) sizes as the node printed them.
+    pub(crate) fn update_sizes(&self) -> Option<(&str, &str)> {
+        match &self.change {
+            BookChange::Update { from, to } => Some((from, to)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn kind(&self) -> DiffKind {
+        match &self.change {
+            BookChange::New { .. } => DiffKind::New,
+            BookChange::Update { to, .. } => DiffKind::Update { to_zero: to.bytes().all(|byte| matches!(byte, b'0' | b'.')) },
+            BookChange::Remove => DiffKind::Remove,
+        }
+    }
+
     pub(crate) fn of(diff: &NodeDataOrderDiff) -> Result<Self, String> {
         let change = match diff.diff() {
             OrderDiff::New { sz, .. } => BookChange::New { size: sz.as_str().into() },
@@ -61,6 +110,37 @@ impl BookDiff {
 struct AssetBook {
     size_decimals: u32,
     orders: FxHashMap<u64, RestingOrder>,
+    /// Resting orders per price level: a level stays while any order rests there, whatever its size (research
+    /// `execution_point_replay.py` `Books`).
+    bids: BTreeMap<u64, u32>,
+    asks: BTreeMap<u64, u32>,
+}
+
+impl AssetBook {
+    const fn levels(&mut self, side: Side) -> &mut BTreeMap<u64, u32> {
+        match side {
+            Side::Bid => &mut self.bids,
+            Side::Ask => &mut self.asks,
+        }
+    }
+
+    fn add_level(&mut self, order: &RestingOrder) {
+        *self.levels(order.side).entry(order.limit_px).or_default() += 1;
+    }
+
+    fn drop_level(&mut self, order: &RestingOrder) {
+        let levels = self.levels(order.side);
+        if let Some(count) = levels.get_mut(&order.limit_px) {
+            *count -= 1;
+            if *count == 0 {
+                levels.remove(&order.limit_px);
+            }
+        }
+    }
+
+    fn best(&self) -> BestPrices {
+        (self.bids.last_key_value().map(|(px, _)| *px), self.asks.first_key_value().map(|(px, _)| *px))
+    }
 }
 
 /// Every main-dex perp's resting orders, by asset index.
@@ -101,16 +181,37 @@ impl NativeBooks {
         let mut assets = Vec::with_capacity(native.assets.len());
         for (index, asset) in native.assets.into_iter().enumerate() {
             by_coin.insert(asset.name.into_boxed_str(), index);
-            let orders = asset.orders.into_iter().map(|order| (order.oid, order)).collect();
-            assets.push(AssetBook { size_decimals: asset.size_decimals, orders });
+            let mut book = AssetBook {
+                size_decimals: asset.size_decimals,
+                orders: FxHashMap::default(),
+                bids: BTreeMap::new(),
+                asks: BTreeMap::new(),
+            };
+            for order in asset.orders {
+                book.add_level(&order);
+                book.orders.insert(order.oid, order);
+            }
+            assets.push(book);
         }
         Self { by_coin, assets }
     }
 
-    /// Applies one diff; `Ok(false)` for a coin outside the universe (listed since the seed).
-    pub(crate) fn apply(&mut self, diff: &BookDiff) -> Result<bool, String> {
+    /// The asset index of a main-dex coin of the universe.
+    pub(crate) fn asset(&self, coin: &str) -> Option<usize> {
+        self.by_coin.get(coin).copied()
+    }
+
+    pub(crate) fn best(&self, asset: usize) -> BestPrices {
+        self.assets[asset].best()
+    }
+
+    /// Applies one diff.
+    pub(crate) fn apply(&mut self, diff: &BookDiff) -> Result<Applied, String> {
+        if !is_main_perp(&diff.coin) {
+            return Ok(Applied::OtherMarket);
+        }
         let Some(&index) = self.by_coin.get(&diff.coin) else {
-            return Ok(false);
+            return Ok(Applied::UnknownCoin);
         };
         let book = &mut self.assets[index];
         let context = |err: String| format!("{} oid {}: {err}", diff.coin, diff.oid);
@@ -122,9 +223,11 @@ impl NativeBooks {
         match &diff.change {
             BookChange::New { size: placed } => {
                 let order = RestingOrder { oid: diff.oid, side: diff.side, limit_px, remaining: size(placed)? };
-                if book.orders.insert(diff.oid, order).is_some() {
+                if book.orders.contains_key(&diff.oid) {
                     return Err(context("a new order already rests".to_string()));
                 }
+                book.add_level(&order);
+                book.orders.insert(diff.oid, order);
             }
             BookChange::Update { from, to } => {
                 let (from, to) = (size(from)?, size(to)?);
@@ -136,10 +239,12 @@ impl NativeBooks {
             }
             BookChange::Remove => {
                 held(book, diff, limit_px).map_err(context)?;
-                book.orders.remove(&diff.oid);
+                if let Some(order) = book.orders.remove(&diff.oid) {
+                    book.drop_level(&order);
+                }
             }
         }
-        Ok(true)
+        Ok(Applied::Book(index))
     }
 
     /// Order by order against a checkpoint's books.
@@ -231,8 +336,9 @@ pub(crate) mod tests {
         let mut native = native_seed();
         native.assets[1].size_decimals = 1;
         let mut books = NativeBooks::seeded(native);
-        assert_eq!(books.apply(&diff("PUMP", 5, "A", "0.004", r#"{"new":{"sz":"2460032.6000000001"}}"#)), Ok(true));
-        assert_eq!(books.apply(&diff("PUMP", 5, "A", "0.004", r#"{"update":{"origSz":"2460032.6","newSz":"2460032.5999999996"}}"#)), Ok(true));
+        assert_eq!(books.apply(&diff("PUMP", 5, "A", "0.004", r#"{"new":{"sz":"2460032.6000000001"}}"#)), Ok(Applied::Book(1)));
+        let update = diff("PUMP", 5, "A", "0.004", r#"{"update":{"origSz":"2460032.6","newSz":"2460032.5999999996"}}"#);
+        assert_eq!(books.apply(&update), Ok(Applied::Book(1)));
         assert_eq!(books.assets[1].orders[&5].remaining, 24_600_326);
     }
 
@@ -245,10 +351,16 @@ pub(crate) mod tests {
     #[test]
     fn diffs_move_the_books_and_a_checkpoint_checks_them() {
         let mut books = NativeBooks::seeded(native_seed());
-        assert_eq!(books.apply(&diff("BTC", 11, "B", "82860.0", r#"{"new":{"sz":"0.002"}}"#)), Ok(true));
-        assert_eq!(books.apply(&diff("BTC", 9, "A", "82870.0", r#"{"update":{"origSz":"0.00005","newSz":"0.00002"}}"#)), Ok(true));
-        assert_eq!(books.apply(&diff("BTC", 7, "B", "82850.0", r#""remove""#)), Ok(true));
-        assert_eq!(books.apply(&diff("NEW", 1, "B", "1.0", r#""remove""#)), Ok(false), "listed since the seed");
+        assert_eq!(books.best(0), (Some(828_500), Some(828_700)));
+        assert_eq!(books.apply(&diff("BTC", 11, "B", "82860.0", r#"{"new":{"sz":"0.002"}}"#)), Ok(Applied::Book(0)));
+        assert_eq!(books.best(0), (Some(828_600), Some(828_700)));
+        assert_eq!(books.apply(&diff("BTC", 9, "A", "82870.0", r#"{"update":{"origSz":"0.00005","newSz":"0.00002"}}"#)), Ok(Applied::Book(0)));
+        assert_eq!(books.apply(&diff("BTC", 7, "B", "82850.0", r#""remove""#)), Ok(Applied::Book(0)));
+        assert_eq!(books.apply(&diff("NEW", 1, "B", "1.0", r#""remove""#)), Ok(Applied::UnknownCoin), "listed since the seed");
+        assert_eq!(books.apply(&diff("xyz:TSLA", 1, "B", "1.0", r#""remove""#)), Ok(Applied::OtherMarket));
+        assert_eq!(books.apply(&diff("BTC", 9, "A", "82870.0", r#""remove""#)), Ok(Applied::Book(0)));
+        assert_eq!(books.best(0), (Some(828_600), None), "the ask side emptied");
+        assert_eq!(books.apply(&diff("BTC", 9, "A", "82870.0", r#"{"new":{"sz":"0.00002"}}"#)), Ok(Applied::Book(0)));
         let mut later = native_seed();
         later.assets[0].orders = vec![
             RestingOrder { oid: 9, side: Side::Ask, limit_px: 828_700, remaining: 2 },

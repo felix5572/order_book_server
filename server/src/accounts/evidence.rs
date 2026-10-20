@@ -13,7 +13,7 @@ use super::{
     book::{RowMismatch, SilentChange},
     liquidation::LiquidationPx,
     marks::{
-        Hip3Mismatch,
+        AmbiguousCut, Hip3Mismatch,
         book::BookMismatch,
         seed::{RestingOrder, StoredMark},
     },
@@ -149,6 +149,12 @@ pub(crate) fn replay_row_mismatch_json(mismatch: &RowMismatch, anchor_from: Opti
     })
 }
 
+/// A price action of block `height` whose cut is not unique (review 000444 r1 P3): it read the book after `lo` lines.
+pub(crate) fn ambiguous_cut_json(height: u64, cut: &AmbiguousCut) -> serde_json::Value {
+    let (bundle, category, position) = cut.rank;
+    json!({"kind": "nodeMarkAmbiguousCut", "height": height, "rank": [bundle, category, position], "lo": cut.lo, "hi": cut.hi})
+}
+
 /// A HIP-3 coin whose mark in the marks' snapshot differs from the checkpoint's (design 000439 r2 revision 2).
 pub(crate) fn hip3_mark_mismatch_json(mismatch: &Hip3Mismatch, seed_from: Option<u64>, seed_to: u64) -> serde_json::Value {
     let mark = |mark: Option<StoredMark>| mark.map(|mark| json!({"px": mark.px, "timeNs": mark.time_ns}));
@@ -161,6 +167,11 @@ pub(crate) fn hip3_mark_mismatch_json(mismatch: &Hip3Mismatch, seed_from: Option
         "replayed": mark(mismatch.replayed),
         "checkpoint": mark(mismatch.checkpoint),
     })
+}
+
+/// A main-dex price field where the marks' snapshot and the checkpoint differ (design 000439 r2 batch 2).
+pub(crate) fn price_mismatch_json(coin: &str, field: &str, seed_from: Option<u64>, seed_to: u64) -> serde_json::Value {
+    json!({"kind": "nodePriceMismatch", "seedFrom": seed_from, "seedTo": seed_to, "coin": coin, "field": field})
 }
 
 /// A main-dex resting order where the marks' snapshot and the checkpoint differ (design 000439 r2 batch 2).
