@@ -80,8 +80,11 @@ pub(crate) enum LedgerDelta {
     Withdraw,
     /// `vaultDeposit`: the depositor's main dex to the vault's.
     VaultDeposit { vault: Address, usdc_wei: i64 },
-    /// `vaultWithdraw`: the vault pays `requestedUsd`, the user receives `netWithdrawnUsd`.
-    VaultWithdraw { user: Address, vault: Address, requested_wei: i64, net_withdrawn_wei: i64 },
+    /// `vaultWithdraw`: the user receives `netWithdrawnUsd`; the vault pays it plus `commission` (the leader's, credited by
+    /// its own `vaultLeaderCommission`), not `closingCost`, which its closing fills of the block already carry
+    /// (`requestedUsd` = net + commission + closingCost; bm: vault `0xa1b6d8ef…` 2026-10-20, closing cost; vault
+    /// `0x1e37a337…` block 1189214090, commission, review 000436 r1).
+    VaultWithdraw { user: Address, vault: Address, commission_wei: i64, net_withdrawn_wei: i64 },
     /// `vaultLeaderCommission`: into the leader's main dex.
     VaultLeaderCommission { user: Address, usdc_wei: i64 },
     /// `rewardsClaim`: into spot.
@@ -152,8 +155,8 @@ struct WireDelta {
     fee_token: Option<String>,
     usdc: Option<String>,
     to_perp: Option<bool>,
-    requested_usd: Option<String>,
     net_withdrawn_usd: Option<String>,
+    commission: Option<String>,
 }
 
 impl WireDelta {
@@ -226,7 +229,7 @@ impl TryFrom<WireDelta> for LedgerDelta {
             "vaultWithdraw" => Self::VaultWithdraw {
                 user: user()?,
                 vault: wire.need(wire.vault, "vault")?,
-                requested_wei: wire.usdc_wei(wire.requested_usd.as_ref(), "requestedUsd")?,
+                commission_wei: wire.usdc_wei(wire.commission.as_ref(), "commission")?,
                 net_withdrawn_wei: wire.usdc_wei(wire.net_withdrawn_usd.as_ref(), "netWithdrawnUsd")?,
             },
             "vaultLeaderCommission" => Self::VaultLeaderCommission { user: user()?, usdc_wei: usdc()? },
@@ -402,7 +405,7 @@ mod tests {
         let withdraw = LedgerDelta::VaultWithdraw {
             user: address("0xa5f189f99499c9d7aefc1ae9fdc24e5d2667f9ac"),
             vault: address("0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7"),
-            requested_wei: 2_314_748_040_800,
+            commission_wei: 0,
             net_withdrawn_wei: 2_314_747_295_600,
         };
         assert_eq!(delta(&[a, b], cases[5].0), Ok(withdraw));

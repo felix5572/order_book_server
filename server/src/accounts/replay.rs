@@ -148,9 +148,10 @@ pub(crate) enum StopReason {
     NonUsdcCollateral,
     /// A unified account's `spotTransfer` of another token with a USDC fee (r3 revision 3).
     NonUsdcSpotTransferFee,
-    /// A USDC fee on a transfer out of spot by an account whose pools do not hold spot: the node may take it from a
-    /// perp dex (bm 2026-10-20, 1190540000→1190550000: `0xb4dca8c9…` sent all 278 USDC of spot, the 0.001566 fee left
-    /// the main dex), which spot outside the pools cannot tell.
+    /// A USDC fee on a transfer from or to spot by an account whose pools do not hold spot: the node takes it from either
+    /// side (bm 2026-10-20: `0xb4dca8c9…` sent all 278 USDC of spot and the 0.001566 fee left the main dex;
+    /// `0x04447ced…` sent 20,000 USDC from the main dex to spot and the 0.001605 fee did not), which spot outside the
+    /// pools cannot tell.
     SpotFeeSource,
     /// A unified account's spot fill of a pair not quoted in USDC.
     NonUsdcSpotFill,
@@ -443,9 +444,9 @@ fn apply_funding(account: &mut AccountMargin, markets: &Markets, coin: &str, amo
     Ok(())
 }
 
-/// A USDC fee charged at spot by an account whose pools do not hold spot: which balance pays it is not known.
-fn spot_fee_source(account: &AccountMargin, source: &Balance, usdc_fee_wei: i64) -> Applied {
-    if usdc_fee_wei != 0 && *source == Balance::Spot && !account.unified() { Err(StopReason::SpotFeeSource) } else { Ok(()) }
+/// A USDC fee on a transfer touching spot, by an account whose pools do not hold spot: which balance pays it is not known.
+const fn spot_fee_source(account: &AccountMargin, touches_spot: bool, usdc_fee_wei: i64) -> Applied {
+    if usdc_fee_wei != 0 && touches_spot && !account.unified() { Err(StopReason::SpotFeeSource) } else { Ok(()) }
 }
 
 /// `user` is the account the event is applied to; its role (sender, receiver, vault) comes from the delta.
@@ -453,7 +454,7 @@ fn apply_ledger(account: &mut AccountMargin, markets: &Markets, user: Address, d
     match delta {
         LedgerDelta::Send { user: sender, destination, source, destination_balance, usdc_wei, usdc_fee_wei } => {
             if user == *sender {
-                spot_fee_source(account, source, *usdc_fee_wei)?;
+                spot_fee_source(account, *source == Balance::Spot || *destination_balance == Balance::Spot, *usdc_fee_wei)?;
                 // another token's send takes only its USDC fee
                 let amount = usdc_wei.as_ref().map_or(0, |amount| *amount);
                 add_balance(account, markets, source, -(amount + usdc_fee_wei))?;
@@ -466,7 +467,7 @@ fn apply_ledger(account: &mut AccountMargin, markets: &Markets, user: Address, d
         }
         LedgerDelta::SpotTransfer { user: sender, destination, usdc_wei, usdc_fee_wei } => {
             if user == *sender {
-                spot_fee_source(account, &Balance::Spot, *usdc_fee_wei)?;
+                spot_fee_source(account, true, *usdc_fee_wei)?;
                 match usdc_wei {
                     Some(amount) => account.add_spot(-(amount + usdc_fee_wei)),
                     None if *usdc_fee_wei != 0 => return Err(StopReason::NonUsdcSpotTransferFee),
@@ -502,9 +503,9 @@ fn apply_ledger(account: &mut AccountMargin, markets: &Markets, user: Address, d
         }
         LedgerDelta::Deposit { usdc_wei } => add_main(account, markets, *usdc_wei)?,
         LedgerDelta::VaultDeposit { vault, usdc_wei } => add_main(account, markets, if user == *vault { *usdc_wei } else { -usdc_wei })?,
-        LedgerDelta::VaultWithdraw { user: withdrawer, vault, requested_wei, net_withdrawn_wei } => {
+        LedgerDelta::VaultWithdraw { user: withdrawer, vault, commission_wei, net_withdrawn_wei } => {
             if user == *vault {
-                add_main(account, markets, -requested_wei)?;
+                add_main(account, markets, -(net_withdrawn_wei + commission_wei))?;
             }
             if user == *withdrawer {
                 add_main(account, markets, *net_withdrawn_wei)?;
@@ -778,16 +779,26 @@ pub(crate) mod tests {
         standard.apply(5, user(HOLDER), &send(HOLDER, main(), ISOLATED, Balance::Dex("xyz".to_string()), Some(100), 7));
         standard.apply(5, user(ISOLATED), &send(HOLDER, main(), ISOLATED, Balance::Dex("xyz".to_string()), Some(100), 7));
         standard.apply(6, user(HOLDER), &send(HOLDER, Balance::Spot, HOLDER, main(), Some(50), 0));
-        standard.apply(7, user(HOLDER), &send(HOLDER, main(), PORTFOLIO, Balance::Spot, None, 9));
+        standard.apply(7, user(HOLDER), &send(HOLDER, main(), PORTFOLIO, main(), None, 9));
         let class = AccountEvent::Ledger(LedgerDelta::ClassTransfer { usdc_wei: 1_000, to_perp: false });
         standard.apply(8, user(HOLDER), &class);
         let vault = AccountEvent::Ledger(LedgerDelta::VaultDeposit { vault: user(ISOLATED), usdc_wei: 30 });
         standard.apply(9, user(HOLDER), &vault);
         standard.apply(9, user(ISOLATED), &vault);
         standard.apply(10, user(HOLDER), &AccountEvent::Action(BlockAction::Withdraw { amount_wei: 2_000 }));
-        let main_cash = -1_200_000_000_000 - 107 + 50 - 9 - 1_000 - 30 - 2_000;
-        assert_eq!(cross(&standard, HOLDER), per_dex_pools(&[(0, main_cash), (1, 3_026_970_000)]));
-        assert_eq!(cross(&standard, ISOLATED), per_dex_pools(&[(0, 30), (1, 100)]));
+        // vault 0x1e37a337… at block 1189214090: requested 1476.092235 = net 1475.272445 + commission 0.81979
+        let withdraw = AccountEvent::Ledger(LedgerDelta::VaultWithdraw {
+            user: user(HOLDER),
+            vault: user(ISOLATED),
+            commission_wei: 81_979_000,
+            net_withdrawn_wei: 147_527_244_500,
+        });
+        standard.apply(11, user(HOLDER), &withdraw);
+        standard.apply(11, user(ISOLATED), &withdraw);
+        let main_cash = -1_200_000_000_000 - 107 + 50 - 9 - 1_000 - 30 - 2_000 + 147_527_244_500;
+        assert_eq!(cross(&standard, HOLDER), per_dex_pools(&[(0, main_cash), (1, 3_026_970_000)]), "the user gets the net amount");
+        let vault_cash = 30 - 147_609_223_500;
+        assert_eq!(cross(&standard, ISOLATED), per_dex_pools(&[(0, vault_cash), (1, 100)]), "the vault pays net plus commission");
         let mut unified = states(|_| {});
         let before = cross(&unified, HOLDER);
         unified.apply(5, user(HOLDER), &class);
@@ -807,6 +818,8 @@ pub(crate) mod tests {
             (spot_transfer(None), Some(StopReason::NonUsdcSpotTransferFee), Some(StopReason::SpotFeeSource)),
             (spot_transfer(Some(27_800_000_000)), None, Some(StopReason::SpotFeeSource)),
             (send(HOLDER, Balance::Spot, ISOLATED, Balance::Spot, None, 100), None, Some(StopReason::SpotFeeSource)),
+            (send(HOLDER, Balance::Dex(String::new()), ISOLATED, Balance::Spot, Some(100), 7), None, Some(StopReason::SpotFeeSource)),
+            (send(HOLDER, Balance::Dex(String::new()), ISOLATED, Balance::Dex(String::new()), Some(100), 7), None, None),
             (AccountEvent::Ledger(LedgerDelta::Unread("liquidation".to_string())), Some(StopReason::UnreadLedger("liquidation".to_string())), Some(StopReason::UnreadLedger("liquidation".to_string()))),
         ];
         for (event, unified_stop, per_dex_stop) in cases {
