@@ -2101,10 +2101,11 @@ mod tests {
         assert_eq!(changes["changes"][0]["position"]["positionHeight"], 1_001);
         assert_eq!(changes["changes"][0]["user"], format!("{:#x}", user(1)));
 
-        owner.anchor(anchor(1_200, &[(PUMP, 0, &[(user(1), 7)])])).await;
+        // an anchor installs once its blocks are applied (design 000433 r2 3.4): 1001 is
+        owner.anchor(anchor(1_001, &[(PUMP, 0, &[(user(1), 7)])])).await;
         let pushed = next_json(&mut ws).await["data"].clone();
         assert_eq!((pushed["kind"].as_str(), pushed["version"].as_u64()), (Some("snapshot"), Some(2)));
-        assert_eq!((pushed["anchor"]["height"].as_u64(), pushed["positions"][0]["szi"].as_str()), (Some(1_200), Some("7.0")));
+        assert_eq!((pushed["anchor"]["height"].as_u64(), pushed["positions"][0]["szi"].as_str()), (Some(1_001), Some("7.0")));
 
         owner.loss(Stream::Fills).await;
         let withdrawn = next_json(&mut ws).await["data"].clone();

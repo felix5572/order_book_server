@@ -24,11 +24,11 @@ use super::{
     blocks::{Assembly, BlockAssembler, MiscKey},
     book::{
         AccountBook, BlockActionsReport, BlockReport, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport,
-        QueryError, Stream, Touched, Unavailable,
+        QueryError, ReplayCheck, Stream, Touched, Unavailable,
     },
     checkpoint::parse_checkpoint_file,
     misc::MiscEvent,
-    evidence::{LineEvidence, fill_line_reason, misc_line_reason, silent_change_json},
+    evidence::{LineEvidence, fill_line_reason, misc_line_reason, replay_mismatch_json, silent_change_json},
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, Publisher},
 };
 use crate::{
@@ -39,7 +39,8 @@ use crate::{
     metrics::{
         ACCOUNTS_ANCHOR_HEIGHT, ACCOUNTS_ANCHOR_PARSE_SECONDS, ACCOUNTS_ANCHOR_SKIPPED_TOTAL, ACCOUNTS_EVIDENCE_TOTAL,
         ACCOUNTS_APPLIED_HEIGHT, ACCOUNTS_CHECKPOINT_FAILURES_TOTAL, ACCOUNTS_DATA_LOSS_TOTAL, ACCOUNTS_DUPLICATE_INPUTS_TOTAL,
-        ACCOUNTS_HELD_FILLS, ACCOUNTS_OPEN_POSITIONS, ACCOUNTS_PENDING_BLOCKS, ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL,
+        ACCOUNTS_HELD_FILLS, ACCOUNTS_OPEN_POSITIONS, ACCOUNTS_PENDING_BLOCKS, ACCOUNTS_REPLAY_CHECKED_TOTAL,
+        ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL, ACCOUNTS_REPLAY_STOPPED_TOTAL, ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL,
         ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL, ACCOUNTS_STREAM_HEIGHT, ACCOUNTS_TRUSTED, ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL,
     },
     prelude::Result,
@@ -86,8 +87,15 @@ struct LineHeader {
 }
 
 enum AnchorMessage {
-    Parsed { anchor: Anchor, parse_seconds: f64, skipped: usize },
+    Parsed(Box<ParsedAnchor>),
     Failed { height: u64, error: String },
+}
+
+/// A checkpoint parsed into an anchor, with how long that took and the older checkpoints it overtook.
+struct ParsedAnchor {
+    anchor: Anchor,
+    parse_seconds: f64,
+    skipped: usize,
 }
 
 enum Query {
@@ -294,7 +302,9 @@ fn spawn_checkpoint_poller(
             let parsed = parse_checkpoint_file(&newest.path)
                 .and_then(|checkpoint| Anchor::from_checkpoint(&checkpoint).map_err(Into::into));
             let message = match parsed {
-                Ok(anchor) => AnchorMessage::Parsed { anchor, parse_seconds: started.elapsed().as_secs_f64(), skipped },
+                Ok(anchor) => {
+                    AnchorMessage::Parsed(Box::new(ParsedAnchor { anchor, parse_seconds: started.elapsed().as_secs_f64(), skipped }))
+                }
                 Err(err) => AnchorMessage::Failed { height: newest.height, error: format!("{}: {err}", newest.path.display()) },
             };
             if anchors.blocking_send(message).is_err() {
@@ -314,6 +324,8 @@ async fn run_owner(
 ) {
     let mut supervision = tokio::time::interval(SUPERVISION_INTERVAL);
     let mut assembler = BlockAssembler::default();
+    // a parsed anchor whose blocks are not applied yet (design 000433 r2 3.4)
+    let mut held: Option<Box<ParsedAnchor>> = None;
     publisher.track(&book);
     loop {
         tokio::select! {
@@ -322,9 +334,12 @@ async fn run_owner(
                 if publisher.track(&book) {
                     publisher.push_changes(&mut book, &touched);
                 }
+                if install_ready(&mut book, &mut held) && publisher.track(&book) {
+                    publisher.push_snapshots(&mut book);
+                }
             }
             Some(message) = anchors.recv() => {
-                let installed = apply_anchor(&mut book, message);
+                let installed = receive_anchor(&mut book, &mut held, message);
                 if publisher.track(&book) && installed {
                     publisher.push_snapshots(&mut book);
                 }
@@ -485,18 +500,20 @@ fn report_block_actions(report: BlockActionsReport) -> Touched {
     report.touched
 }
 
-/// Applies a poller message; returns whether an anchor was installed.
-fn apply_anchor(book: &mut AccountBook, message: AnchorMessage) -> bool {
+/// A poller message: a parsed anchor is held until `AccountBook::anchor_ready` and then installed (a newer one replaces
+/// a held one); returns whether an anchor was installed.
+fn receive_anchor(book: &mut AccountBook, held: &mut Option<Box<ParsedAnchor>>, message: AnchorMessage) -> bool {
     match message {
-        AnchorMessage::Parsed { anchor, parse_seconds, skipped } => {
-            let height = anchor.height;
-            let report = book.install_anchor(anchor);
-            log_install(height, parse_seconds, skipped, &report);
-            ACCOUNTS_ANCHOR_HEIGHT.set(height.cast_signed());
-            ACCOUNTS_ANCHOR_PARSE_SECONDS.set(parse_seconds);
-            ACCOUNTS_ANCHOR_SKIPPED_TOTAL.inc_by(skipped as u64);
-            ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL.inc_by(report.silent_position_changes);
-            true
+        AnchorMessage::Parsed(parsed) => {
+            if let Some(replaced) = held.replace(parsed) {
+                warn!("accounts: anchor {} replaced while waiting for its blocks", replaced.anchor.height);
+                ACCOUNTS_ANCHOR_SKIPPED_TOTAL.inc();
+            }
+            let installed = install_ready(book, held);
+            if let Some(waiting) = held {
+                info!("accounts: anchor {} waits until its blocks are applied", waiting.anchor.height);
+            }
+            installed
         }
         AnchorMessage::Failed { height, error } => {
             error!("accounts: checkpoint {height} failed to parse, withholding the view: {error}");
@@ -505,6 +522,22 @@ fn apply_anchor(book: &mut AccountBook, message: AnchorMessage) -> bool {
             false
         }
     }
+}
+
+/// Installs the held anchor once the book is ready for it; returns whether it did.
+fn install_ready(book: &mut AccountBook, held: &mut Option<Box<ParsedAnchor>>) -> bool {
+    let Some(parsed) = held.take_if(|parsed| book.anchor_ready(parsed.anchor.height)) else {
+        return false;
+    };
+    let ParsedAnchor { anchor, parse_seconds, skipped } = *parsed;
+    let height = anchor.height;
+    let report = book.install_anchor(anchor);
+    log_install(height, parse_seconds, skipped, &report);
+    ACCOUNTS_ANCHOR_HEIGHT.set(height.cast_signed());
+    ACCOUNTS_ANCHOR_PARSE_SECONDS.set(parse_seconds);
+    ACCOUNTS_ANCHOR_SKIPPED_TOTAL.inc_by(skipped as u64);
+    ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL.inc_by(report.silent_position_changes);
+    true
 }
 
 fn log_install(height: u64, parse_seconds: f64, skipped: usize, report: &InstallReport) {
@@ -526,6 +559,45 @@ fn log_install(height: u64, parse_seconds: f64, skipped: usize, report: &Install
     for err in &report.replay_errors {
         error!("accounts fills data loss (size_contract, replayed at anchor {height}): {err}");
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Fills.label(), "size_contract"]).inc();
+    }
+    log_replay_check(height, report);
+}
+
+/// The cash replay of the interval ending at this anchor (design 000433): counts, metrics, and mismatches as evidence.
+fn log_replay_check(height: u64, report: &InstallReport) {
+    let check = match &report.replay_check {
+        ReplayCheck::Skipped(reason) => {
+            info!("accounts: replay to anchor {height} not checked: {reason}");
+            ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL.with_label_values(&[reason]).inc();
+            return;
+        }
+        ReplayCheck::Checked(check) => check,
+    };
+    let sorted = |counts: Vec<(&str, String)>| {
+        let mut counts = counts;
+        counts.sort_unstable();
+        counts.iter().map(|(label, count)| format!("{label} {count}")).collect::<Vec<_>>().join(", ")
+    };
+    let compared = check.compared.iter().map(|(mode, counts)| {
+        (*mode, format!("{} exact ({} moved) / {} mismatched", counts.exact, counts.moved, counts.mismatched))
+    });
+    let stopped = check.stopped.iter().map(|(reason, count)| (*reason, count.to_string()));
+    info!(
+        "accounts: replay {:?} -> {height}: {}; stopped: {}",
+        report.previous_anchor,
+        sorted(compared.collect()),
+        sorted(stopped.collect())
+    );
+    for (mode, counts) in &check.compared {
+        ACCOUNTS_REPLAY_CHECKED_TOTAL.with_label_values(&[mode, "exact"]).inc_by(counts.exact);
+        ACCOUNTS_REPLAY_CHECKED_TOTAL.with_label_values(&[mode, "exactMoved"]).inc_by(counts.moved);
+        ACCOUNTS_REPLAY_CHECKED_TOTAL.with_label_values(&[mode, "mismatch"]).inc_by(counts.mismatched);
+    }
+    for (reason, count) in &check.stopped {
+        ACCOUNTS_REPLAY_STOPPED_TOTAL.with_label_values(&[reason]).inc_by(*count);
+    }
+    for mismatch in &check.samples {
+        record_evidence(&replay_mismatch_json(mismatch, report.previous_anchor, height));
     }
 }
 
@@ -614,7 +686,7 @@ impl TestOwner {
     }
 
     pub(crate) async fn anchor(&self, anchor: Anchor) {
-        self.anchors.send(AnchorMessage::Parsed { anchor, parse_seconds: 0.0, skipped: 0 }).await.unwrap();
+        self.anchors.send(AnchorMessage::Parsed(Box::new(ParsedAnchor { anchor, parse_seconds: 0.0, skipped: 0 }))).await.unwrap();
     }
 }
 
@@ -628,6 +700,7 @@ mod tests {
     use crate::accounts::{
         anchor::AnchorCoin,
         book::{CLOCK_MARGIN_MS, LossBound},
+        replay::MarginStates,
     };
 
     const USER: &str = "0x5b51db9432bc4dd2c30cadc4ab6ab44565419c9a";
@@ -640,7 +713,7 @@ mod tests {
 
     fn ledger_line(block: u64) -> String {
         let event = format!(
-            r#"{{"time":"2026-10-19T06:00:00.0","hash":"0x00","inner":{{"LedgerUpdate":{{"users":["{USER}"],"delta":{{"type":"send"}}}}}}}}"#
+            r#"{{"time":"2026-10-19T06:00:00.0","hash":"0x00","inner":{{"LedgerUpdate":{{"users":["{USER}"],"delta":{{"type":"deposit","usdc":"1.0"}}}}}}}}"#
         );
         batch_line(block, &event)
     }
@@ -662,7 +735,8 @@ mod tests {
 
     fn empty_anchor(height: u64, time_ms: u64) -> Anchor {
         let coin = AnchorCoin { size_decimals: 0, positions: FxHashMap::default() };
-        Anchor { height, time_ms, coins: std::iter::once(("PUMP".to_string(), coin)).collect(), account_modes: FxHashMap::default() }
+        let coins = std::iter::once(("PUMP".to_string(), coin)).collect();
+        Anchor { height, time_ms, coins, account_modes: FxHashMap::default(), margins: MarginStates::default() }
     }
 
     /// The `replica_cmds` lines of `blocks`, then a read-through of both readers after them: the blocks before the last
@@ -741,6 +815,32 @@ mod tests {
         let truncated = r#"{"local_time":"2026-10-19T06:00:00.1","block_time":"2026-10-19T06:00:00.0","block_number":1500,"events":[["0x"#;
         assert_eq!(parse_line::<NodeDataFill>(truncated).expect_err("not JSON").block, None);
         assert!(parse_line::<MiscEvent>("{}").expect_err("no header").block.is_none());
+    }
+
+    /// Review 000435 r1 P2: an anchor whose blocks are not applied waits in the owner, a newer one replaces it, and it
+    /// installs after the input that applies its block.
+    #[test]
+    fn an_anchor_waits_for_its_blocks_and_a_newer_one_replaces_it() {
+        use crate::accounts::test_support::{PUMP, anchor as test_anchor, block_actions, trusted_book, user};
+        let parsed = |height| {
+            let anchor = test_anchor(height, &[(PUMP, 0, &[(user(1), 5)])]);
+            AnchorMessage::Parsed(Box::new(ParsedAnchor { anchor, parse_seconds: 0.0, skipped: 0 }))
+        };
+        let installed_height = |book: &AccountBook| book.availability().map(|available| available.anchor.height);
+        let mut book = trusted_book(&[(user(1), 5)]);
+        let mut held = None;
+        assert!(!receive_anchor(&mut book, &mut held, parsed(1_002)), "block 1002 is not applied");
+        assert!(!receive_anchor(&mut book, &mut held, parsed(1_003)));
+        assert_eq!(held.as_ref().map(|held| held.anchor.height), Some(1_003), "the newer one is held");
+        book.apply_block_actions(block_actions(1_001, &[]));
+        book.apply_block_actions(block_actions(1_002, &[]));
+        assert!(!install_ready(&mut book, &mut held));
+        assert_eq!(installed_height(&book), Ok(1_000));
+        book.apply_block_actions(block_actions(1_003, &[]));
+        assert!(install_ready(&mut book, &mut held));
+        assert_eq!((installed_height(&book), held.is_none()), (Ok(1_003), true));
+        book.apply_block_actions(block_actions(1_004, &[]));
+        assert!(receive_anchor(&mut book, &mut held, parsed(1_004)), "applied already: installs at once");
     }
 
     #[test]

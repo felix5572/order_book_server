@@ -6,16 +6,21 @@
 //! is given (bm 2026-10-19: 1,387 of 1,387), `null` when the signer is unknown.
 //!
 //! Only the successful actions that move a pool's cash or rules without a fill or misc event are kept. Transfers such
-//! as `usdClassTransfer` and `send` are not: their ledger events already mark the account.
+//! as `usdClassTransfer` and `send` are not: their ledger events already mark the account. A kept action's payload is
+//! read only once its type is known (other action types use the same field names with other value types).
 
 use alloy::primitives::Address;
 use rustc_hash::FxHashMap;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
+use sonic_rs::LazyValue;
+
+use super::usdc::usdc_wei;
 
 /// The block actions that may invalidate an anchor's liquidation price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockActionKind {
-    /// `updateIsolatedMargin`, `updateLeverage`: moves isolated margin, or a position between the pools.
+    /// `updateIsolatedMargin`, `updateLeverage`, `topUpIsolatedOnlyMargin`: moves isolated margin, or changes the
+    /// pool a new position of the asset takes.
     Margin,
     /// `userSetAbstraction`, `agentSetAbstraction`: changes the pool rules.
     AccountMode,
@@ -26,7 +31,7 @@ pub(crate) enum BlockActionKind {
 impl BlockActionKind {
     fn of(action_type: &str) -> Option<Self> {
         match action_type {
-            "updateIsolatedMargin" | "updateLeverage" => Some(Self::Margin),
+            "updateIsolatedMargin" | "updateLeverage" | "topUpIsolatedOnlyMargin" => Some(Self::Margin),
             "userSetAbstraction" | "agentSetAbstraction" => Some(Self::AccountMode),
             "withdraw3" => Some(Self::Withdrawal),
             _ => None,
@@ -34,8 +39,50 @@ impl BlockActionKind {
     }
 }
 
+/// What a kept action does (design 000433 r2 3.3). Asset ids are the actions' own: the index on the main dex,
+/// 100000 + 10000 × pdi + index on another dex.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BlockAction {
+    /// `updateIsolatedMargin`: `ntli` (micro USDC, signed) from the dex's cross cash into the asset's isolated cash.
+    IsolatedMargin { asset: u32, ntli_micro: i64 },
+    /// `updateLeverage`: the asset's setting. The node refuses a switch between cross and isolated while a position is
+    /// open ("Cannot switch leverage type with open position."), so a switch moves no cash.
+    Leverage { asset: u32, is_cross: bool },
+    /// `topUpIsolatedOnlyMargin`: never seen; its payload is not read.
+    TopUpIsolatedOnlyMargin,
+    /// `userSetAbstraction`, `agentSetAbstraction`.
+    SetAbstraction,
+    /// `withdraw3`: `amount` (10^-8 USDC, the 1 USDC fee included) leaves the main dex when the request is accepted.
+    Withdraw { amount_wei: i64 },
+}
+
+impl BlockAction {
+    pub(crate) const fn kind(&self) -> BlockActionKind {
+        match self {
+            Self::IsolatedMargin { .. } | Self::Leverage { .. } | Self::TopUpIsolatedOnlyMargin => BlockActionKind::Margin,
+            Self::SetAbstraction => BlockActionKind::AccountMode,
+            Self::Withdraw { .. } => BlockActionKind::Withdrawal,
+        }
+    }
+
+    /// Reads the payload of a kept action type.
+    fn read(action: &Action<'_>) -> Result<Self, String> {
+        Ok(match action.action_type {
+            "updateIsolatedMargin" => Self::IsolatedMargin { asset: action.field(action.asset.as_ref(), "asset")?, ntli_micro: action.field(action.ntli.as_ref(), "ntli")? },
+            "updateLeverage" => Self::Leverage { asset: action.field(action.asset.as_ref(), "asset")?, is_cross: action.field(action.is_cross.as_ref(), "isCross")? },
+            "topUpIsolatedOnlyMargin" => Self::TopUpIsolatedOnlyMargin,
+            "userSetAbstraction" | "agentSetAbstraction" => Self::SetAbstraction,
+            "withdraw3" => {
+                let amount: String = action.field(action.amount.as_ref(), "amount")?;
+                Self::Withdraw { amount_wei: usdc_wei(&amount).map_err(|err| format!("withdraw3 amount: {err}"))? }
+            }
+            other => return Err(format!("{other} is not a kept action type")),
+        })
+    }
+}
+
 /// A kept action and the account it acted on.
-pub(crate) type KeptAction = (BlockActionKind, Address);
+pub(crate) type KeptAction = (BlockAction, Address);
 
 /// The kept actions of one block, in block order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,10 +118,26 @@ struct SignedAction<'a> {
     action: Action<'a>,
 }
 
+/// An action's type, and the raw payload fields a kept type reads.
 #[derive(Deserialize)]
 struct Action<'a> {
     #[serde(rename = "type")]
     action_type: &'a str,
+    #[serde(borrow)]
+    asset: Option<LazyValue<'a>>,
+    #[serde(borrow)]
+    ntli: Option<LazyValue<'a>>,
+    #[serde(borrow, rename = "isCross")]
+    is_cross: Option<LazyValue<'a>>,
+    #[serde(borrow)]
+    amount: Option<LazyValue<'a>>,
+}
+
+impl Action<'_> {
+    fn field<T: DeserializeOwned>(&self, raw: Option<&LazyValue<'_>>, name: &str) -> Result<T, String> {
+        let raw = raw.ok_or_else(|| format!("{} without {name}", self.action_type))?;
+        sonic_rs::from_str(raw.as_raw_str()).map_err(|err| format!("{} {name} {}: {err}", self.action_type, raw.as_raw_str()))
+    }
 }
 
 #[derive(Deserialize)]
@@ -149,11 +212,11 @@ impl Bundle<'_> {
         }
         for (signed, response) in self.signed_actions.iter().zip(responses) {
             let action_type = signed.action.action_type;
-            let Some(kind) = BlockActionKind::of(action_type) else {
+            if BlockActionKind::of(action_type).is_none() {
                 continue;
-            };
+            }
             if let Some(user) = succeeded(action_type, response)? {
-                kept.push((kind, user));
+                kept.push((BlockAction::read(&signed.action)?, user));
             }
         }
         Ok(())
@@ -189,25 +252,50 @@ mod tests {
         text.parse().unwrap()
     }
 
+    /// The kept `updateLeverage` of `REAL_LINE`.
+    const LEVERAGE_ACTION: &str = r#"{"type":"updateLeverage","asset":99,"isCross":true,"leverage":3}"#;
+
     #[test]
     fn keeps_the_successful_actions_with_the_responses_user() {
         let parsed = parse_block_actions(REAL_LINE).unwrap();
-        let leverage = (BlockActionKind::Margin, address(LEVERAGE_VAULT));
+        let leverage = (BlockAction::Leverage { asset: 99, is_cross: true }, address(LEVERAGE_VAULT));
         assert_eq!(parsed, BlockActions { height: 1_189_931_524, actions: vec![leverage] });
     }
 
+    /// Payloads of real successful actions (bm `replica_cmds`, 2026-10-19), put in the place of the kept one.
     #[test]
-    fn every_kept_type_maps_to_its_kind() {
+    fn every_kept_type_reads_its_payload() {
         let cases = [
-            ("updateIsolatedMargin", BlockActionKind::Margin),
-            ("userSetAbstraction", BlockActionKind::AccountMode),
-            ("agentSetAbstraction", BlockActionKind::AccountMode),
-            ("withdraw3", BlockActionKind::Withdrawal),
+            (r#"{"type":"updateIsolatedMargin","asset":110086,"isBuy":true,"ntli":-4950000}"#, BlockAction::IsolatedMargin { asset: 110_086, ntli_micro: -4_950_000 }),
+            (r#"{"type":"userSetAbstraction","signatureChainId":"0xa4b1","hyperliquidChain":"Mainnet","user":"0x77cb5ed9458def628fdb13e0f9098cc3a454bd04","abstraction":"u","nonce":1792446348734}"#, BlockAction::SetAbstraction),
+            (r#"{"type":"agentSetAbstraction","abstraction":"u"}"#, BlockAction::SetAbstraction),
+            (r#"{"type":"withdraw3","signatureChainId":"0xa4b1","hyperliquidChain":"Mainnet","destination":"0x619d9addcefccbe3bde5591b72b9cbe1103c5e43","amount":"34.390000","time":1792446358887}"#, BlockAction::Withdraw { amount_wei: 3_439_000_000 }),
+            (r#"{"type":"topUpIsolatedOnlyMargin","asset":5,"anything":[1]}"#, BlockAction::TopUpIsolatedOnlyMargin),
         ];
-        for (action_type, kind) in cases {
-            let line = REAL_LINE.replace(r#""type":"updateLeverage""#, &format!(r#""type":"{action_type}""#));
-            assert_eq!(parse_block_actions(&line).unwrap().actions, [(kind, address(LEVERAGE_VAULT))], "{action_type}");
+        for (payload, expected) in cases {
+            let line = REAL_LINE.replace(LEVERAGE_ACTION, payload);
+            assert_eq!(parse_block_actions(&line).unwrap().actions, [(expected.clone(), address(LEVERAGE_VAULT))], "{payload}");
         }
+        let kinds = [
+            (BlockAction::TopUpIsolatedOnlyMargin, BlockActionKind::Margin),
+            (BlockAction::SetAbstraction, BlockActionKind::AccountMode),
+            (BlockAction::Withdraw { amount_wei: 1 }, BlockActionKind::Withdrawal),
+        ];
+        for (action, kind) in kinds {
+            assert_eq!(action.kind(), kind);
+        }
+    }
+
+    /// A kept type's payload must read; another type may use the same field names with other value types.
+    #[test]
+    fn only_a_kept_type_must_read_its_payload() {
+        let without_is_cross = REAL_LINE.replace(LEVERAGE_ACTION, r#"{"type":"updateLeverage","asset":99,"leverage":3}"#);
+        let err = parse_block_actions(&without_is_cross).unwrap_err();
+        assert!(err.contains("updateLeverage without isCross"), "{err}");
+        let numeric_amount = REAL_LINE.replace(LEVERAGE_ACTION, r#"{"type":"withdraw3","amount":34.39,"time":1}"#);
+        assert!(parse_block_actions(&numeric_amount).unwrap_err().contains("withdraw3 amount 34.39"));
+        let other_type = REAL_LINE.replace(LEVERAGE_ACTION, r#"{"type":"vaultTransfer","isDeposit":true,"usd":5,"amount":7,"asset":"x"}"#);
+        assert_eq!(parse_block_actions(&other_type).unwrap().actions, []);
     }
 
     #[test]
@@ -217,8 +305,9 @@ mod tests {
             r#"{"status":"ok","response":{"type":"default"}}"#,
         );
         let kept = parse_block_actions(&line).unwrap().actions;
-        let margin = |vault| (BlockActionKind::Margin, address(vault));
-        assert_eq!(kept, [margin(MARGIN_VAULT), margin(LEVERAGE_VAULT)], "block order");
+        let margin = (BlockAction::IsolatedMargin { asset: 110_015, ntli_micro: 17_556_885_255 }, address(MARGIN_VAULT));
+        let leverage = (BlockAction::Leverage { asset: 99, is_cross: true }, address(LEVERAGE_VAULT));
+        assert_eq!(kept, [margin, leverage], "block order");
     }
 
     #[test]

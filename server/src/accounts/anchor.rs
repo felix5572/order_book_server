@@ -9,6 +9,7 @@ use super::{
     checkpoint::{AccountMode, CheckpointAccounts},
     liquidation::{AccountLiquidations, LiquidationPx, account_liquidations},
     portfolio::PortfolioMargin,
+    replay::MarginStates,
 };
 
 #[derive(Debug)]
@@ -19,6 +20,8 @@ pub(crate) struct Anchor {
     pub(crate) coins: FxHashMap<String, AnchorCoin>,
     /// Account mode of every position holder at the anchor.
     pub(crate) account_modes: FxHashMap<Address, AccountMode>,
+    /// The margin state of every position holder, where the cash replay starts (design 000433).
+    pub(crate) margins: MarginStates,
 }
 
 #[derive(Debug)]
@@ -75,7 +78,8 @@ impl Anchor {
             }
             account_modes.insert(*user, account.mode.clone());
         }
-        Ok(Self { height: checkpoint.height, time_ms: checkpoint.time_ms, coins, account_modes })
+        let margins = MarginStates::from_checkpoint(checkpoint).map_err(|err| format!("checkpoint {}: {err}", checkpoint.height))?;
+        Ok(Self { height: checkpoint.height, time_ms: checkpoint.time_ms, coins, account_modes, margins })
     }
 }
 

@@ -4,12 +4,13 @@ use alloy::primitives::Address;
 use rustc_hash::FxHashMap;
 
 use super::{
-    actions::{BlockActionKind, BlockActions},
+    actions::{BlockAction, BlockActions},
     anchor::{Anchor, AnchorCoin, AnchorPosition, AnchorRow},
     book::AccountBook,
     checkpoint::AccountMode,
     liquidation::LiquidationPx,
     misc::MiscEvent,
+    replay::MarginStates,
 };
 use crate::types::node_data::{Batch, NodeDataFill};
 
@@ -95,8 +96,34 @@ pub(crate) fn misc(block: u64, inners: &[&str]) -> Batch<MiscEvent> {
     sonic_rs::from_str(&misc_line(block, inners)).unwrap()
 }
 
+/// A `LedgerUpdate` inner: a USDC `send` of `amount` between two dexes by name ("" main, "spot"), no fee; the field
+/// set of the real deltas of 2026-10-20.
+pub(crate) fn send_inner(from: (Address, &str), to: (Address, &str), amount: &str) -> String {
+    let ((user, source), (destination, destination_dex)) = (from, to);
+    let users = if user == destination { format!(r#""{user:#x}""#) } else { format!(r#""{user:#x}","{destination:#x}""#) };
+    format!(
+        r#"{{"LedgerUpdate":{{"users":[{users}],"delta":{{"type":"send","user":"{user:#x}","destination":"{destination:#x}","sourceDex":"{source}","destinationDex":"{destination_dex}","token":"USDC","amount":"{amount}","usdcValue":"{amount}","fee":"0.0","nativeTokenFee":"0.0","nonce":1,"feeToken":""}}}}}}"#
+    )
+}
+
+/// A `LedgerUpdate` inner with a delta of `delta_type` and no other field: what the replay reads only by name.
+pub(crate) fn unread_ledger_inner(user: Address, delta_type: &str) -> String {
+    format!(r#"{{"LedgerUpdate":{{"users":["{user:#x}"],"delta":{{"type":"{delta_type}"}}}}}}"#)
+}
+
+/// A `Funding` inner of these (user, coin, `funding_amount`) deltas.
+pub(crate) fn funding_inner(deltas: &[(Address, &str, &str)]) -> String {
+    let deltas: Vec<String> = deltas
+        .iter()
+        .map(|(user, coin, amount)| {
+            format!(r#"{{"user":"{user:#x}","coin":"{coin}","funding_amount":"{amount}","szi":"1.0","funding_rate":"0.0000125"}}"#)
+        })
+        .collect();
+    format!(r#"{{"Funding":{{"deltas":[{}]}}}}"#, deltas.join(","))
+}
+
 /// A parsed `replica_cmds` block of these kept actions (the line format is tested in `actions`).
-pub(crate) fn block_actions(height: u64, actions: &[(BlockActionKind, Address)]) -> BlockActions {
+pub(crate) fn block_actions(height: u64, actions: &[(BlockAction, Address)]) -> BlockActions {
     BlockActions { height, actions: actions.to_vec() }
 }
 
@@ -129,7 +156,7 @@ pub(crate) fn anchor(height: u64, coins: &[CoinSpec<'_>]) -> Anchor {
             ((*name).to_string(), AnchorCoin { size_decimals: *size_decimals, positions })
         })
         .collect();
-    Anchor { height, time_ms: height * 1_000, coins, account_modes }
+    Anchor { height, time_ms: height * 1_000, coins, account_modes, margins: MarginStates::default() }
 }
 
 /// Watchers started at unix ms 0, fills and misc events read block 100 and the block actions block 1000 (they run on

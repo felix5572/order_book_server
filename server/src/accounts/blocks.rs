@@ -243,8 +243,8 @@ mod tests {
     use super::*;
     use crate::accounts::test_support::{PUMP, block_actions, fills, misc, user};
 
-    const SEND: &str = r#"{"LedgerUpdate":{"users":["0x0101010101010101010101010101010101010101"],"delta":{"type":"send"}}}"#;
-    const DEPOSIT: &str = r#"{"LedgerUpdate":{"users":["0x0101010101010101010101010101010101010101"],"delta":{"type":"deposit"}}}"#;
+    const SEND: &str = r#"{"LedgerUpdate":{"users":["0x0101010101010101010101010101010101010101"],"delta":{"type":"send","user":"0x0101010101010101010101010101010101010101","destination":"0x0101010101010101010101010101010101010101","sourceDex":"","destinationDex":"spot","token":"USDC","amount":"1.0","usdcValue":"1.0","fee":"0.0","nativeTokenFee":"0.0","nonce":1,"feeToken":""}}}"#;
+    const DEPOSIT: &str = r#"{"LedgerUpdate":{"users":["0x0101010101010101010101010101010101010101"],"delta":{"type":"deposit","usdc":"1.0"}}}"#;
 
     /// Instants `ms` milliseconds after one base.
     fn clock() -> impl Fn(u64) -> Instant {

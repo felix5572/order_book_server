@@ -12,8 +12,8 @@
 //! - **Change marks**: per account, the first block after the anchor of each observed source (fill, ledger, funding,
 //!   and the block actions margin, account mode, withdrawal): from there on the anchor's liquidation price may be
 //!   stale. A mark is set once per anchor interval, so an account trading every block changes its rows once, not per
-//!   block (review of the push volume, 10-19). The mark events since the anchor are logged so the next anchor can
-//!   rebuild the first marks after itself. A block-action mark means a successful action that may invalidate the
+//!   block (review of the push volume, 10-19). The account events since the anchor are logged so the next anchor can
+//!   rebuild the first marks after itself, and check and rebuild the cash replay (`replay.rs`, design 000433). A block-action mark means a successful action that may invalidate the
 //!   anchor, not that the state changed (setting the mode an account already has marks it too). An empty set does not
 //!   prove the account unchanged: the marks cover the sources above, not mark price moves of other positions.
 //! - **Trust**: served only with an anchor covering every recorded loss of the three streams, no newer checkpoint that
@@ -38,7 +38,8 @@ use super::{
     anchor::{Anchor, AnchorCoin, AnchorPosition, AnchorRow},
     blocks::CompletedBlock,
     checkpoint::AccountMode,
-    misc::MiscEvent,
+    misc::{FundingDelta, MiscEvent},
+    replay::{AccountEvent, FillEvent, MarginStates, SelfCheck},
     size::parse_size_raw,
 };
 use crate::{
@@ -54,10 +55,10 @@ use crate::{
 /// loss detection therefore lies above every block lost by then.
 pub(crate) const CLOCK_MARGIN_MS: u64 = 1_000;
 
-/// Mark events kept to rebuild the marks after the next anchor: one anchor interval is ~80k fills, ~6k block actions
-/// plus, across an hour boundary, ~400k funding deltas; this is hours without an anchor. Overflowing drops the oldest event, a loss up to
-/// its block on its stream.
-const MAX_MARK_LOG: usize = 2_000_000;
+/// Account events kept to rebuild the marks and the cash replay at the next anchor: one anchor interval is ~80k fills,
+/// ~6k block actions plus, across an hour boundary, ~400k funding deltas; this is hours without an anchor. Overflowing
+/// drops the oldest event, a loss up to its block on its stream.
+const MAX_EVENT_LOG: usize = 2_000_000;
 
 /// Silent position changes listed per anchor install (all are counted): evidence of backstop liquidation or ADL comes
 /// a few at a time; a systematic contradiction needs only examples.
@@ -167,6 +168,15 @@ enum MarkKind {
 }
 
 impl MarkKind {
+    const fn of(event: &AccountEvent) -> Self {
+        match event {
+            AccountEvent::Fill(_) | AccountEvent::UnreadableFill(_) => Self::Fill,
+            AccountEvent::Funding { .. } => Self::Funding,
+            AccountEvent::Ledger(_) => Self::Ledger,
+            AccountEvent::Action(action) => Self::Action(action.kind()),
+        }
+    }
+
     const fn stream(self) -> Stream {
         match self {
             Self::Fill => Stream::Fills,
@@ -471,6 +481,13 @@ pub(crate) struct InstallReport {
     pub(crate) merge_errors: Vec<String>,
     /// Replayed fills that violate the size contract (recorded as a fills data loss).
     pub(crate) replay_errors: Vec<String>,
+    pub(crate) replay_check: ReplayCheck,
+}
+
+impl Default for ReplayCheck {
+    fn default() -> Self {
+        Self::Skipped("noPreviousAnchor")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -523,6 +540,28 @@ pub(crate) struct BookStatus {
     pub(crate) held_fills: usize,
 }
 
+/// An account event after the anchor.
+#[derive(Debug)]
+struct LoggedEvent {
+    block: u64,
+    user: Address,
+    event: AccountEvent,
+}
+
+/// The cash replay (design 000433 r2 3.6): the anchor's margin state, and that state moved by every event since.
+#[derive(Debug)]
+struct Replay {
+    anchored: MarginStates,
+    current: MarginStates,
+}
+
+/// The previous interval's replay checked against a new anchor, or why it was not.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReplayCheck {
+    Checked(SelfCheck),
+    Skipped(&'static str),
+}
+
 #[derive(Debug)]
 pub(crate) struct AccountBook {
     anchor: Option<AnchorInfo>,
@@ -530,8 +569,11 @@ pub(crate) struct AccountBook {
     coins: FxHashMap<String, CoinBook>,
     accounts: FxHashMap<Address, AccountRecord>,
     held_fills: Vec<(u64, Address, ObservedFill)>,
-    /// Mark events after the anchor, oldest first.
-    mark_log: VecDeque<(u64, MarkKind, Address)>,
+    /// Account events after the anchor, oldest first.
+    events: VecDeque<LoggedEvent>,
+    /// Whether the event log dropped events since the anchor (the replay of the interval is then incomplete).
+    events_dropped: bool,
+    replay: Option<Replay>,
     fills: StreamProgress,
     misc_events: StreamProgress,
     block_actions: StreamProgress,
@@ -548,7 +590,9 @@ impl AccountBook {
             coins: FxHashMap::default(),
             accounts: FxHashMap::default(),
             held_fills: Vec::new(),
-            mark_log: VecDeque::new(),
+            events: VecDeque::new(),
+            events_dropped: false,
+            replay: None,
             fills: StreamProgress::starting(started_ms),
             misc_events: StreamProgress::starting(started_ms),
             block_actions: StreamProgress::starting(started_ms),
@@ -590,7 +634,15 @@ impl AccountBook {
             return report;
         }
         for NodeDataFill(user, fill) in batch.events() {
-            if self.mark(user, MarkKind::Fill, block, &mut report.marks_dropped) {
+            let event = FillEvent::of(&fill).map_or_else(
+                |err| {
+                    report.errors.push(format!("block {block} {user}: {err}"));
+                    raise(&mut self.fills.lost_block, block);
+                    AccountEvent::UnreadableFill(err)
+                },
+                AccountEvent::Fill,
+            );
+            if self.record(user, event, block, &mut report.marks_dropped) {
                 report.touched.accounts.push(user);
             }
             self.apply_or_hold(block, user, ObservedFill::new(fill), &mut report);
@@ -598,16 +650,21 @@ impl AccountBook {
         report
     }
 
-    /// Logs a mark event and lowers the account's mark; returns whether the mark changed.
-    fn mark(&mut self, user: Address, kind: MarkKind, block: u64, dropped: &mut usize) -> bool {
-        if self.mark_log.len() >= MAX_MARK_LOG
-            && let Some((oldest, oldest_kind, _)) = self.mark_log.pop_front()
+    /// Logs an account event, moves the replayed cash and lowers the account's mark; returns whether the mark changed.
+    fn record(&mut self, user: Address, event: AccountEvent, block: u64, dropped: &mut usize) -> bool {
+        if self.events.len() >= MAX_EVENT_LOG
+            && let Some(oldest) = self.events.pop_front()
         {
-            raise(&mut self.progress(oldest_kind.stream()).lost_block, oldest);
+            raise(&mut self.progress(MarkKind::of(&oldest.event).stream()).lost_block, oldest.block);
+            self.events_dropped = true;
             *dropped += 1;
         }
-        self.mark_log.push_back((block, kind, user));
-        self.accounts.entry(user).or_default().marks.mark(kind, block)
+        if let Some(replay) = &mut self.replay {
+            replay.current.apply(block, user, &event);
+        }
+        let changed = self.accounts.entry(user).or_default().marks.mark(MarkKind::of(&event), block);
+        self.events.push_back(LoggedEvent { block, user, event });
+        changed
     }
 
     fn apply_or_hold(&mut self, block: u64, user: Address, fill: ObservedFill, report: &mut FillsReport) {
@@ -655,13 +712,15 @@ impl AccountBook {
         }
         for event in batch.events() {
             match event {
-                MiscEvent::Ledger { users, .. } => {
-                    let marks = users.into_iter().map(|user| (MarkKind::Ledger, user));
-                    self.mark_all(marks, block, &mut report.touched, &mut report.marks_dropped);
+                MiscEvent::Ledger { users, delta } => {
+                    let events = users.into_iter().map(|user| (user, AccountEvent::Ledger(delta.clone())));
+                    self.record_all(events, block, &mut report.touched, &mut report.marks_dropped);
                 }
-                MiscEvent::Funding(users) => {
-                    let marks = users.into_iter().map(|user| (MarkKind::Funding, user));
-                    self.mark_all(marks, block, &mut report.touched, &mut report.marks_dropped);
+                MiscEvent::Funding(deltas) => {
+                    let events = deltas
+                        .into_iter()
+                        .map(|FundingDelta { user, coin, amount_wei }| (user, AccountEvent::Funding { coin, amount_wei }));
+                    self.record_all(events, block, &mut report.touched, &mut report.marks_dropped);
                 }
                 MiscEvent::Irrelevant => {}
                 MiscEvent::Unknown(kind) => {
@@ -675,16 +734,16 @@ impl AccountBook {
         report
     }
 
-    /// Marks each account at `block`; the accounts whose marks changed go to `touched`.
-    fn mark_all(
+    /// Records each account's event of `block`; the accounts whose marks changed go to `touched`.
+    fn record_all(
         &mut self,
-        marks: impl IntoIterator<Item = (MarkKind, Address)>,
+        events: impl IntoIterator<Item = (Address, AccountEvent)>,
         block: u64,
         touched: &mut Touched,
         dropped: &mut usize,
     ) {
-        for (kind, user) in marks {
-            if self.mark(user, kind, block, dropped) {
+        for (user, event) in events {
+            if self.record(user, event, block, dropped) {
                 touched.accounts.push(user);
             }
         }
@@ -705,20 +764,22 @@ impl AccountBook {
             report.stale = true;
             return report;
         }
-        let marks = actions.into_iter().map(|(kind, user)| (MarkKind::Action(kind), user));
-        self.mark_all(marks, height, &mut report.touched, &mut report.marks_dropped);
+        let events = actions.into_iter().map(|(action, user)| (user, AccountEvent::Action(action)));
+        self.record_all(events, height, &mut report.touched, &mut report.marks_dropped);
         report
     }
 
     /// Installs a newer anchor. Heights only increase: the poller sends each checkpoint once, newest first.
     pub(crate) fn install_anchor(&mut self, anchor: Anchor) -> InstallReport {
-        let Anchor { height, time_ms, coins: mut anchor_coins, account_modes } = anchor;
+        let Anchor { height, time_ms, coins: mut anchor_coins, account_modes, margins } = anchor;
         assert!(
             self.anchor.is_none_or(|current| current.height < height),
             "anchor {height} is not newer than the installed {:?}",
             self.anchor
         );
-        let mut report = InstallReport { previous_anchor: self.anchor.map(|anchor| anchor.height), ..InstallReport::default() };
+        let replay_check = self.check_replay(&margins, height);
+        let mut report =
+            InstallReport { previous_anchor: self.anchor.map(|anchor| anchor.height), replay_check, ..InstallReport::default() };
         let mut lost_block = self.fills.lost_block;
         self.coins.retain(|name, coin| {
             let Some(anchor_coin) = anchor_coins.remove(name) else {
@@ -745,6 +806,7 @@ impl AccountBook {
         self.fills.lost_block = lost_block;
         self.coins.extend(anchor_coins.into_iter().map(|(name, coin)| (name, CoinBook::anchored(height, coin, 0))));
         self.rebuild_marks(height);
+        self.rebuild_replay(margins);
         for (user, mode) in account_modes {
             self.accounts.entry(user).or_default().mode = Some(mode);
         }
@@ -763,11 +825,54 @@ impl AccountBook {
             account.mode = None;
             account.marks = ChangeMarks::default();
         }
-        self.mark_log.retain(|(block, _, _)| *block > height);
-        for (block, kind, user) in &self.mark_log {
-            self.accounts.entry(*user).or_default().marks.mark(*kind, *block);
+        self.events.retain(|logged| logged.block > height);
+        for LoggedEvent { block, user, event } in &self.events {
+            self.accounts.entry(*user).or_default().marks.mark(MarkKind::of(event), *block);
         }
         self.accounts.retain(|_, account| !account.marks.is_empty());
+    }
+
+    /// Whether installing an anchor at `height` now keeps the interval it closes checkable (design 000433 r2 3.4): with
+    /// a replay to check, every block up to it is applied first. The first anchor, an untrusted view and an overflowed
+    /// log have nothing to check, so an anchor installs at once.
+    pub(crate) fn anchor_ready(&self, height: u64) -> bool {
+        self.replay.is_none()
+            || self.availability().is_err()
+            || self.events_dropped
+            || self.block_actions.height.is_some_and(|applied| applied >= height)
+    }
+
+    /// Step 1 of an install (design 000433 r2 3.6): the previous anchor's state moved by the logged events up to the
+    /// new anchor, compared with the new anchor's state. Only a complete interval is checked: trusted under the
+    /// previous anchor (no loss), every event logged, and every block up to the new anchor applied.
+    fn check_replay(&self, anchor: &MarginStates, height: u64) -> ReplayCheck {
+        let Some(replay) = &self.replay else {
+            return ReplayCheck::Skipped("noPreviousAnchor");
+        };
+        if self.availability().is_err() {
+            return ReplayCheck::Skipped("untrusted");
+        }
+        if self.events_dropped {
+            return ReplayCheck::Skipped("eventLogOverflowed");
+        }
+        if self.block_actions.height.is_none_or(|applied| applied < height) {
+            return ReplayCheck::Skipped("behindTheAnchor");
+        }
+        let mut replayed = replay.anchored.clone();
+        for LoggedEvent { block, user, event } in self.events.iter().filter(|logged| logged.block <= height) {
+            replayed.apply(*block, *user, event);
+        }
+        ReplayCheck::Checked(replayed.check_against(anchor, &replay.anchored))
+    }
+
+    /// Step 2: the new anchor's state moved by the logged events above it (the log holds only those by now).
+    fn rebuild_replay(&mut self, anchored: MarginStates) {
+        let mut current = anchored.clone();
+        for LoggedEvent { block, user, event } in &self.events {
+            current.apply(*block, *user, event);
+        }
+        self.replay = Some(Replay { anchored, current });
+        self.events_dropped = false;
     }
 
     /// Applies the held fills the anchor does not cover, in arrival order; the ones still outside the universe stay
@@ -918,10 +1023,17 @@ impl AccountBook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::{
+        actions::BlockAction,
+        checkpoint::tests::{HOLDER, ISOLATED, user as checkpoint_user},
+        misc::LedgerDelta,
+        replay::{Compared, StopReason, tests::per_dex_with_main_cash},
+        test_support::FillSpec,
+    };
     use crate::accounts::test_support::{
         AVAX_ADL_BLOCK, AVAX_ADL_FULL, CoinSpec, ETH_ADL_BLOCK, ETH_ADL_PARTIAL, FARTCOIN_LIQUIDATED_LONG, PUMP,
-        SOL_ADL_BLOCK, SOL_ADL_LONG, SOL_LIQUIDATED_SHORT, anchor, block_actions, fills, misc, real_fills, row, trusted_book,
-        user,
+        SOL_ADL_BLOCK, SOL_ADL_LONG, SOL_LIQUIDATED_SHORT, anchor, block_actions, fills, funding_inner, misc, real_fills, row,
+        send_inner, trusted_book, user,
     };
 
     const fn fills_lost_up_to(block: u64) -> Unavailable {
@@ -1183,7 +1295,7 @@ mod tests {
     #[test]
     fn a_funding_batch_changes_the_rows_of_every_touched_holder() {
         let mut book = trusted_book(&[(user(1), 5), (user(2), -3), (user(3), 1)]);
-        let funding = format!(r#"{{"Funding":{{"deltas":[{{"user":"{:#x}"}},{{"user":"{:#x}"}}]}}}}"#, user(1), user(2));
+        let funding = funding_inner(&[(user(1), PUMP, "0.1"), (user(2), PUMP, "-0.1")]);
         let report = book.apply_misc_events(misc(1_100, &[&funding]));
         let changes = push(&mut book, &report.touched).unwrap();
         let rows: Vec<(Address, Option<u64>)> =
@@ -1229,8 +1341,8 @@ mod tests {
     #[test]
     fn marks_keep_the_first_block_and_the_next_anchor_rebuilds_them_from_the_log() {
         let mut book = trusted_book(&[(user(1), 5)]);
-        let ledger = format!(r#"{{"LedgerUpdate":{{"users":["{:#x}","{:#x}"],"delta":{{"type":"send"}}}}}}"#, user(1), user(2));
-        let funding = format!(r#"{{"Funding":{{"deltas":[{{"user":"{:#x}"}}]}}}}"#, user(1));
+        let ledger = send_inner((user(1), ""), (user(2), ""), "1.0");
+        let funding = funding_inner(&[(user(1), PUMP, "0.1")]);
         book.apply_misc_events(misc(1_100, &[&ledger]));
         book.apply_misc_events(misc(1_250, &[&ledger]));
         book.apply_misc_events(misc(1_300, &[&ledger, &funding]));
@@ -1243,7 +1355,7 @@ mod tests {
         book.install_anchor(anchor(1_300, &[(PUMP, 0, &[(user(1), 5)])]));
         assert_eq!(book.coin_positions(PUMP).unwrap().positions[0].changes, ChangeMarks::default());
         assert!(!book.accounts.contains_key(&user(2)), "a covered account without a position is forgotten");
-        assert_eq!(book.mark_log.len(), 0, "the anchor covers every logged event");
+        assert_eq!(book.events.len(), 0, "the anchor covers every logged event");
     }
 
     #[test]
@@ -1256,37 +1368,137 @@ mod tests {
     }
 
     #[test]
-    fn an_overflowing_mark_log_drops_the_oldest_as_a_loss_of_its_stream() {
+    fn an_overflowing_event_log_drops_the_oldest_as_a_loss_of_its_stream() {
+        const LEDGER: AccountEvent = AccountEvent::Ledger(LedgerDelta::Withdraw);
         let mut book = trusted_book(&[]);
         let mut dropped = 0;
-        for tid in 0..MAX_MARK_LOG as u64 {
-            book.mark(user(1), MarkKind::Ledger, 1_100 + tid, &mut dropped);
+        for tid in 0..MAX_EVENT_LOG as u64 {
+            book.record(user(1), LEDGER, 1_100 + tid, &mut dropped);
         }
         assert_eq!(dropped, 0);
         assert!(book.availability().is_ok());
-        book.mark(user(1), MarkKind::Fill, 5_000_000, &mut dropped);
-        assert_eq!((dropped, book.mark_log.len()), (1, MAX_MARK_LOG));
+        book.record(user(1), AccountEvent::UnreadableFill(String::new()), 5_000_000, &mut dropped);
+        assert_eq!((dropped, book.events.len(), book.events_dropped), (1, MAX_EVENT_LOG, true));
         let lost = Unavailable::DataLoss { stream: Stream::MiscEvents, bound: LossBound::Block(1_100) };
         assert_eq!(book.availability(), Err(lost), "the dropped ledger event bounds a misc events loss");
         // review 000429 r2: a block action pushing out a ledger event is a loss of the ledger's stream, not its own
-        book.mark(user(1), MarkKind::Action(BlockActionKind::Margin), 5_000_001, &mut dropped);
+        book.record(user(1), AccountEvent::Action(BlockAction::SetAbstraction), 5_000_001, &mut dropped);
         assert_eq!((book.misc_events.lost_block, book.block_actions.lost_block), (Some(1_101), None));
-        for tid in 0..MAX_MARK_LOG as u64 {
-            book.mark(user(1), MarkKind::Ledger, 6_000_000 + tid, &mut dropped);
+        for tid in 0..MAX_EVENT_LOG as u64 {
+            book.record(user(1), LEDGER, 6_000_000 + tid, &mut dropped);
         }
         assert_eq!(book.block_actions.lost_block, Some(5_000_001), "the dropped block action bounds its own stream");
+    }
+
+    /// Design 000433 r2 3.6: an install checks the replay of the interval it closes against its own state, then
+    /// replays the logged events above it onto that state.
+    #[test]
+    fn an_anchor_checks_the_replayed_interval_and_rebuilds_from_its_own_state() {
+        let holder = checkpoint_user(HOLDER);
+        let funding = |block, amount| misc(block, &[&funding_inner(&[(holder, "BTC", amount)])]);
+        let anchor_with = |height, main_cash_micro| {
+            let mut anchor = anchor(height, &[(PUMP, 0, &[(holder, 5)])]);
+            anchor.margins = per_dex_with_main_cash(main_cash_micro);
+            anchor
+        };
+        let mut book = AccountBook::new(0);
+        book.apply_fills(fills(100, &[]));
+        book.apply_misc_events(misc(100, &[]));
+        book.apply_block_actions(block_actions(1_000, &[]));
+        assert_eq!(book.install_anchor(anchor_with(1_000, -12_000_000_000)).replay_check, ReplayCheck::Skipped("noPreviousAnchor"));
+        book.apply_block_actions(block_actions(1_001, &[]));
+        book.apply_misc_events(funding(1_001, "1.0"));
+        book.apply_block_actions(block_actions(1_002, &[]));
+        let early = book.install_anchor(anchor_with(1_003, -11_999_000_000)).replay_check;
+        assert_eq!(early, ReplayCheck::Skipped("behindTheAnchor"), "block 1003 is not applied yet");
+        book.apply_block_actions(block_actions(1_003, &[]));
+        book.apply_block_actions(block_actions(1_004, &[]));
+        book.apply_misc_events(funding(1_004, "2.0"));
+        let ReplayCheck::Checked(check) = book.install_anchor(anchor_with(1_004, -11_997_000_000)).replay_check else {
+            panic!("a complete interval is checked")
+        };
+        let compared = |exact, moved, mismatched| Compared { exact, moved, mismatched };
+        let both_exact = (compared(2, 1, 0), 1);
+        assert_eq!((check.compared["perDex"], check.stopped["portfolioMargin"]), both_exact, "HOLDER moved, ISOLATED did not");
+        book.apply_block_actions(block_actions(1_005, &[]));
+        book.apply_misc_events(funding(1_005, "4.0"));
+        let rebuilt = &book.replay.as_ref().unwrap().current;
+        let expected = per_dex_with_main_cash(-11_993_000_000);
+        assert_eq!(rebuilt.check_against(&expected, &expected).compared["perDex"], compared(2, 0, 0));
+        book.apply_block_actions(block_actions(1_006, &[]));
+        let ReplayCheck::Checked(check) = book.install_anchor(anchor_with(1_006, -11_997_000_000)).replay_check else {
+            panic!("checked")
+        };
+        assert_eq!((check.compared["perDex"], check.samples[0].user), (compared(1, 0, 1), holder), "the anchor contradicts +4 USDC");
+    }
+
+    /// Review 000435 r1 P2: an isolated position closed in the block that switches its asset back to cross; the block's
+    /// actions apply before its fills, so the close must not count as a cross fill. A switch a block earlier is plain.
+    #[test]
+    fn a_fill_in_the_block_that_switched_its_asset_stops_the_replay() {
+        let isolated = checkpoint_user(ISOLATED);
+        let block = |height, actions: &[(BlockAction, Address)], fills_specs: &[FillSpec<'_>]| CompletedBlock {
+            actions: block_actions(height, actions),
+            fills: vec![fills(height, fills_specs)],
+            misc_events: Vec::new(),
+        };
+        let mut book = AccountBook::new(0);
+        book.apply_fills(fills(100, &[]));
+        book.apply_misc_events(misc(100, &[]));
+        book.apply_block_actions(block_actions(1_000, &[]));
+        let mut first = anchor(1_000, &[(PUMP, 0, &[(isolated, -2_000_000)])]);
+        first.margins = per_dex_with_main_cash(-12_000_000_000);
+        book.install_anchor(first);
+        let to_cross = |asset| (BlockAction::Leverage { asset, is_cross: true }, isolated);
+        // BTC (asset 0, set isolated without a position) back to cross, a BTC fill one block later: cross
+        book.apply_block(block(1_001, &[to_cross(0)], &[]));
+        book.apply_block(block(1_002, &[], &[(isolated, "BTC", "B", 1, "0.0", "0.001")]));
+        assert_eq!(book.replay.as_ref().unwrap().current.stop_reason(&isolated), None);
+        // the isolated PUMP short closed and PUMP switched to cross in one block
+        book.apply_block(block(1_003, &[to_cross(1)], &[(isolated, PUMP, "B", 2, "-2000000.0", "2000000.0")]));
+        assert_eq!(book.replay.as_ref().unwrap().current.stop_reason(&isolated), Some(&StopReason::IsolatedFill));
+    }
+
+    /// Review 000435 r1 P2: an anchor parsed before its blocks are applied waits (the owner holds it while
+    /// `anchor_ready` is false), so the interval it closes is still checked once they are.
+    #[test]
+    fn an_anchor_ahead_of_its_blocks_waits_and_its_interval_is_checked() {
+        let holder = checkpoint_user(HOLDER);
+        let anchor_with = |height, main_cash_micro| {
+            let mut anchor = anchor(height, &[(PUMP, 0, &[(holder, 5)])]);
+            anchor.margins = per_dex_with_main_cash(main_cash_micro);
+            anchor
+        };
+        let mut book = AccountBook::new(0);
+        book.apply_fills(fills(100, &[]));
+        book.apply_misc_events(misc(100, &[]));
+        book.apply_block_actions(block_actions(1_000, &[]));
+        assert!(book.anchor_ready(1_000), "the first anchor has no interval to check");
+        book.install_anchor(anchor_with(1_000, -12_000_000_000));
+        book.apply_block_actions(block_actions(1_001, &[]));
+        book.apply_misc_events(misc(1_001, &[&funding_inner(&[(holder, "BTC", "1.0")])]));
+        assert!(!book.anchor_ready(1_002), "block 1002 is not applied yet");
+        book.apply_block_actions(block_actions(1_002, &[]));
+        assert!(book.anchor_ready(1_002));
+        // the anchor says -11998: the replayed -11999 differs by 1 USDC, and the check reports it
+        let ReplayCheck::Checked(check) = book.install_anchor(anchor_with(1_002, -11_998_000_000)).replay_check else {
+            panic!("checked once its blocks are applied")
+        };
+        assert_eq!((check.compared["perDex"].mismatched, check.samples[0].user), (1, holder));
     }
 
     /// Design 000429 r2: the first block of each block-action kind after the anchor, rebuilt by the next anchor.
     #[test]
     fn block_actions_mark_the_first_block_of_each_kind() {
-        use BlockActionKind::{AccountMode, Margin, Withdrawal};
+        const MARGIN: BlockAction = BlockAction::Leverage { asset: 0, is_cross: true };
+        const MODE: BlockAction = BlockAction::SetAbstraction;
+        const WITHDRAWAL: BlockAction = BlockAction::Withdraw { amount_wei: 100_000_000 };
         let mut book = trusted_book(&[(user(1), 5)]);
-        let first = book.apply_block_actions(block_actions(1_001, &[(Margin, user(1)), (Margin, user(2))]));
+        let first = book.apply_block_actions(block_actions(1_001, &[(MARGIN, user(1)), (MARGIN, user(2))]));
         assert_eq!(first.touched.accounts, [user(1), user(2)]);
         assert_eq!(push(&mut book, &first.touched).unwrap().rows.len(), 1, "only the PUMP holder has a row");
-        book.apply_block_actions(block_actions(1_002, &[(AccountMode, user(1))]));
-        let later = book.apply_block_actions(block_actions(1_003, &[(Margin, user(1)), (Withdrawal, user(1))]));
+        book.apply_block_actions(block_actions(1_002, &[(MODE, user(1))]));
+        let later = book.apply_block_actions(block_actions(1_003, &[(MARGIN, user(1)), (WITHDRAWAL, user(1))]));
         assert_eq!(later.touched.accounts, [user(1)], "only the withdrawal is a new mark");
         let marks = book.coin_positions(PUMP).unwrap().positions[0].changes;
         let expected =
@@ -1304,7 +1516,7 @@ mod tests {
     fn a_gap_in_the_block_heights_is_a_loss_up_to_the_last_missing_block() {
         let mut book = trusted_book(&[(user(1), 5)]);
         assert_eq!(book.apply_block_actions(block_actions(1_001, &[])).missing, None);
-        let report = book.apply_block_actions(block_actions(1_005, &[(BlockActionKind::Margin, user(1))]));
+        let report = book.apply_block_actions(block_actions(1_005, &[(BlockAction::Leverage { asset: 0, is_cross: true }, user(1))]));
         assert_eq!(report.missing, Some((1_002, 1_004)));
         let lost = Unavailable::DataLoss { stream: Stream::BlockActions, bound: LossBound::Block(1_004) };
         assert_eq!(book.availability(), Err(lost.clone()));

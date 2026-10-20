@@ -26,11 +26,12 @@ pub(crate) const OMITTED_POSITION_TABLE: u32 = 20;
 /// Table ids below this are an implicit single tier whose max leverage is the id.
 const FIRST_LISTED_TABLE: u32 = 50;
 /// Asset ids inside a clearinghouse's user states are `PDI_ASSET_STRIDE * pdi + index`.
-const PDI_ASSET_STRIDE: u32 = 10_000;
+pub(crate) const PDI_ASSET_STRIDE: u32 = 10_000;
 /// Perp prices carry `MAX_PERP_DECIMALS - szDecimals` decimals, so `szDecimals` cannot exceed it.
 pub(crate) const MAX_PERP_DECIMALS: u32 = 6;
-/// Spot prices (a reserve's `o`) carry `MAX_SPOT_DECIMALS - szDecimals` decimals; USDC (szDecimals 8) stores 1.
-const MAX_SPOT_DECIMALS: u32 = 8;
+/// Spot prices (a reserve's `o`, a spot fill's `px`) carry `MAX_SPOT_DECIMALS - szDecimals` decimals; USDC
+/// (szDecimals 8) stores 1.
+pub(crate) const MAX_SPOT_DECIMALS: u32 = 8;
 /// Borrow-lend pool indices and LTVs are fixed point with this scale.
 const LENDING_SCALE: f64 = 1e14;
 
@@ -48,12 +49,24 @@ pub(crate) struct CheckpointAccounts {
     /// Every account holding at least one non-zero position on some dex, with all its dex states (cash-only ones
     /// included: a unified account's pool counts the cash of every same-collateral dex).
     pub(crate) accounts: FxHashMap<Address, Account>,
+    /// Every spot pair by index: the `N` of a spot fill's coin `@N` (`scl.meta.spot_infos[N].tokens = [base, quote]`;
+    /// on 1190480000 the node's `spotMeta` listed 336 pairs, every one at its index here).
+    pub(crate) spot_pairs: Vec<SpotPair>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpotPair {
+    /// The base token's `szDecimals`: fill sizes carry these, prices `MAX_SPOT_DECIMALS` minus these.
+    pub(crate) size_decimals: u32,
+    pub(crate) quote_token: u32,
 }
 
 #[derive(Debug)]
 pub(crate) struct DexMeta {
     /// "" for the main dex, else the coin prefix of a HIP-3 dex ("xyz").
     pub(crate) name: String,
+    /// The perp dex index (`meta.pdi`, 0 for the main dex).
+    pub(crate) pdi: u32,
     pub(crate) collateral_token: u32,
     pub(crate) assets: Vec<AssetMeta>,
     tables: FxHashMap<u32, MarginTable>,
@@ -121,6 +134,28 @@ pub(crate) struct AssetMeta {
     /// (slots are [oracle, mark, external perp]; slot 1 matched the node mark for 10/10 main and 306/306 HIP-3 coins).
     /// `None` when the asset stores no price.
     pub(crate) mark_raw: Option<u64>,
+    pub(crate) margin_mode: AssetMarginMode,
+}
+
+/// A perp's `marginMode`: which margin a new position takes. Measured, not documented (research
+/// `hl_account_state_verify_20261019` "新开仓位是全仓还是逐仓", 2,459 of 2,459 new positions over three intervals).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AssetMarginMode {
+    /// `normal`: the account's setting for the asset, cross unless it was set isolated.
+    Normal,
+    /// `noCross`, `strictIsolated`: always isolated.
+    IsolatedOnly,
+    Unknown(String),
+}
+
+impl AssetMarginMode {
+    fn of(code: &str) -> Self {
+        match code {
+            "normal" => Self::Normal,
+            "noCross" | "strictIsolated" => Self::IsolatedOnly,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
 }
 
 impl AssetMeta {
@@ -167,6 +202,9 @@ pub(crate) struct DexAccount {
     /// Cross cash `u`, micro units of the dex's collateral token.
     pub(crate) cash_micro: i64,
     pub(crate) positions: Vec<Position>,
+    /// Assets (indices into the dex's `assets`) without a position whose leverage entry the account keeps isolated
+    /// (`l.I`): a position opened there is isolated. A cross entry (`l.C`) or none means cross.
+    pub(crate) isolated_settings: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +263,7 @@ struct WireMeta {
 struct WireAsset {
     name: String,
     sz_decimals: u32,
+    margin_mode: String,
 }
 
 #[derive(Deserialize)]
@@ -289,6 +328,13 @@ struct WireIsolated {
 #[derive(Deserialize)]
 struct WireSpotMeta {
     token_infos: Vec<WireTokenInfo>,
+    spot_infos: Vec<WireSpotInfo>,
+}
+
+#[derive(Deserialize)]
+struct WireSpotInfo {
+    /// [base, quote]
+    tokens: (u32, u32),
 }
 
 #[derive(Deserialize)]
@@ -377,8 +423,15 @@ struct WireShares {
     s: u64,
 }
 
-/// One dex's `user_to_state`, kept compact: users with non-zero cash or at least one non-zero position.
-struct DexUsers(FxHashMap<Address, (i64, Vec<(u32, WirePosition)>)>);
+/// One dex's `user_to_state`, kept compact: users with non-zero cash, a non-zero position or an isolated setting.
+struct DexUsers(FxHashMap<Address, WireDexUser>);
+
+/// One user's state on a dex: cash, non-zero positions, and the asset ids of the zero-size entries set isolated.
+struct WireDexUser {
+    cash_micro: i64,
+    positions: Vec<(u32, WirePosition)>,
+    isolated_settings: Vec<u32>,
+}
 
 /// `exchange.locus`, read in its on-disk order (ctx, cls, scl, ..., ust): once `cls` is read, spot balances and modes
 /// keep only the position holders. Another order fails the parse (`blp` may come anywhere).
@@ -393,6 +446,8 @@ struct ParsedLocus {
 struct SpotState {
     /// `meta.token_infos[token].spec`, indexed by token id.
     tokens: Vec<WireTokenSpec>,
+    /// `meta.spot_infos[pair].tokens`, indexed by pair.
+    pairs: Vec<(u32, u32)>,
     /// The position holders' non-zero balances, every token (raw, unsigned on the wire): which tokens an account
     /// keeps depends on its mode, known only once `ust` and `blp` are read (`build` narrows).
     balances: FxHashMap<Address, Vec<(u32, u64)>>,
@@ -444,9 +499,15 @@ impl<'de, T: Deserialize<'de>, V, F: FnMut(&Address, T) -> Option<V>> Visitor<'d
 impl<'de> Deserialize<'de> for DexUsers {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         Pairs::new(|_: &Address, state: WireUserState| {
-            let positions: Vec<(u32, WirePosition)> =
-                state.p.map(|p| p.p.into_iter().filter(|(_, position)| position.s != 0).collect()).unwrap_or_default();
-            (state.u != 0 || !positions.is_empty()).then_some((state.u, positions))
+            let (positions, settings): (Vec<_>, Vec<_>) =
+                state.p.map(|p| p.p).unwrap_or_default().into_iter().partition(|(_, position)| position.s != 0);
+            let isolated_settings: Vec<u32> = settings
+                .into_iter()
+                .filter(|(_, entry)| entry.l.as_ref().is_some_and(|leverage| leverage.isolated.is_some()))
+                .map(|(asset_id, _)| asset_id)
+                .collect();
+            let kept = state.u != 0 || !positions.is_empty() || !isolated_settings.is_empty();
+            kept.then_some(WireDexUser { cash_micro: state.u, positions, isolated_settings })
         })
         .deserialize(deserializer)
         .map(Self)
@@ -510,12 +571,13 @@ fn holders_of(dexes: &[WireClearinghouse]) -> FxHashSet<Address> {
     dexes
         .iter()
         .flat_map(|dex| dex.user_states.user_to_state.0.iter())
-        .filter(|(_, (_, positions))| !positions.is_empty())
+        .filter(|(_, state)| !state.positions.is_empty())
         .map(|(user, _)| *user)
         .collect()
 }
 
-/// `scl`: every token's spec from `meta.token_infos` and the position holders' non-zero balances from `user_states`.
+/// `scl`: every token's spec from `meta.token_infos`, every pair's quote from `meta.spot_infos` and the position holders'
+/// non-zero balances from `user_states`.
 struct SpotSeed<'a> {
     holders: &'a FxHashSet<Address>,
 }
@@ -536,13 +598,10 @@ impl<'de> Visitor<'de> for SpotSeed<'_> {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
-        let (mut tokens, mut balances) = (None, None);
+        let (mut meta, mut balances) = (None, None);
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "meta" => {
-                    let meta: WireSpotMeta = map.next_value()?;
-                    tokens = Some(meta.token_infos.into_iter().map(|info| info.spec).collect());
-                }
+                "meta" => meta = Some(map.next_value::<WireSpotMeta>()?),
                 "user_states" => {
                     let keep = |user: &Address, wire: WireSpotUser| {
                         if !self.holders.contains(user) {
@@ -559,8 +618,10 @@ impl<'de> Visitor<'de> for SpotSeed<'_> {
                 }
             }
         }
+        let meta = meta.ok_or_else(|| A::Error::missing_field("scl.meta"))?;
         Ok(SpotState {
-            tokens: tokens.ok_or_else(|| A::Error::missing_field("scl.meta"))?,
+            tokens: meta.token_infos.into_iter().map(|info| info.spec).collect(),
+            pairs: meta.spot_infos.into_iter().map(|info| info.tokens).collect(),
             balances: balances.ok_or_else(|| A::Error::missing_field("scl.user_states"))?,
         })
     }
@@ -626,7 +687,23 @@ fn build(locus: ParsedLocus) -> std::result::Result<CheckpointAccounts, String> 
         };
         accounts.insert(user, Account { mode, spot, lending, dex_states });
     }
-    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral, reserves, accounts })
+    let spot_pairs = spot_pairs(&locus.spot.pairs, &locus.spot.tokens)?;
+    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral, reserves, accounts, spot_pairs })
+}
+
+fn spot_pairs(pairs: &[(u32, u32)], tokens: &[WireTokenSpec]) -> std::result::Result<Vec<SpotPair>, String> {
+    pairs
+        .iter()
+        .enumerate()
+        .map(|(index, (base, quote))| {
+            let size_decimals = token_spec(tokens, *base).map_err(|err| format!("spot pair {index} base {err}"))?.sz_decimals;
+            token_spec(tokens, *quote).map_err(|err| format!("spot pair {index} quote {err}"))?;
+            if size_decimals > MAX_SPOT_DECIMALS {
+                return Err(format!("spot pair {index}: base szDecimals {size_decimals} above {MAX_SPOT_DECIMALS}"));
+            }
+            Ok(SpotPair { size_decimals, quote_token: *quote })
+        })
+        .collect()
 }
 
 fn account_mode(code: Option<&Option<String>>) -> AccountMode {
@@ -757,7 +834,8 @@ fn build_dex(clearinghouse: WireClearinghouse) -> std::result::Result<(DexMeta, 
                 [_, mark, ..] => return Err(format!("{}: stored mark {} is not positive", asset.name, mark.p)),
                 [_] => return Err(format!("{}: pxs2 has one slot, the mark is slot 1", asset.name)),
             };
-            Ok(AssetMeta { name: asset.name, size_decimals: asset.sz_decimals, mark_raw })
+            let margin_mode = AssetMarginMode::of(&asset.margin_mode);
+            Ok(AssetMeta { name: asset.name, size_decimals: asset.sz_decimals, mark_raw, margin_mode })
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
     let mut tables = FxHashMap::default();
@@ -766,7 +844,11 @@ fn build_dex(clearinghouse: WireClearinghouse) -> std::result::Result<(DexMeta, 
         tables.insert(table_id, MarginTable::listed(tiers).map_err(|err| format!("margin table {table_id}: {err}"))?);
     }
     let mut users = FxHashMap::default();
-    for (user, (cash_micro, wire_positions)) in user_states.user_to_state.0 {
+    for (user, WireDexUser { cash_micro, positions: wire_positions, isolated_settings }) in user_states.user_to_state.0 {
+        let isolated_settings = isolated_settings
+            .into_iter()
+            .map(|asset_id| asset_index(asset_id, meta.pdi, assets.len()))
+            .collect::<std::result::Result<Vec<_>, String>>()?;
         let mut positions = Vec::with_capacity(wire_positions.len());
         for (asset_id, wire) in wire_positions {
             let asset = asset_index(asset_id, meta.pdi, assets.len())?;
@@ -786,9 +868,9 @@ fn build_dex(clearinghouse: WireClearinghouse) -> std::result::Result<(DexMeta, 
                 .map_or(PositionMargin::Cross, |isolated| PositionMargin::Isolated { cash_micro: isolated.u });
             positions.push(Position { asset, size_raw: wire.s, margin, table_id });
         }
-        users.insert(user, DexAccount { dex: 0, cash_micro, positions });
+        users.insert(user, DexAccount { dex: 0, cash_micro, positions, isolated_settings });
     }
-    Ok((DexMeta { name, collateral_token: meta.collateral_token, assets, tables }, users))
+    Ok((DexMeta { name, pdi: meta.pdi, collateral_token: meta.collateral_token, assets, tables }, users))
 }
 
 /// The coin prefix shared by every asset of a clearinghouse ("" for the main dex).
@@ -816,9 +898,9 @@ pub(crate) mod tests {
 
     use super::*;
 
-    const HOLDER: &str = "0x00000000000000000000000000000000000000aa";
+    pub(crate) const HOLDER: &str = "0x00000000000000000000000000000000000000aa";
     const CASH_ONLY: &str = "0x00000000000000000000000000000000000000bb";
-    const ISOLATED: &str = "0x00000000000000000000000000000000000000cc";
+    pub(crate) const ISOLATED: &str = "0x00000000000000000000000000000000000000cc";
     /// Portfolio margin: borrows 3150 USDC (shares 3e11 at index 1.05), supplies 100 HYPE and holds 10 more in spot
     /// orders; cross PUMP 5,000,000 on main (cash -20000), xyz cash 1 and an isolated TSLA 1.0 (cash -300).
     pub(crate) const PORTFOLIO: &str = "0x00000000000000000000000000000000000000dd";
@@ -857,7 +939,10 @@ pub(crate) mod tests {
                                         [0, {"l": {"C": 3}, "M": 5}]
                                     ]}, "S": {"s": 1}}],
                                     [CASH_ONLY, {"u": 3_000_000}],
-                                    [ISOLATED, {"p": {"p": [[1, {"s": -2_000_000, "l": {"I": {"l": 3, "u": 12_000_000_000_i64}}, "M": 52}]]}}],
+                                    [ISOLATED, {"p": {"p": [
+                                        [1, {"s": -2_000_000, "l": {"I": {"l": 3, "u": 12_000_000_000_i64}}, "M": 52}],
+                                        [0, {"l": {"I": {"l": 5, "u": 0}}, "M": 56}]
+                                    ]}}],
                                     [PORTFOLIO, {"u": -20_000_000_000_i64, "p": {"p": [[1, {"s": 5_000_000, "l": {"C": 10}, "M": 52}]]}}]
                                 ],
                                 "users_with_positions": []
@@ -874,7 +959,7 @@ pub(crate) mod tests {
                             },
                             "oracle": {"pxs2": [[{"u": "t", "p": 357_970, "d": 1}, {"u": "t", "p": 358_320, "d": 1}, {"u": "t", "p": 357_970, "d": 1}]]},
                             "user_states": {"user_to_state": [
-                                [HOLDER, {"u": 30_269_700}],
+                                [HOLDER, {"u": 30_269_700, "p": {"p": [[10_000, {"l": {"I": {"l": 3, "u": 0}}, "M": 10}]]}}],
                                 [PORTFOLIO, {"u": 1_000_000, "p": {"p": [[10_000, {"s": 1000, "l": {"I": {"u": -300_000_000_i64}}, "M": 10}]]}}]
                             ]}
                         },
@@ -913,7 +998,8 @@ pub(crate) mod tests {
                 json!({"spec": {"name": name, "szDecimals": size_decimals, "weiDecimals": 8}, "spots": []})
             })
             .collect();
-        checkpoint["exchange"]["locus"]["scl"]["meta"] = json!({"token_infos": token_infos, "spot_infos": []});
+        let spot_infos = json!([{"tokens": [1, 0], "deploy_time": "1970-01-01T00:00:00"}, {"tokens": [150, 0]}, {"tokens": [150, 360]}]);
+        checkpoint["exchange"]["locus"]["scl"]["meta"] = json!({"token_infos": token_infos, "spot_infos": spot_infos});
         rmp_serde::to_vec(&checkpoint).unwrap()
     }
 
@@ -973,6 +1059,34 @@ pub(crate) mod tests {
         // the zero-size leverage entry is dropped; the xyz state holds cash only and is kept
         assert_eq!(cash, vec![(0, -12_000_000_000, 2), (1, 30_269_700, 0), (2, -4_000_000_000, 1)]);
         assert_eq!(parsed.accounts[&user(ISOLATED)].mode, AccountMode::Default);
+    }
+
+    /// Research "新开仓位是全仓还是逐仓": a zero-size entry set isolated makes a new position there isolated; a cross one
+    /// or none leaves it cross. The asset's `marginMode` decides first.
+    #[test]
+    fn zero_size_isolated_entries_and_asset_margin_modes_are_kept() {
+        let parsed = parse_checkpoint_bytes(&fixture()).unwrap();
+        let settings = |holder: &str, dex: usize| {
+            let account = &parsed.accounts[&user(holder)];
+            account.dex_states.iter().find(|state| state.dex == dex).unwrap().isolated_settings.clone()
+        };
+        assert_eq!(settings(ISOLATED, 0), [0], "BTC set isolated, no position");
+        assert_eq!(settings(HOLDER, 0), Vec::<usize>::new(), "a cross entry is no isolated setting");
+        assert_eq!(settings(HOLDER, 1), [0], "a cash-only state keeps its setting");
+        assert_eq!(parsed.dexes[0].assets[0].margin_mode, AssetMarginMode::Normal);
+        assert_eq!(parsed.dexes[1].assets[0].margin_mode, AssetMarginMode::IsolatedOnly);
+        let pair = |size_decimals, quote_token| SpotPair { size_decimals, quote_token };
+        assert_eq!(parsed.spot_pairs, [pair(2, 0), pair(2, 0), pair(2, 360)], "@0 T1/USDC, @1 HYPE/USDC, @2 HYPE/USDH");
+    }
+
+    #[test]
+    fn an_unknown_asset_margin_mode_is_kept_as_read() {
+        let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        checkpoint["exchange"]["locus"]["cls"][0]["meta"]["universe"][1]["marginMode"] = json!("hedged");
+        let parsed = parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap();
+        assert_eq!(parsed.dexes[0].assets[1].margin_mode, AssetMarginMode::Unknown("hedged".to_string()));
+        checkpoint["exchange"]["locus"]["cls"][0]["meta"]["universe"][1].as_object_mut().unwrap().remove("marginMode");
+        assert!(parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).is_err(), "required");
     }
 
     #[test]

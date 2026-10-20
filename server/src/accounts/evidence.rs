@@ -12,6 +12,7 @@ use serde_json::json;
 use super::{
     book::SilentChange,
     misc::MiscEvent,
+    replay::Mismatch,
     size::format_size_raw,
     view::user_text,
 };
@@ -77,8 +78,8 @@ pub(crate) fn misc_line_reason(batch: &Batch<MiscEvent>) -> Option<String> {
         .events_ref()
         .iter()
         .filter_map(|event| match event {
-            MiscEvent::Ledger { delta_type, .. } if !ORDINARY_LEDGER_TYPES.contains(&delta_type.as_str()) => {
-                Some(format!("ledger type {delta_type:?}"))
+            MiscEvent::Ledger { delta, .. } if !ORDINARY_LEDGER_TYPES.contains(&delta.delta_type()) => {
+                Some(format!("ledger type {:?}", delta.delta_type()))
             }
             MiscEvent::Unknown(kind) => Some(format!("misc kind {kind:?}")),
             MiscEvent::Ledger { .. } | MiscEvent::Funding(_) | MiscEvent::Irrelevant => None,
@@ -115,11 +116,24 @@ pub(crate) fn silent_change_json(change: &SilentChange, anchor_from: Option<u64>
     })
 }
 
+/// A replayed account the anchor contradicts (design 000433): both states, 10^-8 USDC amounts as decimal text.
+pub(crate) fn replay_mismatch_json(mismatch: &Mismatch, anchor_from: Option<u64>, anchor_to: u64) -> serde_json::Value {
+    json!({
+        "kind": "replayMismatch",
+        "anchorFrom": anchor_from,
+        "anchorTo": anchor_to,
+        "user": user_text(mismatch.user),
+        "replayed": mismatch.replayed.json(),
+        "anchor": mismatch.anchor.json(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::accounts::test_support::{
-        PUMP, SOL_ADL_BLOCK, SOL_ADL_LONG, SOL_LIQUIDATED_SHORT, fills_line, misc, real_fills_line, user,
+        PUMP, SOL_ADL_BLOCK, SOL_ADL_LONG, SOL_LIQUIDATED_SHORT, fills_line, misc, real_fills_line, send_inner,
+        unread_ledger_inner, user,
     };
 
     fn fills_batch(line: &str) -> Batch<NodeDataFill> {
@@ -156,9 +170,10 @@ mod tests {
 
     #[test]
     fn rare_ledger_types_and_unknown_kinds_are_evidence() {
-        let ledger = |kind: &str| format!(r#"{{"LedgerUpdate":{{"users":["{:#x}"],"delta":{{"type":"{kind}"}}}}}}"#, user(1));
-        assert_eq!(misc_line_reason(&misc(1_100, &[&ledger("send")])), None);
-        assert_eq!(misc_line_reason(&misc(1_100, &[&ledger("liquidation")])).as_deref(), Some("ledger type \"liquidation\""));
+        let send = send_inner((user(1), ""), (user(2), ""), "1.0");
+        assert_eq!(misc_line_reason(&misc(1_100, &[&send])), None);
+        let liquidation = unread_ledger_inner(user(1), "liquidation");
+        assert_eq!(misc_line_reason(&misc(1_100, &[&liquidation])).as_deref(), Some("ledger type \"liquidation\""));
         assert_eq!(misc_line_reason(&misc(1_100, &[r#"{"NewKind":{}}"#])).as_deref(), Some("misc kind \"NewKind\""));
         assert_eq!(misc_line_reason(&misc(1_100, &[r#"{"Funding":{"deltas":[]}}"#])), None);
     }
