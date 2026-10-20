@@ -198,12 +198,12 @@ impl MarkState {
             if self.books_broken {
                 break;
             }
-            let before = self.books.asset(diff.coin()).map(|asset| self.books.best(asset));
+            let before = self.books.book(diff.coin()).map(|book| self.books.best(book));
             match self.books.apply(diff) {
-                Ok(Applied::Book(asset)) => {
-                    let after = self.books.best(asset);
+                Ok(Applied::Book(book)) => {
+                    let after = self.books.best(book);
                     if let Some(before) = before.filter(|before| *before != after) {
-                        cuts.record(asset, line, before, after);
+                        cuts.record(book, line, before, after);
                     }
                 }
                 Ok(Applied::OtherMarket) => {}
@@ -247,6 +247,7 @@ impl MarkState {
             }
             let cut_of = |asset: usize| CoinCut {
                 best: cuts.at(asset, point.cut.lo, books.best(asset)),
+                spot_reference: books.spot_reference(asset).map(|book| cuts.at(book, point.cut.lo, books.best(book))),
                 block_trade: trades
                     .get(&asset)
                     .and_then(|trades| trades.iter().take_while(|(index, _)| *index < point.cut.fills_lo).last())
@@ -689,7 +690,7 @@ pub(crate) mod tests {
         book::{CLOCK_MARGIN_MS, LossBound},
         marks::{
             book::{BookMismatch, tests::diff_line},
-            seed::RestingOrder,
+            seed::{RestingOrder, SpotReferenceBook},
         },
         test_support::{HIP3_LINE_TIME_NS, SEED_TIME_MS, hip3_line as line, marks_seed, status_line},
     };
@@ -1094,6 +1095,46 @@ pub(crate) mod tests {
         assert_eq!(unsupported, None);
         // L = median(bid 828600 at the cut, ask 828700, last trade 828600); at the block's end the bid is 828650
         assert_eq!(mark, StoredMark { px: 828_600, time_ns }, "median(828700, Mark cache 828590, L 828600)");
+    }
+
+    /// A reference action reads a `psro` coin's spot book at its place in the block: a bid placed before it moves the
+    /// midpoint to 82,870.25 (→ 828,702, half to even), one placed after it to 82,870.35 (→ 828,704).
+    #[test]
+    fn a_reference_action_reads_the_spot_book_at_its_place_in_the_block() {
+        use self::actions::{BookAnchors, MarkAction, RankedAction};
+        let mut marks = NodeMarks::new(GRID, STARTED_MS);
+        run(&mut marks, 995..=995, &[]);
+        let mut seeded = seed(995);
+        let order = |oid, side, limit_px| RestingOrder { oid, side, limit_px, remaining: 100 };
+        seeded.native.spot_references.push(SpotReferenceBook {
+            asset: 0,
+            coin: "@1".to_string(),
+            size_decimals: 5,
+            price_decimals: 3,
+            orders: vec![order(41, Side::Bid, 82_870_000), order(42, Side::Ask, 82_870_400)],
+        });
+        marks.install(seeded);
+        let validator = Address::repeat_byte(0xee);
+        let placed = |rank, oid| RankedAction {
+            rank,
+            user: Some(Address::repeat_byte(1)),
+            action: MarkAction::Book(BookAnchors { created: vec![oid], ..BookAnchors::default() }),
+        };
+        let reference =
+            RankedAction { rank: (1, 3, 0), user: Some(validator), action: MarkAction::Reference { oracle: Vec::new(), external: Vec::new() } };
+        let actions = MarkActions { height: 996, time_ns: 1_792_391_844_000_000_000, actions: vec![placed((0, 1, 0), 31), reference, placed((2, 1, 0), 32)] };
+        let inputs = MarkInputs {
+            book_diffs: vec![
+                diff_line(996, "@1", 31, "B", "82870.1", r#"{"new":{"sz":"0.001"}}"#),
+                diff_line(996, "@1", 32, "B", "82870.3", r#"{"new":{"sz":"0.001"}}"#),
+            ],
+            mark_actions: Ok(actions),
+            ..MarkInputs::default()
+        };
+        assert_eq!(marks.apply_block(996, inputs), MarksBlockReport::default());
+        let prices = &marks.state.as_ref().unwrap().prices;
+        assert_eq!(prices.spot_member(0, validator), Some((828_702, 1_792_391_844_000_000_000)));
+        assert_eq!(prices.mark_of(0).1, None);
     }
 
     /// Review 000444 r1 P3: a price action whose cut is not unique (order 13's line is anchored by no action) is counted

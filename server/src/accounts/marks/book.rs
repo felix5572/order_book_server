@@ -1,7 +1,9 @@
 //! The main dex's resting orders as the node's raw book diffs move them (design 000439 r2): seeded with a checkpoint's
 //! orders (equal to the node's L4 export order by order, research `62149c8e`), then moved by each block's diffs in the
 //! node's execution order (research `hl_node_mark_state_20261019` method 1: four coins replayed between checkpoints
-//! equal the later one order by order, three intervals). A diff that does not fit the book breaks the contract.
+//! equal the later one order by order, three intervals). A diff that does not fit the book breaks the contract. The
+//! spot books giving HYPE and PURR their Spot reference (`psro`) follow the same way (Codex
+//! `hype_purr_internal_reference_20261020`: both equal at three interval ends, order by order).
 //!
 //! Prices are exact decimals; sizes are printed from binary floating point like the fills' (`2460032.6000000001`, W,
 //! block 1190760017 on bm 2026-10-20), so they go through the fills' rule, `size::parse_size_raw`.
@@ -62,9 +64,9 @@ pub(crate) type BestPrices = (Option<u64>, Option<u64>);
 /// What applying a diff did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Applied {
-    /// It moved the book of this asset index.
+    /// It moved the book at this index (`NativeBooks`: a main-dex asset index, or past them a spot reference book).
     Book(usize),
-    /// A spot, outcome or HIP-3 market: the marks keep no book of it.
+    /// A spot, outcome or HIP-3 market the marks keep no book of.
     OtherMarket,
     /// A main-dex perp outside the seed's universe (listed since).
     UnknownCoin,
@@ -109,6 +111,8 @@ impl BookDiff {
 #[derive(Debug, Clone)]
 struct AssetBook {
     size_decimals: u32,
+    /// Its integer prices are in 10^-this.
+    price_decimals: u32,
     orders: FxHashMap<u64, RestingOrder>,
     /// Resting orders per price level: a level stays while any order rests there, whatever its size (research
     /// `execution_point_replay.py` `Books`).
@@ -117,6 +121,15 @@ struct AssetBook {
 }
 
 impl AssetBook {
+    fn seeded(size_decimals: u32, price_decimals: u32, orders: Vec<RestingOrder>) -> Self {
+        let mut book = Self { size_decimals, price_decimals, orders: FxHashMap::default(), bids: BTreeMap::new(), asks: BTreeMap::new() };
+        for order in orders {
+            book.add_level(&order);
+            book.orders.insert(order.oid, order);
+        }
+        book
+    }
+
     const fn levels(&mut self, side: Side) -> &mut BTreeMap<u64, u32> {
         match side {
             Side::Bid => &mut self.bids,
@@ -143,11 +156,13 @@ impl AssetBook {
     }
 }
 
-/// Every main-dex perp's resting orders, by asset index.
+/// Every main-dex perp's resting orders by asset index, then the spot reference books in `psro` order.
 #[derive(Debug, Clone)]
 pub(crate) struct NativeBooks {
     by_coin: FxHashMap<Box<str>, usize>,
-    assets: Vec<AssetBook>,
+    books: Vec<AssetBook>,
+    /// Per main-dex asset, the index of the spot book giving its Spot reference.
+    spot_reference: FxHashMap<usize, usize>,
 }
 
 /// A checkpoint's books against the replayed ones.
@@ -177,45 +192,45 @@ pub(crate) struct BookMismatch {
 
 impl NativeBooks {
     pub(crate) fn seeded(native: NativeSeed) -> Self {
-        let mut by_coin = FxHashMap::default();
-        let mut assets = Vec::with_capacity(native.assets.len());
-        for (index, asset) in native.assets.into_iter().enumerate() {
-            by_coin.insert(asset.name.into_boxed_str(), index);
-            let mut book = AssetBook {
-                size_decimals: asset.size_decimals,
-                orders: FxHashMap::default(),
-                bids: BTreeMap::new(),
-                asks: BTreeMap::new(),
-            };
-            for order in asset.orders {
-                book.add_level(&order);
-                book.orders.insert(order.oid, order);
-            }
-            assets.push(book);
+        let count = native.assets.len() + native.spot_references.len();
+        let mut books = Self { by_coin: FxHashMap::default(), books: Vec::with_capacity(count), spot_reference: FxHashMap::default() };
+        for asset in native.assets {
+            books.push(asset.name, AssetBook::seeded(asset.size_decimals, MAX_PERP_DECIMALS - asset.size_decimals, asset.orders));
         }
-        Self { by_coin, assets }
+        for spot in native.spot_references {
+            books.spot_reference.insert(spot.asset, books.books.len());
+            books.push(spot.coin, AssetBook::seeded(spot.size_decimals, spot.price_decimals, spot.orders));
+        }
+        books
     }
 
-    /// The asset index of a main-dex coin of the universe.
-    pub(crate) fn asset(&self, coin: &str) -> Option<usize> {
+    fn push(&mut self, coin: String, book: AssetBook) {
+        self.by_coin.insert(coin.into_boxed_str(), self.books.len());
+        self.books.push(book);
+    }
+
+    /// The book index of a coin: a main-dex coin of the universe (its asset index) or a spot reference pair.
+    pub(crate) fn book(&self, coin: &str) -> Option<usize> {
         self.by_coin.get(coin).copied()
     }
 
-    pub(crate) fn best(&self, asset: usize) -> BestPrices {
-        self.assets[asset].best()
+    /// The book index of the spot book giving main-dex asset `asset` its Spot reference.
+    pub(crate) fn spot_reference(&self, asset: usize) -> Option<usize> {
+        self.spot_reference.get(&asset).copied()
+    }
+
+    pub(crate) fn best(&self, book: usize) -> BestPrices {
+        self.books[book].best()
     }
 
     /// Applies one diff.
     pub(crate) fn apply(&mut self, diff: &BookDiff) -> Result<Applied, String> {
-        if !is_main_perp(&diff.coin) {
-            return Ok(Applied::OtherMarket);
-        }
         let Some(&index) = self.by_coin.get(&diff.coin) else {
-            return Ok(Applied::UnknownCoin);
+            return Ok(if is_main_perp(&diff.coin) { Applied::UnknownCoin } else { Applied::OtherMarket });
         };
-        let book = &mut self.assets[index];
+        let book = &mut self.books[index];
         let context = |err: String| format!("{} oid {}: {err}", diff.coin, diff.oid);
-        let limit_px = diff.px.units(MAX_PERP_DECIMALS - book.size_decimals).map_err(|err| context(format!("price {err}")))?;
+        let limit_px = diff.px.units(book.price_decimals).map_err(|err| context(format!("price {err}")))?;
         let size = |text: &str| {
             let raw = parse_size_raw(text, book.size_decimals).map_err(context)?;
             u64::try_from(raw).map_err(|_| context(format!("size {text:?} is negative")))
@@ -247,41 +262,54 @@ impl NativeBooks {
         Ok(Applied::Book(index))
     }
 
-    /// Order by order against a checkpoint's books.
+    /// Order by order against a checkpoint's books, the spot reference books included.
     pub(crate) fn check_against(&self, checkpoint: &NativeSeed) -> BooksCheck {
         let mut check = BooksCheck::default();
-        for asset in &checkpoint.assets {
-            let Some(&index) = self.by_coin.get(asset.name.as_str()) else {
-                check.unknown += 1;
-                continue;
-            };
-            let replayed = &self.assets[index].orders;
-            let before = (check.orders_differ, check.missing, check.extra);
-            for order in &asset.orders {
-                match replayed.get(&order.oid) {
-                    Some(mine) if mine == order => check.orders_equal += 1,
-                    Some(mine) => {
-                        check.orders_differ += 1;
-                        sample(&mut check, &asset.name, order.oid, Some(*mine), Some(*order));
-                    }
-                    None => {
-                        check.missing += 1;
-                        sample(&mut check, &asset.name, order.oid, None, Some(*order));
-                    }
-                }
-            }
-            let stored: FxHashSet<u64> = asset.orders.iter().map(|order| order.oid).collect();
-            for mine in replayed.values().filter(|mine| !stored.contains(&mine.oid)) {
-                check.extra += 1;
-                sample(&mut check, &asset.name, mine.oid, Some(*mine), None);
-            }
-            if (check.orders_differ, check.missing, check.extra) == before {
-                check.books_equal += 1;
-            } else {
-                check.books_differ += 1;
+        let perps = checkpoint.assets.iter().map(|asset| (asset.name.as_str(), asset.orders.as_slice()));
+        let spots = checkpoint.spot_references.iter().map(|spot| (spot.coin.as_str(), spot.orders.as_slice()));
+        for (coin, orders) in perps.chain(spots) {
+            match self.by_coin.get(coin) {
+                Some(&index) => check.book(coin, orders, &self.books[index].orders),
+                None => check.unknown += 1,
             }
         }
         check
+    }
+}
+
+impl BooksCheck {
+    /// One book: the checkpoint's `stored` orders against the `replayed` ones.
+    fn book(&mut self, coin: &str, stored: &[RestingOrder], replayed: &FxHashMap<u64, RestingOrder>) {
+        let before = (self.orders_differ, self.missing, self.extra);
+        for order in stored {
+            match replayed.get(&order.oid) {
+                Some(mine) if mine == order => self.orders_equal += 1,
+                Some(mine) => {
+                    self.orders_differ += 1;
+                    self.sample(coin, order.oid, Some(*mine), Some(*order));
+                }
+                None => {
+                    self.missing += 1;
+                    self.sample(coin, order.oid, None, Some(*order));
+                }
+            }
+        }
+        let stored: FxHashSet<u64> = stored.iter().map(|order| order.oid).collect();
+        for mine in replayed.values().filter(|mine| !stored.contains(&mine.oid)) {
+            self.extra += 1;
+            self.sample(coin, mine.oid, Some(*mine), None);
+        }
+        if (self.orders_differ, self.missing, self.extra) == before {
+            self.books_equal += 1;
+        } else {
+            self.books_differ += 1;
+        }
+    }
+
+    fn sample(&mut self, coin: &str, oid: u64, replayed: Option<RestingOrder>, checkpoint: Option<RestingOrder>) {
+        if self.samples.len() < MAX_SAMPLES {
+            self.samples.push(BookMismatch { coin: coin.to_string(), oid, replayed, checkpoint });
+        }
     }
 }
 
@@ -294,19 +322,13 @@ fn held<'b>(book: &'b mut AssetBook, diff: &BookDiff, limit_px: u64) -> Result<&
     Ok(order)
 }
 
-fn sample(check: &mut BooksCheck, coin: &str, oid: u64, replayed: Option<RestingOrder>, checkpoint: Option<RestingOrder>) {
-    if check.samples.len() < MAX_SAMPLES {
-        check.samples.push(BookMismatch { coin: coin.to_string(), oid, replayed, checkpoint });
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::{
         accounts::{
             checkpoint::{parse_checkpoint_bytes, tests::fixture},
-            marks::seed::MarkSeed,
+            marks::seed::{MarkSeed, SpotReferenceBook},
         },
         types::node_data::Batch,
     };
@@ -339,7 +361,7 @@ pub(crate) mod tests {
         assert_eq!(books.apply(&diff("PUMP", 5, "A", "0.004", r#"{"new":{"sz":"2460032.6000000001"}}"#)), Ok(Applied::Book(1)));
         let update = diff("PUMP", 5, "A", "0.004", r#"{"update":{"origSz":"2460032.6","newSz":"2460032.5999999996"}}"#);
         assert_eq!(books.apply(&update), Ok(Applied::Book(1)));
-        assert_eq!(books.assets[1].orders[&5].remaining, 24_600_326);
+        assert_eq!(books.books[1].orders[&5].remaining, 24_600_326);
     }
 
     #[test]
@@ -380,6 +402,34 @@ pub(crate) mod tests {
             replayed: Some(RestingOrder { oid: 11, side: Side::Bid, limit_px: 828_600, remaining: 200 }),
             checkpoint: Some(RestingOrder { oid: 11, side: Side::Bid, limit_px: 828_600, remaining: 199 }),
         });
+    }
+
+    /// PUMP given the spot book `@1` (base szDecimals 2, 6 price decimals) as its Spot reference.
+    fn spot_referenced_seed() -> NativeSeed {
+        let mut native = native_seed();
+        let book = SpotReferenceBook { asset: 1, coin: "@1".to_string(), size_decimals: 2, price_decimals: 6, orders: Vec::new() };
+        native.spot_references.push(book);
+        native
+    }
+
+    #[test]
+    fn a_spot_reference_book_follows_its_diffs_and_is_checked() {
+        let mut books = NativeBooks::seeded(spot_referenced_seed());
+        assert_eq!((books.spot_reference(1), books.spot_reference(0), books.book("@1")), (Some(2), None, Some(2)));
+        assert_eq!(books.apply(&diff("@1", 21, "B", "79.288", r#"{"new":{"sz":"3.0"}}"#)), Ok(Applied::Book(2)));
+        assert_eq!(books.apply(&diff("@1", 22, "A", "79.289", r#"{"new":{"sz":"3.8"}}"#)), Ok(Applied::Book(2)));
+        assert_eq!(books.best(2), (Some(79_288_000), Some(79_289_000)));
+        assert_eq!(books.apply(&diff("@5", 1, "B", "1.0", r#""remove""#)), Ok(Applied::OtherMarket), "a spot pair it keeps no book of");
+        let mut later = spot_referenced_seed();
+        later.spot_references[0].orders = vec![
+            RestingOrder { oid: 21, side: Side::Bid, limit_px: 79_288_000, remaining: 300 },
+            RestingOrder { oid: 22, side: Side::Ask, limit_px: 79_289_000, remaining: 380 },
+        ];
+        let check = books.check_against(&later);
+        assert_eq!((check.books_equal, check.books_differ, check.orders_equal), (3, 0, 4), "BTC, PUMP and @1");
+        later.spot_references[0].orders[1].remaining = 379;
+        let check = books.check_against(&later);
+        assert_eq!((check.books_differ, check.orders_differ, check.samples[0].coin.as_str()), (1, 1, "@1"));
     }
 
     #[test]

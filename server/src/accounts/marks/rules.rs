@@ -3,7 +3,7 @@
 //! bit-exact over three intervals). Every float operation keeps the node's order: the replay is checked bit for bit
 //! against each checkpoint. The shared goldens (`golden_6911b792.json`, copied from the trading system) bind both ports.
 
-use super::seed::Ema;
+use super::{book::BestPrices, decimal::ExactDecimal, seed::Ema};
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 /// Prices are positive integers below 2^53 (`mark_rules.rs` `price`).
@@ -33,6 +33,18 @@ pub(crate) fn wire_units(text: &str, size_decimals: u32) -> Result<u64, String> 
         return Err(format!("wire price {text:?} outside the positive price range"));
     }
     Ok(units)
+}
+
+/// The Spot input a spot book gives the main-dex perp `psro` maps to it (Codex 0x2da7470..0x2da7942): the floor of the
+/// integer midpoint, read as a price with the book's `price_decimals`, in the perp's units rounded half to even
+/// (`wire_units`; not the order grid). `None`, no input, with an empty side or a zero midpoint (0x2da772e).
+pub(crate) fn spot_reference_units((bid, ask): BestPrices, price_decimals: u32, size_decimals: u32) -> Result<Option<u64>, String> {
+    let (Some(bid), Some(ask)) = (bid, ask) else { return Ok(None) };
+    let mid = bid.midpoint(ask);
+    if mid == 0 {
+        return Ok(None);
+    }
+    wire_units(&ExactDecimal::from_units(mid, price_decimals).to_string(), size_decimals).map(Some)
 }
 
 /// The node's float-to-units rounding (0x644af40): half away from zero for positive values, at least 1.
@@ -134,15 +146,26 @@ impl Ema {
         self.sampled(sample, dt, at_ns)
     }
 
-    /// The basis the selector applies (0x37451e0): zero until `decay_parameter` samples, clipped to [-1, 1].
-    pub(crate) fn basis_ratio(&self) -> f64 {
+    /// `decay_parameter` samples or more and a non-zero denominator.
+    fn is_warm(&self) -> bool {
         #[expect(clippy::cast_precision_loss, reason = "a sample count below 2^53")]
-        let warm = self.samples as f64 >= self.decay_parameter;
-        if !warm || self.denominator_s < 1e-15 {
+        let samples = self.samples as f64;
+        samples >= self.decay_parameter && self.denominator_s >= 1e-15
+    }
+
+    /// The basis the selector applies (0x37451e0): zero until warm, clipped to [-1, 1].
+    pub(crate) fn basis_ratio(&self) -> f64 {
+        if !self.is_warm() {
             return 0.0;
         }
         let ratio = self.numerator / self.denominator_s;
         if ratio.is_finite() { ratio.clamp(-1.0, 1.0) } else { 0.0 }
+    }
+
+    /// The average a two-candidate reference reads from previewed lmpe (0x458b440), in prices; `None` before it is
+    /// warm, a branch never observed (Codex's replay stops there).
+    pub(crate) fn warm_average(&self) -> Option<f64> {
+        self.is_warm().then(|| self.numerator / self.denominator_s)
     }
 
     /// lmpe after one sample of the local price in prices (`L / 10^(6 - szDecimals)`); `None` for a gap longer than
@@ -158,6 +181,49 @@ mod tests {
     use serde::Deserialize;
 
     use super::*;
+
+    /// bm 2026-10-20, the validator member written in each checkpoint's own block against that block's last spot
+    /// book: PURR/USDC (8 price decimals, perp szDecimals 0) at 1190920000 and 1190890000, both half ties to even;
+    /// HYPE/USDC `@107` (6, perp 2) at 1190920000; Codex's HYPE sample at block 1189999977 (78.690 / 78.691).
+    #[test]
+    fn a_spot_book_gives_its_floor_midpoint_half_to_even() {
+        assert_eq!(spot_reference_units((Some(9_721_800), Some(9_735_500)), 8, 0), Ok(Some(97_286)), "97,286.5");
+        assert_eq!(spot_reference_units((Some(9_729_900), Some(9_751_600)), 8, 0), Ok(Some(97_408)), "97,407.5");
+        assert_eq!(spot_reference_units((Some(79_288_000), Some(79_289_000)), 6, 2), Ok(Some(792_885)));
+        assert_eq!(spot_reference_units((Some(78_690_000), Some(78_691_000)), 6, 2), Ok(Some(786_905)));
+        assert_eq!(spot_reference_units((Some(3), Some(4)), 2, 4), Ok(Some(3)), "the floor midpoint 0.03, not 0.035");
+        assert_eq!(spot_reference_units((None, Some(4)), 2, 4), Ok(None));
+        assert_eq!(spot_reference_units((Some(0), Some(1)), 2, 4), Ok(None), "a zero midpoint");
+    }
+
+    #[derive(Deserialize)]
+    struct SpotGolden {
+        cases: Vec<SpotCase>,
+    }
+
+    #[derive(Deserialize)]
+    struct SpotCase {
+        coin: String,
+        spot_bbo: (u64, u64),
+        spot_units: u64,
+    }
+
+    /// Codex's 132 members (66 HYPE, 66 PURR, 10 half ties) at three checkpoints of 2026-10-19: the spot book at the
+    /// validator's action gives the Spot member the checkpoint stored (checked 132 of 132, value and time).
+    #[test]
+    fn spot_reference_goldens() {
+        let golden: SpotGolden = serde_json::from_str(include_str!("spot_reference_goldens.json")).unwrap();
+        assert_eq!(golden.cases.len(), 132);
+        for case in golden.cases {
+            let (price_decimals, size_decimals) = match case.coin.as_str() {
+                "HYPE" => (6, 2),
+                "PURR" => (8, 0),
+                other => panic!("{other}"),
+            };
+            let (bid, ask) = case.spot_bbo;
+            assert_eq!(spot_reference_units((Some(bid), Some(ask)), price_decimals, size_decimals), Ok(Some(case.spot_units)), "{} {bid}/{ask}", case.coin);
+        }
+    }
 
     /// The one sample (xyz:CAMBRICON block 1190248599, szDecimals 2): 140.35 submitted after 138.85 wrote 140.2385.
     #[test]

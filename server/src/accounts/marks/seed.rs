@@ -17,7 +17,7 @@ use serde::{
 
 use super::decimal::ExactDecimal;
 use crate::{
-    accounts::checkpoint::{CheckpointAccounts, DexMeta, MAX_PERP_DECIMALS, node_time_ns},
+    accounts::checkpoint::{CheckpointAccounts, DexMeta, MAX_PERP_DECIMALS, SpotPair, node_time_ns, spot_pair_coin},
     order_book::Side,
 };
 
@@ -43,6 +43,9 @@ pub(crate) struct WireOracle {
     msoe: WireMsoe,
     lmpe: Vec<(u32, WireEma)>,
     ror: WireReferences,
+    /// (main-dex asset, spot pair): the assets whose Spot reference the node takes from that pair's book
+    /// (`[[152, 0], [159, 107]]`, PURR and HYPE, on 2026-10-19/20).
+    psro: Vec<(u32, u32)>,
 }
 
 /// `msoe`: the basis EMA of each priced asset (`e`, by asset index; `g` is not read).
@@ -71,7 +74,8 @@ enum WireReferenceKey {
     /// `{"p": [asset index, kind]}`.
     #[serde(rename = "p")]
     Perp(u32, String),
-    /// `{"s": name}`: `usdtUsdcPx`, `nativePx` (the HYPE / PURR inputs, unsupported).
+    /// `{"s": name}`: `usdtUsdcPx`, `nativePx`, the validators' scalar inputs (not read: no main-dex price rule takes
+    /// them).
     #[serde(rename = "s")]
     Named(IgnoredAny),
 }
@@ -197,11 +201,13 @@ struct WireOrderTerms {
     l: u64,
 }
 
-/// What the account view's parse hands over for the main dex: its oracle state and its books.
+/// What the account view's parse hands over for the main dex: its oracle state, its books and the spot books.
 #[derive(Debug)]
 pub(crate) struct WireNativePrices {
     pub(crate) oracle: WireOracle,
     pub(crate) books: Vec<WireBook>,
+    /// `exchange.spot_books`, each with its pair index as `asset`.
+    pub(crate) spot_books: Vec<WireBook>,
 }
 
 // ─── domain ─────────────────────────────────────────────────────────────────
@@ -221,6 +227,25 @@ pub(crate) struct MarkSeed {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativeSeed {
     pub(crate) assets: Vec<NativeAsset>,
+    /// The spot books `oracle.psro` names, in its order.
+    pub(crate) spot_references: Vec<SpotReferenceBook>,
+}
+
+/// A spot book giving a main-dex asset its Spot reference (`oracle.psro`; the node reads it at each validator's
+/// reference action, Codex `hype_purr_internal_reference_20261020`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SpotReferenceBook {
+    /// The main-dex asset index.
+    pub(crate) asset: usize,
+    /// The pair's coin in the node's book diffs (`@107`, `PURR/USDC`).
+    pub(crate) coin: String,
+    /// The base token's `szDecimals`: the orders' sizes are in 10^-this.
+    pub(crate) size_decimals: u32,
+    /// The quote's `weiDecimals` minus the base's `szDecimals`: the orders' prices are in 10^-this (8 - szDecimals
+    /// for a USDC quote, the only one `psro` names), and the node reads a midpoint as a price with this many
+    /// decimals (0x2da7786).
+    pub(crate) price_decimals: u32,
+    pub(crate) orders: Vec<RestingOrder>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -308,12 +333,12 @@ pub(crate) struct Hip3Coin {
 impl MarkSeed {
     /// The seed of a parsed checkpoint, which it consumes (the books are not copied).
     pub(crate) fn from_checkpoint(checkpoint: CheckpointAccounts) -> Result<Self, String> {
-        let CheckpointAccounts { height, time_ms, dexes, native_prices, .. } = checkpoint;
+        let CheckpointAccounts { height, time_ms, dexes, native_prices, spot_pairs, .. } = checkpoint;
         let (main, hip3_dexes) = dexes.split_first().ok_or("no dex")?;
         if main.pdi != 0 {
             return Err(format!("the first clearinghouse is pdi {}, not the main dex", main.pdi));
         }
-        let native = NativeSeed::from_wire(native_prices, main).map_err(|err| format!("main dex: {err}"))?;
+        let native = NativeSeed::from_wire(native_prices, main, &spot_pairs).map_err(|err| format!("main dex: {err}"))?;
         let mut hip3 = FxHashMap::default();
         for dex in hip3_dexes {
             for asset in &dex.assets {
@@ -330,9 +355,10 @@ impl MarkSeed {
 }
 
 impl NativeSeed {
-    fn from_wire(wire: WireNativePrices, main: &DexMeta) -> Result<Self, String> {
-        let WireNativePrices { oracle, books } = wire;
+    fn from_wire(wire: WireNativePrices, main: &DexMeta, spot_pairs: &[SpotPair]) -> Result<Self, String> {
+        let WireNativePrices { oracle, books, spot_books } = wire;
         let count = main.assets.len();
+        let spot_references = spot_reference_books(oracle.psro, spot_books, spot_pairs, count)?;
         let mut basis = by_asset(oracle.msoe.e, count, "msoe")?;
         let mut local_price = by_asset(oracle.lmpe, count, "lmpe")?;
         let mut references = references_by_asset(oracle.ror.ktm, count)?;
@@ -367,8 +393,40 @@ impl NativeSeed {
                 orders,
             });
         }
-        Ok(Self { assets })
+        Ok(Self { assets, spot_references })
     }
+}
+
+/// The books `psro` names, each asset and pair at most once and every one present.
+fn spot_reference_books(
+    psro: Vec<(u32, u32)>,
+    spot_books: Vec<WireBook>,
+    pairs: &[SpotPair],
+    count: usize,
+) -> Result<Vec<SpotReferenceBook>, String> {
+    let mut by_pair: FxHashMap<u32, Book> =
+        spot_books.into_iter().filter(|book| psro.iter().any(|(_, pair)| *pair == book.asset)).map(resting_orders).collect();
+    let mut references: Vec<SpotReferenceBook> = Vec::with_capacity(psro.len());
+    for (asset, pair) in psro {
+        let context = |err: &str| format!("psro asset {asset} pair {pair}: {err}");
+        let index = usize::try_from(asset).ok().filter(|index| *index < count).ok_or_else(|| context("asset outside the universe"))?;
+        if references.iter().any(|reference| reference.asset == index) {
+            return Err(context("asset listed twice"));
+        }
+        let pair_index = usize::try_from(pair).map_err(|err| context(&err.to_string()))?;
+        let spot_pair = pairs.get(pair_index).ok_or_else(|| context("no such spot pair"))?;
+        let price_decimals =
+            spot_pair.quote_wei_decimals.checked_sub(spot_pair.size_decimals).ok_or_else(|| context("quote weiDecimals below base szDecimals"))?;
+        let (_, orders) = by_pair.remove(&pair).ok_or_else(|| context("no spot book (or the pair listed twice)"))?;
+        references.push(SpotReferenceBook {
+            asset: index,
+            coin: spot_pair_coin(pair_index),
+            size_decimals: spot_pair.size_decimals,
+            price_decimals,
+            orders,
+        });
+    }
+    Ok(references)
 }
 
 /// Entries keyed by asset index, each index at most once and inside the universe.
@@ -468,17 +526,19 @@ fn reference_cache(wire: WireReferenceCache) -> Result<ReferenceCache, String> {
 type Book = (u64, Vec<RestingOrder>);
 
 fn books_by_asset(books: Vec<WireBook>, count: usize) -> Result<Vec<Option<Book>>, String> {
-    let entries = books.into_iter().map(|book| {
-        let orders = book
-            .bod
-            .e
-            .0
-            .into_iter()
-            .map(|order| RestingOrder { oid: order.o, side: order.c.s, limit_px: order.c.l, remaining: order.r })
-            .collect();
-        (book.asset, (book.last_trade_px, orders))
-    });
-    by_asset(entries.collect(), count, "perp_dexs[0].books")
+    by_asset(books.into_iter().map(resting_orders).collect(), count, "perp_dexs[0].books")
+}
+
+/// A book's index (`asset`) and its last trade and resting orders.
+fn resting_orders(book: WireBook) -> (u32, Book) {
+    let orders = book
+        .bod
+        .e
+        .0
+        .into_iter()
+        .map(|order| RestingOrder { oid: order.o, side: order.c.s, limit_px: order.c.l, remaining: order.r })
+        .collect();
+    (book.asset, (book.last_trade_px, orders))
 }
 
 /// A written price (`coin_to_mark_px[..].px`, a diff's `px`) in integer price units: exact (`ExactDecimal`) and
@@ -579,6 +639,53 @@ pub(crate) mod tests {
             checkpoint["exchange"]["locus"]["cls"][1]["oracle"]["pxs2"][0][1].as_object_mut().unwrap().remove("u");
         });
         assert!(error.contains("xyz:TSLA: a stored mark without its time"), "{error}");
+    }
+
+    /// The fixture with `psro` naming spot pair 1 (HYPE/USDC: base szDecimals 2, USDC quote) for PUMP, and the spot
+    /// books of pairs 0 and 1.
+    fn spot_referenced(checkpoint: &mut serde_json::Value) {
+        checkpoint["exchange"]["locus"]["cls"][0]["oracle"]["psro"] = json!([[1, 1]]);
+        checkpoint["exchange"]["spot_books"] = json!([
+            {"asset": 0, "last_trade_px": 1, "bod": {"e": []}},
+            {"asset": 1, "last_trade_px": 79_316_000, "bod": {"e": [
+                {"v": 1},
+                {"o": {"o": 21, "r": 300, "u": VALIDATOR, "c": {"t": 1, "S": 300, "s": "B", "l": 79_288_000}}}
+            ]}}
+        ]);
+    }
+
+    #[test]
+    fn psro_names_the_spot_books_seeded_with_their_units() {
+        let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        spot_referenced(&mut checkpoint);
+        let seed = MarkSeed::from_checkpoint(parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap()).unwrap();
+        assert_eq!(seed.native.spot_references, [SpotReferenceBook {
+            asset: 1,
+            coin: "@1".to_string(),
+            size_decimals: 2,
+            price_decimals: 6,
+            orders: vec![RestingOrder { oid: 21, side: Side::Bid, limit_px: 79_288_000, remaining: 300 }],
+        }]);
+        let error = seed_error(|checkpoint| {
+            spot_referenced(checkpoint);
+            checkpoint["exchange"]["spot_books"].as_array_mut().unwrap().pop();
+        });
+        assert!(error.contains("psro asset 1 pair 1: no spot book"), "{error}");
+        let error = seed_error(|checkpoint| {
+            spot_referenced(checkpoint);
+            checkpoint["exchange"]["locus"]["cls"][0]["oracle"]["psro"] = json!([[1, 1], [1, 0]]);
+        });
+        assert!(error.contains("psro asset 1 pair 0: asset listed twice"), "{error}");
+        let error = seed_error(|checkpoint| {
+            spot_referenced(checkpoint);
+            checkpoint["exchange"]["locus"]["cls"][0]["oracle"]["psro"] = json!([[2, 1]]);
+        });
+        assert!(error.contains("psro asset 2 pair 1: asset outside the universe"), "{error}");
+        let error = seed_error(|checkpoint| {
+            spot_referenced(checkpoint);
+            checkpoint["exchange"]["locus"]["cls"][0]["oracle"]["psro"] = json!([[1, 3]]);
+        });
+        assert!(error.contains("psro asset 1 pair 3: no such spot pair"), "{error}");
     }
 
     #[test]

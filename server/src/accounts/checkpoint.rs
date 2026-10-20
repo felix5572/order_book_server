@@ -19,7 +19,7 @@ use serde::{
 
 use super::{
     margin::MarginTable,
-    marks::seed::{WireNativeBooks, WireNativePrices, WireOracle, WirePx},
+    marks::seed::{WireBook, WireNativeBooks, WireNativePrices, WireOracle, WirePx},
 };
 use crate::prelude::Result;
 
@@ -75,6 +75,16 @@ pub(crate) struct SpotPair {
     /// The base token's `szDecimals`: fill sizes carry these, prices `MAX_SPOT_DECIMALS` minus these.
     pub(crate) size_decimals: u32,
     pub(crate) quote_token: u32,
+    /// The quote token's `weiDecimals`.
+    pub(crate) quote_wei_decimals: u32,
+}
+
+/// Spot pair 0's coin in the node's streams; every other pair `N` is `@N`.
+pub(crate) const SPOT_PAIR_ZERO_COIN: &str = "PURR/USDC";
+
+/// The coin naming spot pair `pair` in the node's fills and book diffs.
+pub(crate) fn spot_pair_coin(pair: usize) -> String {
+    if pair == 0 { SPOT_PAIR_ZERO_COIN.to_string() } else { format!("@{pair}") }
 }
 
 #[derive(Debug)]
@@ -261,6 +271,8 @@ struct WireCheckpoint {
 struct WireExchange {
     locus: ParsedLocus,
     perp_dexs: WireNativeBooks,
+    /// Every spot pair's book (1,121 books, 131,402 orders on 1190920000); the marks keep those `oracle.psro` names.
+    spot_books: Vec<WireBook>,
 }
 
 #[derive(Deserialize)]
@@ -664,7 +676,7 @@ pub(crate) fn parse_checkpoint_bytes(bytes: &[u8]) -> Result<CheckpointAccounts>
 }
 
 fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, String> {
-    let WireExchange { locus, perp_dexs } = exchange;
+    let WireExchange { locus, perp_dexs, spot_books } = exchange;
     let time_ms = node_time_ns(&locus.ctx.time).map_err(|err| format!("ctx.time: {err}"))? / 1_000_000;
     let mut dexes = Vec::with_capacity(locus.cls.len());
     let mut dex_users = Vec::with_capacity(locus.cls.len());
@@ -676,7 +688,7 @@ fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, Stri
         dexes.push(meta);
         dex_users.push(users);
     }
-    let native_prices = WireNativePrices { oracle: first_oracle.ok_or("locus.cls is empty")?, books: perp_dexs.0 };
+    let native_prices = WireNativePrices { oracle: first_oracle.ok_or("locus.cls is empty")?, books: perp_dexs.0, spot_books };
     let holders: Vec<Address> = {
         let mut holders: Vec<Address> = dex_users
             .iter()
@@ -726,11 +738,11 @@ fn spot_pairs(pairs: &[(u32, u32)], tokens: &[WireTokenSpec]) -> std::result::Re
         .enumerate()
         .map(|(index, (base, quote))| {
             let size_decimals = token_spec(tokens, *base).map_err(|err| format!("spot pair {index} base {err}"))?.sz_decimals;
-            token_spec(tokens, *quote).map_err(|err| format!("spot pair {index} quote {err}"))?;
+            let quote_wei_decimals = token_spec(tokens, *quote).map_err(|err| format!("spot pair {index} quote {err}"))?.wei_decimals;
             if size_decimals > MAX_SPOT_DECIMALS {
                 return Err(format!("spot pair {index}: base szDecimals {size_decimals} above {MAX_SPOT_DECIMALS}"));
             }
-            Ok(SpotPair { size_decimals, quote_token: *quote })
+            Ok(SpotPair { size_decimals, quote_token: *quote, quote_wei_decimals })
         })
         .collect()
 }
@@ -1091,7 +1103,7 @@ pub(crate) mod tests {
     /// A HIP-3 dex's oracle: the same keys, its caches not read.
     fn hip3_oracle_fixture(pxs2: serde_json::Value) -> serde_json::Value {
         json!({"pxs2": pxs2, "ror": {"ktm": [[{"p": [0, "Mark"]}, {"v": [], "m": null, "b": {"last_bucket": 1, "bucket_millis": 1000}}]]},
-               "msoe": {"e": []}, "lmpe": []})
+               "msoe": {"e": []}, "lmpe": [], "psro": []})
     }
 
     /// `perp_dexs`: the main dex's books (BTC with two orders around a free slot; PUMP empty), then a HIP-3 dex whose
@@ -1182,7 +1194,7 @@ pub(crate) mod tests {
         assert_eq!(settings(HOLDER, 1), [0], "a cash-only state keeps its setting");
         assert_eq!(parsed.dexes[0].assets[0].margin_mode, AssetMarginMode::Normal);
         assert_eq!(parsed.dexes[1].assets[0].margin_mode, AssetMarginMode::IsolatedOnly);
-        let pair = |size_decimals, quote_token| SpotPair { size_decimals, quote_token };
+        let pair = |size_decimals, quote_token| SpotPair { size_decimals, quote_token, quote_wei_decimals: 8 };
         assert_eq!(parsed.spot_pairs, [pair(2, 0), pair(2, 0), pair(2, 360)], "@0 T1/USDC, @1 HYPE/USDC, @2 HYPE/USDH");
     }
 

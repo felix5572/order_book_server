@@ -18,7 +18,7 @@ use super::{
     margin::MarginTable,
     checkpoint::{
         Account, AccountMode, AssetMarginMode, CheckpointAccounts, MAX_PERP_DECIMALS, MAX_SPOT_DECIMALS, PDI_ASSET_STRIDE,
-        PositionMargin, SpotPair, base_size,
+        PositionMargin, SPOT_PAIR_ZERO_COIN, SpotPair, base_size,
     },
     misc::{Balance, LedgerDelta, USDC_NAME},
     portfolio::USDC,
@@ -403,7 +403,7 @@ enum Market {
 
 impl Market {
     fn of(coin: &str) -> Self {
-        if coin == "PURR/USDC" {
+        if coin == SPOT_PAIR_ZERO_COIN {
             return Self::Spot(Some(0));
         }
         if let Some(index) = coin.strip_prefix('@') {

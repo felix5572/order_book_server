@@ -25,6 +25,16 @@ impl ExactDecimal {
         Ok(Self { mantissa, scale })
     }
 
+    /// `units` in 10^-decimals.
+    pub(crate) const fn from_units(units: u64, decimals: u32) -> Self {
+        let (mut mantissa, mut scale) = (units, decimals);
+        while scale > 0 && mantissa % 10 == 0 {
+            mantissa /= 10;
+            scale -= 1;
+        }
+        Self { mantissa, scale }
+    }
+
     /// The value in 10^-decimals.
     pub(crate) fn units(self, decimals: u32) -> Result<u64, String> {
         let shift = decimals.checked_sub(self.scale).ok_or_else(|| format!("{self} has more than {decimals} decimals"))?;
@@ -69,6 +79,13 @@ mod tests {
             assert!(ExactDecimal::parse(text).is_err(), "{text:?}");
         }
         assert!(units("18446744073709551615", 1).is_err(), "overflows the unit");
+    }
+
+    #[test]
+    fn units_make_the_same_decimal_as_their_text() {
+        assert_eq!(ExactDecimal::from_units(9_728_650, 8), ExactDecimal::parse("0.0972865").unwrap());
+        assert_eq!(ExactDecimal::from_units(79_288_000, 6).to_string(), "79.288");
+        assert_eq!(ExactDecimal::from_units(500, 0).to_string(), "500");
     }
 
     #[test]
