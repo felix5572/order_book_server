@@ -39,6 +39,11 @@ impl NodeDataOrderDiff {
         Coin::new(&self.coin)
     }
 
+    /// The coin's name, without allocating (`coin` makes an owned `Coin`).
+    pub(crate) fn coin_name(&self) -> &str {
+        &self.coin
+    }
+
     pub(crate) const fn user(&self) -> Address {
         self.user
     }

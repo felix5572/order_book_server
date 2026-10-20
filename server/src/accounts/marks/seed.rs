@@ -15,6 +15,7 @@ use serde::{
     de::{IgnoredAny, SeqAccess, Visitor},
 };
 
+use super::decimal::ExactDecimal;
 use crate::{
     accounts::checkpoint::{CheckpointAccounts, DexMeta, MAX_PERP_DECIMALS, node_time_ns},
     order_book::Side,
@@ -480,27 +481,11 @@ fn books_by_asset(books: Vec<WireBook>, count: usize) -> Result<Vec<Option<Book>
     by_asset(entries.collect(), count, "perp_dexs[0].books")
 }
 
-/// A written mark (`coin_to_mark_px[..].px`, a decimal string) in integer price units; it must be exact, as the node
-/// stores units: more decimals than `MAX_PERP_DECIMALS - size_decimals`, or a value that is not positive, breaks the
-/// contract.
+/// A written price (`coin_to_mark_px[..].px`, a diff's `px`) in integer price units: exact (`ExactDecimal`) and
+/// positive, or the contract is broken.
 pub(crate) fn exact_price_units(text: &str, size_decimals: u32) -> Result<u64, String> {
     let price_decimals = MAX_PERP_DECIMALS.checked_sub(size_decimals).ok_or_else(|| format!("szDecimals {size_decimals}"))?;
-    let (whole, fraction) = text.split_once('.').map_or((text, None), |(whole, fraction)| (whole, Some(fraction)));
-    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
-    if !digits(whole) || fraction.is_some_and(|fraction| !digits(fraction)) {
-        return Err(format!("price {text:?} is not a decimal"));
-    }
-    let fraction = fraction.unwrap_or("").trim_end_matches('0');
-    let decimals = u32::try_from(fraction.len()).map_err(|err| format!("price {text:?}: {err}"))?;
-    if decimals > price_decimals {
-        return Err(format!("price {text:?} has more than {price_decimals} decimals"));
-    }
-    let scale = 10_u64.pow(price_decimals - decimals);
-    let units = format!("{whole}{fraction}")
-        .parse::<u64>()
-        .ok()
-        .and_then(|mantissa| mantissa.checked_mul(scale))
-        .ok_or_else(|| format!("price {text:?} out of range"))?;
+    let units = ExactDecimal::parse(text)?.units(price_decimals).map_err(|err| format!("price {err}"))?;
     if units == 0 {
         return Err(format!("price {text:?} is not positive"));
     }

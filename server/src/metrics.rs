@@ -515,13 +515,14 @@ lazy_static! {
         "Checkpoint the node marks were last rebuilt from"
     ).expect("metric can be created");
 
-    pub static ref NODE_MARKS_LOGGED_UPDATES: IntGauge = IntGauge::new(
-        "orderbook_node_marks_logged_updates",
-        "HIP-3 mark updates held in the node marks' input log"
+    pub static ref NODE_MARKS_LOGGED_INPUTS: IntGauge = IntGauge::new(
+        "orderbook_node_marks_logged_inputs",
+        "HIP-3 mark updates and main-dex book diffs held in the node marks' input log"
     ).expect("metric can be created");
 
-    /// Each checkpoint's marks against the node marks' snapshot at its height, by market and result (`equal`,
-    /// `differ`, `unknown`).
+    /// Each checkpoint against the node marks' snapshot at its height: HIP-3 marks (`hip3`: `equal`, `differ`,
+    /// `unknown`) and the main dex's resting orders (`nativeOrders`: `equal`, `differ`, `missing`, `extra`;
+    /// `nativeBooks`: `equal`, `differ`, `unknown`).
     pub static ref NODE_MARKS_CHECKED_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_node_marks_checked_total", "Checkpoint marks compared with the node marks' snapshot"),
         &["market", "result"]
@@ -543,9 +544,10 @@ lazy_static! {
         "Checkpoints whose node mark seed broke its contract"
     ).expect("metric can be created");
 
-    pub static ref NODE_MARKS_UNKNOWN_COIN_UPDATES_TOTAL: IntCounter = IntCounter::new(
-        "orderbook_node_marks_unknown_coin_updates_total",
-        "HIP-3 mark updates of coins outside the seed's universe"
+    /// Inputs of coins outside the seed's universe (listed since it), by stream.
+    pub static ref NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_node_marks_unknown_coin_inputs_total", "Node mark inputs of coins outside the seed's universe"),
+        &["stream"]
     ).expect("metric can be created");
 
 }
@@ -622,12 +624,12 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(NODE_MARKS_AVAILABLE.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_SEED_HEIGHT.clone())).ok();
-    REGISTRY.register(Box::new(NODE_MARKS_LOGGED_UPDATES.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_LOGGED_INPUTS.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_CHECKED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_CHECKS_SKIPPED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_REBUILDS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_SEED_FAILURES_TOTAL.clone())).ok();
-    REGISTRY.register(Box::new(NODE_MARKS_UNKNOWN_COIN_UPDATES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.clone())).ok();
 
     // File watcher metrics
     REGISTRY.register(Box::new(FILE_EVENTS_TOTAL.clone())).ok();

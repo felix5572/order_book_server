@@ -29,10 +29,13 @@ use super::{
         QueryError, ReplayCheck, RowCheck, Stream, Touched, Unavailable,
     },
     checkpoint::parse_checkpoint_file,
-    marks::{CheckpointGrid, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild, seed::MarkSeed},
+    marks::{
+        CheckpointGrid, MarkInputs, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild,
+        book::is_main_perp, seed::MarkSeed,
+    },
     misc::MiscEvent,
     evidence::{
-        LineEvidence, fill_line_reason, hip3_mark_mismatch_json, misc_line_reason, replay_mismatch_json,
+        LineEvidence, book_mismatch_json, fill_line_reason, hip3_mark_mismatch_json, misc_line_reason, replay_mismatch_json,
         replay_row_mismatch_json, silent_change_json,
     },
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, Publisher},
@@ -49,11 +52,11 @@ use crate::{
         ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL, ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL, ACCOUNTS_REPLAY_STOPPED_TOTAL, ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL,
         ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL, ACCOUNTS_STREAM_HEIGHT, ACCOUNTS_TRUSTED, ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL,
         NODE_MARKS_AVAILABLE, NODE_MARKS_CHECKED_TOTAL, NODE_MARKS_CHECKS_SKIPPED_TOTAL, NODE_MARKS_HEIGHT,
-        NODE_MARKS_LOGGED_UPDATES, NODE_MARKS_REBUILDS_TOTAL, NODE_MARKS_SEED_FAILURES_TOTAL, NODE_MARKS_SEED_HEIGHT,
-        NODE_MARKS_UNKNOWN_COIN_UPDATES_TOTAL,
+        NODE_MARKS_LOGGED_INPUTS, NODE_MARKS_REBUILDS_TOTAL, NODE_MARKS_SEED_FAILURES_TOTAL, NODE_MARKS_SEED_HEIGHT,
+        NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL,
     },
     prelude::Result,
-    types::node_data::{Batch, NodeDataFill, OracleUpdateEvent},
+    types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, OracleUpdateEvent},
 };
 
 /// Same bound as the book's watchers. A Funding line (one per dex per hour) is the largest item: ~300k users.
@@ -63,6 +66,8 @@ const MISC_EVENTS_MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
 const FILLS_MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// One deployer's update per line: ~44 coins on average, 4 price lists each (2026-10-20 11 UTC).
 const HIP3_ORACLE_UPDATES_MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+/// One diff per line: 277 bytes median, 318 at most over 43,224,015 lines (2026-10-20 11 UTC).
+const BOOK_DIFFS_MAX_LINE_BYTES: usize = 1024 * 1024;
 /// The largest `replica_cmds` line measured 6.4 MB (bm, 2026-10-19).
 const BLOCK_ACTIONS_MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 /// Checkpoints appear complete (a new file has its final size at first sight, 2026-10-19), every ~12 minutes.
@@ -79,6 +84,8 @@ enum Input {
     MiscEvents(std::result::Result<(Batch<MiscEvent>, LineKey), LineError>, Option<LineEvidence>),
     /// With the line's identity within its block.
     Hip3OracleUpdates(std::result::Result<(Batch<OracleUpdateEvent>, LineKey), LineError>),
+    /// A line's main-dex diffs with the line's identity; `None` for a line of another market.
+    BookDiffs(std::result::Result<Option<(Batch<NodeDataOrderDiff>, LineKey)>, LineError>),
     /// With the instant the line was read.
     BlockActions(std::result::Result<BlockActions, LineError>, Instant),
     /// The stream's reader proved that every line written before the instant reached the owner (design 000433 r3).
@@ -170,30 +177,17 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
     let (queries_tx, queries) = mpsc::channel(64);
     let subscriptions = CoinSubscriptions::default();
     let (frames, _) = broadcast::channel(FRAME_CHANNEL_CAPACITY);
-    let fills = LineStream {
-        name: "AccountFills",
-        lag_label: "accounts_fills",
-        dir: data_dir.join("node_fills_streaming"),
-        max_line_bytes: FILLS_MAX_LINE_BYTES,
-        start_skip_is_loss: true,
-        layout: FileLayout::Hourly,
-    };
-    let misc_events = LineStream {
-        name: "AccountMiscEvents",
-        lag_label: "accounts_misc_events",
-        dir: data_dir.join("misc_events_streaming"),
-        max_line_bytes: MISC_EVENTS_MAX_LINE_BYTES,
-        start_skip_is_loss: true,
-        layout: FileLayout::Hourly,
-    };
-    let hip3_oracle_updates = LineStream {
-        name: "AccountHip3OracleUpdates",
-        lag_label: "accounts_hip3_oracle_updates",
-        dir: data_dir.join("hip3_oracle_updates_streaming"),
-        max_line_bytes: HIP3_ORACLE_UPDATES_MAX_LINE_BYTES,
-        start_skip_is_loss: true,
-        layout: FileLayout::Hourly,
-    };
+    let fills = hourly("AccountFills", "accounts_fills", data_dir.join("node_fills_streaming"), FILLS_MAX_LINE_BYTES);
+    let misc_events =
+        hourly("AccountMiscEvents", "accounts_misc_events", data_dir.join("misc_events_streaming"), MISC_EVENTS_MAX_LINE_BYTES);
+    let hip3_oracle_updates = hourly(
+        "AccountHip3OracleUpdates",
+        "accounts_hip3_oracle_updates",
+        data_dir.join("hip3_oracle_updates_streaming"),
+        HIP3_ORACLE_UPDATES_MAX_LINE_BYTES,
+    );
+    let book_diffs =
+        hourly("AccountBookDiffs", "accounts_book_diffs", data_dir.join("node_raw_book_diffs_streaming"), BOOK_DIFFS_MAX_LINE_BYTES);
     let block_actions = LineStream {
         name: "AccountBlockActions",
         lag_label: "accounts_block_actions",
@@ -203,39 +197,10 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
         layout: FileLayout::ReplicaSessions,
     };
     let threads = vec![
-        Supervised {
-            name: "fills watcher",
-            handle: spawn_line_watcher(
-                fills,
-                input_tx.clone(),
-                None,
-                fills_input,
-                || Input::Loss(Stream::Fills),
-                Some(Box::new(|at| Input::ReadThrough(Stream::Fills, at))),
-            ),
-        },
-        Supervised {
-            name: "misc events watcher",
-            handle: spawn_line_watcher(
-                misc_events,
-                input_tx.clone(),
-                None,
-                misc_input,
-                || Input::Loss(Stream::MiscEvents),
-                Some(Box::new(|at| Input::ReadThrough(Stream::MiscEvents, at))),
-            ),
-        },
-        Supervised {
-            name: "HIP-3 oracle updates watcher",
-            handle: spawn_line_watcher(
-                hip3_oracle_updates,
-                input_tx.clone(),
-                None,
-                hip3_input,
-                || Input::Loss(Stream::Hip3OracleUpdates),
-                Some(Box::new(|at| Input::ReadThrough(Stream::Hip3OracleUpdates, at))),
-            ),
-        },
+        proving_watcher("fills watcher", fills, Stream::Fills, fills_input, input_tx.clone()),
+        proving_watcher("misc events watcher", misc_events, Stream::MiscEvents, misc_input, input_tx.clone()),
+        proving_watcher("HIP-3 oracle updates watcher", hip3_oracle_updates, Stream::Hip3OracleUpdates, hip3_input, input_tx.clone()),
+        proving_watcher("book diffs watcher", book_diffs, Stream::BookDiffs, book_diffs_input, input_tx.clone()),
         Supervised {
             name: "block actions watcher",
             handle: spawn_line_watcher(
@@ -261,6 +226,23 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
     Ok((handle, owner))
 }
 
+/// An hourly stream whose start skip is a loss.
+const fn hourly(name: &'static str, lag_label: &'static str, dir: PathBuf, max_line_bytes: usize) -> LineStream {
+    LineStream { name, lag_label, dir, max_line_bytes, start_skip_is_loss: true, layout: FileLayout::Hourly }
+}
+
+/// The watcher of a stream whose read-throughs join the block assembly (every stream but `replica_cmds`).
+fn proving_watcher(
+    name: &'static str,
+    lines: LineStream,
+    stream: Stream,
+    wrap: fn(String) -> Input,
+    inputs: mpsc::Sender<Input>,
+) -> Supervised {
+    let read_through = Box::new(move |at| Input::ReadThrough(stream, at));
+    Supervised { name, handle: spawn_line_watcher(lines, inputs, None, wrap, move || Input::Loss(stream), Some(read_through)) }
+}
+
 fn fills_input(line: String) -> Input {
     let parsed = parse_line(&line);
     let evidence = parsed.as_ref().ok().and_then(fill_line_reason).map(|reason| LineEvidence { reason, raw_line: line });
@@ -284,7 +266,19 @@ fn hip3_input(line: String) -> Input {
     }))
 }
 
-/// A misc events or HIP-3 oracle updates line's identity within its block (`blocks::LineKey`): its text from
+/// The main-dex diffs of a book diffs line (the marks read no other market), with the line's identity.
+fn book_diffs_input(line: String) -> Input {
+    Input::BookDiffs(parse_line::<NodeDataOrderDiff>(&line).and_then(|mut batch| {
+        batch.retain_events(|diff| is_main_perp(diff.coin_name()));
+        if batch.events_len() == 0 {
+            return Ok(None);
+        }
+        let key = line_key(&line, batch.block_number())?;
+        Ok(Some((batch, key)))
+    }))
+}
+
+/// A misc events, HIP-3 oracle updates or book diffs line's identity within its block (`blocks::LineKey`): its text from
 /// `"events":` on, without the node's `local_time`, which a replayed line writes anew. A line written otherwise has no
 /// identity: an error.
 fn line_key(line: &str, block: u64) -> std::result::Result<LineKey, LineError> {
@@ -430,11 +424,14 @@ fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut Bl
             assembler.receive_misc_events(batch, key)
         }
         Input::Hip3OracleUpdates(Ok((batch, key))) => assembler.receive_hip3_oracle_updates(batch, key),
+        Input::BookDiffs(Ok(Some((batch, key)))) => assembler.receive_book_diffs(batch, key),
+        Input::BookDiffs(Ok(None)) => return Touched::default(),
         Input::BlockActions(Ok(block), read_at) => assembler.receive_block_actions(block, read_at),
         Input::ReadThrough(stream, at) => assembler.receive_read_through(stream, at),
         Input::Fills(Err(err), _) => return lost(book, marks, Stream::Fills, "parse_error", &err),
         Input::MiscEvents(Err(err), _) => return lost(book, marks, Stream::MiscEvents, "parse_error", &err),
         Input::Hip3OracleUpdates(Err(err)) => return lost(book, marks, Stream::Hip3OracleUpdates, "parse_error", &err),
+        Input::BookDiffs(Err(err)) => return lost(book, marks, Stream::BookDiffs, "parse_error", &err),
         Input::BlockActions(Err(err), _) => return lost(book, marks, Stream::BlockActions, "parse_error", &err),
         Input::Loss(stream) => {
             let error = "the watcher skipped lines while positioning at its start, or discarded buffered data".to_string();
@@ -444,7 +441,8 @@ fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut Bl
     apply_assembly(book, marks, assembler, assembly)
 }
 
-const ASSEMBLED_STREAMS: [Stream; 4] = [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BlockActions];
+const ASSEMBLED_STREAMS: [Stream; 5] =
+    [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::BlockActions];
 
 /// Records what the assembly could not apply, then applies the released blocks in order: the marks first, so the
 /// account view's block finds them at its height (design 000439 r1 4.1).
@@ -480,8 +478,11 @@ fn apply_assembly(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &Blo
     let mut touched = Touched::default();
     for mut block in completed {
         let height = block.actions.height;
-        let hip3_oracle_updates = std::mem::take(&mut block.hip3_oracle_updates);
-        report_marks_block(height, marks.apply_block(height, hip3_oracle_updates));
+        let inputs = MarkInputs {
+            hip3_oracle_updates: std::mem::take(&mut block.hip3_oracle_updates),
+            book_diffs: std::mem::take(&mut block.book_diffs),
+        };
+        report_marks_block(height, marks.apply_block(height, inputs));
         touched.absorb(report_block(book.apply_block(block)));
         ACCOUNTS_APPLIED_HEIGHT.set(height.cast_signed());
     }
@@ -529,15 +530,23 @@ fn record_lost_block(book: &mut AccountBook, marks: &mut NodeMarks, stream: Stre
 }
 
 fn report_marks_block(height: u64, report: MarksBlockReport) {
-    let MarksBlockReport { unknown_coin_updates, errors, log_overflowed } = report;
-    NODE_MARKS_UNKNOWN_COIN_UPDATES_TOTAL.inc_by(unknown_coin_updates as u64);
-    for err in &errors {
-        error!("accounts hip3_oracle_updates data loss (contract): {err}");
-        ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label(), "contract"]).inc();
-    }
+    let MarksBlockReport { unknown_coin_updates, unknown_coin_diffs, errors, log_overflowed } = report;
+    NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label()]).inc_by(unknown_coin_updates as u64);
+    NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.with_label_values(&[Stream::BookDiffs.label()]).inc_by(unknown_coin_diffs as u64);
+    report_contract_errors(&errors, "");
     if log_overflowed {
-        error!("accounts hip3_oracle_updates data loss (mark_log_overflow): the node marks' input log overflowed at block {height}");
-        ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label(), "mark_log_overflow"]).inc();
+        error!("node marks data loss (mark_log_overflow): the input log overflowed at block {height}");
+        for stream in [Stream::Hip3OracleUpdates, Stream::BookDiffs] {
+            ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), "mark_log_overflow"]).inc();
+        }
+    }
+}
+
+/// Inputs the marks could not apply; `when` says where they were met (empty while applying the block).
+fn report_contract_errors(errors: &[(Stream, String)], when: &str) {
+    for (stream, err) in errors {
+        error!("accounts {} data loss (contract{when}): {err}", stream.label());
+        ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), "contract"]).inc();
     }
 }
 
@@ -658,24 +667,38 @@ fn log_marks_install(height: u64, report: &MarksInstallReport) {
             info!("node marks: seed {height} (previous {previous_seed:?}) not checked ({reason}); rebuild {rebuild:?}");
             NODE_MARKS_CHECKS_SKIPPED_TOTAL.with_label_values(&[reason]).inc();
         }
-        MarksCheck::Checked(hip3) => {
+        MarksCheck::Checked { hip3, books } => {
             info!(
                 "node marks: seed {height} (previous {previous_seed:?}) against the snapshot: HIP-3 {} equal, {} differ, {} \
-                 unknown; rebuild {rebuild:?}",
-                hip3.equal, hip3.differ, hip3.unknown
+                 unknown; main books {} equal, {} differ, {} unknown (orders {} equal, {} differ, {} missing, {} extra); \
+                 rebuild {rebuild:?}",
+                hip3.equal, hip3.differ, hip3.unknown, books.books_equal, books.books_differ, books.unknown,
+                books.orders_equal, books.orders_differ, books.missing, books.extra
             );
-            for (result, count) in [("equal", hip3.equal), ("differ", hip3.differ), ("unknown", hip3.unknown)] {
-                NODE_MARKS_CHECKED_TOTAL.with_label_values(&["hip3", result]).inc_by(count);
+            let counts = [
+                ("hip3", "equal", hip3.equal),
+                ("hip3", "differ", hip3.differ),
+                ("hip3", "unknown", hip3.unknown),
+                ("nativeBooks", "equal", books.books_equal),
+                ("nativeBooks", "differ", books.books_differ),
+                ("nativeBooks", "unknown", books.unknown),
+                ("nativeOrders", "equal", books.orders_equal),
+                ("nativeOrders", "differ", books.orders_differ),
+                ("nativeOrders", "missing", books.missing),
+                ("nativeOrders", "extra", books.extra),
+            ];
+            for (market, result, count) in counts {
+                NODE_MARKS_CHECKED_TOTAL.with_label_values(&[market, result]).inc_by(count);
             }
             for mismatch in &hip3.samples {
                 record_evidence(&hip3_mark_mismatch_json(mismatch, *previous_seed, height));
             }
+            for mismatch in &books.samples {
+                record_evidence(&book_mismatch_json(mismatch, *previous_seed, height));
+            }
         }
     }
-    for err in errors {
-        error!("accounts hip3_oracle_updates data loss (contract, replayed at seed {height}): {err}");
-        ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label(), "contract"]).inc();
-    }
+    report_contract_errors(errors, &format!(", replayed at seed {height}"));
 }
 
 /// Installs the held anchor once the book is ready for it; returns whether it did.
@@ -802,7 +825,7 @@ fn export_marks_status(status: &MarksStatus) {
     if let Some(height) = status.seed_height {
         NODE_MARKS_SEED_HEIGHT.set(height.cast_signed());
     }
-    NODE_MARKS_LOGGED_UPDATES.set((status.logged_updates as u64).cast_signed());
+    NODE_MARKS_LOGGED_INPUTS.set((status.logged_inputs as u64).cast_signed());
 }
 
 fn export_status(status: &BookStatus) {
@@ -880,7 +903,7 @@ impl TestOwner {
 
 /// The streams whose readers send read-through proofs.
 #[cfg(test)]
-const PROVING_STREAMS: [Stream; 3] = [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates];
+const PROVING_STREAMS: [Stream; 4] = [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs];
 
 #[cfg(test)]
 mod tests {
@@ -1059,6 +1082,22 @@ mod tests {
         let err = key(&spaced).unwrap_err();
         assert_eq!(err.block, Some(9));
         assert!(err.error.starts_with("no \"events\": text to take the line's identity from"), "{}", err.error);
+    }
+
+    /// The marks read only the main dex's diffs: a line of another market reaches the owner as nothing.
+    #[test]
+    fn a_book_diffs_line_keeps_only_a_main_perp_diff() {
+        let line = |coin: &str| {
+            format!(
+                r#"{{"local_time":"2026-10-20T11:00:00.1","block_time":"2026-10-20T11:00:00.0","block_number":9,"events":[{{"user":"0x00000000000000000000000000000000000000aa","oid":1,"side":"B","px":"1.0","coin":"{coin}","raw_book_diff":"remove"}}]}}"#
+            )
+        };
+        let Input::BookDiffs(Ok(Some((batch, _)))) = book_diffs_input(line("BTC")) else { panic!("a main perp's diff is kept") };
+        assert_eq!((batch.block_number(), batch.events_len()), (9, 1));
+        for other in ["@107", "PURR/USDC", "#114920", "xyz:TSLA"] {
+            assert!(matches!(book_diffs_input(line(other)), Input::BookDiffs(Ok(None))), "{other}");
+        }
+        assert!(matches!(book_diffs_input("{\"block_number\":9".to_string()), Input::BookDiffs(Err(_))));
     }
 
     #[test]

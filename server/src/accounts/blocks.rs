@@ -1,15 +1,16 @@
 //! Block assembly (design 000433 r3, sections 3.2 and 3.4; design 000439 r2 revision 4): the account view and the node
-//! marks apply whole blocks in height order, each exactly once. The inputs of the four streams are held per pending
+//! marks apply whole blocks in height order, each exactly once. The inputs of the five streams are held per pending
 //! block, keyed by identity so a repeated input does not count twice, and a block is released once complete:
 //!
 //! - its `replica_cmds` line was read (every block has one);
 //! - the `replica_cmds` line of the next block was read too, at instant `r`;
-//! - the fills, the misc events and the HIP-3 oracle updates readers each proved a read-through at an instant later
-//!   than `r`.
+//! - the fills, misc events, HIP-3 oracle updates and raw book diffs readers each proved a read-through at an instant
+//!   later than `r`.
 //!
-//! The last two rest on the node's write order measured on bm: the fills, misc and HIP-3 oracle update lines of a block
-//! arrive before the `replica_cmds` line of the next block (research README "三路流的写出顺序"; the HIP-3 stream 382
-//! blocks over 300 s, minimum 9.5 ms). It is a run assumption, not a protocol guarantee. A line for a block already released either breaks it or is a node replay of written blocks; the two
+//! The last two rest on the node's write order measured on bm: the fills, misc, HIP-3 oracle update and book diff lines
+//! of a block arrive before the `replica_cmds` line of the next block (research README "三路流的写出顺序"; over 300 s
+//! the HIP-3 stream 382 blocks, minimum 9.5 ms, the diffs 3,987 blocks, minimum 2.4 ms). It is a run assumption, not a
+//! protocol guarantee. A line for a block already released either breaks it or is a node replay of written blocks; the two
 //! cannot be told apart, so either is a loss up to that block and the view waits for a covering anchor. What was
 //! released before cannot be taken back.
 
@@ -21,7 +22,7 @@ use rustc_hash::FxHashSet;
 use super::{actions::BlockActions, book::Stream, misc::MiscEvent};
 use crate::{
     order_book::Side,
-    types::node_data::{Batch, NodeDataFill, OracleUpdateEvent},
+    types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, OracleUpdateEvent},
 };
 
 /// Pending blocks held at most: normally a few; ~2,000 is minutes of a stalled stream (~14 blocks a second).
@@ -37,7 +38,8 @@ type FillKey = (Address, String, u64, Side);
 /// A misc events or HIP-3 oracle updates line's identity within its block, hashed from its `events` text (the node's
 /// `local_time` excluded): in 6,835 misc lines of 2026-10-19 21-22 UTC only the empty hourly Funding lines (one per
 /// dex, no deltas, no cash) repeated within a block; a HIP-3 line holds one deployer's update (4,920 lines of
-/// 2026-10-20 11 UTC, one dex each; 467 blocks had several).
+/// 2026-10-20 11 UTC, one dex each; 467 blocks had several). A book diffs line holds one diff: none of the 43,224,015
+/// lines of 2026-10-20 11 UTC repeated another of its block.
 pub(crate) type LineKey = u64;
 
 /// A released block: its `replica_cmds` actions and every distinct input of the other streams read for it.
@@ -48,6 +50,8 @@ pub(crate) struct CompletedBlock {
     pub(crate) misc_events: Vec<Batch<MiscEvent>>,
     /// In arrival order, the node's write order.
     pub(crate) hip3_oracle_updates: Vec<Batch<OracleUpdateEvent>>,
+    /// The main dex's diffs (the watcher keeps no other), in arrival order: the node's execution order.
+    pub(crate) book_diffs: Vec<Batch<NodeDataOrderDiff>>,
 }
 
 /// The distinct lines of one stream held for a block.
@@ -72,6 +76,7 @@ struct PendingBlock {
     fill_keys: FxHashSet<FillKey>,
     misc_events: KeyedLines<MiscEvent>,
     hip3_oracle_updates: KeyedLines<OracleUpdateEvent>,
+    book_diffs: KeyedLines<NodeDataOrderDiff>,
     inputs: usize,
 }
 
@@ -102,6 +107,7 @@ pub(crate) struct BlockAssembler {
     fills_read_through: Option<Instant>,
     misc_read_through: Option<Instant>,
     hip3_read_through: Option<Instant>,
+    book_diffs_read_through: Option<Instant>,
 }
 
 impl BlockAssembler {
@@ -147,6 +153,10 @@ impl BlockAssembler {
 
     pub(crate) fn receive_hip3_oracle_updates(&mut self, batch: Batch<OracleUpdateEvent>, key: LineKey) -> Assembly {
         self.receive_keyed_line(Stream::Hip3OracleUpdates, batch, key, |pending| &mut pending.hip3_oracle_updates)
+    }
+
+    pub(crate) fn receive_book_diffs(&mut self, batch: Batch<NodeDataOrderDiff>, key: LineKey) -> Assembly {
+        self.receive_keyed_line(Stream::BookDiffs, batch, key, |pending| &mut pending.book_diffs)
     }
 
     /// Holds a line of `stream` for its block unless a line of the same identity is held already.
@@ -212,6 +222,7 @@ impl BlockAssembler {
             Stream::Fills => &mut self.fills_read_through,
             Stream::MiscEvents => &mut self.misc_read_through,
             Stream::Hip3OracleUpdates => &mut self.hip3_read_through,
+            Stream::BookDiffs => &mut self.book_diffs_read_through,
             // a block's own line completes it on `replica_cmds`
             Stream::BlockActions => return Assembly::default(),
         };
@@ -246,11 +257,13 @@ impl BlockAssembler {
         let complete = self.pending.get(&block)?.actions.is_some()
             && proven(self.fills_read_through)
             && proven(self.misc_read_through)
-            && proven(self.hip3_read_through);
+            && proven(self.hip3_read_through)
+            && proven(self.book_diffs_read_through);
         if !complete {
             return None;
         }
-        let PendingBlock { actions, fills, misc_events, hip3_oracle_updates, inputs, .. } = self.pending.remove(&block)?;
+        let PendingBlock { actions, fills, misc_events, hip3_oracle_updates, book_diffs, inputs, .. } =
+            self.pending.remove(&block)?;
         self.inputs -= inputs;
         self.released = Some(block);
         Some(CompletedBlock {
@@ -258,6 +271,7 @@ impl BlockAssembler {
             fills,
             misc_events: misc_events.lines,
             hip3_oracle_updates: hip3_oracle_updates.lines,
+            book_diffs: book_diffs.lines,
         })
     }
 
@@ -275,6 +289,9 @@ impl BlockAssembler {
             }
             if !pending.hip3_oracle_updates.lines.is_empty() {
                 assembly.lost.push((Stream::Hip3OracleUpdates, height));
+            }
+            if !pending.book_diffs.lines.is_empty() {
+                assembly.lost.push((Stream::BookDiffs, height));
             }
         }
         self.released = Some(self.released.map_or(block, |released| released.max(block)));
@@ -315,7 +332,9 @@ mod tests {
 
     /// Proofs of the readers other than `stream`, at `at`.
     fn prove_others(assembler: &mut BlockAssembler, stream: Stream, at: Instant) -> Vec<u64> {
-        let others = [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates].into_iter().filter(|other| *other != stream);
+        let others = [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs]
+            .into_iter()
+            .filter(|other| *other != stream);
         others.flat_map(|other| heights(&assembler.receive_read_through(other, at))).collect()
     }
 
@@ -333,6 +352,7 @@ mod tests {
         assembler.receive_block_actions(block_actions(101, &[]), at(10));
         assembler.receive_block_actions(block_actions(102, &[]), at(20));
         assert_eq!(heights(&assembler.receive_read_through(Stream::Hip3OracleUpdates, at(25))), Vec::<u64>::new());
+        assert_eq!(heights(&assembler.receive_read_through(Stream::BookDiffs, at(25))), Vec::<u64>::new());
         let fills_proof = assembler.receive_read_through(Stream::Fills, at(15));
         assert!(heights(&fills_proof).is_empty(), "the misc events reader has proved nothing yet");
         let misc_proof = assembler.receive_read_through(Stream::MiscEvents, at(25));
@@ -342,6 +362,19 @@ mod tests {
         let block = &later.completed[0];
         assert_eq!((tids(block), block.misc_events.len(), block.hip3_oracle_updates.len()), (vec![1], 2, 1), "102's fill stays held");
         assert_eq!((assembler.released(), assembler.pending_blocks()), (Some(101), 1));
+    }
+
+    /// Every reader's proof is needed: with the other three proved past block 101's successor, 101 waits for it.
+    #[test]
+    fn each_readers_proof_is_needed() {
+        for stream in [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs] {
+            let at = clock();
+            let mut assembler = started(&at);
+            assembler.receive_block_actions(block_actions(101, &[]), at(10));
+            assembler.receive_block_actions(block_actions(102, &[]), at(20));
+            assert_eq!(prove_others(&mut assembler, stream, at(30)), Vec::<u64>::new(), "{stream:?} not proved");
+            assert_eq!(heights(&assembler.receive_read_through(stream, at(30))), [100, 101], "{stream:?}");
+        }
     }
 
     /// Design 000439 r2 revision 4: the HIP-3 reader's proof joins the completion rule, its lines are held once by
@@ -383,6 +416,7 @@ mod tests {
         assembler.receive_block_actions(block_actions(102, &[]), at(20));
         assembler.receive_read_through(Stream::Fills, at(30));
         assembler.receive_read_through(Stream::Hip3OracleUpdates, at(30));
+        assembler.receive_read_through(Stream::BookDiffs, at(30));
         let released = assembler.receive_read_through(Stream::MiscEvents, at(30));
         assert_eq!(heights(&released), [100, 101]);
         let block = &released.completed[1];

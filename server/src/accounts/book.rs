@@ -77,6 +77,8 @@ pub(crate) enum Stream {
     BlockActions,
     /// `hip3_oracle_updates_streaming`: read by the node marks (design 000439), not by the account view.
     Hip3OracleUpdates,
+    /// `node_raw_book_diffs_streaming`, the main dex's diffs: read by the node marks, not by the account view.
+    BookDiffs,
 }
 
 impl Stream {
@@ -86,6 +88,7 @@ impl Stream {
             Self::MiscEvents => "misc_events",
             Self::BlockActions => "block_actions",
             Self::Hip3OracleUpdates => "hip3_oracle_updates",
+            Self::BookDiffs => "book_diffs",
         }
     }
 }
@@ -754,20 +757,20 @@ impl AccountBook {
         self.anchor.is_some_and(|anchor| block <= anchor.height)
     }
 
-    /// The view's progress on `stream`; `None` for the HIP-3 oracle updates, which it does not read.
+    /// The view's progress on `stream`; `None` for the node marks' streams, which it does not read.
     const fn progress(&mut self, stream: Stream) -> Option<&mut StreamProgress> {
         match stream {
             Stream::Fills => Some(&mut self.fills),
             Stream::MiscEvents => Some(&mut self.misc_events),
             Stream::BlockActions => Some(&mut self.block_actions),
-            Stream::Hip3OracleUpdates => None,
+            Stream::Hip3OracleUpdates | Stream::BookDiffs => None,
         }
     }
 
     /// The one entry of a released block (design 000433 r3, 3.4): its `replica_cmds` actions, then its fills, then its
     /// misc events, each through the stream's own application below. Its HIP-3 oracle updates are the node marks'.
     pub(crate) fn apply_block(&mut self, block: CompletedBlock) -> BlockReport {
-        let CompletedBlock { actions, fills, misc_events, hip3_oracle_updates: _ } = block;
+        let CompletedBlock { actions, fills, misc_events, hip3_oracle_updates: _, book_diffs: _ } = block;
         BlockReport {
             block_actions: self.apply_block_actions(actions),
             fills: fills.into_iter().map(|batch| self.apply_fills(batch)).collect(),
@@ -1807,6 +1810,7 @@ mod tests {
             fills: vec![fills(height, fills_specs)],
             misc_events: Vec::new(),
             hip3_oracle_updates: Vec::new(),
+            book_diffs: Vec::new(),
         };
         let mut book = AccountBook::new(0);
         book.apply_fills(fills(100, &[]));

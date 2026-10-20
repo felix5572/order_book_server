@@ -12,7 +12,11 @@ use serde_json::json;
 use super::{
     book::{RowMismatch, SilentChange},
     liquidation::LiquidationPx,
-    marks::{Hip3Mismatch, seed::StoredMark},
+    marks::{
+        Hip3Mismatch,
+        book::BookMismatch,
+        seed::{RestingOrder, StoredMark},
+    },
     misc::MiscEvent,
     replay::Mismatch,
     size::format_size_raw,
@@ -156,6 +160,22 @@ pub(crate) fn hip3_mark_mismatch_json(mismatch: &Hip3Mismatch, seed_from: Option
         "coin": mismatch.coin,
         "replayed": mark(mismatch.replayed),
         "checkpoint": mark(mismatch.checkpoint),
+    })
+}
+
+/// A main-dex resting order where the marks' snapshot and the checkpoint differ (design 000439 r2 batch 2).
+pub(crate) fn book_mismatch_json(mismatch: &BookMismatch, seed_from: Option<u64>, seed_to: u64) -> serde_json::Value {
+    let order = |order: Option<RestingOrder>| {
+        order.map(|order| json!({"side": order.side, "limitPx": order.limit_px, "remaining": order.remaining}))
+    };
+    json!({
+        "kind": "nodeBookMismatch",
+        "seedFrom": seed_from,
+        "seedTo": seed_to,
+        "coin": mismatch.coin,
+        "oid": mismatch.oid,
+        "replayed": order(mismatch.replayed),
+        "checkpoint": order(mismatch.checkpoint),
     })
 }
 
