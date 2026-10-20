@@ -6,8 +6,8 @@ use serde::Serialize;
 
 use super::{
     book::{AnchorInfo, ChangeMarks, CoinChanges, CoinPositions, PositionView},
-    checkpoint::AccountMode,
-    liquidation::{LiquidationPx, UnsupportedReason},
+    checkpoint::{AccountMode, MAX_PERP_DECIMALS},
+    liquidation::{LiquidationPx, RowMark, UnsupportedReason},
     portfolio::PortfolioMargin,
     size::format_size_raw,
 };
@@ -46,12 +46,18 @@ struct PositionDto {
     liquidation_px: Option<String>,
     liquidation_px_status: &'static str,
     unsupported_reason: Option<String>,
-    /// `replay`: computed from the replayed state of block `liquidationPxHeight` (design 000437; an isolated position
-    /// or a cross position alone in its pool); `anchor`: the anchor's row; `null` while `pending`.
+    /// `replay`: computed from the replayed state of block `liquidationPxHeight` (designs 000437, 000442; the pool's
+    /// other positions at the node marks of that block); `anchor`: the anchor's row; `null` while `pending`.
     liquidation_px_source: Option<&'static str>,
     /// The block the row's state is of: the applied height for a replayed row, the anchor height for an anchor's row;
     /// `null` while `pending`.
     liquidation_px_height: Option<u64>,
+    /// The coin's mark at `liquidationPxHeight`: the node mark for a replayed row, the stored mark for an anchor's row;
+    /// `null` without one.
+    mark_px: Option<String>,
+    /// How far `markPx` is from `liquidationPx` in bp of the mark, with the size at `liquidationPxHeight`: positive while
+    /// the mark has not reached it (long: mark above; short: below). `null` without both.
+    liquidation_distance_bps: Option<f64>,
     /// Observed sources that touched the account after the anchor; empty does not prove it unchanged (mark price moves
     /// of the pool's other positions are not a source). Always empty on a replayed row: every event up to its height
     /// is in it.
@@ -182,17 +188,19 @@ struct Shown<'a> {
     isolated: bool,
     pool_positions: Option<usize>,
     liquidation_px: &'a LiquidationPx,
+    mark: RowMark,
 }
 
 fn position_dto(size_decimals: u32, anchor: AnchorInfo, position: &PositionView) -> PositionDto {
     let row = position.anchor_row.as_ref();
     let shown = match (&position.replayed, row) {
-        (Some((height, replayed)), _) => Some(Shown {
+        (Some(replayed), _) => Some(Shown {
             source: "replay",
-            height: *height,
-            isolated: replayed.isolated,
-            pool_positions: Some(1),
-            liquidation_px: &replayed.liquidation_px,
+            height: replayed.height,
+            isolated: replayed.row.isolated,
+            pool_positions: Some(replayed.row.pool_positions),
+            liquidation_px: &replayed.row.liquidation_px,
+            mark: replayed.mark,
         }),
         (None, Some(row)) => Some(Shown {
             source: "anchor",
@@ -200,6 +208,7 @@ fn position_dto(size_decimals: u32, anchor: AnchorInfo, position: &PositionView)
             isolated: row.isolated,
             pool_positions: row.pool_positions,
             liquidation_px: &row.liquidation_px,
+            mark: row.mark,
         }),
         (None, None) => None,
     };
@@ -222,11 +231,18 @@ fn position_dto(size_decimals: u32, anchor: AnchorInfo, position: &PositionView)
         unsupported_reason,
         liquidation_px_source: shown.as_ref().map(|shown| shown.source),
         liquidation_px_height: shown.as_ref().map(|shown| shown.height),
+        mark_px: shown.as_ref().and_then(|shown| shown.mark.mark_raw).map(|raw| format_mark_raw(raw, size_decimals)),
+        liquidation_distance_bps: shown.as_ref().and_then(|shown| shown.mark.distance_bps),
         changed_since_liquidation_px: if replayed { Vec::new() } else { changes(position.changes) },
         replay_stopped_reason: position.replay_stop.as_ref().map(|stop| stop.reason.text()),
         replay_stopped_height: position.replay_stop.as_ref().and_then(|stop| stop.block),
         portfolio_margin: row.and_then(|row| row.portfolio_margin.as_ref()).filter(|_| !replayed).map(PortfolioMarginDto::new),
     }
+}
+
+/// A perp mark's exact decimal from its price units (10^-(6 - szDecimals)).
+fn format_mark_raw(raw: u64, size_decimals: u32) -> String {
+    format_size_raw(raw.cast_signed(), MAX_PERP_DECIMALS - size_decimals)
 }
 
 fn changes(marks: ChangeMarks) -> Vec<ChangeDto> {
@@ -278,7 +294,7 @@ mod tests {
     use super::*;
     use crate::accounts::{
         anchor::AnchorRow,
-        book::AnchorInfo,
+        book::{AnchorInfo, Replayed},
         replay::{ReplayedRow, Stop, StopReason},
     };
 
@@ -286,6 +302,49 @@ mod tests {
     fn an_unsupported_portfolio_margin_names_its_reason() {
         let dto = PortfolioMarginDto::new(&PortfolioMargin::Unsupported(UnsupportedReason::PortfolioMarginSupplyCap));
         assert_eq!(serde_json::to_value(dto).unwrap(), json!({"status": "unsupported", "reason": "portfolioMarginSupplyCap"}));
+    }
+
+    /// A view of PUMP (szDecimals 1) at block 1012 over the anchor at 1000.
+    fn view_of(positions: Vec<PositionView>) -> CoinPositions {
+        CoinPositions {
+            coin: "PUMP".to_string(),
+            version: 7,
+            anchor: AnchorInfo { height: 1_000, time_ms: 1_792_384_440_000 },
+            fills_height: 1_011,
+            misc_events_height: 1_009,
+            block_actions_height: 1_012,
+            size_decimals: 1,
+            positions,
+        }
+    }
+
+    /// A cross position in a pool of three, replayed to block 1012: its row, mark and distance replace the anchor's.
+    #[test]
+    fn serializes_a_replayed_row_with_its_mark() {
+        let replayed = PositionView {
+            user: Address::repeat_byte(0xab),
+            size_raw: -2_696_200,
+            position_height: 1_000,
+            account_mode: Some(AccountMode::Unified),
+            anchor_row: None,
+            changes: ChangeMarks::default(),
+            replayed: Some(Replayed {
+                height: 1_012,
+                row: ReplayedRow { isolated: false, pool_positions: 3, liquidation_px: LiquidationPx::Computed(0.004_2) },
+                mark: RowMark { mark_raw: Some(380), distance_bps: Some(1_052.5) },
+            }),
+            replay_stop: None,
+        };
+        let value = serde_json::to_value(CoinPositionsDto::new(&view_of(vec![replayed]))).unwrap();
+        assert_eq!(
+            value["positions"][0],
+            json!({"user": "0xabababababababababababababababababababab", "szi": "-269620.0", "positionHeight": 1_000,
+                   "marginMode": "cross", "accountMode": "unifiedAccount", "poolPositions": 3, "liquidationPx": "0.0042",
+                   "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxSource": "replay",
+                   "liquidationPxHeight": 1_012, "markPx": "0.0038", "liquidationDistanceBps": 1_052.5,
+                   "changedSinceLiquidationPx": [], "replayStoppedReason": null, "replayStoppedHeight": null,
+                   "portfolioMargin": null})
+        );
     }
 
     #[test]
@@ -299,6 +358,7 @@ mod tests {
                 isolated: false,
                 pool_positions: Some(2),
                 liquidation_px: LiquidationPx::Computed(0.003_951_5),
+                mark: RowMark { mark_raw: Some(350), distance_bps: Some(1_290.0) },
                 portfolio_margin: Some(PortfolioMargin::Computed { ratio: 0.25 }),
             }),
             changes: ChangeMarks {
@@ -327,6 +387,7 @@ mod tests {
                 isolated: true,
                 pool_positions: None,
                 liquidation_px: LiquidationPx::Unsupported(UnsupportedReason::UnknownAccountMode("x".to_string())),
+                mark: RowMark { mark_raw: Some(350), distance_bps: None },
                 portfolio_margin: None,
             }),
             account_mode: Some(AccountMode::Unknown("x".to_string())),
@@ -334,24 +395,7 @@ mod tests {
             replay_stop: Some(Stop { block: Some(1_007), reason: StopReason::UnreadLedger("spotGenesis".to_string()) }),
             ..anchored.clone()
         };
-        // a cross position alone in its pool, replayed to block 1012: its row replaces the anchor's
-        let replayed = PositionView {
-            account_mode: Some(AccountMode::Unified),
-            replayed: Some((1_012, ReplayedRow { isolated: false, liquidation_px: LiquidationPx::Computed(0.004_2) })),
-            replay_stop: None,
-            ..anchored.clone()
-        };
-        let view = CoinPositions {
-            coin: "PUMP".to_string(),
-            version: 7,
-            anchor: AnchorInfo { height: 1_000, time_ms: 1_792_384_440_000 },
-            fills_height: 1_011,
-            misc_events_height: 1_009,
-            block_actions_height: 1_012,
-            size_decimals: 1,
-            positions: vec![anchored, pending, unsupported, replayed],
-        };
-        let value = serde_json::to_value(CoinPositionsDto::new(&view)).unwrap();
+        let value = serde_json::to_value(CoinPositionsDto::new(&view_of(vec![anchored, pending, unsupported]))).unwrap();
         let ab = "0xabababababababababababababababababababab";
         assert_eq!(
             value,
@@ -362,7 +406,7 @@ mod tests {
                     {"user": ab, "szi": "-269620.0", "positionHeight": 1_000, "marginMode": "cross",
                      "accountMode": "portfolioMargin", "poolPositions": 2, "liquidationPx": "0.0039515",
                      "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxSource": "anchor",
-                     "liquidationPxHeight": 1_000,
+                     "liquidationPxHeight": 1_000, "markPx": "0.0035", "liquidationDistanceBps": 1_290.0,
                      "changedSinceLiquidationPx": [
                          {"kind": "ledger", "height": 1_005}, {"kind": "funding", "height": 1_003},
                          {"kind": "margin", "height": 1_002}, {"kind": "accountMode", "height": 1_004},
@@ -373,18 +417,15 @@ mod tests {
                     {"user": "0x0101010101010101010101010101010101010101", "szi": "0.5", "positionHeight": 1_010,
                      "marginMode": null, "accountMode": null, "poolPositions": null, "liquidationPx": null,
                      "liquidationPxStatus": "pending", "unsupportedReason": null, "liquidationPxSource": null,
-                     "liquidationPxHeight": null, "changedSinceLiquidationPx": [{"kind": "fill", "height": 1_010}],
+                     "liquidationPxHeight": null, "markPx": null, "liquidationDistanceBps": null,
+                     "changedSinceLiquidationPx": [{"kind": "fill", "height": 1_010}],
                      "replayStoppedReason": null, "replayStoppedHeight": null, "portfolioMargin": null},
                     {"user": ab, "szi": "-269620.0", "positionHeight": 1_000, "marginMode": "isolated",
                      "accountMode": "unknown:x", "poolPositions": null, "liquidationPx": null,
                      "liquidationPxStatus": "unsupported", "unsupportedReason": "unknownAccountMode:x",
-                     "liquidationPxSource": "anchor", "liquidationPxHeight": 1_000, "changedSinceLiquidationPx": [],
-                     "replayStoppedReason": "unreadLedger:spotGenesis", "replayStoppedHeight": 1_007, "portfolioMargin": null},
-                    {"user": ab, "szi": "-269620.0", "positionHeight": 1_000, "marginMode": "cross",
-                     "accountMode": "unifiedAccount", "poolPositions": 1, "liquidationPx": "0.0042",
-                     "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxSource": "replay",
-                     "liquidationPxHeight": 1_012, "changedSinceLiquidationPx": [],
-                     "replayStoppedReason": null, "replayStoppedHeight": null, "portfolioMargin": null}
+                     "liquidationPxSource": "anchor", "liquidationPxHeight": 1_000, "markPx": "0.0035",
+                     "liquidationDistanceBps": null, "changedSinceLiquidationPx": [],
+                     "replayStoppedReason": "unreadLedger:spotGenesis", "replayStoppedHeight": 1_007, "portfolioMargin": null}
                 ]
             })
         );

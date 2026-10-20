@@ -11,7 +11,7 @@
 //! dexes held no position on 2026-10-19, so their pools follow the same rule unverified.
 
 use super::{
-    checkpoint::{Account, AccountMode, CheckpointAccounts, DexAccount, Position, PositionMargin},
+    checkpoint::{Account, AccountMode, CheckpointAccounts, DexAccount, Position, PositionMargin, base_size, mark_px},
     margin::MarginTable,
     portfolio::{PortfolioMargin, PortfolioState, USDC, portfolio_state},
 };
@@ -56,16 +56,53 @@ pub(crate) struct PositionLiquidation {
     pub(crate) liquidation_px: LiquidationPx,
 }
 
+/// A row's mark and its distance to the liquidation price, both of the row's height (design 000442 r1 3, r2 revision
+/// 2): the anchor's row takes the anchor's size and stored mark, a replayed row its height's size and node mark.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RowMark {
+    /// In 10^-(6 - szDecimals) USD; `None` without a mark.
+    pub(crate) mark_raw: Option<u64>,
+    /// (mark − liquidation price) / mark in bp for a long, (liquidation price − mark) / mark for a short: positive while
+    /// the mark has not reached the price. `None` without a mark or without a computed price.
+    pub(crate) distance_bps: Option<f64>,
+}
+
+impl RowMark {
+    pub(crate) fn of(size_raw: i64, size_decimals: u32, mark_raw: Option<u64>, liquidation_px: &LiquidationPx) -> Self {
+        let distance_bps = match (mark_raw, liquidation_px) {
+            // a stored mark is a positive price; 0 has no relative distance
+            (Some(raw), LiquidationPx::Computed(px)) if raw > 0 => {
+                let mark = mark_px(raw, size_decimals);
+                let room = if size_raw > 0 { mark - px } else { px - mark };
+                Some(room / mark * 1e4)
+            }
+            _ => None,
+        };
+        Self { mark_raw, distance_bps }
+    }
+}
+
 /// Pool cash (in the collateral token) and its members (dex index, position).
 type Pool<'a> = (f64, Vec<(usize, &'a Position)>);
 
-/// A valued pool member: its maintenance at the mark is the node's integer one.
-struct Valued<'a> {
-    position: &'a Position,
-    size: f64,
-    mark: f64,
-    maintenance_micro: i128,
-    table: &'a MarginTable,
+/// A pool member other than the solved position, held at a mark (design 000442 r1 2): it counts `size × mark` and
+/// the node's integer maintenance there. The anchor's rows hold it at the checkpoint's stored mark, the replayed rows
+/// at the node mark of their height.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HeldAtMark<'a> {
+    /// Signed, in 10^-szDecimals.
+    pub(crate) size_raw: i64,
+    pub(crate) size_decimals: u32,
+    /// In 10^-(6 - szDecimals) USD, the unit of the stored mark.
+    pub(crate) mark_raw: u64,
+    pub(crate) table: &'a MarginTable,
+}
+
+impl HeldAtMark<'_> {
+    /// Raw size times mark is the exact notional in micro-USD.
+    fn maintenance_micro(&self) -> i128 {
+        self.table.maintenance_micro(u128::from(self.size_raw.unsigned_abs()) * u128::from(self.mark_raw))
+    }
 }
 
 /// Every position of an account at the checkpoint, and its portfolio margin when it is a portfolio-margin account.
@@ -187,30 +224,31 @@ fn solve_pool(
     cash: f64,
     members: &[(usize, &Position)],
 ) -> LiquidationPx {
-    let mut valued = Vec::with_capacity(members.len());
+    let mut others = Vec::with_capacity(members.len());
     for (dex_index, position) in members {
         let dex = &checkpoint.dexes[*dex_index];
         let asset = &dex.assets[position.asset];
-        let (Some(mark), Some(maintenance_micro)) = (asset.mark_px(), dex.maintenance_micro(position)) else {
+        let Some(mark_raw) = asset.mark_raw else {
             return LiquidationPx::Unsupported(UnsupportedReason::MissingMark);
         };
-        valued.push(Valued {
-            position,
-            size: asset.size(position.size_raw),
-            mark,
-            maintenance_micro,
-            table: dex.table(position.table_id),
-        });
+        if !std::ptr::eq(*position, target) {
+            others.push(HeldAtMark { size_raw: position.size_raw, size_decimals: asset.size_decimals, mark_raw, table: dex.table(position.table_id) });
+        }
     }
-    let Some(own) = valued.iter().find(|member| std::ptr::eq(member.position, target)) else {
+    let Some((dex_index, _)) = members.iter().find(|(_, position)| std::ptr::eq(*position, target)) else {
         unreachable!("a pool always contains its own position");
     };
-    // the node solves the target continuously in its price and holds the others at their integer maintenance
-    let others = valued.iter().filter(|member| !std::ptr::eq(member.position, target));
-    let (others_value, others_mm_micro) = others.fold((0.0, 0_i128), |(value, mm), member| {
-        (member.size.mul_add(member.mark, value), mm + member.maintenance_micro)
+    let dex = &checkpoint.dexes[*dex_index];
+    solve_held(cash, &others, dex.assets[target.asset].size(target.size_raw), dex.table(target.table_id))
+}
+
+/// The liquidation price of a position of `size` (base units) with `table` in a pool of `cash` whose other members are
+/// `others`: the node solves the position continuously in its price and holds the others at their integer maintenance.
+pub(crate) fn solve_held(cash: f64, others: &[HeldAtMark<'_>], size: f64, table: &MarginTable) -> LiquidationPx {
+    let (others_value, others_mm_micro) = others.iter().fold((0.0, 0_i128), |(value, mm), member| {
+        (base_size(member.size_raw, member.size_decimals).mul_add(mark_px(member.mark_raw, member.size_decimals), value), mm + member.maintenance_micro())
     });
-    solve(cash + others_value, others_mm_micro as f64 / 1e6, own.size, own.table)
+    solve(cash + others_value, others_mm_micro as f64 / 1e6, size, table)
 }
 
 /// Price `p` with `fixed + size * p == others_mm + maintenance(|size| * p)`, the maintenance tier taken at `p`.
@@ -261,6 +299,18 @@ mod tests {
     fn long_with_standard_pool_cash() {
         let table = MarginTable::single(10).unwrap();
         assert!((computed(&solve(-80.0, 0.0, 1.0, &table)) - 84.210_526).abs() < 1e-5);
+    }
+
+    /// Design 000442 r1 3 / r2 revision 2: positive while the mark has not reached the price, either side; `None`
+    /// without a mark or a computed price. PUMP (szDecimals 0) marked at 0.004.
+    #[test]
+    fn the_distance_is_positive_until_the_mark_reaches_the_price() {
+        let distance = |size_raw, px| RowMark::of(size_raw, 0, Some(4_000), &LiquidationPx::Computed(px)).distance_bps.unwrap();
+        assert!((distance(1_000, 0.003) - 2_500.0).abs() < 1e-9, "a long 25% above its price");
+        assert!((distance(-1_000, 0.005) - 2_500.0).abs() < 1e-9, "a short 25% below its price");
+        assert!((distance(1_000, 0.005) + 2_500.0).abs() < 1e-9, "a long past its price");
+        assert_eq!(RowMark::of(1_000, 0, None, &LiquidationPx::Computed(0.003)), RowMark { mark_raw: None, distance_bps: None });
+        assert_eq!(RowMark::of(1_000, 0, Some(4_000), &LiquidationPx::NoPositiveSolution).distance_bps, None);
     }
 
     #[test]

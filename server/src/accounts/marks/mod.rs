@@ -445,6 +445,28 @@ pub(crate) struct MarksInstallReport {
     pub(crate) errors: Vec<(Stream, String)>,
 }
 
+/// The marks of one height, as the account view reads them (design 000442 r1 1): the node marks of the applied height,
+/// or a checkpoint's stored marks for the row check at an anchor.
+pub(crate) trait MarksAt {
+    fn height(&self) -> u64;
+    /// The coin's mark in price units (10^-(6 - szDecimals)); `None` when there is none to claim: a main-dex coin
+    /// marked unsupported, a coin without a stored mark or outside the universe.
+    fn mark(&self, coin: &str) -> Option<u64>;
+}
+
+impl MarksAt for MarkState {
+    fn height(&self) -> u64 {
+        self.height
+    }
+
+    fn mark(&self, coin: &str) -> Option<u64> {
+        match self.prices.asset(coin) {
+            Some(asset) => self.prices.mark(asset),
+            None => self.hip3.get(coin)?.mark.map(|mark| mark.px),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct MarksStatus {
     pub(crate) availability: Result<u64, Unavailable>,
@@ -497,6 +519,13 @@ impl NodeMarks {
         let state = self.state.as_ref().ok_or(Unavailable::Initializing)?;
         self.streams.check(state.seed)?;
         Ok(state.height)
+    }
+
+    /// The marks while they are trusted, of their height.
+    pub(crate) fn at(&self) -> Option<&dyn MarksAt> {
+        self.availability().ok()?;
+        let state: &MarkState = self.state.as_ref()?;
+        Some(state)
     }
 
     pub(crate) fn status(&self) -> MarksStatus {
@@ -653,31 +682,24 @@ fn check_hip3(replayed: &FxHashMap<String, Hip3Coin>, checkpoint: &FxHashMap<Str
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::accounts::{
         book::{CLOCK_MARGIN_MS, LossBound},
-        checkpoint::{parse_checkpoint_bytes, tests::fixture},
         marks::{
             book::{BookMismatch, tests::diff_line},
             seed::RestingOrder,
         },
-        test_support::{HIP3_LINE_TIME_NS, hip3_line as line, status_line},
+        test_support::{HIP3_LINE_TIME_NS, SEED_TIME_MS, hip3_line as line, marks_seed, status_line},
     };
     use alloy::primitives::Address;
     use crate::order_book::Side;
 
     const GRID: CheckpointGrid = CheckpointGrid { anchor: 1_000, interval: 100 };
-    /// 2026-10-19T06:37:23.556 UTC, the fixture checkpoint's time.
-    const SEED_TIME_MS: u64 = 1_792_391_843_556;
     const STARTED_MS: u64 = SEED_TIME_MS - 60_000;
 
-    /// The fixture's seed at `height` (its HIP-3 coins: xyz:TSLA at 358.32, flx:GOLD at 41883.0).
     fn seed(height: u64) -> MarkSeed {
-        let mut seed = MarkSeed::from_checkpoint(parse_checkpoint_bytes(&fixture()).unwrap()).unwrap();
-        seed.height = height;
-        seed.time_ms = SEED_TIME_MS + height;
-        seed
+        marks_seed(height)
     }
 
     fn tsla(marks: &NodeMarks) -> Option<StoredMark> {
@@ -741,6 +763,16 @@ mod tests {
             }
             assert_eq!(marks.apply_block(height, inputs), MarksBlockReport::default(), "block {height}");
         }
+    }
+
+    /// Marks trusted at 1001: seeded at 995, every stream read past it.
+    pub(crate) fn trusted_marks() -> NodeMarks {
+        let mut marks = NodeMarks::new(GRID, STARTED_MS);
+        run(&mut marks, 990..=995, &[]);
+        marks.install(seed(995));
+        run(&mut marks, 996..=1_001, &[(997, "360.0")]);
+        assert_eq!(marks.availability(), Ok(1_001));
+        marks
     }
 
     #[test]

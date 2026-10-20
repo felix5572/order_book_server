@@ -33,6 +33,16 @@ const FIRST_LISTED_TABLE: u32 = 50;
 pub(crate) const PDI_ASSET_STRIDE: u32 = 10_000;
 /// Perp prices carry `MAX_PERP_DECIMALS - szDecimals` decimals, so `szDecimals` cannot exceed it.
 pub(crate) const MAX_PERP_DECIMALS: u32 = 6;
+
+/// A perp's mark in USD from its price units (10^-(6 - szDecimals)).
+pub(crate) fn mark_px(mark_raw: u64, size_decimals: u32) -> f64 {
+    mark_raw as f64 / 10f64.powi((MAX_PERP_DECIMALS - size_decimals).cast_signed())
+}
+
+/// A signed size in base units from its raw units (10^-szDecimals).
+pub(crate) fn base_size(size_raw: i64, size_decimals: u32) -> f64 {
+    size_raw as f64 / 10f64.powi(size_decimals.cast_signed())
+}
 /// Spot prices (a reserve's `o`, a spot fill's `px`) carry `MAX_SPOT_DECIMALS - szDecimals` decimals; USDC
 /// (szDecimals 8) stores 1.
 pub(crate) const MAX_SPOT_DECIMALS: u32 = 8;
@@ -177,13 +187,12 @@ impl AssetMarginMode {
 impl AssetMeta {
     /// The stored mark in USD.
     pub(crate) fn mark_px(&self) -> Option<f64> {
-        let price_decimals = MAX_PERP_DECIMALS - self.size_decimals;
-        self.mark_raw.map(|raw| raw as f64 / 10f64.powi(price_decimals.cast_signed()))
+        self.mark_raw.map(|raw| mark_px(raw, self.size_decimals))
     }
 
     /// Signed size in base units.
     pub(crate) fn size(&self, size_raw: i64) -> f64 {
-        size_raw as f64 / 10f64.powi(self.size_decimals.cast_signed())
+        base_size(size_raw, self.size_decimals)
     }
 }
 

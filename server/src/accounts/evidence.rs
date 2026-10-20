@@ -143,7 +143,8 @@ pub(crate) fn replay_row_mismatch_json(mismatch: &RowMismatch, anchor_from: Opti
         "anchorTo": anchor_to,
         "coin": mismatch.coin,
         "user": user_text(mismatch.user),
-        "replayed": mismatch.replayed.as_ref().map(|row| json!({"isolated": row.isolated, "liquidationPx": price(&row.liquidation_px)})),
+        "replayed": mismatch.replayed.as_ref().map(|row| json!({"isolated": row.isolated, "poolPositions": row.pool_positions,
+                                                                "liquidationPx": price(&row.liquidation_px)})),
         "anchor": json!({"isolated": mismatch.anchor.isolated, "poolPositions": mismatch.anchor.pool_positions,
                           "liquidationPx": price(&mismatch.anchor.liquidation_px)}),
     })

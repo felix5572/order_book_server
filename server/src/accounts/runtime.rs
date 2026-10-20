@@ -399,30 +399,35 @@ async fn run_owner(
         tokio::select! {
             Some(input) = inputs.recv() => {
                 let touched = apply_input(&mut book, &mut marks, &mut assembler, input);
+                // a seed made ready by these blocks installs before anything is pushed: the frames carry the marks a
+                // query would read (review 000445 r1 P2)
+                install_seed_ready(&mut marks, &mut held_seed);
                 if publisher.track(&book) {
-                    publisher.push_changes(&mut book, &touched);
+                    publisher.push_changes(&mut book, &touched, marks.at());
                 }
                 if install_ready(&mut book, &mut held) && publisher.track(&book) {
-                    publisher.push_snapshots(&mut book);
+                    publisher.push_snapshots(&mut book, marks.at());
                 }
-                install_seed_ready(&mut marks, &mut held_seed);
+                publisher.track_marks(&mut book, &marks);
             }
             Some(message) = anchors.recv() => {
                 let installed = receive_anchor(&mut book, &mut marks, &mut held, &mut held_seed, message);
                 if publisher.track(&book) && installed {
-                    publisher.push_snapshots(&mut book);
+                    publisher.push_snapshots(&mut book, marks.at());
                 }
+                publisher.track_marks(&mut book, &marks);
             }
             query = queries.recv() => {
                 let Some(query) = query else {
                     info!("accounts: every handle dropped, owner exits");
                     return;
                 };
-                answer(&book, query);
+                answer(&book, &marks, query);
             }
             _ = supervision.tick() => {
                 supervise(&mut book, &mut marks, &threads);
                 publisher.track(&book);
+                publisher.track_marks(&mut book, &marks);
                 export_status(&book.status());
                 export_marks_status(&marks.status());
             }
@@ -842,10 +847,10 @@ fn log_replay_check(height: u64, report: &InstallReport) {
     }
 }
 
-fn answer(book: &AccountBook, query: Query) {
+fn answer(book: &AccountBook, marks: &NodeMarks, query: Query) {
     // a dropped receiver is a caller that gave up; nothing to undo
     match query {
-        Query::CoinPositions { coin, reply } => drop(reply.send(book.coin_positions(&coin))),
+        Query::CoinPositions { coin, reply } => drop(reply.send(book.coin_positions(&coin, marks.at()))),
         Query::Status { reply } => drop(reply.send(book.status())),
     }
 }
@@ -1005,7 +1010,7 @@ mod tests {
     }
 
     fn empty_anchor(height: u64, time_ms: u64) -> Anchor {
-        let coin = AnchorCoin { size_decimals: 0, table_id: 52, positions: FxHashMap::default() };
+        let coin = AnchorCoin { size_decimals: 0, table_id: 52, mark_raw: None, positions: FxHashMap::default() };
         let coins = std::iter::once(("PUMP".to_string(), coin)).collect();
         Anchor { height, time_ms, coins, account_modes: FxHashMap::default(), margins: MarginStates::default() }
     }
@@ -1211,5 +1216,86 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(handle.is_finished(), "the poller should notice the closed channel at its next poll");
+    }
+
+    /// Review 000445 r1 P2: an anchor and its seed waiting for the same blocks both install before anything is pushed,
+    /// so the anchor's snapshot values the shared pool at the seed's marks, as a query at that height does. The seed
+    /// at 1100 moves BTC's mark; HOLDER holds PUMP and BTC in one pool.
+    #[tokio::test]
+    async fn a_snapshot_after_a_waiting_seed_reads_the_marks_a_query_reads() {
+        use crate::accounts::{
+            checkpoint::tests::{HOLDER, user as checkpoint_user},
+            marks::tests::trusted_marks,
+            replay::tests::per_dex_with_main_cash,
+            test_support::{PUMP, SEED_TIME_MS, anchor, block_actions, fills, marks_seed, misc},
+            view::CoinPositionsDto,
+        };
+        let shared_pool = |height| {
+            let holder = checkpoint_user(HOLDER);
+            let mut anchor = anchor(height, &[(PUMP, 0, &[(holder, 1_000_000)]), ("BTC", 5, &[(holder, 10_000)])]);
+            anchor.margins = per_dex_with_main_cash(-12_000_000_000);
+            anchor
+        };
+        let mut book = AccountBook::new(0);
+        book.apply_fills(fills(100, &[]));
+        book.apply_misc_events(misc(100, &[]));
+        book.apply_block_actions(block_actions(1_001, &[]));
+        book.install_anchor(shared_pool(1_000));
+        let marks = trusted_marks();
+        let subscriptions = CoinSubscriptions::default();
+        let (frames, mut received) = broadcast::channel(16);
+        let (input_tx, input_rx) = mpsc::channel(256);
+        let (anchor_tx, anchor_rx) = mpsc::channel(1);
+        let (query_tx, query_rx) = mpsc::channel(16);
+        let mut publisher = Publisher::new(subscriptions.clone(), frames);
+        // the view and the marks are available before anyone subscribes
+        publisher.track(&book);
+        publisher.track_marks(&mut book, &marks);
+        let _guard = subscriptions.acquire(PUMP);
+        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new()));
+        let query = || async {
+            let (reply, answer) = oneshot::channel();
+            query_tx.send(Query::CoinPositions { coin: PUMP.to_string(), reply }).await.unwrap();
+            answer.await.unwrap().unwrap()
+        };
+        let mut seed = marks_seed(1_100);
+        seed.native.assets.iter_mut().find(|asset| asset.name == "BTC").unwrap().mark.px = 900_000;
+        let parsed = Box::new(ParsedAnchor { anchor: shared_pool(1_100), parse_seconds: 0.0, skipped: 0 });
+        anchor_tx.send(AnchorMessage::Parsed { parsed, seed: Ok(Box::new(seed)) }).await.unwrap();
+        assert_eq!(query().await.anchor.height, 1_000, "the anchor waits for its blocks");
+        for height in 1_002..=1_101 {
+            let actions = MarkActions { height, time_ns: (SEED_TIME_MS + height) * 1_000_000, actions: Vec::new() };
+            input_tx.send(Input::BlockActions(Ok((block_actions(height, &[]), Ok(actions))), Instant::now())).await.unwrap();
+        }
+        let read_through = Instant::now() + Duration::from_millis(1);
+        for stream in [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses] {
+            input_tx.send(Input::ReadThrough(stream, read_through)).await.unwrap();
+        }
+        let installed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let view = query().await;
+                if view.anchor.height == 1_100 {
+                    break view;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let queried = serde_json::to_value(CoinPositionsDto::new(&installed)).unwrap();
+        let mut snapshots = Vec::new();
+        while let Ok(frame) = received.try_recv() {
+            if let AccountsFrame::Coin { wire, .. } = frame.as_ref() {
+                let frame: serde_json::Value = serde_json::from_slice(wire).unwrap();
+                if frame["data"]["kind"] == "snapshot" {
+                    snapshots.push(frame);
+                }
+            }
+        }
+        owner.abort();
+        let [snapshot] = snapshots.as_slice() else { panic!("one snapshot: {snapshots:?}") };
+        let (pushed, read) = (&snapshot["data"]["positions"][0], &queried["positions"][0]);
+        assert_eq!(pushed["liquidationPxSource"], "replay");
+        assert_eq!((&pushed["liquidationPx"], &pushed["markPx"]), (&read["liquidationPx"], &read["markPx"]));
     }
 }

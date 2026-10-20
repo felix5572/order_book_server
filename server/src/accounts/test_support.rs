@@ -8,7 +8,9 @@ use super::{
     anchor::{Anchor, AnchorCoin, AnchorPosition, AnchorRow},
     book::AccountBook,
     checkpoint::AccountMode,
-    liquidation::LiquidationPx,
+    checkpoint::{parse_checkpoint_bytes, tests::fixture},
+    liquidation::{LiquidationPx, RowMark},
+    marks::{MarksAt, seed::MarkSeed},
     misc::MiscEvent,
     replay::MarginStates,
 };
@@ -168,7 +170,40 @@ pub(crate) fn batch_line(block: u64, events: &str) -> String {
 }
 
 pub(crate) fn row() -> AnchorRow {
-    AnchorRow { isolated: false, pool_positions: Some(1), liquidation_px: LiquidationPx::Computed(0.004), portfolio_margin: None }
+    AnchorRow {
+        isolated: false,
+        pool_positions: Some(1),
+        liquidation_px: LiquidationPx::Computed(0.004),
+        mark: RowMark { mark_raw: None, distance_bps: None },
+        portfolio_margin: None,
+    }
+}
+
+/// Marks of one height for the view's tests, in price units (10^-(6 - szDecimals)).
+pub(crate) struct ListedMarks {
+    pub(crate) height: u64,
+    pub(crate) marks: &'static [(&'static str, u64)],
+}
+
+impl MarksAt for ListedMarks {
+    fn height(&self) -> u64 {
+        self.height
+    }
+
+    fn mark(&self, coin: &str) -> Option<u64> {
+        self.marks.iter().find(|(listed, _)| *listed == coin).map(|(_, mark)| *mark)
+    }
+}
+
+/// 2026-10-19T06:37:23.556 UTC, the fixture checkpoint's time.
+pub(crate) const SEED_TIME_MS: u64 = 1_792_391_843_556;
+
+/// The fixture checkpoint's marks seed, moved to `height` (its HIP-3 coins: xyz:TSLA at 358.32, flx:GOLD at 41883.0).
+pub(crate) fn marks_seed(height: u64) -> MarkSeed {
+    let mut seed = MarkSeed::from_checkpoint(parse_checkpoint_bytes(&fixture()).unwrap()).unwrap();
+    seed.height = height;
+    seed.time_ms = SEED_TIME_MS + height;
+    seed
 }
 
 /// `(coin, szDecimals, [(user, size_raw)])`.
@@ -187,7 +222,7 @@ pub(crate) fn anchor(height: u64, coins: &[CoinSpec<'_>]) -> Anchor {
                     (*user, AnchorPosition { size_raw: *size_raw, table_id: ANCHOR_TABLE, row: row() })
                 })
                 .collect();
-            ((*name).to_string(), AnchorCoin { size_decimals: *size_decimals, table_id: CURRENT_TABLE, positions })
+            ((*name).to_string(), AnchorCoin { size_decimals: *size_decimals, table_id: CURRENT_TABLE, mark_raw: None, positions })
         })
         .collect();
     Anchor { height, time_ms: height * 1_000, coins, account_modes, margins: MarginStates::default() }

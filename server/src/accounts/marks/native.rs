@@ -226,6 +226,12 @@ impl NativePrices {
         self.by_name.get(coin).copied()
     }
 
+    /// The coin's mark in price units; `None` while it is unsupported.
+    pub(crate) fn mark(&self, asset: usize) -> Option<u64> {
+        let coin = &self.coins[asset];
+        coin.unsupported.is_none().then_some(coin.mark.px)
+    }
+
     #[cfg(test)]
     pub(crate) fn mark_of(&self, asset: usize) -> (StoredMark, Option<&'static str>) {
         (self.coins[asset].mark, self.coins[asset].unsupported)

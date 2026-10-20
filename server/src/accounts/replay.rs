@@ -14,11 +14,11 @@ use serde_json::json;
 
 use super::{
     actions::BlockAction,
-    liquidation::{LiquidationPx, solve},
+    liquidation::{HeldAtMark, LiquidationPx, solve, solve_held},
     margin::MarginTable,
     checkpoint::{
         Account, AccountMode, AssetMarginMode, CheckpointAccounts, MAX_PERP_DECIMALS, MAX_SPOT_DECIMALS, PDI_ASSET_STRIDE,
-        PositionMargin, SpotPair,
+        PositionMargin, SpotPair, base_size,
     },
     misc::{Balance, LedgerDelta, USDC_NAME},
     portfolio::USDC,
@@ -580,12 +580,24 @@ fn apply_action(account: &mut AccountMargin, markets: &Markets, block: u64, acti
     Ok(())
 }
 
-/// A mark-independent liquidation price from the replayed state (design 000437): an isolated position's own pool, or
-/// a cross position alone in its pool.
+/// A liquidation price from the replayed state (designs 000437, 000442): an isolated position's own pool, or a cross
+/// position's pool with its other members held at the marks of the same height.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReplayedRow {
     pub(crate) isolated: bool,
+    /// The positions of its pool, itself included.
+    pub(crate) pool_positions: usize,
     pub(crate) liquidation_px: LiquidationPx,
+}
+
+/// Another open position of the account, as a replayed row of its pool needs it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HeldPosition<'c> {
+    pub(crate) coin: &'c str,
+    /// In 10^-szDecimals.
+    pub(crate) size_raw: i64,
+    /// `None` when unknown: its pool then has no replayed row.
+    pub(crate) table_id: Option<u32>,
 }
 
 impl MarginStates {
@@ -605,40 +617,50 @@ impl MarginStates {
     }
 
     /// The replayed row of `user`'s position in `coin` (`size_raw` in 10^-szDecimals, margin table `table_id`), given
-    /// every coin the account holds a position in. `None` when it has none: the account is not tracked or stopped, the
-    /// coin is not a USDC perp of the anchor, or a cross position shares its pool with another (default / disabled:
-    /// the same dex; unified: every USDC dex), whose price would need its mark.
+    /// the account's open positions `held` (every coin, `coin` included or not) and `mark_of` the marks of the same
+    /// height in price units. `None` when it has none: the account is not tracked or stopped, the coin is not a USDC
+    /// perp of the anchor, or a cross position shares its pool (default / disabled: the same dex; unified: every USDC
+    /// dex) with a position of an unknown coin or table, or without a mark.
     pub(crate) fn replayed_row<'c>(
         &self,
         user: &Address,
         coin: &str,
         size_raw: i64,
         table_id: u32,
-        held: impl IntoIterator<Item = &'c str>,
+        held: impl IntoIterator<Item = HeldPosition<'c>>,
+        mark_of: impl Fn(&str) -> Option<u64>,
     ) -> Option<ReplayedRow> {
         let account = self.accounts.get(user).filter(|account| account.stop.is_none())?;
         let market = self.markets.perps.get(coin).filter(|market| self.markets.usdc_dexes[market.dex])?;
         let table = self.markets.tables[market.dex].get(&table_id)?;
-        let size = size_raw as f64 / 10f64.powi(market.size_decimals.cast_signed());
+        let size = base_size(size_raw, market.size_decimals);
         if let Some(isolated_wei) = account.isolated.get(&(market.dex, market.asset)) {
             let liquidation_px = solve(wei_to_usdc(*isolated_wei), 0.0, size, table);
-            return Some(ReplayedRow { isolated: true, liquidation_px });
+            return Some(ReplayedRow { isolated: true, pool_positions: 1, liquidation_px });
         }
-        for other in held.into_iter().filter(|other| *other != coin) {
-            let other = self.markets.perps.get(other)?;
+        let mut others = Vec::new();
+        for other in held.into_iter().filter(|other| other.coin != coin) {
+            let other_market = self.markets.perps.get(other.coin)?;
             let same_pool = match &account.pools {
-                Pools::PerDex(_) => other.dex == market.dex,
-                Pools::Unified(_) => self.markets.usdc_dexes[other.dex],
+                Pools::PerDex(_) => other_market.dex == market.dex,
+                Pools::Unified(_) => self.markets.usdc_dexes[other_market.dex],
             };
-            if same_pool && !account.isolated.contains_key(&(other.dex, other.asset)) {
-                return None;
+            if !same_pool || account.isolated.contains_key(&(other_market.dex, other_market.asset)) {
+                continue;
             }
+            others.push(HeldAtMark {
+                size_raw: other.size_raw,
+                size_decimals: other_market.size_decimals,
+                mark_raw: mark_of(other.coin)?,
+                table: self.markets.tables[other_market.dex].get(&other.table_id?)?,
+            });
         }
         let cash_wei = match &account.pools {
             Pools::PerDex(cross) => cross.get(&market.dex).copied().unwrap_or(0),
             Pools::Unified(pool) => *pool,
         };
-        Some(ReplayedRow { isolated: false, liquidation_px: solve(wei_to_usdc(cash_wei), 0.0, size, table) })
+        let liquidation_px = solve_held(wei_to_usdc(cash_wei), &others, size, table);
+        Some(ReplayedRow { isolated: false, pool_positions: 1 + others.len(), liquidation_px })
     }
 }
 
@@ -955,18 +977,39 @@ pub(crate) mod tests {
     }
 
     /// Design 000437 1: a unified account's cross pool spans every USDC dex; a dex settled otherwise is a pool of its own.
+    /// Design 000442: the pool's other members count at the marks given, all of them needed.
     #[test]
     fn a_unified_pool_counts_every_usdc_dex_and_no_other() {
         let unified = states(|_| {});
         let table = 20;
-        let row = |held: &[&str]| unified.replayed_row(&user(HOLDER), PUMP_COIN, 1_000_000, table, held.iter().copied());
-        assert!(row(&[PUMP_COIN, "flx:GOLD"]).is_some(), "flx settles in USDH");
-        assert_eq!(row(&[PUMP_COIN, "BTC"]), None, "BTC shares the pool");
-        assert_eq!(row(&[PUMP_COIN, "ZZZ"]), None, "an unknown coin may share it");
-        assert_eq!(unified.replayed_row(&user(HOLDER), "flx:GOLD", 100, 10, ["flx:GOLD"]), None, "not a USDC perp");
-        let Some(ReplayedRow { isolated: false, liquidation_px }) = row(&[PUMP_COIN]) else { panic!("alone in the pool") };
+        let held = |coins: &[&'static str], btc_table| {
+            let size_raw = |coin| if coin == "BTC" { 10_000 } else { 1_000_000 };
+            coins.iter().map(move |coin| HeldPosition { coin, size_raw: size_raw(*coin), table_id: btc_table }).collect::<Vec<_>>()
+        };
+        let btc_mark = |coin: &str| (coin == "BTC").then_some(828_576);
+        let row = |coins: &[&'static str], mark_of: &dyn Fn(&str) -> Option<u64>| {
+            unified.replayed_row(&user(HOLDER), PUMP_COIN, 1_000_000, table, held(coins, Some(20)), mark_of)
+        };
+        let alone = row(&[PUMP_COIN, "flx:GOLD"], &|_| None).expect("flx settles in USDH");
+        assert_eq!(row(&[PUMP_COIN, "BTC"], &|_| None), None, "BTC shares the pool, without a mark");
+        assert_eq!(row(&[PUMP_COIN, "ZZZ"], &btc_mark), None, "an unknown coin may share it");
+        let unknown_table = unified.replayed_row(&user(HOLDER), PUMP_COIN, 1_000_000, table, held(&["BTC"], None), btc_mark);
+        assert_eq!(unknown_table, None, "BTC's table is unknown");
+        assert_eq!(unified.replayed_row(&user(HOLDER), "flx:GOLD", 100, 10, held(&["flx:GOLD"], Some(10)), btc_mark), None, "not a USDC perp");
         let pool = (20_000_000_000_i64 - 1_200_000_000_000 + 3_026_970_000) as f64 / 1e8;
-        assert_eq!(liquidation_px, solve(pool, 0.0, 1_000_000.0, &MarginTable::single(table).unwrap()));
+        let pump_table = MarginTable::single(table).unwrap();
+        assert_eq!(alone, ReplayedRow { isolated: false, pool_positions: 1, liquidation_px: solve(pool, 0.0, 1_000_000.0, &pump_table) });
+        let shared = row(&[PUMP_COIN, "BTC"], &btc_mark).expect("BTC has a mark");
+        // BTC 0.1 at 82,857.6 held at 20x: value 8,285.76, maintenance 207.144
+        let btc_table = MarginTable::single(20).unwrap();
+        let btc = HeldAtMark { size_raw: 10_000, size_decimals: 5, mark_raw: 828_576, table: &btc_table };
+        assert_eq!(shared, ReplayedRow { isolated: false, pool_positions: 2, liquidation_px: solve_held(pool, &[btc], 1_000_000.0, &pump_table) });
+        let (LiquidationPx::Computed(price), LiquidationPx::Computed(by_hand)) =
+            (shared.liquidation_px, solve(pool + 8_285.76, 207.144, 1_000_000.0, &pump_table))
+        else {
+            panic!("both computed")
+        };
+        assert!((price / by_hand - 1.0).abs() < 1e-12, "{price} vs {by_hand}");
     }
 
     #[test]

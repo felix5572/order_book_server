@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 
 use super::{
     checkpoint::{AccountMode, CheckpointAccounts},
-    liquidation::{AccountLiquidations, LiquidationPx, account_liquidations},
+    liquidation::{AccountLiquidations, LiquidationPx, RowMark, account_liquidations},
     portfolio::PortfolioMargin,
     replay::MarginStates,
 };
@@ -30,6 +30,8 @@ pub(crate) struct AnchorCoin {
     pub(crate) size_decimals: u32,
     /// The table a position opened from zero takes (`marginTableId`).
     pub(crate) table_id: u32,
+    /// The stored mark at the anchor (`AssetMeta::mark_raw`).
+    pub(crate) mark_raw: Option<u64>,
     /// Non-zero positions at the anchor.
     pub(crate) positions: FxHashMap<Address, AnchorPosition>,
 }
@@ -48,6 +50,8 @@ pub(crate) struct AnchorRow {
     pub(crate) isolated: bool,
     pub(crate) pool_positions: Option<usize>,
     pub(crate) liquidation_px: LiquidationPx,
+    /// The anchor's mark and the distance to `liquidation_px` with the anchor's size.
+    pub(crate) mark: RowMark,
     /// The account's portfolio margin at the anchor; `None` for the other modes.
     pub(crate) portfolio_margin: Option<PortfolioMargin>,
 }
@@ -56,8 +60,12 @@ impl Anchor {
     pub(crate) fn from_checkpoint(checkpoint: &CheckpointAccounts) -> Result<Self, String> {
         let mut coins = FxHashMap::default();
         for asset in checkpoint.dexes.iter().flat_map(|dex| &dex.assets) {
-            let coin =
-                AnchorCoin { size_decimals: asset.size_decimals, table_id: asset.margin_table_id, positions: FxHashMap::default() };
+            let coin = AnchorCoin {
+                size_decimals: asset.size_decimals,
+                table_id: asset.margin_table_id,
+                mark_raw: asset.mark_raw,
+                positions: FxHashMap::default(),
+            };
             if coins.insert(asset.name.clone(), coin).is_some() {
                 return Err(format!("checkpoint {}: coin {} is listed twice", checkpoint.height, asset.name));
             }
@@ -66,10 +74,12 @@ impl Anchor {
         for (user, account) in &checkpoint.accounts {
             let AccountLiquidations { portfolio_margin, positions } = account_liquidations(checkpoint, account);
             for position in positions {
-                let name = &checkpoint.dexes[position.dex].assets[position.asset].name;
+                let asset = &checkpoint.dexes[position.dex].assets[position.asset];
+                let name = &asset.name;
                 let row = AnchorRow {
                     isolated: position.isolated,
                     pool_positions: position.pool_positions,
+                    mark: RowMark::of(position.size_raw, asset.size_decimals, asset.mark_raw, &position.liquidation_px),
                     liquidation_px: position.liquidation_px,
                     portfolio_margin: portfolio_margin.clone(),
                 };

@@ -36,10 +36,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{
     actions::{BlockActionKind, BlockActions},
     anchor::{Anchor, AnchorCoin, AnchorPosition, AnchorRow},
-    checkpoint::AccountMode,
+    checkpoint::{AccountMode, mark_px},
     misc::{FundingDelta, MiscEvent},
-    liquidation::LiquidationPx,
-    replay::{AccountEvent, FillEvent, MarginStates, ReplayedRow, SelfCheck, Stop},
+    liquidation::{LiquidationPx, RowMark, UnsupportedReason},
+    marks::MarksAt,
+    replay::{AccountEvent, FillEvent, HeldPosition, MarginStates, ReplayedRow, SelfCheck, Stop},
     size::parse_size_raw,
 };
 use crate::{
@@ -576,10 +577,18 @@ pub(crate) struct PositionView {
     /// The anchor's row (at `CoinPositions::anchor`); `None` = opened after the anchor.
     pub(crate) anchor_row: Option<AnchorRow>,
     pub(crate) changes: ChangeMarks,
-    /// The replayed row and the block whose state it is (design 000437); when present it replaces the anchor's row.
-    pub(crate) replayed: Option<(u64, ReplayedRow)>,
+    /// The replayed row (design 000437); when present it replaces the anchor's row.
+    pub(crate) replayed: Option<Replayed>,
     /// Why the account's replay stopped, and where; its rows keep the anchor's values.
     pub(crate) replay_stop: Option<Stop>,
+}
+
+/// A replayed row with the block whose state it is, and the node mark of that block (design 000442).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Replayed {
+    pub(crate) height: u64,
+    pub(crate) row: ReplayedRow,
+    pub(crate) mark: RowMark,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -620,7 +629,7 @@ pub(crate) struct BookStatus {
     pub(crate) held_fills: usize,
 }
 
-/// The coins each account holds a non-zero position in (design 000437): whether a cross position is alone in its pool.
+/// The coins each account holds a non-zero position in (designs 000437, 000442): the members of a cross position's pool.
 #[derive(Debug, Default)]
 struct Holdings(FxHashMap<Address, FxHashSet<String>>);
 
@@ -676,23 +685,27 @@ pub(crate) enum ReplayCheck {
     Skipped(&'static str),
 }
 
-/// Rows below this relative distance from the anchor's are equal: the cash is equal to the last 10^-8, so the solver
-/// sees the same input but for the order of a float sum.
+/// Rows within this fraction of the larger of the anchor's price and the coin's mark are equal: the cash is equal to the
+/// last 10^-8, so the solver sees the same input but for the order of a float sum. A price far below the mark loses
+/// digits to cancellation, so it is not measured against itself (bm 2026-10-20: DOGE 5.9e-6 and PUMP 3.1e-8 differed
+/// by 1.1e-12 and 8.8e-12 of themselves).
 const ROW_TOLERANCE: f64 = 1e-12;
 /// Row mismatches kept as evidence per anchor.
 const MAX_ROW_SAMPLES: usize = 20;
 
-/// The replayed rows at the new anchor against its own (design 000437 r2 revision 3): for every position the anchor
-/// holds of an account replaying to it on a USDC perp, the replayed cash at the anchor, the anchor's size and pool
-/// members and the record's table as of the anchor give a row. It checks the pool membership and the table choice
-/// given the anchor's sizes; the live sizes and holdings are checked by the silent position changes and the tests.
+/// The replayed rows at the new anchor against its own (design 000437 r2 revision 3, 000442 r2 revision 3): for every
+/// position the anchor holds of an account replaying to it on a USDC perp, the replayed cash at the anchor, the
+/// anchor's size and pool members, the records' tables as of the anchor and the anchor's stored marks give a row. It
+/// checks the pool membership, the members' valuation and the table choice given the anchor's sizes and marks; the
+/// live sizes and holdings are checked by the silent position changes and the tests, the node marks by their own check.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct RowCheck {
     pub(crate) equal: u64,
     pub(crate) differ: u64,
-    /// The replay and the anchor disagree on whether the row is a replayed one (isolated, or alone in its pool).
+    /// The replay gives no row where the anchor has a price to compare, or a pool of another size.
     pub(crate) class_differs: u64,
-    /// Positions whose record moved after the anchor: their table as of the anchor is not kept.
+    /// Positions whose account has a record that moved after the anchor (its own, or a member's its row needs): their
+    /// table as of the anchor is not kept.
     pub(crate) moved_after: u64,
     pub(crate) samples: Vec<RowMismatch>,
 }
@@ -705,10 +718,12 @@ pub(crate) struct RowMismatch {
     pub(crate) anchor: AnchorRow,
 }
 
-/// Whether two rows' prices agree within `ROW_TOLERANCE`.
-fn same_price(left: &LiquidationPx, right: &LiquidationPx) -> bool {
+/// Whether two rows' prices agree within `ROW_TOLERANCE` of `right` or of `mark`, the coin's mark in USD.
+fn same_price(left: &LiquidationPx, right: &LiquidationPx, mark: Option<f64>) -> bool {
     match (left, right) {
-        (LiquidationPx::Computed(left), LiquidationPx::Computed(right)) => (left - right).abs() <= ROW_TOLERANCE * right.abs(),
+        (LiquidationPx::Computed(left), LiquidationPx::Computed(right)) => {
+            (left - right).abs() <= ROW_TOLERANCE * right.abs().max(mark.unwrap_or(0.0))
+        }
         _ => left == right,
     }
 }
@@ -1031,14 +1046,22 @@ impl AccountBook {
 
     /// See `RowCheck`.
     fn check_rows(&self, replayed: &MarginStates, anchor_coins: &FxHashMap<String, AnchorCoin>, height: u64) -> RowCheck {
-        let mut held: FxHashMap<Address, Vec<&str>> = FxHashMap::default();
+        let mut held: FxHashMap<Address, Vec<HeldPosition<'_>>> = FxHashMap::default();
+        let mut moved: FxHashSet<Address> = FxHashSet::default();
         for (name, coin) in anchor_coins {
-            for user in coin.positions.keys() {
-                held.entry(*user).or_default().push(name);
+            for (user, position) in &coin.positions {
+                let record = self.coins.get(name).and_then(|book| book.records.get(user));
+                if record.is_some_and(|record| record.version_block > height) {
+                    moved.insert(*user);
+                }
+                let table_id = record.filter(|record| record.version_block <= height).and_then(|record| record.table_id);
+                held.entry(*user).or_default().push(HeldPosition { coin: name, size_raw: position.size_raw, table_id });
             }
         }
+        let mark_of = |coin: &str| anchor_coins.get(coin)?.mark_raw;
         let mut check = RowCheck::default();
         for (name, coin) in anchor_coins.iter().filter(|(name, _)| replayed.usdc_perp(name)) {
+            let mark = coin.mark_raw.map(|raw| mark_px(raw, coin.size_decimals));
             for (user, position) in coin.positions.iter().filter(|(user, _)| replayed.replays(user)) {
                 let Some(record) = self.coins.get(name).and_then(|book| book.records.get(user)) else {
                     continue;
@@ -1048,22 +1071,27 @@ impl AccountBook {
                     continue;
                 }
                 // a record whose table is unknown has no replayed row, as in the view
-                let row = record
-                    .table_id
-                    .and_then(|table_id| replayed.replayed_row(user, name, position.size_raw, table_id, held[user].iter().copied()));
-                let anchor_alone = position.row.isolated || position.row.pool_positions == Some(1);
-                match (&row, anchor_alone) {
-                    // a pool of several positions both ways: nothing to compare
-                    (None, false) => continue,
-                    (Some(replayed), true) if same_price(&replayed.liquidation_px, &position.row.liquidation_px) => {
+                let row = record.table_id.and_then(|table_id| {
+                    replayed.replayed_row(user, name, position.size_raw, table_id, held[user].iter().copied(), mark_of)
+                });
+                let anchor = &position.row;
+                match &row {
+                    Some(row) if Some(row.pool_positions) != anchor.pool_positions => check.class_differs += 1,
+                    Some(row) if same_price(&row.liquidation_px, &anchor.liquidation_px, mark) => {
                         check.equal += 1;
                         continue;
                     }
-                    (Some(_), true) => check.differ += 1,
-                    _ => check.class_differs += 1,
+                    Some(_) => check.differ += 1,
+                    None if moved.contains(user) => {
+                        check.moved_after += 1;
+                        continue;
+                    }
+                    // a member without a stored mark: neither side has a price
+                    None if anchor.liquidation_px == LiquidationPx::Unsupported(UnsupportedReason::MissingMark) => continue,
+                    None => check.class_differs += 1,
                 }
                 if check.samples.len() < MAX_ROW_SAMPLES {
-                    check.samples.push(RowMismatch { coin: name.clone(), user: *user, replayed: row, anchor: position.row.clone() });
+                    check.samples.push(RowMismatch { coin: name.clone(), user: *user, replayed: row, anchor: anchor.clone() });
                 }
             }
         }
@@ -1146,14 +1174,15 @@ impl AccountBook {
         }
     }
 
-    pub(crate) fn coin_positions(&self, name: &str) -> Result<CoinPositions, QueryError> {
+    /// The coin's open positions; `marks` the trusted node marks, if any (rows read them at the applied height only).
+    pub(crate) fn coin_positions(&self, name: &str, marks: Option<&dyn MarksAt>) -> Result<CoinPositions, QueryError> {
         let available = self.availability().map_err(QueryError::Unavailable)?;
         let coin = self.coins.get(name).ok_or(QueryError::UnknownCoin)?;
         let mut positions: Vec<PositionView> = coin
             .records
             .iter()
             .filter(|(_, record)| record.size_raw != 0)
-            .map(|(user, record)| self.position_view(*user, name, record))
+            .map(|(user, record)| self.position_view(*user, name, record, marks))
             .collect();
         positions.sort_unstable_by_key(|position| position.user);
         Ok(CoinPositions {
@@ -1169,10 +1198,10 @@ impl AccountBook {
     }
 
     /// The view right after an anchor install, pushed to the coin's subscribers: bumps the coin's version.
-    pub(crate) fn push_snapshot(&mut self, name: &str) -> Result<CoinPositions, QueryError> {
+    pub(crate) fn push_snapshot(&mut self, name: &str, marks: Option<&dyn MarksAt>) -> Result<CoinPositions, QueryError> {
         let coin = self.coins.get_mut(name).ok_or(QueryError::UnknownCoin)?;
         coin.version += 1;
-        self.coin_positions(name)
+        self.coin_positions(name, marks)
     }
 
     /// The changed rows of `name` (closed ones as `None`) for a `changes` push: every row of `accounts` plus the rows
@@ -1182,6 +1211,7 @@ impl AccountBook {
         name: &str,
         accounts: &FxHashSet<Address>,
         positions: &[Address],
+        marks: Option<&dyn MarksAt>,
     ) -> Result<Option<CoinChanges>, QueryError> {
         let available = self.availability().map_err(QueryError::Unavailable)?;
         let coin = self.coins.get(name).ok_or(QueryError::UnknownCoin)?;
@@ -1198,7 +1228,7 @@ impl AccountBook {
             .into_iter()
             .map(|user| {
                 let record = &coin.records[&user];
-                (user, (record.size_raw != 0).then(|| self.position_view(user, name, record)))
+                (user, (record.size_raw != 0).then(|| self.position_view(user, name, record, marks)))
             })
             .collect();
         rows.sort_unstable_by_key(|(user, _)| *user);
@@ -1217,7 +1247,7 @@ impl AccountBook {
         }))
     }
 
-    fn position_view(&self, user: Address, coin: &str, record: &PositionRecord) -> PositionView {
+    fn position_view(&self, user: Address, coin: &str, record: &PositionRecord, marks: Option<&dyn MarksAt>) -> PositionView {
         let account = self.accounts.get(&user);
         PositionView {
             user,
@@ -1226,20 +1256,29 @@ impl AccountBook {
             account_mode: account.and_then(|account| account.mode.clone()),
             anchor_row: record.anchor_row.clone(),
             changes: account.map_or_else(ChangeMarks::default, |account| account.marks),
-            replayed: self.replayed_row(user, coin, record),
+            replayed: self.replayed_row(user, coin, record, marks),
             replay_stop: self.replay.as_ref().and_then(|replay| replay.current.stop(&user)).cloned(),
         }
     }
 
-    /// The position's replayed row (design 000437), once every block up to the anchor is applied: the cash and the size
-    /// are then both those of the applied height, which the row carries.
-    fn replayed_row(&self, user: Address, coin: &str, record: &PositionRecord) -> Option<(u64, ReplayedRow)> {
+    /// The position's replayed row (designs 000437, 000442), once every block up to the anchor is applied: the cash,
+    /// the sizes and the marks are then all those of the applied height, which the row carries. Marks of another height
+    /// count as none: a pool with other members then has no replayed row.
+    fn replayed_row(&self, user: Address, coin: &str, record: &PositionRecord, marks: Option<&dyn MarksAt>) -> Option<Replayed> {
         let replay = self.replay.as_ref()?;
         let anchor = self.anchor?;
         let applied = self.block_actions.height.filter(|applied| *applied >= anchor.height)?;
         let table_id = record.table_id.filter(|_| record.size_raw != 0)?;
-        let row = replay.current.replayed_row(&user, coin, record.size_raw, table_id, self.holdings.of(&user))?;
-        Some((applied, row))
+        let marks = marks.filter(|marks| marks.height() == applied);
+        let mark_of = |held: &str| marks.and_then(|marks| marks.mark(held));
+        let held = self.holdings.of(&user).map(|held| {
+            // every held coin has an open record (`Holdings`)
+            let record = &self.coins[held].records[&user];
+            HeldPosition { coin: held, size_raw: record.size_raw, table_id: record.table_id }
+        });
+        let row = replay.current.replayed_row(&user, coin, record.size_raw, table_id, held, mark_of)?;
+        let mark = RowMark::of(record.size_raw, self.coins[coin].size_decimals, mark_of(coin), &row.liquidation_px);
+        Some(Replayed { height: applied, row, mark })
     }
 }
 
@@ -1252,11 +1291,11 @@ mod tests {
             parse_checkpoint_bytes,
             tests::{HOLDER, ISOLATED, fixture as checkpoint_fixture, user as checkpoint_user},
         },
-        liquidation::{LiquidationPx, solve},
+        liquidation::{HeldAtMark, LiquidationPx, solve, solve_held},
         margin::MarginTable,
         misc::LedgerDelta,
         replay::{Compared, ReplayedRow, Stop, StopReason, tests::per_dex_with_main_cash},
-        test_support::{ANCHOR_TABLE, CURRENT_TABLE, FillSpec},
+        test_support::{ANCHOR_TABLE, CURRENT_TABLE, FillSpec, ListedMarks},
     };
     use crate::accounts::test_support::{
         AVAX_ADL_BLOCK, AVAX_ADL_FULL, CoinSpec, ETH_ADL_BLOCK, ETH_ADL_PARTIAL, FARTCOIN_LIQUIDATED_LONG, PUMP,
@@ -1273,7 +1312,7 @@ mod tests {
     }
 
     fn shown(book: &AccountBook, coin: &str) -> Vec<(Address, i64, u64)> {
-        let view = book.coin_positions(coin).unwrap();
+        let view = book.coin_positions(coin, None).unwrap();
         view.positions.iter().map(|position| (position.user, position.size_raw, position.position_height)).collect()
     }
 
@@ -1395,7 +1434,7 @@ mod tests {
         samples.sort_unstable();
         let expected = [(user(2), Some((7, 1_000)), 8), (user(3), Some((1, 1_000)), 0), (user(4), None, 3)];
         assert_eq!(samples, expected, "changed, closed and opened without a fill");
-        let view = book.coin_positions(PUMP).unwrap();
+        let view = book.coin_positions(PUMP, None).unwrap();
         assert!(view.positions.iter().all(|position| position.anchor_row == Some(row())), "rows come from the new anchor");
     }
 
@@ -1403,12 +1442,12 @@ mod tests {
     fn a_position_opened_after_the_anchor_is_pending_until_the_next() {
         let mut book = trusted_book(&[]);
         book.apply_fills(fills(1_100, &[(user(1), PUMP, "B", 1, "0.0", "2.0")]));
-        let view = book.coin_positions(PUMP).unwrap();
+        let view = book.coin_positions(PUMP, None).unwrap();
         assert_eq!(view.positions[0].anchor_row, None);
         assert_eq!(view.positions[0].account_mode, None);
         assert_eq!(view.positions[0].changes, ChangeMarks { fill: Some(1_100), ..ChangeMarks::default() });
         book.install_anchor(anchor(1_200, &[(PUMP, 0, &[(user(1), 2)])]));
-        let view = book.coin_positions(PUMP).unwrap();
+        let view = book.coin_positions(PUMP, None).unwrap();
         assert_eq!(view.positions[0].anchor_row, Some(row()));
         assert_eq!(view.positions[0].account_mode, Some(AccountMode::Unified));
         assert_eq!(view.positions[0].changes, ChangeMarks::default(), "the anchor covers the fill");
@@ -1419,7 +1458,7 @@ mod tests {
         let mut book = trusted_book(&[(user(1), 5)]);
         let report = book.install_anchor(anchor(1_100, &[("BTC", 5, &[])]));
         assert_eq!(report.dropped_coin_records, 1);
-        assert_eq!(book.coin_positions(PUMP), Err(QueryError::UnknownCoin));
+        assert_eq!(book.coin_positions(PUMP, None), Err(QueryError::UnknownCoin));
     }
 
     #[test]
@@ -1508,16 +1547,16 @@ mod tests {
     #[test]
     fn every_push_bumps_the_coin_version_and_a_query_does_not() {
         let mut book = trusted_book(&[(user(1), 5), (user(2), 3)]);
-        assert_eq!(book.coin_positions(PUMP).unwrap().version, 0);
+        assert_eq!(book.coin_positions(PUMP, None).unwrap().version, 0);
         let report = book.apply_fills(fills(1_100, &[(user(1), PUMP, "A", 1, "5.0", "5.0")]));
         let changes = push(&mut book, &report.touched).unwrap();
         assert_eq!((changes.version, changes.rows), (1, vec![(user(1), None)]), "the close is a removed row");
-        assert_eq!(book.coin_positions(PUMP).unwrap().version, 1, "a subscriber's snapshot carries the version as is");
+        assert_eq!(book.coin_positions(PUMP, None).unwrap().version, 1, "a subscriber's snapshot carries the version as is");
         let untouched: FxHashSet<Address> = std::iter::once(user(9)).collect();
-        assert_eq!(book.push_changes(PUMP, &untouched, &[user(9)]), Ok(None), "no holder touched: no frame, no bump");
+        assert_eq!(book.push_changes(PUMP, &untouched, &[user(9)], None), Ok(None), "no holder touched: no frame, no bump");
         book.install_anchor(anchor(1_200, &[(PUMP, 0, &[(user(2), 3)])]));
-        assert_eq!(book.push_snapshot(PUMP).map(|view| view.version), Ok(2));
-        assert_eq!(book.push_snapshot("BTC").map(|view| view.version), Err(QueryError::UnknownCoin));
+        assert_eq!(book.push_snapshot(PUMP, None).map(|view| view.version), Ok(2));
+        assert_eq!(book.push_snapshot("BTC", None).map(|view| view.version), Err(QueryError::UnknownCoin));
     }
 
     #[test]
@@ -1536,7 +1575,7 @@ mod tests {
         let accounts: FxHashSet<Address> = touched.accounts.iter().copied().collect();
         let positions: Vec<Address> =
             touched.positions.iter().filter(|(coin, _)| coin == PUMP).map(|(_, user)| *user).collect();
-        book.push_changes(PUMP, &accounts, &positions).unwrap()
+        book.push_changes(PUMP, &accounts, &positions, None).unwrap()
     }
 
     /// An account trading every block changes its rows once per anchor interval (its first mark), not per block.
@@ -1559,7 +1598,7 @@ mod tests {
     #[test]
     fn a_size_decimals_reset_keeps_the_coin_version() {
         let mut book = trusted_book(&[(user(1), 5)]);
-        book.push_snapshot(PUMP).unwrap();
+        book.push_snapshot(PUMP, None).unwrap();
         book.install_anchor(anchor(1_100, &[(PUMP, 1, &[(user(1), 50)])]));
         assert_eq!(book.coins[PUMP].version, 1, "subscribers must never see a version go back");
     }
@@ -1575,13 +1614,13 @@ mod tests {
         book.apply_misc_events(misc(1_250, &[&ledger]));
         book.apply_misc_events(misc(1_300, &[&ledger, &funding]));
         assert!(book.apply_misc_events(misc(900, &[&ledger])).stale);
-        let marks = book.coin_positions(PUMP).unwrap().positions[0].changes;
+        let marks = book.coin_positions(PUMP, None).unwrap().positions[0].changes;
         assert_eq!(marks, ChangeMarks { ledger: Some(1_100), funding: Some(1_300), ..ChangeMarks::default() }, "first after 1000");
         book.install_anchor(anchor(1_200, &[(PUMP, 0, &[(user(1), 5)])]));
-        let marks = book.coin_positions(PUMP).unwrap().positions[0].changes;
+        let marks = book.coin_positions(PUMP, None).unwrap().positions[0].changes;
         assert_eq!(marks, ChangeMarks { ledger: Some(1_250), funding: Some(1_300), ..ChangeMarks::default() }, "first after 1200");
         book.install_anchor(anchor(1_300, &[(PUMP, 0, &[(user(1), 5)])]));
-        assert_eq!(book.coin_positions(PUMP).unwrap().positions[0].changes, ChangeMarks::default());
+        assert_eq!(book.coin_positions(PUMP, None).unwrap().positions[0].changes, ChangeMarks::default());
         assert!(!book.accounts.contains_key(&user(2)), "a covered account without a position is forgotten");
         assert_eq!(book.events.len(), 0, "the anchor covers every logged event");
     }
@@ -1592,7 +1631,7 @@ mod tests {
         book.apply_fills(fills(1_200, &[(user(1), "BTC", "B", 1, "0.0", "1.0")]));
         let replay = book.apply_fills(fills(1_150, &[(user(1), "BTC", "B", 2, "0.0", "1.0")]));
         assert_eq!(replay.touched.accounts, [user(1)]);
-        assert_eq!(book.coin_positions(PUMP).unwrap().positions[0].changes.fill, Some(1_150));
+        assert_eq!(book.coin_positions(PUMP, None).unwrap().positions[0].changes.fill, Some(1_150));
     }
 
     #[test]
@@ -1677,7 +1716,7 @@ mod tests {
     }
 
     fn view_of(book: &AccountBook, holder: Address) -> PositionView {
-        let view = book.coin_positions(PUMP).unwrap();
+        let view = book.coin_positions(PUMP, None).unwrap();
         view.positions.into_iter().find(|position| position.user == holder).unwrap()
     }
 
@@ -1685,8 +1724,10 @@ mod tests {
         parse_checkpoint_bytes(&checkpoint_fixture()).unwrap().dexes[0].table(table_id).clone()
     }
 
-    fn replayed(height: u64, isolated: bool, liquidation_px: LiquidationPx) -> (u64, ReplayedRow) {
-        (height, ReplayedRow { isolated, liquidation_px })
+    /// A replayed row of a pool of one, read without marks.
+    fn replayed(height: u64, isolated: bool, liquidation_px: LiquidationPx) -> Replayed {
+        let row = ReplayedRow { isolated, pool_positions: 1, liquidation_px };
+        Replayed { height, row, mark: RowMark { mark_raw: None, distance_bps: None } }
     }
 
     #[test]
@@ -1796,6 +1837,78 @@ mod tests {
         assert_eq!(rows.samples[0].replayed.as_ref().map(|row| row.liquidation_px.clone()), Some(expected));
     }
 
+    fn view_at(book: &AccountBook, holder: Address, marks: &ListedMarks) -> PositionView {
+        let view = book.coin_positions(PUMP, Some(marks)).unwrap();
+        view.positions.into_iter().find(|position| position.user == holder).unwrap()
+    }
+
+    /// Design 000442: a cross position sharing its pool replays with the other members at the marks of the applied
+    /// height; marks of another height, or a member without a mark, leave the anchor's row.
+    #[test]
+    fn a_shared_pool_replays_at_the_marks_of_its_height() {
+        let holder = checkpoint_user(HOLDER);
+        let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000)]);
+        book.apply_block_actions(block_actions(1_001, &[]));
+        book.apply_fills(fills(1_001, &[(holder, "BTC", "B", 1, "0.0", "0.001")]));
+        let both = ListedMarks { height: 1_001, marks: &[(PUMP, 4_000), ("BTC", 828_576)] };
+        let shared = view_at(&book, holder, &both).replayed.expect("both members have a mark");
+        // -12000 less 0.001 BTC bought at 1.0; BTC opened from zero takes the coin's current table
+        let btc_table = fixture_table(CURRENT_TABLE);
+        let btc = HeldAtMark { size_raw: 100, size_decimals: 5, mark_raw: 828_576, table: &btc_table };
+        let expected = solve_held(-12_000.001, &[btc], 1_000_000.0, &fixture_table(ANCHOR_TABLE));
+        assert_eq!(shared.row, ReplayedRow { isolated: false, pool_positions: 2, liquidation_px: expected.clone() });
+        assert_eq!(shared.mark, RowMark::of(1_000_000, 0, Some(4_000), &expected));
+        assert!(shared.mark.distance_bps.is_some());
+        let earlier = ListedMarks { height: 1_000, marks: both.marks };
+        assert_eq!(view_at(&book, holder, &earlier).replayed, None, "marks of another height");
+        let view = view_at(&book, holder, &ListedMarks { height: 1_001, marks: &[(PUMP, 4_000)] });
+        assert_eq!((view.replayed, view.anchor_row.is_some()), (None, true), "BTC has no mark: the anchor's row");
+    }
+
+    /// Design 000442 r2 revision 3: at an install a pool of two checks with the anchor's sizes, tables and stored marks;
+    /// a member whose record moved after the anchor skips the row.
+    #[test]
+    fn an_install_compares_shared_pool_rows_at_the_anchors_marks() {
+        let holder = checkpoint_user(HOLDER);
+        let anchor_at = |height| {
+            let mut anchor = anchor(height, &[(PUMP, 0, &[(holder, 1_000_000)]), ("BTC", 5, &[(holder, 10_000)])]);
+            anchor.margins = per_dex_with_main_cash(-12_000_000_000);
+            anchor
+        };
+        let mut book = AccountBook::new(0);
+        book.apply_fills(fills(100, &[]));
+        book.apply_misc_events(misc(100, &[]));
+        book.apply_block_actions(block_actions(1_000, &[]));
+        book.install_anchor(anchor_at(1_000));
+        let table = fixture_table(ANCHOR_TABLE);
+        let pump = HeldAtMark { size_raw: 1_000_000, size_decimals: 0, mark_raw: 4_477, table: &table };
+        let btc = HeldAtMark { size_raw: 10_000, size_decimals: 5, mark_raw: 828_576, table: &table };
+        let with_rows = |mut anchor: Anchor| {
+            for (name, mark_raw, liquidation_px) in [
+                (PUMP, 4_477, solve_held(-12_000.0, &[btc], 1_000_000.0, &table)),
+                ("BTC", 828_576, solve_held(-12_000.0, &[pump], 0.1, &table)),
+            ] {
+                let coin = anchor.coins.get_mut(name).unwrap();
+                coin.mark_raw = Some(mark_raw);
+                let row = &mut coin.positions.get_mut(&holder).unwrap().row;
+                (row.pool_positions, row.liquidation_px) = (Some(2), liquidation_px);
+            }
+            anchor
+        };
+        book.apply_block_actions(block_actions(1_001, &[]));
+        let ReplayCheck::Checked { rows, .. } = book.install_anchor(with_rows(anchor_at(1_001))).replay_check else {
+            panic!("checked")
+        };
+        assert_eq!((rows.equal, rows.differ, rows.class_differs, rows.moved_after), (2, 0, 0, 0), "{:?}", rows.samples);
+        book.apply_block_actions(block_actions(1_002, &[]));
+        book.apply_block_actions(block_actions(1_003, &[]));
+        book.apply_fills(fills(1_003, &[(holder, "BTC", "A", 3, "0.1", "0.001")]));
+        let ReplayCheck::Checked { rows, .. } = book.install_anchor(with_rows(anchor_at(1_002))).replay_check else {
+            panic!("checked")
+        };
+        assert_eq!((rows.equal, rows.class_differs, rows.moved_after), (0, 0, 2), "BTC moved after 1002: neither row checks");
+    }
+
     /// Design 000437 4: every event of a replaying account touches its rows, not only its first mark.
     #[test]
     fn a_replaying_accounts_cash_change_touches_its_rows() {
@@ -1872,14 +1985,14 @@ mod tests {
         book.apply_block_actions(block_actions(1_002, &[(MODE, user(1))]));
         let later = book.apply_block_actions(block_actions(1_003, &[(MARGIN, user(1)), (WITHDRAWAL, user(1))]));
         assert_eq!(later.touched.accounts, [user(1)], "only the withdrawal is a new mark");
-        let marks = book.coin_positions(PUMP).unwrap().positions[0].changes;
+        let marks = book.coin_positions(PUMP, None).unwrap().positions[0].changes;
         let expected =
             ChangeMarks { margin: Some(1_001), account_mode: Some(1_002), withdrawal: Some(1_003), ..ChangeMarks::default() };
         assert_eq!(marks, expected);
         book.install_anchor(anchor(1_002, &[(PUMP, 0, &[(user(1), 5)])]));
-        let marks = book.coin_positions(PUMP).unwrap().positions[0].changes;
+        let marks = book.coin_positions(PUMP, None).unwrap().positions[0].changes;
         assert_eq!(marks, ChangeMarks { margin: Some(1_003), withdrawal: Some(1_003), ..ChangeMarks::default() });
-        assert_eq!(book.coin_positions(PUMP).unwrap().block_actions_height, 1_003);
+        assert_eq!(book.coin_positions(PUMP, None).unwrap().block_actions_height, 1_003);
         assert_eq!(book.apply_block_actions(block_actions(1_004, &[])).touched, Touched::default());
     }
 
@@ -1897,7 +2010,7 @@ mod tests {
         book.install_anchor(anchor(1_003, &[(PUMP, 0, &[(user(1), 5)])]));
         assert_eq!(book.availability(), Err(lost));
         book.install_anchor(anchor(1_004, &[(PUMP, 0, &[(user(1), 5)])]));
-        assert_eq!(book.coin_positions(PUMP).unwrap().positions[0].changes.margin, Some(1_005));
+        assert_eq!(book.coin_positions(PUMP, None).unwrap().positions[0].changes.margin, Some(1_005));
     }
 
     /// The first block-actions line after the start or a discard has no previous height to compare: the unknown loss
@@ -1914,7 +2027,7 @@ mod tests {
     fn a_spot_fill_marks_the_account() {
         let mut book = trusted_book(&[(user(1), 5)]);
         book.apply_fills(fills(1_100, &[(user(1), "@107", "B", 1, "0.0", "1.0")]));
-        assert_eq!(book.coin_positions(PUMP).unwrap().positions[0].changes.fill, Some(1_100));
+        assert_eq!(book.coin_positions(PUMP, None).unwrap().positions[0].changes.fill, Some(1_100));
     }
 
     #[test]
@@ -2006,7 +2119,7 @@ mod tests {
         book.stop("fills watcher exited".to_string());
         book.install_anchor(anchor(1_300, &[(PUMP, 0, &[])]));
         assert_eq!(book.availability(), Err(Unavailable::Stopped("fills watcher exited".to_string())));
-        assert!(matches!(book.coin_positions(PUMP), Err(QueryError::Unavailable(Unavailable::Stopped(_)))));
+        assert!(matches!(book.coin_positions(PUMP, None), Err(QueryError::Unavailable(Unavailable::Stopped(_)))));
     }
 
     #[test]
@@ -2020,7 +2133,7 @@ mod tests {
     fn the_view_lists_open_positions_by_user_with_stream_heights() {
         let mut book = trusted_book(&[(user(3), 1), (user(1), -4)]);
         book.apply_fills(fills(1_100, &[(user(2), PUMP, "A", 1, "0.0", "2.0"), (user(3), PUMP, "A", 2, "1.0", "1.0")]));
-        let view = book.coin_positions(PUMP).unwrap();
+        let view = book.coin_positions(PUMP, None).unwrap();
         assert_eq!((view.fills_height, view.misc_events_height, view.size_decimals), (1_100, 100, 0));
         assert_eq!(shown(&book, PUMP), [(user(1), -4, 1_000), (user(2), -2, 1_100)]);
         assert_eq!(book.status().open_positions, 2);
