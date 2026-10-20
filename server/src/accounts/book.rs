@@ -890,7 +890,11 @@ impl AccountBook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accounts::test_support::{PUMP, anchor, block_actions, fills, misc, row, trusted_book, user};
+    use crate::accounts::test_support::{
+        AVAX_ADL_BLOCK, AVAX_ADL_FULL, CoinSpec, ETH_ADL_BLOCK, ETH_ADL_PARTIAL, FARTCOIN_LIQUIDATED_LONG, PUMP,
+        SOL_ADL_BLOCK, SOL_ADL_LONG, SOL_LIQUIDATED_SHORT, anchor, block_actions, fills, misc, real_fills, row, trusted_book,
+        user,
+    };
 
     const fn fills_lost_up_to(block: u64) -> Unavailable {
         Unavailable::DataLoss { stream: Stream::Fills, bound: LossBound::Block(block) }
@@ -961,6 +965,51 @@ mod tests {
         let mut book = trusted_book(&[]);
         book.apply_fills(fills(1_100, &[(user(1), PUMP, "B", 9, "0.0", "4.0"), (user(1), PUMP, "A", 9, "4.0", "1.0")]));
         assert_eq!(size(&book, PUMP, user(1)), Some(3), "a self-trade: same tid, both sides");
+    }
+
+    // ---- ADL: official fills of 2025-10-10 in test envelopes (test_support) ----
+
+    const ADL_ANCHOR: u64 = 758_800_000;
+
+    fn address(text: &str) -> Address {
+        text.parse().unwrap()
+    }
+
+    /// A trusted book anchored at `ADL_ANCHOR` with these coins.
+    fn adl_book(coins: &[CoinSpec<'_>]) -> AccountBook {
+        let mut book = AccountBook::new(0);
+        book.apply_fills(fills(100, &[]));
+        book.apply_misc_events(misc(100, &[]));
+        book.apply_block_actions(block_actions(ADL_ANCHOR, &[]));
+        book.install_anchor(anchor(ADL_ANCHOR, coins));
+        assert_eq!(book.availability().map(|available| available.anchor.height), Ok(ADL_ANCHOR));
+        book
+    }
+
+    #[test]
+    fn adl_fills_set_the_size_from_start_position_partial_and_full() {
+        let (eth_user, avax_user) = (address(ETH_ADL_PARTIAL.0), address(AVAX_ADL_FULL.0));
+        let mut book = adl_book(&[("ETH", 4, &[(eth_user, -950_367_854)]), ("AVAX", 2, &[(avax_user, -2_853)])]);
+        book.apply_fills(real_fills(AVAX_ADL_BLOCK, &[AVAX_ADL_FULL]));
+        book.apply_fills(real_fills(ETH_ADL_BLOCK, &[ETH_ADL_PARTIAL]));
+        assert_eq!(size(&book, "ETH", eth_user), Some(-461_272_925), "-95,036.7854 + 48,909.4929");
+        assert_eq!(size(&book, "AVAX", avax_user), Some(0));
+        assert_eq!(shown(&book, "AVAX"), [], "the closed position is not listed");
+    }
+
+    #[test]
+    fn both_legs_of_an_adl_trade_share_the_tid_and_each_applies_once() {
+        let (long, short) = (address(SOL_ADL_LONG.0), address(SOL_LIQUIDATED_SHORT.0));
+        let mut book = adl_book(&[("SOL", 2, &[(long, 54), (short, -1)]), ("FARTCOIN", 1, &[(short, 456_680)])]);
+        let line = [SOL_ADL_LONG, SOL_LIQUIDATED_SHORT, FARTCOIN_LIQUIDATED_LONG];
+        let legs = [("SOL".to_string(), long), ("SOL".to_string(), short), ("FARTCOIN".to_string(), short)];
+        for applied in [legs.as_slice(), &[]] {
+            let report = book.apply_fills(real_fills(SOL_ADL_BLOCK, &line));
+            assert_eq!(report.touched.positions, applied, "every leg once, then none on the replay");
+            assert_eq!(shown(&book, "SOL"), [(long, 53, SOL_ADL_BLOCK)]);
+            assert_eq!(size(&book, "SOL", short), Some(0));
+            assert_eq!(size(&book, "FARTCOIN", short), Some(0), "the liquidated account's other coin");
+        }
     }
 
     // ---- anchor merge ----

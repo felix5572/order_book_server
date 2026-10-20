@@ -3,7 +3,9 @@
 //! counted by kind in `orderbook_accounts_evidence_total`. Line evidence carries the raw node line it came from.
 //!
 //! "Ordinary" below is what one full hour of 2026-10-19 contained; anything else, and every non-market liquidation or
-//! `liquidation` ledger record (the documented backstop record), is evidence.
+//! `liquidation` ledger record (the documented backstop record), is evidence. A non-market liquidation names its `dir`
+//! too: ADL fills carry method `backstop` with dir `Auto-Deleveraging`, and the liquidated side of the same trade the
+//! same method with dir `Liquidated Cross …` (official fills of 2025-10-10, Codex handoff `adl_replay_20261020`).
 
 use serde_json::json;
 
@@ -61,7 +63,7 @@ pub(crate) fn fill_line_reason(batch: &Batch<NodeDataFill>) -> Option<String> {
             if let Some(liquidation) = &fill.liquidation
                 && liquidation.method != MARKET_LIQUIDATION
             {
-                return Some(format!("liquidation method {:?}", liquidation.method));
+                return Some(format!("liquidation method {:?} dir {:?}", liquidation.method, fill.dir));
             }
             (!ORDINARY_FILL_DIRS.contains(&fill.dir.as_str())).then(|| format!("fill dir {:?}", fill.dir))
         })
@@ -116,7 +118,9 @@ pub(crate) fn silent_change_json(change: &SilentChange, anchor_from: Option<u64>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accounts::test_support::{PUMP, fills_line, misc, user};
+    use crate::accounts::test_support::{
+        PUMP, SOL_ADL_BLOCK, SOL_ADL_LONG, SOL_LIQUIDATED_SHORT, fills_line, misc, real_fills_line, user,
+    };
 
     fn fills_batch(line: &str) -> Batch<NodeDataFill> {
         sonic_rs::from_str(line).unwrap()
@@ -132,7 +136,22 @@ mod tests {
         let market = ordinary.replace(r#""feeToken":"USDC""#, &format!(r#""feeToken":"USDC",{liquidation}"market"}}"#));
         assert_eq!(fill_line_reason(&fills_batch(&market)), None, "a market liquidation is ordinary");
         let backstop = ordinary.replace(r#""feeToken":"USDC""#, &format!(r#""feeToken":"USDC",{liquidation}"backstop"}}"#));
-        assert_eq!(fill_line_reason(&fills_batch(&backstop)).as_deref(), Some("liquidation method \"backstop\""));
+        assert_eq!(
+            fill_line_reason(&fills_batch(&backstop)).as_deref(),
+            Some("liquidation method \"backstop\" dir \"Open Long\"")
+        );
+    }
+
+    #[test]
+    fn a_real_adl_line_names_the_method_and_both_dirs() {
+        let line = real_fills_line(SOL_ADL_BLOCK, &[SOL_ADL_LONG, SOL_LIQUIDATED_SHORT]);
+        assert_eq!(
+            fill_line_reason(&fills_batch(&line)).as_deref(),
+            Some(
+                "liquidation method \"backstop\" dir \"Auto-Deleveraging\"; \
+                 liquidation method \"backstop\" dir \"Liquidated Cross Short\""
+            )
+        );
     }
 
     #[test]
