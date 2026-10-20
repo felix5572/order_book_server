@@ -36,6 +36,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{
     actions::{BlockActionKind, BlockActions},
     anchor::{Anchor, AnchorCoin, AnchorPosition, AnchorRow},
+    blocks::CompletedBlock,
     checkpoint::AccountMode,
     misc::MiscEvent,
     size::parse_size_raw,
@@ -385,6 +386,14 @@ pub(crate) struct Touched {
     pub(crate) positions: Vec<(String, Address)>,
 }
 
+impl Touched {
+    /// Adds the rows another batch changed.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.accounts.extend(other.accounts);
+        self.positions.extend(other.positions);
+    }
+}
+
 /// What one fills batch did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct FillsReport {
@@ -410,6 +419,14 @@ pub(crate) struct BlockActionsReport {
     pub(crate) touched: Touched,
     /// Oldest mark events dropped for room (recorded as losses up to their blocks).
     pub(crate) marks_dropped: usize,
+}
+
+/// What one released block did, per stream.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct BlockReport {
+    pub(crate) block_actions: BlockActionsReport,
+    pub(crate) fills: Vec<FillsReport>,
+    pub(crate) misc_events: Vec<MiscReport>,
 }
 
 /// What one misc events batch did.
@@ -550,6 +567,17 @@ impl AccountBook {
             Stream::Fills => &mut self.fills,
             Stream::MiscEvents => &mut self.misc_events,
             Stream::BlockActions => &mut self.block_actions,
+        }
+    }
+
+    /// The one entry of a released block (design 000433 r3, 3.4): its `replica_cmds` actions, then its fills, then its
+    /// misc events, each through the stream's own application below.
+    pub(crate) fn apply_block(&mut self, block: CompletedBlock) -> BlockReport {
+        let CompletedBlock { actions, fills, misc_events } = block;
+        BlockReport {
+            block_actions: self.apply_block_actions(actions),
+            fills: fills.into_iter().map(|batch| self.apply_fills(batch)).collect(),
+            misc_events: misc_events.into_iter().map(|batch| self.apply_misc_events(batch)).collect(),
         }
     }
 

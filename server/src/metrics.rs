@@ -448,6 +448,24 @@ lazy_static! {
         &["kind"]
     ).expect("metric can be created");
 
+    /// Inputs already held for their pending block (design 000433 r3, 3.4), by stream.
+    pub static ref ACCOUNTS_DUPLICATE_INPUTS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_accounts_duplicate_inputs_total", "Account view inputs already held for their pending block"),
+        &["stream"]
+    ).expect("metric can be created");
+
+    /// The highest complete block the account view applied; blocks dropped as a loss (the start, a gap, an overflow)
+    /// do not move it (review 000434 r1 P3).
+    pub static ref ACCOUNTS_APPLIED_HEIGHT: IntGauge = IntGauge::new(
+        "orderbook_accounts_applied_height",
+        "Highest complete block the account view applied"
+    ).expect("metric can be created");
+
+    pub static ref ACCOUNTS_PENDING_BLOCKS: IntGauge = IntGauge::new(
+        "orderbook_accounts_pending_blocks",
+        "Blocks the account view holds until they are complete"
+    ).expect("metric can be created");
+
     pub static ref ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL: IntCounter = IntCounter::new(
         "orderbook_accounts_unknown_misc_events_total",
         "Misc events of a kind the account view does not know"
@@ -515,6 +533,9 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ACCOUNTS_STREAM_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_DATA_LOSS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_DUPLICATE_INPUTS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_APPLIED_HEIGHT.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_PENDING_BLOCKS.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_EVIDENCE_TOTAL.clone())).ok();
 

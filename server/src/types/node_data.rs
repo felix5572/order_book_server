@@ -185,6 +185,11 @@ impl<E> Batch<E> {
         self.events.len()
     }
 
+    /// Keeps the events `keep` accepts, in order (the account view drops inputs it already holds).
+    pub(crate) fn retain_events(&mut self, keep: impl FnMut(&E) -> bool) {
+        self.events.retain(keep);
+    }
+
     /// The node's wall clock (unix ns) when it wrote this line.
     pub(crate) const fn local_time_unix_nanos(&self) -> Option<i64> {
         self.local_time.and_utc().timestamp_nanos_opt()

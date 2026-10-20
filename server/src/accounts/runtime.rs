@@ -1,10 +1,13 @@
-//! Process wiring of the account view (design 000419 r2 3.1 / 3.4, 000429 r2): the fills, misc events and block
-//! actions line watchers, the checkpoint poller thread and the owner task holding the `AccountBook`. Every input reaches the owner through a
-//! bounded channel whose full state blocks the producer, so a backlog stays in the node's files. Lines are parsed on
-//! the watcher threads; the owner only applies them. A finished watcher or poller stops the view for good (503 until
-//! restart); a gone owner answers every query with the same.
+//! Process wiring of the account view (design 000419 r2 3.1 / 3.4, 000429 r2, 000433 r3): the fills, misc events and
+//! block actions line watchers, the checkpoint poller thread and the owner task holding the `AccountBook`. Every input
+//! reaches the owner through a bounded channel whose full state blocks the producer, so a backlog stays in the node's
+//! files. Lines are parsed on the watcher threads; the owner hands them to the block assembly and applies the complete
+//! blocks it releases, in height order. The fills and misc events watchers also send read-through proofs, in line
+//! with their data; block actions lines carry the instant they were read. A finished watcher or poller stops the view
+//! for good (503 until restart); a gone owner answers every query with the same.
 
 use std::{
+    hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     sync::Arc,
     thread,
@@ -18,9 +21,10 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use super::{
     actions::{BlockActions, line_height, parse_block_actions},
     anchor::Anchor,
+    blocks::{Assembly, BlockAssembler, MiscKey},
     book::{
-        AccountBook, BlockActionsReport, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport, QueryError,
-        Stream, Touched, Unavailable,
+        AccountBook, BlockActionsReport, BlockReport, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport,
+        QueryError, Stream, Touched, Unavailable,
     },
     checkpoint::parse_checkpoint_file,
     misc::MiscEvent,
@@ -34,9 +38,9 @@ use crate::{
     },
     metrics::{
         ACCOUNTS_ANCHOR_HEIGHT, ACCOUNTS_ANCHOR_PARSE_SECONDS, ACCOUNTS_ANCHOR_SKIPPED_TOTAL, ACCOUNTS_EVIDENCE_TOTAL,
-        ACCOUNTS_CHECKPOINT_FAILURES_TOTAL, ACCOUNTS_DATA_LOSS_TOTAL, ACCOUNTS_HELD_FILLS, ACCOUNTS_OPEN_POSITIONS,
-        ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL, ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL, ACCOUNTS_STREAM_HEIGHT,
-        ACCOUNTS_TRUSTED, ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL,
+        ACCOUNTS_APPLIED_HEIGHT, ACCOUNTS_CHECKPOINT_FAILURES_TOTAL, ACCOUNTS_DATA_LOSS_TOTAL, ACCOUNTS_DUPLICATE_INPUTS_TOTAL,
+        ACCOUNTS_HELD_FILLS, ACCOUNTS_OPEN_POSITIONS, ACCOUNTS_PENDING_BLOCKS, ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL,
+        ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL, ACCOUNTS_STREAM_HEIGHT, ACCOUNTS_TRUSTED, ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL,
     },
     prelude::Result,
     types::node_data::{Batch, NodeDataFill},
@@ -59,8 +63,12 @@ const LINE_PREFIX_CHARS: usize = 300;
 /// A parsed line, with the raw line kept when it is rare-event evidence.
 enum Input {
     Fills(std::result::Result<Batch<NodeDataFill>, LineError>, Option<LineEvidence>),
-    MiscEvents(std::result::Result<Batch<MiscEvent>, LineError>, Option<LineEvidence>),
-    BlockActions(std::result::Result<BlockActions, LineError>),
+    /// With the line's identity within its block.
+    MiscEvents(std::result::Result<(Batch<MiscEvent>, MiscKey), LineError>, Option<LineEvidence>),
+    /// With the instant the line was read.
+    BlockActions(std::result::Result<BlockActions, LineError>, Instant),
+    /// The stream's reader proved that every line written before the instant reached the owner (design 000433 r3).
+    ReadThrough(Stream, Instant),
     /// The watcher did not deliver lines of unknown blocks: the skip while positioning at its start, or a discard.
     Loss(Stream),
 }
@@ -170,6 +178,7 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
                 None,
                 fills_input,
                 || Input::Loss(Stream::Fills),
+                Some(Box::new(|at| Input::ReadThrough(Stream::Fills, at))),
             ),
         },
         Supervised {
@@ -180,6 +189,7 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
                 None,
                 misc_input,
                 || Input::Loss(Stream::MiscEvents),
+                Some(Box::new(|at| Input::ReadThrough(Stream::MiscEvents, at))),
             ),
         },
         Supervised {
@@ -190,6 +200,7 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
                 None,
                 block_actions_input,
                 || Input::Loss(Stream::BlockActions),
+                None,
             ),
         },
         Supervised {
@@ -211,13 +222,29 @@ fn fills_input(line: String) -> Input {
 }
 
 fn misc_input(line: String) -> Input {
-    let parsed = parse_line(&line);
-    let evidence = parsed.as_ref().ok().and_then(misc_line_reason).map(|reason| LineEvidence { reason, raw_line: line });
+    let parsed = parse_line(&line).and_then(|batch| {
+        let key = misc_key(&line, batch.block_number())?;
+        Ok((batch, key))
+    });
+    let evidence =
+        parsed.as_ref().ok().and_then(|(batch, _)| misc_line_reason(batch)).map(|reason| LineEvidence { reason, raw_line: line });
     Input::MiscEvents(parsed, evidence)
 }
 
+/// A misc events line's identity within its block (`blocks::MiscKey`): its text from `"events":` on, without the
+/// node's `local_time`, which a replayed line writes anew. A line written otherwise has no identity: an error.
+fn misc_key(line: &str, block: u64) -> std::result::Result<MiscKey, LineError> {
+    let Some(start) = line.find("\"events\":") else {
+        return Err(line_error(line, &"no \"events\": text to take the line's identity from", Some(block)));
+    };
+    let mut hasher = DefaultHasher::new();
+    line[start..].hash(&mut hasher);
+    Ok(hasher.finish())
+}
+
 fn block_actions_input(line: String) -> Input {
-    Input::BlockActions(parse_block_actions(&line).map_err(|err| line_error(&line, &err, line_height(&line))))
+    let read_at = Instant::now();
+    Input::BlockActions(parse_block_actions(&line).map_err(|err| line_error(&line, &err, line_height(&line))), read_at)
 }
 
 fn parse_line<E: DeserializeOwned>(line: &str) -> std::result::Result<Batch<E>, LineError> {
@@ -286,11 +313,12 @@ async fn run_owner(
     threads: Vec<Supervised>,
 ) {
     let mut supervision = tokio::time::interval(SUPERVISION_INTERVAL);
+    let mut assembler = BlockAssembler::default();
     publisher.track(&book);
     loop {
         tokio::select! {
             Some(input) = inputs.recv() => {
-                let touched = apply_input(&mut book, input);
+                let touched = apply_input(&mut book, &mut assembler, input);
                 if publisher.track(&book) {
                     publisher.push_changes(&mut book, &touched);
                 }
@@ -317,30 +345,84 @@ async fn run_owner(
     }
 }
 
-/// Applies one input; returns the rows it changed.
-fn apply_input(book: &mut AccountBook, input: Input) -> Touched {
-    match input {
+/// Hands one input to the block assembly and applies the blocks it releases; returns the rows they changed.
+fn apply_input(book: &mut AccountBook, assembler: &mut BlockAssembler, input: Input) -> Touched {
+    let assembly = match input {
         Input::Fills(Ok(batch), evidence) => {
             if let Some(evidence) = evidence {
                 record_evidence(&evidence.json(Stream::Fills.label(), batch.block_number()));
             }
-            report_fills(book.apply_fills(batch))
+            assembler.receive_fills(batch)
         }
-        Input::MiscEvents(Ok(batch), evidence) => {
+        Input::MiscEvents(Ok((batch, key)), evidence) => {
             if let Some(evidence) = evidence {
                 record_evidence(&evidence.json(Stream::MiscEvents.label(), batch.block_number()));
             }
-            report_misc(book.apply_misc_events(batch))
+            assembler.receive_misc_events(batch, key)
         }
-        Input::BlockActions(Ok(block)) => report_block_actions(book.apply_block_actions(block)),
-        Input::Fills(Err(err), _) => lost(book, Stream::Fills, "parse_error", &err),
-        Input::MiscEvents(Err(err), _) => lost(book, Stream::MiscEvents, "parse_error", &err),
-        Input::BlockActions(Err(err)) => lost(book, Stream::BlockActions, "parse_error", &err),
+        Input::BlockActions(Ok(block), read_at) => assembler.receive_block_actions(block, read_at),
+        Input::ReadThrough(stream, at) => assembler.receive_read_through(stream, at),
+        Input::Fills(Err(err), _) => return lost(book, Stream::Fills, "parse_error", &err),
+        Input::MiscEvents(Err(err), _) => return lost(book, Stream::MiscEvents, "parse_error", &err),
+        Input::BlockActions(Err(err), _) => return lost(book, Stream::BlockActions, "parse_error", &err),
         Input::Loss(stream) => {
             let error = "the watcher skipped lines while positioning at its start, or discarded buffered data".to_string();
-            lost(book, stream, "watcher_discard", &LineError { block: None, error })
+            return lost(book, stream, "watcher_discard", &LineError { block: None, error });
+        }
+    };
+    apply_assembly(book, assembler, assembly)
+}
+
+/// Records what the assembly could not apply, then applies the released blocks in order.
+fn apply_assembly(book: &mut AccountBook, assembler: &BlockAssembler, assembly: Assembly) -> Touched {
+    let Assembly { completed, lost: dropped, duplicates, missing_actions, overflowed_to } = assembly;
+    for (stream, count) in duplicates {
+        ACCOUNTS_DUPLICATE_INPUTS_TOTAL.with_label_values(&[stream.label()]).inc_by(count as u64);
+    }
+    // one record per stream and input: a gap or an overflow drops many held blocks at once
+    for stream in [Stream::Fills, Stream::MiscEvents, Stream::BlockActions] {
+        let blocks: Vec<u64> = dropped.iter().filter(|(of, _)| *of == stream).map(|(_, block)| *block).collect();
+        if let Some(highest) = blocks.iter().max() {
+            let error = format!(
+                "{} inputs up to block {highest} will not be applied: their block was released already (a node replay \
+                 or a broken write order) or dropped with a gap or an overflow",
+                blocks.len()
+            );
+            lost(book, stream, "late_or_dropped", &LineError { block: Some(*highest), error });
         }
     }
+    if let Some((first, last)) = missing_actions {
+        error!("accounts block_actions data loss (height_gap): blocks {first} to {last} never arrived");
+        ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::BlockActions.label(), "height_gap"]).inc();
+        book.record_lost_block(Stream::BlockActions, last);
+    }
+    if let Some(block) = overflowed_to {
+        error!("accounts data loss (pending_overflow): the pending blocks overflowed and were dropped up to {block}");
+        for stream in [Stream::Fills, Stream::MiscEvents, Stream::BlockActions] {
+            ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), "pending_overflow"]).inc();
+            book.record_lost_block(stream, block);
+        }
+    }
+    let mut touched = Touched::default();
+    for block in completed {
+        let height = block.actions.height;
+        touched.absorb(report_block(book.apply_block(block)));
+        ACCOUNTS_APPLIED_HEIGHT.set(height.cast_signed());
+    }
+    ACCOUNTS_PENDING_BLOCKS.set((assembler.pending_blocks() as u64).cast_signed());
+    touched
+}
+
+fn report_block(report: BlockReport) -> Touched {
+    let BlockReport { block_actions, fills, misc_events } = report;
+    let mut touched = report_block_actions(block_actions);
+    for report in fills {
+        touched.absorb(report_fills(report));
+    }
+    for report in misc_events {
+        touched.absorb(report_misc(report));
+    }
+    touched
 }
 
 /// One `ACCOUNTS_EVIDENCE` line (see `evidence.rs`).
@@ -512,8 +594,19 @@ impl TestOwner {
         }
     }
 
-    pub(crate) async fn fills_line(&self, line: &str) {
-        self.inputs.send(fills_input(line.to_string())).await.unwrap();
+    /// Feeds these fills lines of block `height` and completes the block: the `replica_cmds` lines of it and of the
+    /// next block, then a read-through of both readers after them (design 000433 r3).
+    pub(crate) async fn complete_block(&self, height: u64, fills_lines: &[String]) {
+        for line in fills_lines {
+            self.inputs.send(fills_input(line.clone())).await.unwrap();
+        }
+        for block in [height, height + 1] {
+            self.inputs.send(Input::BlockActions(Ok(BlockActions { height: block, actions: Vec::new() }), Instant::now())).await.unwrap();
+        }
+        let after = Instant::now() + Duration::from_micros(1);
+        for stream in [Stream::Fills, Stream::MiscEvents] {
+            self.inputs.send(Input::ReadThrough(stream, after)).await.unwrap();
+        }
     }
 
     pub(crate) async fn loss(&self, stream: Stream) {
@@ -572,6 +665,18 @@ mod tests {
         Anchor { height, time_ms, coins: std::iter::once(("PUMP".to_string(), coin)).collect(), account_modes: FxHashMap::default() }
     }
 
+    /// The `replica_cmds` lines of `blocks`, then a read-through of both readers after them: the blocks before the last
+    /// one complete.
+    fn complete_through(book: &mut AccountBook, assembler: &mut BlockAssembler, blocks: std::ops::RangeInclusive<u64>) {
+        for height in blocks {
+            apply_input(book, assembler, Input::BlockActions(Ok(BlockActions { height, actions: Vec::new() }), Instant::now()));
+        }
+        let after = Instant::now() + Duration::from_micros(1);
+        for stream in [Stream::Fills, Stream::MiscEvents] {
+            apply_input(book, assembler, Input::ReadThrough(stream, after));
+        }
+    }
+
     /// Review 000422 r2 P2, across the real watcher and the owner's input path: the content skipped while the watcher
     /// positions at EOF (here the line that triggered it) is a loss of unknown blocks; an anchor older than the moment
     /// the owner learns of it cannot clear it, however many later lines flow.
@@ -591,28 +696,25 @@ mod tests {
             start_skip_is_loss: true,
             layout: FileLayout::Hourly,
         };
-        let _watcher = spawn_line_watcher(
-            stream,
-            tx,
-            None,
-            misc_input,
-            || Input::Loss(Stream::MiscEvents),
-        );
+        let _watcher = spawn_line_watcher(stream, tx, None, misc_input, || Input::Loss(Stream::MiscEvents), None);
         // let the watcher register its inotify watch before the first append
         thread::sleep(Duration::from_millis(200));
         let mut book = AccountBook::new(0);
-        apply_input(&mut book, fills_input(batch_line(1_200, "")));
-        apply_input(&mut book, Input::BlockActions(Ok(BlockActions { height: 1_200, actions: Vec::new() })));
+        let mut assembler = BlockAssembler::default();
+        apply_input(&mut book, &mut assembler, fills_input(batch_line(1_200, "")));
+        complete_through(&mut book, &mut assembler, 1_200..=1_201);
         book.install_anchor(empty_anchor(1_300, now_ms()));
 
         append(&file, &ledger_line(1_500));
         let skipped = recv_within(&mut inputs, Duration::from_secs(2));
         assert!(matches!(skipped, Input::Loss(Stream::MiscEvents)), "the positioning skip is reported");
-        apply_input(&mut book, skipped);
-        append(&file, &ledger_line(1_600));
+        apply_input(&mut book, &mut assembler, skipped);
+        append(&file, &ledger_line(1_202));
         let next = recv_within(&mut inputs, Duration::from_secs(2));
         assert!(matches!(next, Input::MiscEvents(Ok(_), None)), "lines after the skip flow");
-        apply_input(&mut book, next);
+        apply_input(&mut book, &mut assembler, next);
+        complete_through(&mut book, &mut assembler, 1_202..=1_203);
+        assert_eq!(assembler.released(), Some(1_202));
         assert!(matches!(
             book.availability(),
             Err(Unavailable::DataLoss { stream: Stream::MiscEvents, bound: LossBound::WrittenBy(_) })
@@ -642,12 +744,26 @@ mod tests {
     }
 
     #[test]
+    fn a_misc_line_is_identified_by_its_events_text_or_fails() {
+        let key = |line: &str| match misc_input(line.to_string()) {
+            Input::MiscEvents(parsed, _) => parsed.map(|(_, key)| key),
+            _ => panic!("a misc events input"),
+        };
+        let replayed = ledger_line(9).replace("06:00:00.1", "07:00:00.1");
+        assert_eq!(key(&ledger_line(9)).unwrap(), key(&replayed).unwrap(), "local_time is not part of the identity");
+        let spaced = ledger_line(9).replace("\"events\":", "\"events\" :");
+        let err = key(&spaced).unwrap_err();
+        assert_eq!(err.block, Some(9));
+        assert!(err.error.starts_with("no \"events\": text to take the line's identity from"), "{}", err.error);
+    }
+
+    #[test]
     fn a_block_actions_line_breaking_the_contract_keeps_its_height() {
         let empty = r#"{"abci_block":{"signed_action_bundles":[]},"resps":{"Full":[]},"height":8}"#;
-        let Input::BlockActions(Ok(block)) = block_actions_input(empty.to_string()) else { panic!("an empty block reads") };
+        let Input::BlockActions(Ok(block), _) = block_actions_input(empty.to_string()) else { panic!("an empty block reads") };
         assert_eq!(block, BlockActions { height: 8, actions: Vec::new() });
         let unpaired = r#"{"abci_block":{"signed_action_bundles":[["0x01",{"signed_actions":[]}]]},"resps":{"Full":[]},"height":7}"#;
-        let Input::BlockActions(Err(err)) = block_actions_input(unpaired.to_string()) else { panic!("no responses") };
+        let Input::BlockActions(Err(err), _) = block_actions_input(unpaired.to_string()) else { panic!("no responses") };
         assert_eq!(err.block, Some(7));
         assert!(err.error.starts_with("block 7: 1 bundles but 0 response groups (line of "), "{}", err.error);
     }

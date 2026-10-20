@@ -1,13 +1,14 @@
 //! Per-coin positions and checkpoint-anchored liquidation prices (design 000419 r4).
 //!
 //! - `checkpoint` / `margin` / `liquidation` / `anchor`: parse a node checkpoint and compute its liquidation rows;
-//! - `book`: the `AccountBook` owner (positions, merge, change marks, trust); `misc` / `actions` / `size`: stream wire
-//!   formats;
+//! - `book`: the `AccountBook` owner (positions, merge, change marks, trust); `blocks`: the block assembly that hands it
+//!   complete blocks in height order; `misc` / `actions` / `size`: stream wire formats;
 //! - `runtime`: watchers, checkpoint poller and owner task; `view`: the served JSON;
 //! - `probe` (one checkpoint) and `follow` (live, standalone): acceptance tools. The API comes in batch 3.
 
 mod actions;
 mod anchor;
+mod blocks;
 pub(crate) mod book;
 mod checkpoint;
 mod evidence;

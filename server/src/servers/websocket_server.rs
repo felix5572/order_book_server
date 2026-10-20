@@ -2093,11 +2093,12 @@ mod tests {
         assert_eq!((snapshot["channel"].as_str(), snapshot["data"]["kind"].as_str()), (Some("coinPositions"), Some("snapshot")));
         assert_eq!((snapshot["data"]["version"].as_u64(), snapshot["data"]["positions"][0]["szi"].as_str()), (Some(0), Some("5.0")));
 
-        owner.fills_line(&fills_line(1_100, &[(user(1), PUMP, "B", 1, "5.0", "1.0")])).await;
+        // the trusted book read replica_cmds through block 1000: the next complete block is 1001
+        owner.complete_block(1_001, &[fills_line(1_001, &[(user(1), PUMP, "B", 1, "5.0", "1.0")])]).await;
         let changes = next_json(&mut ws).await["data"].clone();
         assert_eq!((changes["kind"].as_str(), changes["version"].as_u64()), (Some("changes"), Some(1)));
         assert_eq!(changes["changes"][0]["position"]["szi"], "6.0");
-        assert_eq!(changes["changes"][0]["position"]["positionHeight"], 1_100);
+        assert_eq!(changes["changes"][0]["position"]["positionHeight"], 1_001);
         assert_eq!(changes["changes"][0]["user"], format!("{:#x}", user(1)));
 
         owner.anchor(anchor(1_200, &[(PUMP, 0, &[(user(1), 7)])])).await;

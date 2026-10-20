@@ -17,7 +17,7 @@ use std::{
         atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// Message sent from file watcher threads to the main processor
@@ -46,6 +46,58 @@ const MAX_PARTIAL_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// memory bounded - the 1ms poll loop (and `on_create`'s drain loop) comes
 /// straight back for the remainder.
 const READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// How often a watcher asked for read-through proofs tries one (design 000433 r3): each try scans the stream's
+/// directory for a newer file.
+const READ_THROUGH_INTERVAL: Duration = Duration::from_millis(5);
+
+/// One read-through check (design 000433 r3, revision 1).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReadThrough {
+    /// Every line written to the stream before this instant has been returned by an earlier read.
+    Proven(Instant),
+    /// The check read new lines; they go out first and a later check may prove.
+    Lines(Vec<String>),
+    /// No proof now: no file tracked yet, a newer file or a recreated one, a read that failed, a buffered partial line
+    /// or a pending discard.
+    Unproven,
+}
+
+/// What one bounded read of the tracked file found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadStatus {
+    /// The handle's size is the position: nothing was written since the last read.
+    AtEnd,
+    /// Bytes were read (possibly only part of a line).
+    Read,
+    /// Nothing was read and the end is not established: no tracked file, or opening, sizing, seeking or reading it
+    /// failed (logged; a failed handle is dropped and the next read re-opens).
+    NotRead,
+}
+
+/// The handle operations one read needs: `File` in production, a handle failing on demand in tests.
+trait ReadHandle: Read + Seek {
+    fn size(&self) -> std::io::Result<u64>;
+}
+
+impl ReadHandle for File {
+    fn size(&self) -> std::io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
+}
+
+/// One read of at most `READ_CHUNK_BYTES` from `position` (so a catch-up backlog never pins itself in memory whole;
+/// the caller loops right back for more), or `None` when the handle's size is the position. Sizing, seeking and
+/// reading errors all come back as errors: none of them shows the end was reached (review 000434 r1 P2).
+fn read_chunk(handle: &mut impl ReadHandle, position: u64) -> std::io::Result<Option<Vec<u8>>> {
+    if handle.size()? <= position {
+        return Ok(None);
+    }
+    handle.seek(SeekFrom::Start(position))?;
+    let mut buf = Vec::new();
+    Read::by_ref(handle).take(READ_CHUNK_BYTES).read_to_end(&mut buf)?;
+    Ok(Some(buf))
+}
 
 /// Wall-clock milliseconds since the unix epoch, for the watcher health
 /// timestamps. (The previous `Instant::now().elapsed()` measured elapsed time
@@ -231,6 +283,12 @@ impl FileReader {
 
     /// Process file modification - read new data and return lines
     fn on_modify(&mut self) -> Vec<String> {
+        self.read_lines().0
+    }
+
+    /// One bounded read of the tracked file from the position: its complete lines (only with `ReadStatus::Read`) and
+    /// what the read found.
+    fn read_lines(&mut self) -> (Vec<String>, ReadStatus) {
         static MODIFY_COUNT: AtomicU64 = AtomicU64::new(0);
         let count = MODIFY_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -266,127 +324,101 @@ impl FileReader {
                             error!("Failed to open {} (retrying silently): {err}", path.display());
                             self.open_error_path = Some(path.clone());
                         }
-                        return lines;
+                        return (lines, ReadStatus::NotRead);
                     }
                 }
             }
-            let mut read_failed = false;
-            if let Some(file) = self.file.as_mut() {
-                // Get fresh file size from the handle
-                if let Ok(metadata) = file.metadata() {
-                    let file_size = metadata.len();
+            let Some(file) = self.file.as_mut() else {
+                return (lines, ReadStatus::NotRead);
+            };
+            let buf = match read_chunk(file, self.file_position) {
+                Ok(Some(buf)) if !buf.is_empty() => buf,
+                Ok(Some(_)) => return (lines, ReadStatus::NotRead),
+                Ok(None) => return (lines, ReadStatus::AtEnd),
+                Err(err) => {
+                    // drop the failed handle so the next call re-opens fresh
+                    error!("Read of {} at {} failed (re-opening): {err}", path.display(), self.file_position);
+                    self.file = None;
+                    return (lines, ReadStatus::NotRead);
+                }
+            };
+            // Update position
+            let bytes_read = buf.len();
+            self.file_position += bytes_read as u64;
 
-                    // Only read if there's new data
-                    if file_size > self.file_position {
-                        // Log every read attempt
-                        if count % 10_000 == 0 {
-                            log::debug!(
-                                "on_modify #{}: reading {} bytes (pos {} -> {})",
-                                count,
-                                file_size - self.file_position,
-                                self.file_position,
-                                file_size
-                            );
-                        }
+            // Prepend any partial line from last read
+            let mut full_buf = std::mem::take(&mut self.partial_line);
+            full_buf.extend_from_slice(&buf);
 
-                        if file.seek(SeekFrom::Start(self.file_position)).is_ok() {
-                            // Bounded read (see READ_CHUNK_BYTES): one chunk per
-                            // call so a catch-up backlog never pins itself in
-                            // memory whole; the caller loops right back for more.
-                            let mut buf = Vec::new();
-                            match Read::by_ref(file).take(READ_CHUNK_BYTES).read_to_end(&mut buf) {
-                                Ok(bytes_read) => {
-                                    if bytes_read > 0 {
-                                        // Update position
-                                        self.file_position += bytes_read as u64;
+            if count % 10_000 == 0 {
+                // The line count walks the whole buffer - only
+                // pay for it when this debug line actually fires.
+                log::debug!(
+                    "on_modify #{}: read {} bytes, {} segments, ends_newline={}",
+                    count,
+                    bytes_read,
+                    full_buf.split(|&b| b == b'\n').count(),
+                    buf.last() == Some(&b'\n')
+                );
+            }
 
-                                        // Prepend any partial line from last read
-                                        let mut full_buf = std::mem::take(&mut self.partial_line);
-                                        full_buf.extend_from_slice(&buf);
-
-                                        if count % 10_000 == 0 {
-                                            // The line count walks the whole buffer - only
-                                            // pay for it when this debug line actually fires.
-                                            log::debug!(
-                                                "on_modify #{}: read {} bytes, {} segments, ends_newline={}",
-                                                count,
-                                                bytes_read,
-                                                full_buf.split(|&b| b == b'\n').count(),
-                                                buf.last() == Some(&b'\n')
-                                            );
-                                        }
-
-                                        // Only the unterminated tail may go to `partial_line`.
-                                        // A newline-TERMINATED line that fails the JSON shape
-                                        // check (or is not valid UTF-8) is complete-but-corrupt:
-                                        // buffering it (the old behavior) prepended the garbage
-                                        // to the next read and corrupted the following valid
-                                        // line too. Discard it and flag the data loss so the
-                                        // book re-syncs.
-                                        for segment in full_buf.split_inclusive(|&b| b == b'\n') {
-                                            if segment.last() == Some(&b'\n') {
-                                                let Ok(text) = std::str::from_utf8(segment) else {
-                                                    error!(
-                                                        "discarding non-UTF-8 terminated line ({} bytes); flagging desync",
-                                                        segment.len()
-                                                    );
-                                                    self.desynced = true;
-                                                    continue;
-                                                };
-                                                let line = text.trim_end();
-                                                if line.is_empty() {
-                                                    continue;
-                                                }
-                                                if line.starts_with('{') && line.ends_with('}') {
-                                                    lines.push(line.to_string());
-                                                } else {
-                                                    error!(
-                                                        "discarding malformed terminated line ({} bytes); flagging desync",
-                                                        line.len()
-                                                    );
-                                                    self.desynced = true;
-                                                }
-                                            } else {
-                                                // Unterminated tail - buffer until the newline arrives.
-                                                self.partial_line = segment.to_vec();
-                                            }
-                                        }
-
-                                        // Bound the partial-line buffer. If the upstream goes wedged
-                                        // mid-JSON (corrupt flush, mmap weirdness, multi-MB single line),
-                                        // we'd otherwise grow `partial_line` until we OOM. Drop, flag the
-                                        // data loss so the book re-syncs, and resync on the next newline.
-                                        if self.partial_line.len() > self.max_line_bytes {
-                                            error!(
-                                                "partial_line exceeded {} bytes ({} bytes buffered); discarding and resyncing",
-                                                self.max_line_bytes,
-                                                self.partial_line.len()
-                                            );
-                                            self.partial_line.clear();
-                                            self.desynced = true;
-                                        }
-
-                                        // Log result
-                                        if count % 10_000 == 0 {
-                                            log::debug!("on_modify #{}: returning {} lines", count, lines.len());
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    error!("Read error: {}", err);
-                                    read_failed = true;
-                                }
-                            }
-                        }
+            // Only the unterminated tail may go to `partial_line`.
+            // A newline-TERMINATED line that fails the JSON shape
+            // check (or is not valid UTF-8) is complete-but-corrupt:
+            // buffering it (the old behavior) prepended the garbage
+            // to the next read and corrupted the following valid
+            // line too. Discard it and flag the data loss so the
+            // book re-syncs.
+            for segment in full_buf.split_inclusive(|&b| b == b'\n') {
+                if segment.last() == Some(&b'\n') {
+                    let Ok(text) = std::str::from_utf8(segment) else {
+                        error!(
+                            "discarding non-UTF-8 terminated line ({} bytes); flagging desync",
+                            segment.len()
+                        );
+                        self.desynced = true;
+                        continue;
+                    };
+                    let line = text.trim_end();
+                    if line.is_empty() {
+                        continue;
                     }
+                    if line.starts_with('{') && line.ends_with('}') {
+                        lines.push(line.to_string());
+                    } else {
+                        error!(
+                            "discarding malformed terminated line ({} bytes); flagging desync",
+                            line.len()
+                        );
+                        self.desynced = true;
+                    }
+                } else {
+                    // Unterminated tail - buffer until the newline arrives.
+                    self.partial_line = segment.to_vec();
                 }
             }
-            // Drop a handle that failed to read so the next call re-opens fresh.
-            if read_failed {
-                self.file = None;
+
+            // Bound the partial-line buffer. If the upstream goes wedged
+            // mid-JSON (corrupt flush, mmap weirdness, multi-MB single line),
+            // we'd otherwise grow `partial_line` until we OOM. Drop, flag the
+            // data loss so the book re-syncs, and resync on the next newline.
+            if self.partial_line.len() > self.max_line_bytes {
+                error!(
+                    "partial_line exceeded {} bytes ({} bytes buffered); discarding and resyncing",
+                    self.max_line_bytes,
+                    self.partial_line.len()
+                );
+                self.partial_line.clear();
+                self.desynced = true;
             }
+
+            // Log result
+            if count % 10_000 == 0 {
+                log::debug!("on_modify #{}: returning {} lines", count, lines.len());
+            }
+            return (lines, ReadStatus::Read);
         }
-        lines
+        (lines, ReadStatus::NotRead)
     }
 
     /// Switch to a new file (on create event), first handing the old file's remaining lines to `deliver` one bounded
@@ -417,20 +449,37 @@ impl FileReader {
         // Drain the old file until it goes quiet: a single read raced the
         // node's final appends (anything written between the read and the
         // switch was silently lost). Each pass observes the size at read time,
-        // so the loop ends only after a read that consumed no bytes. Progress,
-        // not "returned no complete line", is the stop condition: a bounded
-        // READ_CHUNK_BYTES read inside one long line advances the position and
-        // returns nothing, and stopping there would clear `partial_line` below
-        // and silently drop the rest of the old file (review 000212).
-        if !stale_handleless {
+        // so the loop ends only at a read that established the end. Bytes read,
+        // not "returned no complete line", keep it going: a bounded
+        // READ_CHUNK_BYTES read inside one long line returns nothing, and
+        // stopping there would drop the rest of the old file (review 000212).
+        // A read that failed leaves the old tail unread, and a partial line
+        // left at the end is dropped by the switch: either is a loss
+        // (review 000434 r2 P2). Before the first file there is nothing to drain.
+        if let Some(old) = self.current_path.clone().filter(|_| !stale_handleless) {
             loop {
-                let position_before = self.file_position;
-                if !deliver(self.on_modify()) {
+                let (lines, status) = self.read_lines();
+                if !deliver(lines) {
                     return false;
                 }
-                if self.file_position == position_before {
-                    break;
+                match status {
+                    ReadStatus::Read => {}
+                    ReadStatus::AtEnd => break,
+                    ReadStatus::NotRead => {
+                        warn!("Could not drain {}; switching to {} and flagging desync", old.display(), path.display());
+                        self.desynced = true;
+                        break;
+                    }
                 }
+            }
+            if !self.partial_line.is_empty() {
+                warn!(
+                    "{} ends in an unterminated line ({} bytes); switching to {} and flagging desync",
+                    old.display(),
+                    self.partial_line.len(),
+                    path.display()
+                );
+                self.desynced = true;
             }
         }
 
@@ -441,6 +490,29 @@ impl FileReader {
         self.partial_line.clear();
         self.open_file_id = None; // position 0 is valid in any inode; id set on open
         true
+    }
+
+    /// Whether every line written before the check began has been returned (design 000433 r3, revision 1). The
+    /// instant is taken first; then the newest file must be the tracked one with the inode the position refers to, and
+    /// a read from the position must establish the end (the handle's size is the position: sizing, seeking or reading
+    /// that fails proves nothing), leave no partial line and flag no discard.
+    /// Anything appended before that instant is in the tracked file (the read would have returned it) or in a newer
+    /// file (the scan would have seen it), so a proof covers every line written before its instant. A read that
+    /// returns lines, or one cut at `READ_CHUNK_BYTES`, proves nothing yet.
+    fn read_through(&mut self) -> ReadThrough {
+        let at = Instant::now();
+        let Some(current) = self.current_path.clone() else {
+            return ReadThrough::Unproven;
+        };
+        let recreated = current.metadata().ok().map(|meta| file_id(&meta)) != self.open_file_id;
+        if recreated || self.find_latest_file().as_ref() != Some(&current) {
+            return ReadThrough::Unproven;
+        }
+        match self.read_lines() {
+            (lines, ReadStatus::Read) => ReadThrough::Lines(lines),
+            (_, ReadStatus::AtEnd) if self.partial_line.is_empty() && !self.desynced => ReadThrough::Proven(at),
+            (_, ReadStatus::AtEnd | ReadStatus::NotRead) => ReadThrough::Unproven,
+        }
     }
 
     /// Track an existing file (first event we see for it)
@@ -482,7 +554,7 @@ pub(super) fn spawn_file_watcher(
         start_skip_is_loss: false,
         layout: FileLayout::Hourly,
     };
-    spawn_line_watcher(stream, tx, Some(last_event), move |line| file_event(source, line), move || FileEvent::Desync(source))
+    spawn_line_watcher(stream, tx, Some(last_event), move |line| file_event(source, line), move || FileEvent::Desync(source), None)
 }
 
 const fn file_event(source: EventSource, line: String) -> FileEvent {
@@ -493,6 +565,9 @@ const fn file_event(source: EventSource, line: String) -> FileEvent {
         EventSource::OracleUpdates => FileEvent::OracleUpdate(line),
     }
 }
+
+/// Wraps a proven read-through instant for the channel.
+pub(crate) type ReadThroughMark<E> = Box<dyn Fn(Instant) -> E + Send>;
 
 /// One newline-delimited node stream for `spawn_line_watcher`.
 pub(crate) struct LineStream {
@@ -511,16 +586,35 @@ pub(crate) struct LineStream {
     pub(crate) layout: FileLayout,
 }
 
+/// One read-through attempt: lines it read go out through `send`, a proven instant goes out as `mark(at)` after them.
+/// False once the consumer is gone.
+fn send_read_through<E>(
+    reader: &mut FileReader,
+    send: &impl Fn(Vec<String>) -> bool,
+    tx: &tokio::sync::mpsc::Sender<E>,
+    mark: &ReadThroughMark<E>,
+    name: &str,
+) -> bool {
+    match reader.read_through() {
+        ReadThrough::Lines(lines) => send(lines),
+        ReadThrough::Proven(at) => tx.blocking_send(mark(at)).inspect_err(|_| error!("{name} channel closed, exiting")).is_ok(),
+        ReadThrough::Unproven => true,
+    }
+}
+
 /// Watch one node stream from the end of its current file, sending every complete line wrapped by `wrap`
 /// (blocking on a full channel, so a slow consumer back-pressures the reader) and `desync()` whenever buffered data
 /// had to be discarded; `last_event` (unix ms of the last line sent) feeds the book's health monitor. The thread
-/// returns when the channel closes (checked every poll) or the inotify watch cannot be set up.
+/// returns when the channel closes (checked every poll) or the inotify watch cannot be set up. With `read_through`,
+/// every `READ_THROUGH_INTERVAL` the reader tries a read-through proof (`FileReader::read_through`) and sends a proven
+/// instant in line with the data, after every line read before it (design 000433 r3).
 pub(crate) fn spawn_line_watcher<E, F, D>(
     stream: LineStream,
     tx: tokio::sync::mpsc::Sender<E>,
     last_event: Option<Arc<AtomicU64>>,
     wrap: F,
     desync: D,
+    read_through: Option<ReadThroughMark<E>>,
 ) -> thread::JoinHandle<()>
 where
     E: Send + 'static,
@@ -571,6 +665,7 @@ where
 
         // Main event loop - primarily event-driven with fallback polling
         let mut poll_count = 0u64;
+        let mut last_read_through: Option<Instant> = None;
         loop {
             poll_count += 1;
             // The consumer is gone: stop now rather than at the next line (a quiet stream may have none for long).
@@ -630,6 +725,15 @@ where
             if reader.take_desynced() && tx.blocking_send(desync()).is_err() {
                 error!("{name} channel closed, exiting");
                 return;
+            }
+
+            if let Some(mark) = &read_through
+                && last_read_through.is_none_or(|tried| tried.elapsed() >= READ_THROUGH_INTERVAL)
+            {
+                last_read_through = Some(Instant::now());
+                if !send_read_through(&mut reader, &send, &tx, mark, name) {
+                    return;
+                }
             }
 
             // Every 100000 polls, log status
@@ -781,14 +885,14 @@ mod tests {
             append(&path, "{\"old\":0}\n");
             let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
             let stream = test_stream(dir, start_skip_is_loss);
-            let _watcher = spawn_line_watcher(stream, tx, None, |line| line, || "DESYNC".to_string());
+            let _watcher = spawn_line_watcher(stream, tx, None, |line| line, || "DESYNC".to_string(), None);
             thread::sleep(Duration::from_millis(200));
             append(&path, "{\"skipped\":1}\n");
             thread::sleep(Duration::from_millis(200));
             append(&path, "{\"read\":2}\n");
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + Duration::from_secs(2);
             let mut received = Vec::new();
-            while !received.contains(&"{\"read\":2}".to_string()) && std::time::Instant::now() < deadline {
+            while !received.contains(&"{\"read\":2}".to_string()) && Instant::now() < deadline {
                 match rx.try_recv() {
                     Ok(line) => received.push(line),
                     Err(_) => thread::sleep(Duration::from_millis(5)),
@@ -806,13 +910,168 @@ mod tests {
         let dir = test_dir("consumer_gone");
         let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
         let stream = test_stream(dir, false);
-        let handle = spawn_line_watcher(stream, tx, None, |line| line, String::new);
+        let handle = spawn_line_watcher(stream, tx, None, |line| line, String::new, None);
         drop(rx);
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !handle.is_finished() && std::time::Instant::now() < deadline {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !handle.is_finished() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(handle.is_finished(), "the watcher should notice the closed channel within a poll");
+    }
+
+    /// `hourly/<day>/<hour>` below `dir` (the layout the newest-file scan reads).
+    fn hourly_file(dir: &Path, day: &str, hour: &str) -> PathBuf {
+        let day_dir = dir.join("hourly").join(day);
+        std::fs::create_dir_all(&day_dir).unwrap();
+        day_dir.join(hour)
+    }
+
+    #[test]
+    fn test_read_through_proves_only_a_drained_file_without_a_partial_line() {
+        let dir = test_dir("read_through");
+        let path = hourly_file(&dir, "20261020", "5");
+        append(&path, "{\"old\":0}\n");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        assert_eq!(reader.read_through(), ReadThrough::Unproven, "no file tracked yet");
+        reader.start_tracking(&path);
+        assert!(reader.on_modify().is_empty(), "opens the handle at the end");
+        let before = Instant::now();
+        let ReadThrough::Proven(at) = reader.read_through() else { panic!("a drained newest file proves") };
+        assert!(at >= before, "the instant is taken by the check");
+
+        append(&path, "{\"a\":1}\n{\"b\":");
+        assert_eq!(reader.read_through(), ReadThrough::Lines(vec!["{\"a\":1}".to_string()]), "new lines go out first");
+        assert_eq!(reader.read_through(), ReadThrough::Unproven, "a partial line is buffered");
+        append(&path, "2}\n");
+        assert_eq!(reader.read_through(), ReadThrough::Lines(vec!["{\"b\":2}".to_string()]));
+        assert!(matches!(reader.read_through(), ReadThrough::Proven(_)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Fault {
+        Size,
+        Seek,
+        Read,
+    }
+
+    /// A handle over `data` whose `fault` operation fails.
+    struct FaultyHandle {
+        data: std::io::Cursor<Vec<u8>>,
+        fault: Option<Fault>,
+    }
+
+    impl FaultyHandle {
+        fn fail(&self, operation: Fault) -> std::io::Result<()> {
+            if self.fault == Some(operation) { Err(std::io::Error::other(format!("injected {operation:?}"))) } else { Ok(()) }
+        }
+    }
+
+    impl Read for FaultyHandle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.fail(Fault::Read)?;
+            self.data.read(buf)
+        }
+    }
+
+    impl Seek for FaultyHandle {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.fail(Fault::Seek)?;
+            self.data.seek(position)
+        }
+    }
+
+    impl ReadHandle for FaultyHandle {
+        fn size(&self) -> std::io::Result<u64> {
+            self.fail(Fault::Size)?;
+            Ok(self.data.get_ref().len() as u64)
+        }
+    }
+
+    /// Review 000434 r1 P2: sizing, seeking and reading failures all come back as errors, never as the end.
+    #[test]
+    fn test_read_chunk_reports_every_failed_operation_with_a_line_unread() {
+        let line = b"{\"block\":1}\n".to_vec();
+        for fault in [Fault::Size, Fault::Seek, Fault::Read] {
+            let mut handle = FaultyHandle { data: std::io::Cursor::new(line.clone()), fault: Some(fault) };
+            let err = read_chunk(&mut handle, 0).expect_err("a failed operation is an error");
+            assert_eq!(err.to_string(), format!("injected {fault:?}"));
+        }
+        let mut sound = FaultyHandle { data: std::io::Cursor::new(line.clone()), fault: None };
+        assert_eq!(read_chunk(&mut sound, 0).unwrap(), Some(line.clone()));
+        assert_eq!(read_chunk(&mut sound, line.len() as u64).unwrap(), None, "the end");
+        let mut unsized_at_end = FaultyHandle { data: std::io::Cursor::new(line.clone()), fault: Some(Fault::Size) };
+        assert!(read_chunk(&mut unsized_at_end, line.len() as u64).is_err(), "no size, no end");
+    }
+
+    /// Review 000434 r1 P2, through the reader: a failed read with a line unread proves nothing; the reader re-opens,
+    /// delivers the line, and only then proves.
+    #[test]
+    fn test_read_through_after_a_failed_read_delivers_the_line_before_proving() {
+        let dir = test_dir("read_through_failed_read");
+        let path = hourly_file(&dir, "20261020", "5");
+        append(&path, "{\"old\":0}\n");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&path);
+        assert!(reader.on_modify().is_empty(), "opens the handle at the end");
+        // a handle that sizes and seeks but cannot read
+        reader.file = Some(std::fs::OpenOptions::new().append(true).open(&path).unwrap());
+        append(&path, "{\"block\":1}\n");
+        assert_eq!(reader.read_through(), ReadThrough::Unproven, "the read failed");
+        assert!(reader.file.is_none(), "the failed handle is dropped");
+        assert_eq!(reader.read_through(), ReadThrough::Lines(vec!["{\"block\":1}".to_string()]), "re-opened");
+        assert!(matches!(reader.read_through(), ReadThrough::Proven(_)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review 000433 r2 P1: the node already wrote the next block into the next hour's file while the reader sits at
+    /// the end of the old one; that end proves nothing until the reader switched and drained the new file.
+    #[test]
+    fn test_read_through_is_unproven_while_a_newer_file_waits() {
+        let dir = test_dir("read_through_rotation");
+        let old = hourly_file(&dir, "20261020", "5");
+        append(&old, "{\"old\":0}\n");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&old);
+        assert!(reader.on_modify().is_empty(), "opens the handle at the end");
+        assert!(matches!(reader.read_through(), ReadThrough::Proven(_)));
+        thread::sleep(Duration::from_millis(20)); // a later mtime for the new file
+        let new = hourly_file(&dir, "20261020", "6");
+        append(&new, "{\"block\":1}\n");
+        assert_eq!(reader.read_through(), ReadThrough::Unproven, "the old file's end proves nothing");
+        assert_eq!(switch_collecting(&mut reader, &new), Vec::<String>::new());
+        assert_eq!(reader.read_through(), ReadThrough::Unproven, "no handle on the new file yet");
+        assert_eq!(reader.on_modify(), vec!["{\"block\":1}".to_string()]);
+        assert!(matches!(reader.read_through(), ReadThrough::Proven(_)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The watcher sends a proven instant after every line read before it, in line with the data.
+    #[test]
+    fn test_line_watcher_sends_read_through_after_the_lines() {
+        let dir = test_dir("read_through_watcher");
+        let path = hourly_file(&dir, "20261020", "5");
+        append(&path, "");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
+        let mark: ReadThroughMark<String> = Box::new(|_| "PROVEN".to_string());
+        let _watcher = spawn_line_watcher(test_stream(dir, false), tx, None, |line| line, || "DESYNC".to_string(), Some(mark));
+        thread::sleep(Duration::from_millis(200));
+        append(&path, "{\"positioned\":0}\n");
+        thread::sleep(Duration::from_millis(200));
+        append(&path, "{\"a\":1}\n");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut received = Vec::new();
+        while Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(item) => received.push(item),
+                Err(_) => thread::sleep(Duration::from_millis(5)),
+            }
+            if received.iter().position(|item| item == "{\"a\":1}").is_some_and(|line| received[line..].contains(&"PROVEN".to_string())) {
+                break;
+            }
+        }
+        let line = received.iter().position(|item| item == "{\"a\":1}").expect("the line arrives");
+        assert!(received[line..].iter().any(|item| item == "PROVEN"), "a proof follows the line: {received:?}");
     }
 
     #[test]
@@ -1143,7 +1402,7 @@ mod tests {
         let old = dir.join("0");
         append(&old, "");
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
-        let handle = spawn_line_watcher(test_stream(dir.clone(), false), tx, None, |line| line, || "DESYNC".to_string());
+        let handle = spawn_line_watcher(test_stream(dir.clone(), false), tx, None, |line| line, || "DESYNC".to_string(), None);
         thread::sleep(Duration::from_millis(200));
         append(&old, "{\"skipped\":0}\n");
         thread::sleep(Duration::from_millis(200));
@@ -1151,9 +1410,9 @@ mod tests {
         append(&old, &(backlog.join("\n") + "\n"));
         append(&dir.join("1"), "{\"new\":1}\n");
         let expected: Vec<String> = backlog.into_iter().chain(["{\"new\":1}".to_string()]).collect();
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(20);
         let mut received = Vec::new();
-        while received.len() < expected.len() && std::time::Instant::now() < deadline {
+        while received.len() < expected.len() && Instant::now() < deadline {
             match rx.try_recv() {
                 Ok(line) => received.push(line),
                 Err(_) => thread::sleep(Duration::from_millis(2)),
@@ -1163,8 +1422,8 @@ mod tests {
         assert_eq!(received.len(), expected.len());
         assert!(received == expected, "every line once, in order");
         drop(rx);
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !handle.is_finished() && std::time::Instant::now() < deadline {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !handle.is_finished() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(handle.is_finished(), "the watcher exits once the consumer is gone");
@@ -1226,5 +1485,48 @@ mod tests {
         assert_eq!(drained.len(), 3, "all three old rows survive the switch");
         assert!(drained[2].contains("tail"));
         assert!(!loss_reported, "a complete drain is not data loss");
+    }
+
+    /// Review 000434 r2 P2: the old file's read fails with a line of block 100 unread; the switch leaves that tail
+    /// behind, so it is a loss, reported before the new file can prove a read-through.
+    #[test]
+    fn test_rotation_after_a_failed_read_flags_the_unread_tail() {
+        let dir = test_dir("rotation_failed_read");
+        let old = hourly_file(&dir, "20261020", "5");
+        append(&old, "{\"old\":0}\n");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&old);
+        assert!(reader.on_modify().is_empty(), "opens the handle at the end");
+        // a handle that sizes and seeks but cannot read
+        reader.file = Some(std::fs::OpenOptions::new().append(true).open(&old).unwrap());
+        append(&old, "{\"block\":100}\n");
+        thread::sleep(Duration::from_millis(20)); // a later mtime for the new file
+        let new = hourly_file(&dir, "20261020", "6");
+        append(&new, "{\"block\":101}\n");
+        assert_eq!(switch_collecting(&mut reader, &new), Vec::<String>::new(), "the old tail was not read");
+        assert_eq!(reader.on_modify(), vec!["{\"block\":101}".to_string()], "the watcher reads the new file next");
+        assert_eq!(reader.read_through(), ReadThrough::Unproven, "the loss is reported first");
+        assert!(reader.take_desynced(), "the unread tail is a loss");
+        assert!(matches!(reader.read_through(), ReadThrough::Proven(_)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review 000434 r2 P2: a partial line left at the old file's end is dropped by the switch: a loss.
+    #[test]
+    fn test_rotation_with_a_partial_tail_flags_the_dropped_line() {
+        let dir = test_dir("rotation_partial_tail");
+        let old = hourly_file(&dir, "20261020", "5");
+        append(&old, "");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&old);
+        append(&old, "{\"block\":100}\n{\"block\":");
+        assert_eq!(reader.on_modify(), vec!["{\"block\":100}".to_string()]);
+        thread::sleep(Duration::from_millis(20)); // a later mtime for the new file
+        let new = hourly_file(&dir, "20261020", "6");
+        append(&new, "{\"block\":101}\n");
+        assert_eq!(switch_collecting(&mut reader, &new), Vec::<String>::new());
+        assert!(reader.partial_line.is_empty(), "the switch starts the new file clean");
+        assert!(reader.take_desynced(), "the dropped partial line is a loss");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
