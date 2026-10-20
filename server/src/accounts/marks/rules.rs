@@ -47,6 +47,21 @@ pub(crate) fn internal_round(value: f64) -> Result<u64, String> {
     Ok(((value + almost_half).trunc() as u64).max(1))
 }
 
+/// The mark after the per-update 1% limit: a candidate further than 1% from the previous mark moves by 1% of it,
+/// rounded as the node rounds a calculated price. The direction and rounding follow the archived node's Mark branch
+/// (0x2965ece..0x2965f9c, review 000447: the rate clamped to ±0.01, then `internal_round`); one observed sample
+/// (research `hl_node_mark_state_20261019`: xyz:CAMBRICON block 1190248599 wrote 140.2385 = 138.85 × 1.01 for a
+/// submitted 140.35). A checkpoint checks only the end state: a later update overwrites a limited mark.
+pub(crate) fn step_limited_mark(candidate: u64, previous: u64) -> Result<u64, String> {
+    if u128::from(candidate.abs_diff(previous)) * 100 <= u128::from(previous) {
+        return Ok(candidate);
+    }
+    let factor = if candidate > previous { 1.01 } else { 0.99 };
+    #[expect(clippy::cast_precision_loss, reason = "prices are below 2^52")]
+    let limited = previous as f64 * factor;
+    internal_round(limited)
+}
+
 /// The node's median (0x3b56140): the middle value, or the floor of the middle pair's mean; `None` for no value.
 pub(crate) fn median_units(values: &[u64]) -> Option<u64> {
     let mut sorted = values.to_vec();
@@ -143,6 +158,15 @@ mod tests {
     use serde::Deserialize;
 
     use super::*;
+
+    /// The one sample (xyz:CAMBRICON block 1190248599, szDecimals 2): 140.35 submitted after 138.85 wrote 140.2385.
+    #[test]
+    fn a_mark_step_moves_by_one_percent_at_most() {
+        assert_eq!(step_limited_mark(1_403_500, 1_388_500), Ok(1_402_385));
+        assert_eq!(step_limited_mark(1_402_385, 1_388_500), Ok(1_402_385), "1% exactly is not limited");
+        assert_eq!(step_limited_mark(1_300_000, 1_388_500), Ok(1_374_615), "down: 1,388,500 × 0.99");
+        assert_eq!(step_limited_mark(1_390_000, 1_388_500), Ok(1_390_000));
+    }
 
     #[derive(Deserialize)]
     struct WireCase {

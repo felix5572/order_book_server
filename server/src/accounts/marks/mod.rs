@@ -401,6 +401,7 @@ pub(crate) struct AmbiguousCut {
 
 /// The snapshot at a checkpoint's height against the checkpoint (design 000439 r2 revision 2).
 #[derive(Debug, PartialEq, Eq)]
+#[expect(clippy::large_enum_variant, reason = "one per checkpoint install, moved once into the log")]
 pub(crate) enum MarksCheck {
     Checked { hip3: Hip3Check, books: BooksCheck, prices: PricesCheck },
     /// `noSnapshot`: no trusted state was kept at the checkpoint's height (the first after start, the marks were

@@ -13,16 +13,17 @@
 //!    - a `SetGlobalAction` stores the oracle median(submitted, Spot cache, L with the basis undone) and the mark
 //!      median(submitted, Mark cache, L), then samples msoe with the new oracle and lmpe with L.
 //!
-//! A coin whose inputs take a path never observed (a validator pricing it with one of the two prices, an empty book
-//! side, a mark moving more than the 1% step limit, an lmpe gap, HYPE and PURR's internal reference members) is
-//! `unsupported` until a seed replaces it: its values are not claimed.
+//! A mark moving more than 1% from the previous one moves by 1% of it (`step_limited_mark`, after the archived node's
+//! branch; a checkpoint checks the end state and lists the coins it moved). A coin whose inputs take a path
+//! never observed (a validator pricing it with one of the two prices, an empty book side, an lmpe gap, HYPE and PURR's
+//! internal reference members) is `unsupported` until a seed replaces it: its values are not claimed.
 
 use alloy::primitives::Address;
 use rustc_hash::FxHashMap;
 
 use super::{
     actions::MarkAction,
-    rules::{internal_round, inverse_basis, local_price, median_units, wire_units},
+    rules::{internal_round, inverse_basis, local_price, median_units, step_limited_mark, wire_units},
     seed::{NativeAsset, NativeEmas, NativeSeed, ReferenceCache, StoredMark},
 };
 
@@ -84,6 +85,8 @@ struct CoinPrices {
     marks: MemberCache,
     last_trade: u64,
     unsupported: Option<&'static str>,
+    /// Marks the 1% limit moved since the seed.
+    step_limited: u64,
 }
 
 /// The book a price action reads for one coin, and the coin's last trade of the block before it.
@@ -108,6 +111,7 @@ impl CoinPrices {
             marks: MemberCache::seeded(asset.references.mark),
             last_trade: asset.last_trade_px,
             unsupported,
+            step_limited: 0,
         }
     }
 
@@ -163,12 +167,9 @@ impl CoinPrices {
             return Ok(());
         };
         let stored = median_units(&[submitted_oracle, spot_median, inverse_basis(local, emas.basis.basis_ratio())?]).ok_or("no oracle candidates")?;
-        let new_mark = median_units(&[submitted_mark, mark_median, local]).ok_or("no mark candidates")?;
-        // the per-update 1% Mark limit (seen once on HIP-3, never on the main dex): its main-dex rounding is unknown
-        if u128::from(new_mark.abs_diff(self.mark.px)) * 100 > u128::from(self.mark.px) {
-            self.unsupported.get_or_insert("markStepLimit");
-            return Ok(());
-        }
+        let candidate = median_units(&[submitted_mark, mark_median, local]).ok_or("no mark candidates")?;
+        let new_mark = step_limited_mark(candidate, self.mark.px)?;
+        self.step_limited += u64::from(new_mark != candidate);
         #[expect(clippy::cast_precision_loss, reason = "prices are below 2^53")]
         let local_px = local as f64 / 10_f64.powi((6 - self.size_decimals).cast_signed());
         let Some(local_price_ema) = emas.local_price.local_price_advanced(local_px, time_ns) else {
@@ -197,6 +198,9 @@ pub(crate) struct PricesCheck {
     pub(crate) fields: Vec<(&'static str, u64, u64)>,
     /// Coins whose replay is not claimed, by reason.
     pub(crate) unsupported: Vec<(&'static str, Vec<String>)>,
+    /// Coins whose mark the 1% limit moved since the seed, with how many times. Their fields check the end state
+    /// only: a later update overwrites a limited mark, so an equal check does not prove each limited value.
+    pub(crate) step_limited: Vec<(String, u64)>,
     pub(crate) samples: Vec<(String, &'static str)>,
 }
 
@@ -316,7 +320,10 @@ impl NativePrices {
             coins.sort_unstable();
         }
         unsupported.sort_unstable();
-        PricesCheck { fields, unsupported, samples }
+        let mut step_limited: Vec<(String, u64)> =
+            self.coins.iter().filter(|coin| coin.step_limited > 0).map(|coin| (coin.name.clone(), coin.step_limited)).collect();
+        step_limited.sort_unstable();
+        PricesCheck { fields, unsupported, step_limited, samples }
     }
 }
 
@@ -371,12 +378,19 @@ mod tests {
         assert_eq!(prices.coins[0].unsupported, Some("fillInPath"));
         let mut prices = NativePrices::seeded(&native_seed());
         let set_global = MarkAction::SetGlobal(vec![Some(("82890.0".to_string(), "90000.0".to_string()))]);
-        prices.apply(&set_global, None, T1, |_| cut(900_000, 900_100, 900_050)).unwrap();
-        assert_eq!(prices.coins[0].unsupported, Some("markStepLimit"));
-        assert_eq!(prices.check_against(&native_seed()).unsupported, [("markStepLimit", vec!["BTC".to_string()])], "named");
-        let mut prices = NativePrices::seeded(&native_seed());
         prices.apply(&set_global, None, T1, |_| CoinCut { best: (Some(828_500), None), block_trade: None }).unwrap();
         assert_eq!(prices.coins[0].unsupported, Some("emptyBookSide"));
+    }
+
+    /// A `SetGlobalAction` pricing BTC 8.6% above its mark of 82,857.6 moves it by 1% (82,857.6 × 1.01 = 83,686.176,
+    /// rounded to the unit) and lists the coin at the check; the coin stays claimed.
+    #[test]
+    fn a_mark_beyond_the_step_limit_moves_by_one_percent() {
+        let mut prices = NativePrices::seeded(&native_seed());
+        let set_global = MarkAction::SetGlobal(vec![Some(("82890.0".to_string(), "90000.0".to_string()))]);
+        prices.apply(&set_global, None, T1, |_| cut(900_000, 900_100, 900_050)).unwrap();
+        assert_eq!(prices.mark_of(0), (StoredMark { px: 836_862, time_ns: T1 }, None));
+        assert_eq!(prices.check_against(&native_seed()).step_limited, [("BTC".to_string(), 1)]);
     }
 
     #[test]
