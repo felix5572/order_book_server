@@ -414,6 +414,12 @@ impl BookTrust {
         self.withheld_periods.load(Ordering::Acquire)
     }
 
+    /// A test's book trust change, as the listener makes it.
+    #[cfg(test)]
+    pub(crate) fn set_for_test(&self, trusted: bool) {
+        self.set(trusted);
+    }
+
     /// Called only on a change. The period count moves before trust drops, so
     /// a reader that sees "untrusted" never sees the count it held before.
     fn set(&self, trusted: bool) {
@@ -422,6 +428,19 @@ impl BookTrust {
         }
         self.trusted.store(trusted, Ordering::Release);
     }
+}
+
+/// One coin's levels for a book walk, read under the listener lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TakerLevels {
+    /// The book's progress: the block time both book streams applied, and the latest height.
+    pub(crate) time: u64,
+    pub(crate) height: u64,
+    pub(crate) trusted: bool,
+    /// `BookTrust::withheld_periods` at the read.
+    pub(crate) withheld_periods: u64,
+    /// (price, total size), best first.
+    pub(crate) levels: Vec<(Px, Sz)>,
 }
 
 pub(crate) struct OrderBookListener {
@@ -905,6 +924,19 @@ impl OrderBookListener {
         band: PxBand,
     ) -> Option<(u64, u64, Snapshot<InnerL4Order>)> {
         self.order_book_state.as_ref().and_then(|state| state.compute_snapshot_for_coin(coin, band))
+    }
+
+    /// The levels a market order meets in one coin's book (design 000443 r2 revision 4), with the book's progress and
+    /// trust as they stand under the lock; `None` before the first snapshot or without the coin's book.
+    pub(crate) fn taker_levels(&self, coin: &Coin, taker: Side, needed: Sz, max_levels: usize) -> Option<TakerLevels> {
+        let (time, height, levels) = self.order_book_state.as_ref()?.taker_levels(coin, taker, needed, max_levels)?;
+        Some(TakerLevels {
+            time,
+            height,
+            trusted: self.book_trusted(),
+            withheld_periods: self.book_trust.withheld_periods(),
+            levels,
+        })
     }
 
     /// Untriggered trigger orders - all coins, or one coin when given - as
@@ -1901,7 +1933,7 @@ impl ActiveSubs {
             // exists (it never touches the book), so it registers no gated family.
             Subscription::Oracle { .. } => Vec::new(),
             // Pushed by the account view's own broadcast, never through the book.
-            Subscription::CoinPositions { .. } => Vec::new(),
+            Subscription::CoinPositions { .. } | Subscription::LiquidationCandidates { .. } => Vec::new(),
         }
     }
 

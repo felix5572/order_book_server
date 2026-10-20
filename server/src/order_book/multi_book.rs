@@ -1,5 +1,5 @@
 use crate::{
-    order_book::{Coin, InnerOrder, Oid, OrderBook, Px, PxBand, Snapshot, Sz},
+    order_book::{Coin, InnerOrder, Oid, OrderBook, Px, PxBand, Side, Snapshot, Sz},
     prelude::*,
 };
 use serde::{Deserialize, Serialize};
@@ -135,6 +135,11 @@ impl<O: InnerOrder> OrderBooks<O> {
     #[must_use]
     pub(crate) fn snapshot_for_coin(&self, coin: &Coin, band: PxBand) -> Option<Snapshot<O>> {
         self.order_books.get(coin).map(|book| book.to_snapshot_in_band(band))
+    }
+
+    /// `OrderBook::taker_levels` of one coin; `None` without its book.
+    pub(crate) fn taker_levels(&self, coin: &Coin, taker: Side, needed: Sz, max_levels: usize) -> Option<Vec<(Px, Sz)>> {
+        self.order_books.get(coin).map(|book| book.taker_levels(taker, needed, max_levels))
     }
 }
 

@@ -7,6 +7,7 @@
 use alloy::primitives::Address;
 
 use super::{
+    checkpoint::node_time_ns,
     replica::{Action, ReplicaLine, Response},
     usdc::usdc_wei,
 };
@@ -83,6 +84,8 @@ pub(crate) type KeptAction = (BlockAction, Address);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BlockActions {
     pub(crate) height: u64,
+    /// The block's time (`abci_block.time`), unix ms.
+    pub(crate) time_ms: u64,
     pub(crate) actions: Vec<KeptAction>,
 }
 
@@ -96,6 +99,8 @@ pub(crate) fn parse_block_actions(line: &str) -> Result<BlockActions, String> {
 /// The kept actions of a parsed line.
 pub(crate) fn block_actions(replica: &ReplicaLine<'_>) -> Result<BlockActions, String> {
     let height = replica.height;
+    let time = replica.time().ok_or_else(|| format!("block {height} without abci_block.time"))?;
+    let time_ms = node_time_ns(time).map_err(|err| format!("block {height}: {err}"))? / 1_000_000;
     let mut kept = Vec::new();
     for paired in replica.paired().map_err(|err| format!("block {height}: {err}"))? {
         let action_type = paired.action.action_type;
@@ -110,7 +115,7 @@ pub(crate) fn block_actions(replica: &ReplicaLine<'_>) -> Result<BlockActions, S
             kept.push(action);
         }
     }
-    Ok(BlockActions { height, actions: kept })
+    Ok(BlockActions { height, time_ms, actions: kept })
 }
 
 /// The account a kept action acted on; `None` when it failed.
@@ -150,7 +155,7 @@ pub(crate) mod tests {
     fn keeps_the_successful_actions_with_the_responses_user() {
         let parsed = parse_block_actions(REAL_LINE).unwrap();
         let leverage = (BlockAction::Leverage { asset: 99, is_cross: true }, address(LEVERAGE_VAULT));
-        assert_eq!(parsed, BlockActions { height: 1_189_931_524, actions: vec![leverage] });
+        assert_eq!(parsed, BlockActions { height: 1_189_931_524, time_ms: 1_792_442_115_736, actions: vec![leverage] });
     }
 
     /// Payloads of real successful actions (bm `replica_cmds`, 2026-10-19), put in the place of the kept one.
@@ -243,7 +248,8 @@ pub(crate) mod tests {
     #[test]
     fn a_block_without_kept_actions_still_reads_its_height() {
         let line = REAL_LINE.replace(r#""type":"updateLeverage""#, r#""type":"order""#);
-        assert_eq!(parse_block_actions(&line).unwrap(), BlockActions { height: 1_189_931_524, actions: Vec::new() });
+        let empty = BlockActions { height: 1_189_931_524, time_ms: 1_792_442_115_736, actions: Vec::new() };
+        assert_eq!(parse_block_actions(&line).unwrap(), empty);
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! streams they read. A finished watcher or poller stops the view for good (503 until restart); a gone owner answers
 //! every query with the same.
 
+use alloy::primitives::Address;
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
@@ -40,9 +41,12 @@ use super::{
         price_mismatch_json, replay_mismatch_json, replay_row_mismatch_json, silent_change_json,
     },
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, Publisher},
+    candidates::{BookLink, Candidates, CandidatesSnapshot},
+    walk::{WalkMailbox, WalkResult, run_walker},
 };
 use crate::{
     listeners::order_book::{
+        BookTrust, OrderBookListener,
         parallel::{FileLayout, LineStream, spawn_line_watcher},
         utils::{checkpoint_grid, list_checkpoints},
     },
@@ -52,6 +56,7 @@ use crate::{
         ACCOUNTS_HELD_FILLS, ACCOUNTS_OPEN_POSITIONS, ACCOUNTS_PENDING_BLOCKS, ACCOUNTS_REPLAY_CHECKED_TOTAL,
         ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL, ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL, ACCOUNTS_REPLAY_STOPPED_TOTAL, ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL,
         ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL, ACCOUNTS_STREAM_HEIGHT, ACCOUNTS_TRUSTED, ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL,
+        LIQUIDATION_CANDIDATES, LIQUIDATION_CANDIDATES_REFRESH_SECONDS,
         NODE_MARKS_AVAILABLE, NODE_MARKS_CHECKED_TOTAL, NODE_MARKS_CHECKS_SKIPPED_TOTAL, NODE_MARKS_HEIGHT,
         NODE_MARKS_LOGGED_INPUTS, NODE_MARKS_REBUILDS_TOTAL, NODE_MARKS_SEED_FAILURES_TOTAL, NODE_MARKS_SEED_HEIGHT,
         NODE_MARKS_AMBIGUOUS_CUTS_TOTAL, NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL,
@@ -127,6 +132,7 @@ struct ParsedAnchor {
 enum Query {
     CoinPositions { coin: String, reply: oneshot::Sender<std::result::Result<CoinPositions, QueryError>> },
     Status { reply: oneshot::Sender<BookStatus> },
+    Candidates { reply: oneshot::Sender<std::result::Result<CandidatesSnapshot, String>> },
 }
 
 /// Queries the owner task and joins its `coinPositions` push.
@@ -156,6 +162,13 @@ impl AccountsHandle {
         answer.await.map_err(|_| gone())?
     }
 
+    /// Every published liquidation candidate; `Err` with the reason while they are not available.
+    pub(crate) async fn liquidation_candidates(&self) -> std::result::Result<CandidatesSnapshot, String> {
+        let (reply, answer) = oneshot::channel();
+        self.queries.send(Query::Candidates { reply }).await.map_err(|_| OWNER_GONE.to_string())?;
+        answer.await.map_err(|_| OWNER_GONE.to_string())?
+    }
+
     pub(crate) async fn status(&self) -> std::result::Result<BookStatus, Unavailable> {
         let (reply, answer) = oneshot::channel();
         let gone = || Unavailable::Stopped(OWNER_GONE.to_string());
@@ -172,7 +185,46 @@ struct Supervised {
 
 /// Starts the watchers, the poller and the owner task. Fails when the checkpoint directory cannot be listed or holds
 /// fewer than two checkpoints (the node marks take their grid from the two newest).
-pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::task::JoinHandle<()>)> {
+/// Walk results in flight to the owner: at most one per (coin, side) request pending, so a few hundred.
+const WALK_RESULTS_CAPACITY: usize = 1_024;
+
+/// The order book the liquidation candidates walk (design 000443): the listener and its trust mirror.
+pub(crate) struct BookSource {
+    pub(crate) trust: BookTrust,
+    pub(crate) listener: Arc<tokio::sync::Mutex<OrderBookListener>>,
+}
+
+/// The liquidation candidates and the walk results coming back to the owner; `walks` is `None` without a book.
+pub(crate) struct CandidateFeed {
+    candidates: Candidates,
+    walks: Option<mpsc::Receiver<WalkResult>>,
+}
+
+impl CandidateFeed {
+    /// With `book`, the walk task starts here.
+    fn start(book: Option<BookSource>) -> Self {
+        let Some(BookSource { trust, listener }) = book else {
+            return Self { candidates: Candidates::new(None), walks: None };
+        };
+        let mailbox = Arc::new(WalkMailbox::default());
+        let (results, walks) = mpsc::channel(WALK_RESULTS_CAPACITY);
+        tokio::spawn(run_walker(listener, Arc::clone(&mailbox), results));
+        Self { candidates: Candidates::new(Some(BookLink { trust, mailbox })), walks: Some(walks) }
+    }
+}
+
+/// The next walk result; pending forever without a book. Cancel-safe.
+async fn next_walk(walks: &mut Option<mpsc::Receiver<WalkResult>>) -> Option<WalkResult> {
+    match walks {
+        Some(walks) => walks.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Starts the watchers, the poller and the owner task, and with `book` the candidates' walk task. Fails when the
+/// checkpoint directory cannot be listed or holds fewer than two checkpoints (the node marks take their grid from the
+/// two newest).
+pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Result<(AccountsHandle, tokio::task::JoinHandle<()>)> {
     let checkpoints = list_checkpoints(data_dir)?;
     let (anchor, interval) = checkpoint_grid(&checkpoints)?;
     // checkpoints already on disk predate the watchers: the first anchor is the next one (design r2 3.5)
@@ -234,7 +286,8 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
     let publisher = Publisher::new(subscriptions, frames);
     let started_ms = now_ms();
     let marks = NodeMarks::new(CheckpointGrid { anchor, interval }, started_ms);
-    let owner = tokio::spawn(run_owner(AccountBook::new(started_ms), marks, publisher, inputs, anchors, queries, threads));
+    let feed = CandidateFeed::start(book);
+    let owner = tokio::spawn(run_owner(AccountBook::new(started_ms), marks, publisher, inputs, anchors, queries, threads, feed));
     Ok((handle, owner))
 }
 
@@ -380,6 +433,7 @@ fn spawn_checkpoint_poller(
     })
 }
 
+#[expect(clippy::too_many_arguments, reason = "the owner task's parts, moved in once at start")]
 async fn run_owner(
     mut book: AccountBook,
     mut marks: NodeMarks,
@@ -388,7 +442,9 @@ async fn run_owner(
     mut anchors: mpsc::Receiver<AnchorMessage>,
     mut queries: mpsc::Receiver<Query>,
     threads: Vec<Supervised>,
+    feed: CandidateFeed,
 ) {
+    let CandidateFeed { mut candidates, mut walks } = feed;
     let mut supervision = tokio::time::interval(SUPERVISION_INTERVAL);
     let mut assembler = BlockAssembler::default();
     // a parsed anchor whose blocks are not applied yet (design 000433 r2 3.4), and a seed the marks are not ready for
@@ -409,6 +465,7 @@ async fn run_owner(
                     publisher.push_snapshots(&mut book, marks.at());
                 }
                 publisher.track_marks(&mut book, &marks);
+                refresh_candidates(&mut candidates, &book, &marks, &touched, &publisher);
             }
             Some(message) = anchors.recv() => {
                 let installed = receive_anchor(&mut book, &mut marks, &mut held, &mut held_seed, message);
@@ -416,18 +473,29 @@ async fn run_owner(
                     publisher.push_snapshots(&mut book, marks.at());
                 }
                 publisher.track_marks(&mut book, &marks);
+                refresh_candidates(&mut candidates, &book, &marks, &Touched::default(), &publisher);
+            }
+            walk = next_walk(&mut walks) => {
+                let Some(result) = walk else {
+                    error!("liquidation candidates: the book walk task ended; the candidates stay unavailable until restart");
+                    walks = None;
+                    publisher.publish_candidates(candidates.stop("the book walk task ended".to_string()));
+                    continue;
+                };
+                publisher.publish_candidates(candidates.apply_walk(result));
             }
             query = queries.recv() => {
                 let Some(query) = query else {
                     info!("accounts: every handle dropped, owner exits");
                     return;
                 };
-                answer(&book, &marks, query);
+                answer(&book, &marks, &candidates, query);
             }
             _ = supervision.tick() => {
                 supervise(&mut book, &mut marks, &threads);
                 publisher.track(&book);
                 publisher.track_marks(&mut book, &marks);
+                refresh_candidates(&mut candidates, &book, &marks, &Touched::default(), &publisher);
                 export_status(&book.status());
                 export_marks_status(&marks.status());
             }
@@ -847,12 +915,24 @@ fn log_replay_check(height: u64, report: &InstallReport) {
     }
 }
 
-fn answer(book: &AccountBook, marks: &NodeMarks, query: Query) {
+fn answer(book: &AccountBook, marks: &NodeMarks, candidates: &Candidates, query: Query) {
     // a dropped receiver is a caller that gave up; nothing to undo
     match query {
         Query::CoinPositions { coin, reply } => drop(reply.send(book.coin_positions(&coin, marks.at()))),
         Query::Status { reply } => drop(reply.send(book.status())),
+        Query::Candidates { reply } => drop(reply.send(candidates.snapshot())),
     }
+}
+
+/// The candidates after a step (design 000443), broadcast as one frame; a withdrawal ends every subscription.
+fn refresh_candidates(candidates: &mut Candidates, book: &AccountBook, marks: &NodeMarks, touched: &Touched, publisher: &Publisher) {
+    let started = Instant::now();
+    let mut users: Vec<Address> = touched.accounts.clone();
+    users.extend(touched.positions.iter().map(|(_, user)| *user));
+    let refresh = candidates.refresh(book, marks.at(), &users);
+    LIQUIDATION_CANDIDATES_REFRESH_SECONDS.observe(started.elapsed().as_secs_f64());
+    LIQUIDATION_CANDIDATES.set((candidates.count() as u64).cast_signed());
+    publisher.publish_candidates(refresh);
 }
 
 /// A finished thread stops the view and the marks for good: every input thread feeds the block assembly both apply,
@@ -917,7 +997,7 @@ impl TestOwner {
         let handle = AccountsHandle { queries, subscriptions: subscriptions.clone(), frames: frames.downgrade() };
         let marks = NodeMarks::new(tests::TEST_GRID, 0);
         let publisher = Publisher::new(subscriptions, frames);
-        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new()));
+        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None)));
         Self { handle, inputs, anchors, owner }
     }
 
@@ -936,7 +1016,7 @@ impl TestOwner {
             self.inputs.send(fills_input(line.clone())).await.unwrap();
         }
         for block in [height, height + 1] {
-            let line = Ok((BlockActions { height: block, actions: Vec::new() }, Err("an account test line".to_string())));
+            let line = Ok((BlockActions { height: block, time_ms: block * 1_000, actions: Vec::new() }, Err("an account test line".to_string())));
             self.inputs.send(Input::BlockActions(line, Instant::now())).await.unwrap();
         }
         let after = Instant::now() + Duration::from_micros(1);
@@ -1024,7 +1104,7 @@ mod tests {
         blocks: std::ops::RangeInclusive<u64>,
     ) {
         for height in blocks {
-            let parsed = (BlockActions { height, actions: Vec::new() }, Err("an account test line".to_string()));
+            let parsed = (BlockActions { height, time_ms: height * 1_000, actions: Vec::new() }, Err("an account test line".to_string()));
             let line = Input::BlockActions(Ok(parsed), Instant::now());
             apply_input(book, marks, assembler, line);
         }
@@ -1158,10 +1238,10 @@ mod tests {
 
     #[test]
     fn a_block_actions_line_breaking_the_contract_keeps_its_height() {
-        let empty = r#"{"abci_block":{"signed_action_bundles":[]},"resps":{"Full":[]},"height":8}"#;
+        let empty = r#"{"abci_block":{"time":"2026-10-19T06:00:00.0","signed_action_bundles":[]},"resps":{"Full":[]},"height":8}"#;
         let Input::BlockActions(Ok((block, _)), _) = block_actions_input(empty.to_string()) else { panic!("an empty block reads") };
-        assert_eq!(block, BlockActions { height: 8, actions: Vec::new() });
-        let unpaired = r#"{"abci_block":{"signed_action_bundles":[["0x01",{"signed_actions":[]}]]},"resps":{"Full":[]},"height":7}"#;
+        assert_eq!(block, BlockActions { height: 8, time_ms: 1_792_389_600_000, actions: Vec::new() });
+        let unpaired = r#"{"abci_block":{"time":"2026-10-19T06:00:00.0","signed_action_bundles":[["0x01",{"signed_actions":[]}]]},"resps":{"Full":[]},"height":7}"#;
         let Input::BlockActions(Err(err), _) = block_actions_input(unpaired.to_string()) else { panic!("no responses") };
         assert_eq!(err.block, Some(7));
         assert!(err.error.starts_with("block 7: 1 bundles but 0 response groups (line of "), "{}", err.error);
@@ -1252,7 +1332,7 @@ mod tests {
         publisher.track(&book);
         publisher.track_marks(&mut book, &marks);
         let _guard = subscriptions.acquire(PUMP);
-        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new()));
+        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None)));
         let query = || async {
             let (reply, answer) = oneshot::channel();
             query_tx.send(Query::CoinPositions { coin: PUMP.to_string(), reply }).await.unwrap();

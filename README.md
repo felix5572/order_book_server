@@ -362,6 +362,32 @@ Frames on `{"channel":"coinPositions","data":{…}}` with a per-coin `version`:
 
 Every frame's `version` is the previous one plus one; a subscriber applies frames above its snapshot's version in order. Validated against the node's own `clearinghouseState` on 2026-10-19 (aligned single-position pools within 0.1 bp; sizes equal to the next checkpoint for all ~400k positions); only USDC-collateral pools were checked against live positions.
 
+### Liquidation candidates: liquidationCandidates
+With `--accounts`, the positions whose node mark is within a distance of their liquidation price (design 000443), with the market liquidation order each would take next:
+```json
+{ "method": "subscribe", "subscription": { "type": "liquidationCandidates", "coin": "BTC", "maxDistanceBps": 200 } }
+```
+`coin` may be `null` (every coin); `maxDistanceBps` is at most 1000. Frames on `{"channel":"liquidationCandidates","data":{"coin","maxDistanceBps",…}}`, each naming its subscription, with the subscription's own `version`:
+- `{"kind":"snapshot","version":0,"height","time","candidates":[…]}` on subscribe;
+- `{"kind":"changes","version","height","time","enter":[…],"update":[…],"exit":[{"user","coin"}]}`: one frame per refresh with changes, every coin at once;
+- `{"kind":"withdrawn","reason"}`: the subscription ended (the account view or the node marks unavailable, a missed frame, a slow connection); subscribe again for a new snapshot.
+
+A candidate row:
+```json
+{"user":"0x…","coin":"BTC","szi":"-1.5","markPx":"83022.0","liquidationPx":"84213.4","liquidationDistanceBps":143.5,"liquidationPxHeight":1190866310,
+ "marginMode":"cross","poolPositions":3,"crossPoolCoins":["ETH","SOL"],
+ "expectedOrder":{"side":"B","cooldown":"none","firstOrderSize":"0.3","cooldownOrderSize":"1.5","walkSize":"0.3","notional":"124533.0"},
+ "bookWalk":{"status":"walked","vwapPx":"83031.6","deepestPx":"83034.0","filledSize":"0.3","levels":4,"aheadSize":"1.2","end":"filled",
+   "assumption":"known","bookHeight":1190866309,"bookTime":1792512887052}}
+```
+- Only replayed rows (see `liquidationPxSource` above) of the applied height are candidates: their size, pool cash, pool members and node marks all belong to block `liquidationPxHeight`. An anchor's row is never one. The distance is `liquidationDistanceBps` of `coinPositions`, against the node mark of that block.
+- The server keeps every position within 1000 bp, re-read each block for the accounts the block's events touched and for the accounts sharing a pool with a coin whose mark moved; each subscription projects it onto its coin and distance, so a candidate enters or exits a subscription as its distance crosses the subscription's threshold.
+- `update` goes out when the distance moves by a bp (to the integer) or the price, size, pool or expected order changes; the mark and the notional alone push nothing, so a row not updated keeps the `markPx`, `notional` and `liquidationPxHeight` it was sent with.
+- `expectedOrder` is the next **market** liquidation (research `hl_liquidation_rules_20261020`, 21,846 node liquidations): `side` `A` sells a long, `B` buys back a short; up to 100,000 USD of notional (`notional`, |size| × mark) the whole position, above it a fifth (`firstOrderSize`, raw size floored, 236 of 236 partials). After a partial market liquidation of any of the account's positions, its market liquidations take whole positions for 30 s (`cooldownOrderSize`; official "Liquidations", 122 of 122). `cooldown`: `inCooldown` (a partial one within the last 30 s of block time), `none` (none within them, every block of them applied without a fills loss), `unknown` (anything else: the view started or lost fills less than 30 s ago — a checkpoint does not restore that history — or a liquidation it could not size). `walkSize` is what an order takes under the known rule, the whole position while `unknown`. Backstop liquidations (off the book) and auto-deleveraging are outside the estimate; when the remainder is liquidated depends on later prices.
+- `crossPoolCoins`: the other coins of the cross pool, which may be liquidated in the same block; not a guarantee. Candidates of one coin and side order by how soon the mark reaches them only in the static view where that coin moves alone.
+- `bookWalk`: where the order would fill on the public book of this server, static (no cascade, no refill). The candidates of one coin and side walk together in that order — longs from the highest liquidation price, shorts from the lowest, equal prices by address — each taking its `walkSize` from where the ones before it (`aheadSize`) stopped: `vwapPx`, `deepestPx`, `filledSize`, `levels`; `end` is `filled`, `bookExhausted`, or `truncatedAtLevels` (the walk reads at most 2,000 levels, the book may hold more). `assumption` is `unknownCooldownAsFull` when this candidate or one before it walks a whole position for an unknown cooldown. `bookHeight` / `bookTime` are the book's own progress at the read, not the candidate's height; the walk is redone when the candidates of that coin and side, their order or their sizes change, not on every book move. `status` is `pending` until a walk of the current list is in: a new candidate, and every candidate from the first changed place of the list on (an estimate holds only for the list it walked). `untrusted` while the book is withheld: every estimate goes to it at once, and an estimate read before cannot come back — snapshots and frames publish each walk as of the book's state when they go out, so one from an earlier withheld period shows `pending` until walked anew. `noBook` in a process without the order book.
+- Metrics: `orderbook_liquidation_candidates` (published candidates), `orderbook_liquidation_candidates_refresh_seconds` (the owner's work per refresh), `orderbook_liquidation_walk_lock_wait_seconds` / `orderbook_liquidation_walk_lock_hold_seconds` (a walk waiting for the listener lock, and holding it to copy the levels); frames in `orderbook_accounts_frames_total{kind="candidates"|"candidatesWithdrawn"}`.
+
 ### Ping/Pong
 ```json
 { "method": "ping" }

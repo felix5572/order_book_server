@@ -37,6 +37,7 @@ use super::{
     actions::{BlockActionKind, BlockActions},
     anchor::{Anchor, AnchorCoin, AnchorPosition, AnchorRow},
     checkpoint::{AccountMode, mark_px},
+    cooldown::{Cooldown, LiquidationHistory},
     misc::{FundingDelta, MiscEvent},
     liquidation::{LiquidationPx, RowMark, UnsupportedReason},
     marks::MarksAt,
@@ -747,6 +748,10 @@ pub(crate) struct AccountBook {
     checkpoint_failure: Option<(u64, String)>,
     stopped: Option<String>,
     unknown_misc_kinds: FxHashSet<String>,
+    /// Block time of the highest block whose actions are applied, unix ms.
+    applied_time_ms: Option<u64>,
+    /// Liquidation cooldown evidence (design 000443).
+    liquidations: LiquidationHistory,
 }
 
 impl AccountBook {
@@ -767,6 +772,8 @@ impl AccountBook {
             checkpoint_failure: None,
             stopped: None,
             unknown_misc_kinds: FxHashSet::default(),
+            applied_time_ms: None,
+            liquidations: LiquidationHistory::default(),
         }
     }
 
@@ -792,8 +799,17 @@ impl AccountBook {
         fills: Vec<Batch<NodeDataFill>>,
         misc_events: Vec<Batch<MiscEvent>>,
     ) -> BlockReport {
+        let time_ms = actions.time_ms;
+        let block_actions = self.apply_block_actions(actions);
+        // the cooldown evidence follows every block, the ones an anchor covers included, and takes the block whole
+        let coins = &self.coins;
+        let size_fill = |fill: &Fill| {
+            let coin = coins.get(&fill.coin).ok_or_else(|| format!("{} is outside the anchor's universe", fill.coin))?;
+            Ok((parse_size_raw(&fill.start_position, coin.size_decimals)?, parse_size_raw(&fill.sz, coin.size_decimals)?))
+        };
+        self.liquidations.record_block(time_ms, fills.iter().flat_map(Batch::events_ref), size_fill);
         BlockReport {
-            block_actions: self.apply_block_actions(actions),
+            block_actions,
             fills: fills.into_iter().map(|batch| self.apply_fills(batch)).collect(),
             misc_events: misc_events.into_iter().map(|batch| self.apply_misc_events(batch)).collect(),
         }
@@ -927,7 +943,7 @@ impl AccountBook {
 
     /// Every block has a line, so a height past the next one is a loss of the blocks between.
     pub(crate) fn apply_block_actions(&mut self, block: BlockActions) -> BlockActionsReport {
-        let BlockActions { height, actions } = block;
+        let BlockActions { height, time_ms, actions } = block;
         let mut report = BlockActionsReport::default();
         if let Some(previous) = self.block_actions.height
             && height > previous + 1
@@ -936,6 +952,8 @@ impl AccountBook {
             report.missing = Some((previous + 1, height - 1));
         }
         raise(&mut self.block_actions.height, height);
+        self.applied_time_ms = Some(time_ms);
+        self.liquidations.begin_block(time_ms, (self.fills.lost_block, self.fills.lost_by_ms));
         if self.covered(height) {
             report.stale = true;
             return report;
@@ -1261,6 +1279,54 @@ impl AccountBook {
         }
     }
 
+    /// The anchor the replayed rows replay from, the applied height they are of and its block time; `None` until every
+    /// block up to the anchor is applied, or without a replay.
+    pub(crate) fn replay_at(&self) -> Option<(AnchorInfo, u64, u64)> {
+        self.replay.as_ref()?;
+        let anchor = self.anchor?;
+        let applied = self.block_actions.height.filter(|applied| *applied >= anchor.height)?;
+        Some((anchor, applied, self.applied_time_ms?))
+    }
+
+    /// Every account holding an open position.
+    pub(crate) fn holders(&self) -> impl Iterator<Item = Address> + '_ {
+        self.holdings.0.keys().copied()
+    }
+
+    /// The coins `user` holds an open position in.
+    pub(crate) fn held_coins(&self, user: Address) -> Vec<&str> {
+        self.holdings.of(&user).collect()
+    }
+
+    /// The coin's `szDecimals`; `None` outside the anchor's universe.
+    pub(crate) fn size_decimals(&self, coin: &str) -> Option<u32> {
+        self.coins.get(coin).map(|coin| coin.size_decimals)
+    }
+
+    /// The replayed rows of `user`'s open positions with their coins and sizes (`marks` as for `coin_positions`).
+    pub(crate) fn replayed_rows(&self, user: Address, marks: Option<&dyn MarksAt>) -> Vec<(&str, i64, Replayed)> {
+        self.holdings
+            .of(&user)
+            .filter_map(|coin| {
+                let record = &self.coins[coin].records[&user];
+                Some((coin, record.size_raw, self.replayed_row(user, coin, record, marks)?))
+            })
+            .collect()
+    }
+
+    /// The other coins of `user`'s cross pool in `coin` (design 000443 r2 revision 5).
+    pub(crate) fn cross_pool_coins(&self, user: Address, coin: &str) -> Vec<String> {
+        let Some(replay) = self.replay.as_ref() else { return Vec::new() };
+        let mut coins: Vec<String> = replay.current.cross_pool_coins(&user, coin, self.holdings.of(&user)).into_iter().map(str::to_string).collect();
+        coins.sort_unstable();
+        coins
+    }
+
+    /// The account's liquidation cooldown at the applied block's time (design 000443 r3 revision 3).
+    pub(crate) fn cooldown(&self, user: &Address) -> Cooldown {
+        self.applied_time_ms.map_or(Cooldown::Unknown, |now_ms| self.liquidations.state(user, now_ms))
+    }
+
     /// The position's replayed row (designs 000437, 000442), once every block up to the anchor is applied: the cash,
     /// the sizes and the marks are then all those of the applied height, which the row carries. Marks of another height
     /// count as none: a pool with other members then has no replayed row.
@@ -1287,20 +1353,16 @@ mod tests {
     use super::*;
     use crate::accounts::{
         actions::BlockAction,
-        checkpoint::{
-            parse_checkpoint_bytes,
-            tests::{HOLDER, ISOLATED, fixture as checkpoint_fixture, user as checkpoint_user},
-        },
+        checkpoint::tests::{HOLDER, ISOLATED, user as checkpoint_user},
         liquidation::{HeldAtMark, LiquidationPx, solve, solve_held},
-        margin::MarginTable,
         misc::LedgerDelta,
         replay::{Compared, ReplayedRow, Stop, StopReason, tests::per_dex_with_main_cash},
-        test_support::{ANCHOR_TABLE, CURRENT_TABLE, FillSpec, ListedMarks},
+        test_support::{ANCHOR_TABLE, CURRENT_TABLE, FillSpec, ListedMarks, fixture_table},
     };
     use crate::accounts::test_support::{
         AVAX_ADL_BLOCK, AVAX_ADL_FULL, CoinSpec, ETH_ADL_BLOCK, ETH_ADL_PARTIAL, FARTCOIN_LIQUIDATED_LONG, PUMP,
-        SOL_ADL_BLOCK, SOL_ADL_LONG, SOL_LIQUIDATED_SHORT, anchor, block_actions, fills, funding_inner, misc, real_fills, row,
-        send_inner, trusted_book, user,
+        SOL_ADL_BLOCK, SOL_ADL_LONG, SOL_LIQUIDATED_SHORT, anchor, block_actions, fills, funding_inner, misc, real_fills,
+        replay_book, row, send_inner, trusted_book, user,
     };
 
     const fn fills_lost_up_to(block: u64) -> Unavailable {
@@ -1701,27 +1763,10 @@ mod tests {
 
     // ---- replayed rows (design 000437), through the view every output uses ----
 
-    /// A book whose anchor at `height` holds these PUMP positions, with the fixture's margins (HOLDER default with main
-    /// dex cash -12000, ISOLATED's isolated PUMP cash 12000); every block up to `applied` is applied.
-    fn replay_book(height: u64, applied: u64, holders: &[(Address, i64)]) -> AccountBook {
-        let mut book = AccountBook::new(0);
-        book.apply_fills(fills(100, &[]));
-        book.apply_misc_events(misc(100, &[]));
-        book.apply_block_actions(block_actions(applied, &[]));
-        // the fixture's universe has BTC (szDecimals 5) on the main dex too
-        let mut first = anchor(height, &[(PUMP, 0, holders), ("BTC", 5, &[])]);
-        first.margins = per_dex_with_main_cash(-12_000_000_000);
-        book.install_anchor(first);
-        book
-    }
 
     fn view_of(book: &AccountBook, holder: Address) -> PositionView {
         let view = book.coin_positions(PUMP, None).unwrap();
         view.positions.into_iter().find(|position| position.user == holder).unwrap()
-    }
-
-    fn fixture_table(table_id: u32) -> MarginTable {
-        parse_checkpoint_bytes(&checkpoint_fixture()).unwrap().dexes[0].table(table_id).clone()
     }
 
     /// A replayed row of a pool of one, read without marks.
@@ -1850,7 +1895,7 @@ mod tests {
         let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000)]);
         book.apply_block_actions(block_actions(1_001, &[]));
         book.apply_fills(fills(1_001, &[(holder, "BTC", "B", 1, "0.0", "0.001")]));
-        let both = ListedMarks { height: 1_001, marks: &[(PUMP, 4_000), ("BTC", 828_576)] };
+        let both = ListedMarks { height: 1_001, marks: vec![(PUMP, 4_000), ("BTC", 828_576)] };
         let shared = view_at(&book, holder, &both).replayed.expect("both members have a mark");
         // -12000 less 0.001 BTC bought at 1.0; BTC opened from zero takes the coin's current table
         let btc_table = fixture_table(CURRENT_TABLE);
@@ -1859,9 +1904,9 @@ mod tests {
         assert_eq!(shared.row, ReplayedRow { isolated: false, pool_positions: 2, liquidation_px: expected.clone() });
         assert_eq!(shared.mark, RowMark::of(1_000_000, 0, Some(4_000), &expected));
         assert!(shared.mark.distance_bps.is_some());
-        let earlier = ListedMarks { height: 1_000, marks: both.marks };
+        let earlier = ListedMarks { height: 1_000, marks: both.marks.clone() };
         assert_eq!(view_at(&book, holder, &earlier).replayed, None, "marks of another height");
-        let view = view_at(&book, holder, &ListedMarks { height: 1_001, marks: &[(PUMP, 4_000)] });
+        let view = view_at(&book, holder, &ListedMarks { height: 1_001, marks: vec![(PUMP, 4_000)] });
         assert_eq!((view.replayed, view.anchor_row.is_some()), (None, true), "BTC has no mark: the anchor's row");
     }
 

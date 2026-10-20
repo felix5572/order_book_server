@@ -10,9 +10,10 @@ use super::{
     checkpoint::AccountMode,
     checkpoint::{parse_checkpoint_bytes, tests::fixture},
     liquidation::{LiquidationPx, RowMark},
+    margin::MarginTable,
     marks::{MarksAt, seed::MarkSeed},
     misc::MiscEvent,
-    replay::MarginStates,
+    replay::{MarginStates, tests::per_dex_with_main_cash},
 };
 use crate::types::node_data::{Batch, NodeDataFill, NodeDataOrderStatus, OracleUpdateEvent};
 
@@ -159,8 +160,9 @@ pub(crate) fn funding_inner(deltas: &[(Address, &str, &str)]) -> String {
 }
 
 /// A parsed `replica_cmds` block of these kept actions (the line format is tested in `actions`).
+/// Block `height` at block time `height` seconds, as the test anchors.
 pub(crate) fn block_actions(height: u64, actions: &[(BlockAction, Address)]) -> BlockActions {
-    BlockActions { height, actions: actions.to_vec() }
+    BlockActions { height, time_ms: height * 1_000, actions: actions.to_vec() }
 }
 
 pub(crate) fn batch_line(block: u64, events: &str) -> String {
@@ -182,7 +184,7 @@ pub(crate) fn row() -> AnchorRow {
 /// Marks of one height for the view's tests, in price units (10^-(6 - szDecimals)).
 pub(crate) struct ListedMarks {
     pub(crate) height: u64,
-    pub(crate) marks: &'static [(&'static str, u64)],
+    pub(crate) marks: Vec<(&'static str, u64)>,
 }
 
 impl MarksAt for ListedMarks {
@@ -193,6 +195,11 @@ impl MarksAt for ListedMarks {
     fn mark(&self, coin: &str) -> Option<u64> {
         self.marks.iter().find(|(listed, _)| *listed == coin).map(|(_, mark)| *mark)
     }
+}
+
+/// The fixture checkpoint's main-dex margin table `table_id`.
+pub(crate) fn fixture_table(table_id: u32) -> MarginTable {
+    parse_checkpoint_bytes(&fixture()).unwrap().dexes[0].table(table_id).clone()
 }
 
 /// 2026-10-19T06:37:23.556 UTC, the fixture checkpoint's time.
@@ -237,5 +244,19 @@ pub(crate) fn trusted_book(holders: &[(Address, i64)]) -> AccountBook {
     book.apply_block_actions(block_actions(1_000, &[]));
     book.install_anchor(anchor(1_000, &[(PUMP, 0, holders)]));
     assert_eq!(book.availability().map(|available| available.anchor.height), Ok(1_000));
+    book
+}
+
+/// A book whose anchor at `height` holds these PUMP positions, with the fixture's margins (HOLDER default with main
+/// dex cash -12000, ISOLATED's isolated PUMP cash 12000); every block up to `applied` is applied.
+pub(crate) fn replay_book(height: u64, applied: u64, holders: &[(Address, i64)]) -> AccountBook {
+    let mut book = AccountBook::new(0);
+    book.apply_fills(fills(100, &[]));
+    book.apply_misc_events(misc(100, &[]));
+    book.apply_block_actions(block_actions(applied, &[]));
+    // the fixture's universe has BTC (szDecimals 5) on the main dex too
+    let mut first = anchor(height, &[(PUMP, 0, holders), ("BTC", 5, &[])]);
+    first.margins = per_dex_with_main_cash(-12_000_000_000);
+    book.install_anchor(first);
     book
 }

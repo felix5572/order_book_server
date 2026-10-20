@@ -11,8 +11,11 @@
 mod actions;
 mod anchor;
 mod blocks;
+pub(crate) mod candidates;
+pub(crate) mod candidates_view;
 pub(crate) mod book;
 mod checkpoint;
+mod cooldown;
 mod evidence;
 pub(crate) mod follow;
 mod liquidation;
@@ -27,6 +30,7 @@ mod replica;
 pub(crate) mod runtime;
 mod size;
 mod usdc;
+pub(crate) mod walk;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod view;

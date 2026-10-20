@@ -1,3 +1,4 @@
+use crate::accounts::candidates::MAX_CANDIDATE_DISTANCE_BPS;
 use crate::metrics::WS_SUBSCRIPTIONS_ACTIVE;
 use crate::types::node_data::{NodeDataOrderDiff, NodeDataOrderStatus};
 use crate::types::{Bbo, Fill, L2Book, L4Book, Trade};
@@ -52,6 +53,10 @@ pub(crate) enum Subscription {
     /// The account view's positions of one coin (design 000419): a snapshot, then changes; needs `--accounts`.
     #[serde(rename_all = "camelCase")]
     CoinPositions { coin: String },
+    /// The positions within `max_distance_bps` of their liquidation price, of one coin or all (design 000443): a
+    /// snapshot, then enter / update / exit; needs `--accounts`.
+    #[serde(rename_all = "camelCase")]
+    LiquidationCandidates { coin: Option<String>, max_distance_bps: u32 },
 }
 
 impl Subscription {
@@ -125,6 +130,9 @@ impl Subscription {
             // Coins of the account anchor's universe, which the book universe does not bound (it is market-filtered);
             // the owner answers an unknown coin when the snapshot is taken.
             Self::CoinPositions { coin } => !coin.is_empty(),
+            Self::LiquidationCandidates { coin, max_distance_bps } => {
+                coin.as_ref().is_none_or(|coin| !coin.is_empty()) && *max_distance_bps <= MAX_CANDIDATE_DISTANCE_BPS
+            }
         }
     }
 }
@@ -154,6 +162,7 @@ impl Subscription {
             Self::BookDiffs { .. } => "bookDiffs",
             Self::Oracle { .. } => "oracleUpdates",
             Self::CoinPositions { .. } => "coinPositions",
+            Self::LiquidationCandidates { .. } => "liquidationCandidates",
         }
     }
 }

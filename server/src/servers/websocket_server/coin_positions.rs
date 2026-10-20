@@ -1,5 +1,6 @@
-//! The `coinPositions` side of a WS connection and the `GET /coinPositions` handler (design 000419 r2 4.1 / 4.2).
-//! The account view reaches connections through its own broadcast, never the book's channel.
+//! The account view's side of a WS connection — `coinPositions` (design 000419 r2 4.1 / 4.2) and, through
+//! `liquidation_candidates`, `liquidationCandidates` (design 000443) — and the `GET /coinPositions` handler. The account
+//! view reaches connections through its own broadcast, never the book's channel.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -8,10 +9,12 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast::{self, error::RecvError};
 
-use super::{Outbound, gzip_body};
+use super::{Outbound, gzip_body, liquidation_candidates::CandidateSubscriptions};
 use crate::{
+    listeners::order_book::BookTrust,
     accounts::{
         book::QueryError,
+        candidates_view::CandidateFilter,
         publish::{AccountsFrame, CoinSubscriptionGuard},
         runtime::AccountsHandle,
         view::{CoinPositionsDto, CoinPositionsFrame},
@@ -27,19 +30,36 @@ struct Subscribed {
     version: u64,
 }
 
-/// A connection's `coinPositions` subscriptions.
-pub(super) struct CoinPositionsSession {
+/// A connection's subscriptions to the account view.
+pub(super) struct AccountsSession {
     accounts: AccountsHandle,
     /// `None` once the owner is gone.
     frames: Option<broadcast::Receiver<Arc<AccountsFrame>>>,
+    /// `coinPositions`, by coin.
     subscribed: HashMap<String, Subscribed>,
+    candidates: CandidateSubscriptions,
 }
 
-impl CoinPositionsSession {
-    pub(super) fn new(accounts: AccountsHandle) -> Self {
+impl AccountsSession {
+    /// `book`: the order book the candidates' walks read.
+    pub(super) fn new(accounts: AccountsHandle, book: BookTrust) -> Self {
         // `None` when the owner is already gone: every subscription is then refused by the snapshot query
         let frames = accounts.frames();
-        Self { accounts, frames, subscribed: HashMap::new() }
+        Self { accounts, frames, subscribed: HashMap::new(), candidates: CandidateSubscriptions::new(book) }
+    }
+
+    /// Subscribe / unsubscribe of `liquidationCandidates`. Returns false when the connection must be dropped.
+    pub(super) async fn on_candidates_message(
+        &mut self,
+        outbound: &Outbound,
+        manager: &mut SubscriptionManager,
+        client_message: ClientMessage,
+        coin: Option<String>,
+        max_distance_bps: u32,
+    ) -> bool {
+        let subscription = Subscription::LiquidationCandidates { coin: coin.clone(), max_distance_bps };
+        let filter = CandidateFilter { coin, max_distance_bps };
+        self.candidates.on_client_message(&self.accounts, outbound, manager, client_message, subscription, filter).await
     }
 
     /// The next broadcast frame; pending forever once the owner is gone. Cancel-safe.
@@ -60,12 +80,12 @@ impl CoinPositionsSession {
         let frame = match frame {
             Ok(frame) => frame,
             Err(RecvError::Lagged(missed)) => {
-                let reason = format!("slow consumer: {missed} coinPositions frames dropped");
-                return self.withdraw_all(outbound, manager, &reason).await;
+                let reason = format!("slow consumer: {missed} account view frames dropped");
+                return self.withdraw_everything(outbound, manager, &reason).await;
             }
             Err(RecvError::Closed) => {
                 self.frames = None;
-                return self.withdraw_all(outbound, manager, OWNER_GONE).await;
+                return self.withdraw_everything(outbound, manager, OWNER_GONE).await;
             }
         };
         match frame.as_ref() {
@@ -86,9 +106,16 @@ impl CoinPositionsSession {
                 subscribed.version = *version;
                 outbound.send_frame(wire.clone()).await
             }
-            AccountsFrame::WithdrawAll { reason } => self.withdraw_all(outbound, manager, reason).await,
+            AccountsFrame::WithdrawAll { reason } => self.withdraw_everything(outbound, manager, reason).await,
             AccountsFrame::WithdrawCoin { coin, reason } => self.withdraw(outbound, manager, coin, reason).await,
+            AccountsFrame::Candidates(changes) => self.candidates.on_changes(outbound, manager, changes).await,
+            AccountsFrame::CandidatesWithdrawn { reason } => self.candidates.withdraw_all(outbound, manager, reason).await,
         }
+    }
+
+    /// Ends every subscription of both feeds.
+    async fn withdraw_everything(&mut self, outbound: &Outbound, manager: &mut SubscriptionManager, reason: &str) -> bool {
+        self.withdraw_all(outbound, manager, reason).await && self.candidates.withdraw_all(outbound, manager, reason).await
     }
 
     /// Subscribe / unsubscribe of `coinPositions` for `coin`. Returns false when the connection must be dropped.
@@ -238,10 +265,10 @@ mod tests {
     }
 
     /// Subscribed to PUMP; the ack and the snapshot (version 0) consumed.
-    async fn subscribed_session(owner: &TestOwner) -> (CoinPositionsSession, Outbound, mpsc::Receiver<bytes::Bytes>, SubscriptionManager) {
+    async fn subscribed_session(owner: &TestOwner) -> (AccountsSession, Outbound, mpsc::Receiver<bytes::Bytes>, SubscriptionManager) {
         let (outbound, mut data) = outbound();
         let mut manager = SubscriptionManager::default();
-        let mut session = CoinPositionsSession::new(owner.handle.clone());
+        let mut session = AccountsSession::new(owner.handle.clone(), BookTrust::new());
         assert!(session.on_client_message(&outbound, &mut manager, subscribe(PUMP), PUMP).await);
         assert_eq!(json(&data.recv().await.unwrap())["channel"], "subscriptionResponse");
         let snapshot = json(&data.recv().await.unwrap());
@@ -271,7 +298,7 @@ mod tests {
         let owner = TestOwner::start(trusted_book(&[(user(1), 5)]));
         let (mut session, outbound, mut data, mut manager) = subscribed_session(&owner).await;
         assert!(session.on_frame(&outbound, &mut manager, Err(RecvError::Lagged(7))).await);
-        assert_eq!(json(&data.try_recv().unwrap())["data"]["reason"], "slow consumer: 7 coinPositions frames dropped");
+        assert_eq!(json(&data.try_recv().unwrap())["data"]["reason"], "slow consumer: 7 account view frames dropped");
         assert!(manager.subscriptions().is_empty());
 
         let (mut session, outbound, mut data, mut manager) = subscribed_session(&owner).await;
@@ -285,7 +312,7 @@ mod tests {
         let owner = TestOwner::start(trusted_book(&[(user(1), 5)]));
         let (outbound, mut data) = outbound();
         let mut manager = SubscriptionManager::default();
-        let mut session = CoinPositionsSession::new(owner.handle.clone());
+        let mut session = AccountsSession::new(owner.handle.clone(), BookTrust::new());
         assert!(session.on_client_message(&outbound, &mut manager, subscribe("NOPE"), "NOPE").await);
         let error = json(&data.recv().await.unwrap());
         assert_eq!(error["data"], "Unable to grab coinPositions snapshot: NOPE is not a coin of the account anchor universe");

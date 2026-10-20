@@ -199,6 +199,25 @@ impl<O: InnerOrder> OrderBook<O> {
         self.to_snapshot_in_band(PxBand::default())
     }
 
+    /// The levels a market order of side `taker` meets, best first, as (price, total size): until they hold `needed`
+    /// or `max_levels` are read. Levels only (`PriceLevel::total_sz`), no orders: cheap under the listener lock.
+    pub(crate) fn taker_levels(&self, taker: Side, needed: Sz, max_levels: usize) -> Vec<(Px, Sz)> {
+        let levels: Box<dyn Iterator<Item = (&Px, &PriceLevel<O>)>> = match taker {
+            Side::Ask => Box::new(self.bids.iter().rev()),
+            Side::Bid => Box::new(self.asks.iter()),
+        };
+        let mut held = 0_u64;
+        let mut out = Vec::new();
+        for (px, level) in levels.take(max_levels) {
+            if held >= needed.value() {
+                break;
+            }
+            held = held.saturating_add(level.total_sz().value());
+            out.push((*px, level.total_sz()));
+        }
+        out
+    }
+
     /// Snapshot restricted to price levels inside the (inclusive) band. Filtering
     /// happens at the `BTreeMap::range` level so out-of-band levels are never
     /// visited or cloned — a banded l4Book subscribe on a deep book copies a few
@@ -617,6 +636,22 @@ mod tests {
         let (bid, ask) = book.get_bbo();
         assert_eq!(bid.unwrap().0, Px::new(50)); // best bid = highest
         assert_eq!(ask.unwrap().0, Px::new(60)); // best ask = lowest
+    }
+
+    /// Design 000443 r2 revision 4: a market order's levels, best first, until they hold what it needs or the limit.
+    #[test]
+    fn test_taker_levels_stop_at_the_size_or_the_limit() {
+        let mut book = OrderBook::new();
+        let mut factory = OrderFactory::default();
+        book.add_order(factory.order(100, 40, Side::Bid));
+        book.add_order(factory.order(200, 50, Side::Bid));
+        book.add_order(factory.order(50, 50, Side::Bid));
+        book.add_order(factory.order(150, 70, Side::Ask));
+        let sold = book.taker_levels(Side::Ask, Sz::new(250), 10);
+        assert_eq!(sold, [(Px::new(50), Sz::new(250))], "the best bid level holds it");
+        assert_eq!(book.taker_levels(Side::Ask, Sz::new(251), 10), [(Px::new(50), Sz::new(250)), (Px::new(40), Sz::new(100))]);
+        assert_eq!(book.taker_levels(Side::Ask, Sz::new(1_000), 1), [(Px::new(50), Sz::new(250))], "the limit");
+        assert_eq!(book.taker_levels(Side::Bid, Sz::new(1_000), 10), [(Px::new(70), Sz::new(150))], "a buy takes the asks");
     }
 
     #[test]

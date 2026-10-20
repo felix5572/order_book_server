@@ -641,11 +641,7 @@ impl MarginStates {
         let mut others = Vec::new();
         for other in held.into_iter().filter(|other| other.coin != coin) {
             let other_market = self.markets.perps.get(other.coin)?;
-            let same_pool = match &account.pools {
-                Pools::PerDex(_) => other_market.dex == market.dex,
-                Pools::Unified(_) => self.markets.usdc_dexes[other_market.dex],
-            };
-            if !same_pool || account.isolated.contains_key(&(other_market.dex, other_market.asset)) {
+            if !self.cross_member(account, market, other_market) {
                 continue;
             }
             others.push(HeldAtMark {
@@ -661,6 +657,32 @@ impl MarginStates {
         };
         let liquidation_px = solve_held(wei_to_usdc(cash_wei), &others, size, table);
         Some(ReplayedRow { isolated: false, pool_positions: 1 + others.len(), liquidation_px })
+    }
+}
+
+impl MarginStates {
+    /// Whether `other` is a cross position of the pool of `market`'s cross position (default / disabled: the same dex;
+    /// unified: every USDC dex).
+    fn cross_member(&self, account: &AccountMargin, market: &PerpMarket, other: &PerpMarket) -> bool {
+        let same_pool = match &account.pools {
+            Pools::PerDex(_) => other.dex == market.dex,
+            Pools::Unified(_) => self.markets.usdc_dexes[other.dex],
+        };
+        same_pool && !account.isolated.contains_key(&(other.dex, other.asset))
+    }
+
+    /// The other coins of `user`'s cross pool in `coin` among `held` (design 000443 r2 revision 5); empty for an isolated
+    /// position, an account not replaying, or a coin that is not a USDC perp of the anchor.
+    pub(crate) fn cross_pool_coins<'c>(&self, user: &Address, coin: &str, held: impl IntoIterator<Item = &'c str>) -> Vec<&'c str> {
+        let Some(account) = self.accounts.get(user).filter(|account| account.stop.is_none()) else { return Vec::new() };
+        let Some(market) = self.markets.perps.get(coin).filter(|market| self.markets.usdc_dexes[market.dex]) else {
+            return Vec::new();
+        };
+        if account.isolated.contains_key(&(market.dex, market.asset)) {
+            return Vec::new();
+        }
+        let member = |other: &str| self.markets.perps.get(other).is_some_and(|other| self.cross_member(account, market, other));
+        held.into_iter().filter(|other| *other != coin && member(other)).collect()
     }
 }
 

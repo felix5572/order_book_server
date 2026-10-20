@@ -17,6 +17,7 @@ use tokio::sync::broadcast::{self, error::RecvError};
 
 use super::{
     book::{QueryError, Unavailable},
+    candidates_view::changes_json,
     publish::{AccountsFrame, CoinSubscriptionGuard},
     runtime::{AccountsHandle, start_accounts},
     view::CoinPositionsDto,
@@ -31,17 +32,17 @@ pub struct FollowOptions {
     pub coins: Vec<String>,
     /// Dump again after this long without a new anchor.
     pub dump_interval: Duration,
+    /// Every liquidation candidates refresh, one JSON line each (design 000443 acceptance).
+    pub candidates_out: Box<dyn Write + Send>,
 }
 
 /// Runs until the account view stops; returns the reason as the error.
-pub async fn run_accounts_follow(
-    data_dir: &Path,
-    options: &FollowOptions,
-    out: &mut (dyn Write + Send),
-) -> Result<()> {
-    let (accounts, owner) = start_accounts(data_dir)?;
-    let guards: Vec<CoinSubscriptionGuard> = options.coins.iter().map(|coin| accounts.acquire(coin)).collect();
-    tokio::spawn(watch_push(accounts.frames().ok_or("account owner task exited")?, guards));
+pub async fn run_accounts_follow(data_dir: &Path, options: FollowOptions, out: &mut (dyn Write + Send)) -> Result<()> {
+    let FollowOptions { coins, dump_interval, candidates_out } = options;
+    // standalone: no order book, so no book walks
+    let (accounts, owner) = start_accounts(data_dir, None)?;
+    let guards: Vec<CoinSubscriptionGuard> = coins.iter().map(|coin| accounts.acquire(coin)).collect();
+    tokio::spawn(watch_push(accounts.frames().ok_or("account owner task exited")?, guards, candidates_out));
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     let mut dumped_anchor = None;
     let mut last_dump = Instant::now();
@@ -62,14 +63,14 @@ pub async fn run_accounts_follow(
             Err(_) => continue,
         };
         let anchor = available.anchor;
-        if dumped_anchor == Some(anchor.height) && last_dump.elapsed() < options.dump_interval {
+        if dumped_anchor == Some(anchor.height) && last_dump.elapsed() < dump_interval {
             continue;
         }
-        for coin in &options.coins {
+        for coin in &coins {
             dump_coin(&accounts, coin, out).await?;
         }
         out.flush()?;
-        info!("accounts: dumped {} coins at anchor {}", options.coins.len(), anchor.height);
+        info!("accounts: dumped {} coins at anchor {}", coins.len(), anchor.height);
         dumped_anchor = Some(anchor.height);
         last_dump = Instant::now();
     }
@@ -99,15 +100,26 @@ struct PushStats {
     gaps: u64,
 }
 
-/// Receives the push for the subscribed coins (kept alive by `guards`) and checks every coin's versions run on by one.
-async fn watch_push(mut frames: broadcast::Receiver<Arc<AccountsFrame>>, guards: Vec<CoinSubscriptionGuard>) {
+/// Receives the push for the subscribed coins (kept alive by `guards`) and checks every coin's versions run on by one;
+/// records every liquidation candidates frame in `candidates_out`.
+async fn watch_push(
+    mut frames: broadcast::Receiver<Arc<AccountsFrame>>,
+    guards: Vec<CoinSubscriptionGuard>,
+    mut candidates_out: Box<dyn Write + Send>,
+) {
     let _guards = guards;
     let mut versions: HashMap<String, u64> = HashMap::new();
     let mut stats = PushStats::default();
     let mut logged = Instant::now();
     loop {
         match frames.recv().await {
-            Ok(frame) => observe(&frame, &mut versions, &mut stats),
+            Ok(frame) => {
+                observe(&frame, &mut versions, &mut stats);
+                if let Err(err) = record_candidates(&frame, &mut candidates_out) {
+                    error!("push: writing the candidates record failed: {err}; the record stops");
+                    return;
+                }
+            }
             Err(RecvError::Lagged(missed)) => {
                 error!("push: lagged, {missed} frames dropped; restarting the version checks");
                 stats.lagged += 1;
@@ -124,6 +136,17 @@ async fn watch_push(mut frames: broadcast::Receiver<Arc<AccountsFrame>>, guards:
             logged = Instant::now();
         }
     }
+}
+
+/// One line per candidates frame: the refresh in full, or the withdrawal with its reason.
+fn record_candidates(frame: &AccountsFrame, out: &mut (dyn Write + Send)) -> std::io::Result<()> {
+    let line = match frame {
+        AccountsFrame::Candidates(changes) => changes_json(changes),
+        AccountsFrame::CandidatesWithdrawn { reason } => json!({"withdrawn": reason}),
+        AccountsFrame::Coin { .. } | AccountsFrame::WithdrawAll { .. } | AccountsFrame::WithdrawCoin { .. } => return Ok(()),
+    };
+    writeln!(out, "{line}")?;
+    out.flush()
 }
 
 fn observe(frame: &AccountsFrame, versions: &mut HashMap<String, u64>, stats: &mut PushStats) {
@@ -149,6 +172,11 @@ fn observe(frame: &AccountsFrame, versions: &mut HashMap<String, u64>, stats: &m
             info!("push: {coin} withdrawn ({reason})");
             *stats.frames.entry("withdrawn").or_default() += 1;
             versions.remove(coin);
+        }
+        AccountsFrame::Candidates(_) => *stats.frames.entry("candidates").or_default() += 1,
+        AccountsFrame::CandidatesWithdrawn { reason } => {
+            info!("push: liquidation candidates withdrawn ({reason})");
+            *stats.frames.entry("candidatesWithdrawn").or_default() += 1;
         }
     }
 }

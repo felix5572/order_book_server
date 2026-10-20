@@ -14,6 +14,7 @@ use tokio::sync::broadcast;
 
 use super::{
     book::{AccountBook, QueryError, Touched},
+    candidates::{CandidateChanges, Refresh},
     marks::{MarksAt, NodeMarks},
     view::CoinPositionsFrame,
 };
@@ -31,6 +32,10 @@ pub(crate) enum AccountsFrame {
     WithdrawAll { reason: String },
     /// The coin left the anchor universe: its subscriptions end.
     WithdrawCoin { coin: String, reason: String },
+    /// One refresh of the liquidation candidates (design 000443): each candidate subscription projects it.
+    Candidates(CandidateChanges),
+    /// The liquidation candidates stopped being available: every candidate subscription ends.
+    CandidatesWithdrawn { reason: String },
 }
 
 /// Live subscriber counts per coin.
@@ -155,6 +160,15 @@ impl Publisher {
         }
     }
 
+    /// A candidates refresh as one frame.
+    pub(crate) fn publish_candidates(&self, refresh: Refresh) {
+        match refresh {
+            Refresh::Unchanged => {}
+            Refresh::Changes(changes) => self.send(AccountsFrame::Candidates(changes), "candidates"),
+            Refresh::Withdrawn(reason) => self.send(AccountsFrame::CandidatesWithdrawn { reason }, "candidatesWithdrawn"),
+        }
+    }
+
     fn send(&self, frame: AccountsFrame, kind: &str) {
         ACCOUNTS_FRAMES_TOTAL.with_label_values(&[kind]).inc();
         // an error only means no connection is listening right now
@@ -218,6 +232,7 @@ mod tests {
                 }
                 AccountsFrame::WithdrawCoin { coin, .. } => format!("{coin} withdrawn"),
                 AccountsFrame::WithdrawAll { .. } => "all withdrawn".to_string(),
+                AccountsFrame::Candidates(_) | AccountsFrame::CandidatesWithdrawn { .. } => "candidates".to_string(),
             });
         }
         kinds.sort_unstable();
@@ -242,6 +257,7 @@ mod tests {
                     AccountsFrame::Coin { version, .. } => format!("v{version} {}", wire_json(&frame)["data"]["kind"].as_str().unwrap()),
                     AccountsFrame::WithdrawAll { .. } => "withdrawn".to_string(),
                     AccountsFrame::WithdrawCoin { .. } => "coin withdrawn".to_string(),
+                    AccountsFrame::Candidates(_) | AccountsFrame::CandidatesWithdrawn { .. } => "candidates".to_string(),
                 });
             }
             kinds

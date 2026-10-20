@@ -50,6 +50,9 @@ struct PendingStatus {
     replayed: bool,
 }
 
+/// A coin's taker levels with the book's progress: (block time, height, (price, total size) best first).
+pub(super) type TakerLevelsAt = (u64, u64, Vec<(Px, crate::order_book::Sz)>);
+
 pub(super) struct OrderBookState {
     order_book: OrderBooks<InnerL4Order>,
     // Furthest block applied by either book stream: the loss bound and the
@@ -236,6 +239,17 @@ impl OrderBookState {
         band: PxBand,
     ) -> Option<(u64, u64, Snapshot<InnerL4Order>)> {
         self.order_book.snapshot_for_coin(coin, band).map(|snapshot| (self.latest.time, self.latest.height, snapshot))
+    }
+
+    /// The levels a market order meets in one coin's book, with the book's progress; `None` without its book.
+    pub(super) fn taker_levels(
+        &self,
+        coin: &Coin,
+        taker: crate::order_book::Side,
+        needed: crate::order_book::Sz,
+        max_levels: usize,
+    ) -> Option<TakerLevelsAt> {
+        self.order_book.taker_levels(coin, taker, needed, max_levels).map(|levels| (self.book_time(), self.latest.height, levels))
     }
 
     /// Incremental variant: rebuilds variants only for `changed_coins` and reuses

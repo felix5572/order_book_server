@@ -544,6 +544,30 @@ lazy_static! {
         "Checkpoints whose node mark seed broke its contract"
     ).expect("metric can be created");
 
+    /// Seconds one refresh of the liquidation candidates took (design 000443): the rows re-read and the coins evaluated.
+    pub static ref LIQUIDATION_CANDIDATES_REFRESH_SECONDS: Histogram = Histogram::with_opts(
+        HistogramOpts::new("orderbook_liquidation_candidates_refresh_seconds", "Liquidation candidates refresh time")
+            .buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
+    ).expect("metric can be created");
+
+    /// A liquidation candidates' book walk waiting for the listener lock, and holding it to copy the levels (design
+    /// 000443 r2 revision 4 acceptance).
+    pub static ref LIQUIDATION_WALK_LOCK_WAIT_SECONDS: Histogram = Histogram::with_opts(
+        HistogramOpts::new("orderbook_liquidation_walk_lock_wait_seconds", "Book walk wait for the listener lock")
+            .buckets(vec![0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5])
+    ).expect("metric can be created");
+
+    pub static ref LIQUIDATION_WALK_LOCK_HOLD_SECONDS: Histogram = Histogram::with_opts(
+        HistogramOpts::new("orderbook_liquidation_walk_lock_hold_seconds", "Book walk level copy under the listener lock")
+            .buckets(vec![0.000001, 0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05])
+    ).expect("metric can be created");
+
+    /// The published liquidation candidates (within the server's distance).
+    pub static ref LIQUIDATION_CANDIDATES: IntGauge = IntGauge::new(
+        "orderbook_liquidation_candidates",
+        "Positions within the server's distance of their liquidation price"
+    ).expect("metric can be created");
+
     /// Price actions whose cut is not unique; each reads the book at the first line not known to run before it.
     pub static ref NODE_MARKS_AMBIGUOUS_CUTS_TOTAL: IntCounter = IntCounter::new(
         "orderbook_node_marks_ambiguous_cuts_total",
@@ -637,6 +661,10 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(NODE_MARKS_SEED_FAILURES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_AMBIGUOUS_CUTS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(LIQUIDATION_CANDIDATES_REFRESH_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(LIQUIDATION_CANDIDATES.clone())).ok();
+    REGISTRY.register(Box::new(LIQUIDATION_WALK_LOCK_WAIT_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(LIQUIDATION_WALK_LOCK_HOLD_SECONDS.clone())).ok();
 
     // File watcher metrics
     REGISTRY.register(Box::new(FILE_EVENTS_TOTAL.clone())).ok();

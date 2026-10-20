@@ -1,9 +1,10 @@
 mod coin_positions;
+mod liquidation_candidates;
 
-use coin_positions::{CoinPositionsSession, coin_positions_handler};
+use coin_positions::{AccountsSession, coin_positions_handler};
 
 use crate::{
-    accounts::runtime::{AccountsHandle, start_accounts},
+    accounts::runtime::{AccountsHandle, BookSource, start_accounts},
     listeners::order_book::{
         ActiveL2Params, ActiveSubGuard, ActiveSubs, BookTrust, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey,
         L2ParamGuard, L2SnapshotParams, OrderBookListener, hl_listen_hft,
@@ -145,7 +146,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     // Lock-free trust mirror for the send paths below (design 000249 B).
     let book_trust = listener.book_trust();
     let listener = Arc::new(Mutex::new(listener));
-    let accounts = start_account_view(&config)?;
+    let accounts = start_account_view(&config, BookSource { trust: book_trust.clone(), listener: listener.clone() })?;
     let listener_task = {
         let listener = listener.clone();
         let config = config.clone();
@@ -301,11 +302,11 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
 
 /// Starts the account view when `--accounts` is set. Its owner ending leaves the view answering 503 (design 000419 r3
 /// revision 4); the book keeps serving.
-fn start_account_view(config: &ServerConfig) -> Result<Option<AccountsHandle>> {
+fn start_account_view(config: &ServerConfig, book: BookSource) -> Result<Option<AccountsHandle>> {
     if !config.accounts {
         return Ok(None);
     }
-    let (accounts, owner) = start_accounts(&config.resolved_data_dir()?)?;
+    let (accounts, owner) = start_accounts(&config.resolved_data_dir()?, Some(book))?;
     tokio::spawn(async move {
         let ended = owner.await;
         error!("Accounts owner task ended; the account view stays unavailable until restart: {ended:?}");
@@ -455,7 +456,7 @@ async fn handle_socket(
     // releases everything, mirroring l2_param_guards.
     let mut sub_guards: HashMap<Subscription, Vec<ActiveSubGuard>> = HashMap::new();
     // Joined at connect time, like the book's broadcast above.
-    let mut coin_positions = accounts.map(CoinPositionsSession::new);
+    let mut coin_positions = accounts.map(|accounts| AccountsSession::new(accounts, book_trust.clone()));
 
     // Split the socket into an owned write half (driven by the writer task) and
     // a read half polled by this session task. Every send enqueues onto a
@@ -547,7 +548,7 @@ async fn run_session(
     l2_param_guards: &mut HashMap<L2SnapshotParams, L2ParamGuard>,
     active_subs: &ActiveSubs,
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
-    coin_positions: &mut Option<CoinPositionsSession>,
+    coin_positions: &mut Option<AccountsSession>,
     listener: &Arc<Mutex<OrderBookListener>>,
     l4_cache: &Arc<L4SnapshotCache>,
     book_trust: &BookTrust,
@@ -855,7 +856,7 @@ async fn receive_client_message(
     l2_param_guards: &mut HashMap<L2SnapshotParams, L2ParamGuard>,
     active_subs: &ActiveSubs,
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
-    coin_positions: &mut Option<CoinPositionsSession>,
+    coin_positions: &mut Option<AccountsSession>,
 ) -> bool {
     let subscription = match &client_message {
         ClientMessage::Unsubscribe { subscription } | ClientMessage::Subscribe { subscription } => subscription.clone(),
@@ -881,6 +882,13 @@ async fn receive_client_message(
                 .await;
         };
         return session.on_client_message(outbound, manager, client_message, coin).await;
+    }
+    if let Subscription::LiquidationCandidates { coin, max_distance_bps } = subscription {
+        let Some(session) = coin_positions.as_mut() else {
+            let refused = "liquidationCandidates needs the server started with --accounts".to_string();
+            return outbound.send_message(ServerResponse::Error(refused)).await;
+        };
+        return session.on_candidates_message(outbound, manager, client_message, coin, max_distance_bps).await;
     }
 
     let (word, success) = match &client_message {
@@ -973,7 +981,7 @@ async fn receive_client_message(
 
 /// The next account view frame of a connection; pending forever without `--accounts`. Cancel-safe.
 async fn next_coin_positions_frame(
-    session: &mut Option<CoinPositionsSession>,
+    session: &mut Option<AccountsSession>,
 ) -> std::result::Result<Arc<crate::accounts::publish::AccountsFrame>, tokio::sync::broadcast::error::RecvError> {
     match session {
         Some(session) => session.next_frame().await,
@@ -2149,6 +2157,32 @@ mod tests {
         ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
         let refused = next_json(&mut ws).await;
         assert_eq!((refused["channel"].as_str(), refused["data"].as_str()), (Some("error"), Some("coinPositions needs the server started with --accounts")));
+        server.abort();
+    }
+
+    /// Design 000443: a candidates subscription needs `--accounts`, a threshold up to 1,000 bp and trusted candidates
+    /// (the test owner has no node marks: the snapshot is refused, the connection stays up).
+    #[tokio::test]
+    #[allow(clippy::future_not_send)]
+    async fn test_liquidation_candidates_are_refused_until_available() {
+        use crate::accounts::{
+            runtime::TestOwner,
+            test_support::{trusted_book, user},
+        };
+        let subscribe = |max: u32| format!(r#"{{"method":"subscribe","subscription":{{"type":"liquidationCandidates","coin":null,"maxDistanceBps":{max}}}}}"#);
+        let (mut ws, server) = coin_positions_server(None).await;
+        ws.send(FrameView::text(subscribe(200).into_bytes())).await.unwrap();
+        assert_eq!(next_json(&mut ws).await["data"], "liquidationCandidates needs the server started with --accounts");
+        server.abort();
+        let owner = TestOwner::start(trusted_book(&[(user(1), 5)]));
+        let (mut ws, server) = coin_positions_server(Some(owner.handle.clone())).await;
+        ws.send(FrameView::text(subscribe(1_001).into_bytes())).await.unwrap();
+        assert!(next_json(&mut ws).await["data"].as_str().unwrap().starts_with("Invalid subscription"));
+        ws.send(FrameView::text(subscribe(200).into_bytes())).await.unwrap();
+        let refused = next_json(&mut ws).await;
+        assert_eq!(refused["data"], "Unable to grab liquidationCandidates snapshot: the liquidation candidates are not available");
+        ws.send(FrameView::text(r#"{"method":"ping"}"#.as_bytes().to_vec())).await.unwrap();
+        assert_eq!(next_json(&mut ws).await["channel"], "pong", "the connection stays up");
         server.abort();
     }
 

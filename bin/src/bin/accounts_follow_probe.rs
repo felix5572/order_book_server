@@ -27,6 +27,9 @@ struct Args {
     /// Dump again after this many seconds without a new anchor
     #[arg(long)]
     dump_interval_secs: u64,
+    /// Liquidation candidates record, one JSON object per refresh
+    #[arg(long)]
+    candidates_out: PathBuf,
 }
 
 #[tokio::main]
@@ -34,6 +37,8 @@ async fn main() -> server::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
     let mut out = BufWriter::new(File::create(&args.out)?);
-    let options = server::FollowOptions { coins: args.coins, dump_interval: Duration::from_secs(args.dump_interval_secs) };
-    server::run_accounts_follow(&args.data_dir, &options, &mut out).await
+    let candidates_out = Box::new(BufWriter::new(File::create(&args.candidates_out)?));
+    let options =
+        server::FollowOptions { coins: args.coins, dump_interval: Duration::from_secs(args.dump_interval_secs), candidates_out };
+    server::run_accounts_follow(&args.data_dir, options, &mut out).await
 }
