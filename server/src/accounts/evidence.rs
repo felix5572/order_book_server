@@ -12,6 +12,7 @@ use serde_json::json;
 use super::{
     book::{RowMismatch, SilentChange},
     liquidation::LiquidationPx,
+    marks::{Hip3Mismatch, seed::StoredMark},
     misc::MiscEvent,
     replay::Mismatch,
     size::format_size_raw,
@@ -141,6 +142,20 @@ pub(crate) fn replay_row_mismatch_json(mismatch: &RowMismatch, anchor_from: Opti
         "replayed": mismatch.replayed.as_ref().map(|row| json!({"isolated": row.isolated, "liquidationPx": price(&row.liquidation_px)})),
         "anchor": json!({"isolated": mismatch.anchor.isolated, "poolPositions": mismatch.anchor.pool_positions,
                           "liquidationPx": price(&mismatch.anchor.liquidation_px)}),
+    })
+}
+
+/// A HIP-3 coin whose mark in the marks' snapshot differs from the checkpoint's (design 000439 r2 revision 2).
+pub(crate) fn hip3_mark_mismatch_json(mismatch: &Hip3Mismatch, seed_from: Option<u64>, seed_to: u64) -> serde_json::Value {
+    let mark = |mark: Option<StoredMark>| mark.map(|mark| json!({"px": mark.px, "timeNs": mark.time_ns}));
+    json!({
+        "kind": "nodeMarkMismatch",
+        "market": "hip3",
+        "seedFrom": seed_from,
+        "seedTo": seed_to,
+        "coin": mismatch.coin,
+        "replayed": mark(mismatch.replayed),
+        "checkpoint": mark(mismatch.checkpoint),
     })
 }
 

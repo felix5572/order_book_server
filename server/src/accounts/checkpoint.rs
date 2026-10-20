@@ -1,6 +1,7 @@
 //! Account state of one node checkpoint (`periodic_abci_states/<day>/<height>.rmp`: `MessagePack`, string keys).
 //!
-//! Only the fields the liquidation computation needs are read; every other key is skipped. The meanings below were
+//! Only the fields the liquidation computation needs are read; every other key is skipped. The same pass reads the
+//! node marks' seed (`marks::seed`: the main dex's oracle state and books), which is checked there. The meanings below were
 //! measured against the node's own answers (research `hl_account_state_verify_20261019`, design 000419 r4), not taken
 //! from an official schema, so a missing required field fails the parse instead of being guessed. The node omits
 //! zero values (`u`, `s`): an absent one is 0, which the checkpoint-to-checkpoint cash reconciliation confirmed.
@@ -16,7 +17,10 @@ use serde::{
     de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 
-use super::margin::MarginTable;
+use super::{
+    margin::MarginTable,
+    marks::seed::{WireNativeBooks, WireNativePrices, WireOracle, WirePx},
+};
 use crate::prelude::Result;
 
 /// A position omits `M` while it still uses the single-tier 20x table: on 2026-10-19 every such position the node was
@@ -52,6 +56,8 @@ pub(crate) struct CheckpointAccounts {
     /// Every spot pair by index: the `N` of a spot fill's coin `@N` (`scl.meta.spot_infos[N].tokens = [base, quote]`;
     /// on 1190480000 the node's `spotMeta` listed 336 pairs, every one at its index here).
     pub(crate) spot_pairs: Vec<SpotPair>,
+    /// The first clearinghouse's oracle state and the main dex's books, for `MarkSeed::from_checkpoint`.
+    pub(crate) native_prices: WireNativePrices,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +145,8 @@ pub(crate) struct AssetMeta {
     /// (slots are [oracle, mark, external perp]; slot 1 matched the node mark for 10/10 main and 306/306 HIP-3 coins).
     /// `None` when the asset stores no price.
     pub(crate) mark_raw: Option<u64>,
+    /// `pxs2[asset][1].u`: when the node set the stored mark (block time, unix ns); `None` without one.
+    pub(crate) mark_time_ns: Option<u64>,
     pub(crate) margin_mode: AssetMarginMode,
     /// `marginTableId`: the table a position opened from zero takes (research "新开仓位的档位表", 603/603); it resolves
     /// in the dex's tables (checked at parse time).
@@ -239,9 +247,11 @@ struct WireCheckpoint {
     exchange: WireExchange,
 }
 
+/// `locus` precedes `perp_dexs` on disk (1190680000); the order does not matter to the parse.
 #[derive(Deserialize)]
 struct WireExchange {
     locus: ParsedLocus,
+    perp_dexs: WireNativeBooks,
 }
 
 #[derive(Deserialize)]
@@ -285,16 +295,6 @@ struct WireTier {
     lower_bound: i64,
     max_leverage: u32,
     maintenance_deduction: i64,
-}
-
-#[derive(Deserialize)]
-struct WireOracle {
-    pxs2: Vec<Vec<WirePx>>,
-}
-
-#[derive(Deserialize)]
-struct WirePx {
-    p: i64,
 }
 
 #[derive(Deserialize)]
@@ -644,28 +644,30 @@ pub(crate) fn parse_checkpoint_file(path: &Path) -> Result<CheckpointAccounts> {
     let reader = BufReader::with_capacity(1 << 20, file);
     let wire: WireCheckpoint =
         rmp_serde::from_read(reader).map_err(|err| format!("decode checkpoint {}: {err}", path.display()))?;
-    build(wire.exchange.locus).map_err(|err| format!("checkpoint {}: {err}", path.display()).into())
+    build(wire.exchange).map_err(|err| format!("checkpoint {}: {err}", path.display()).into())
 }
 
 /// Parse an in-memory checkpoint (tests).
 #[cfg(test)]
 pub(crate) fn parse_checkpoint_bytes(bytes: &[u8]) -> Result<CheckpointAccounts> {
     let wire: WireCheckpoint = rmp_serde::from_slice(bytes).map_err(|err| format!("decode checkpoint: {err}"))?;
-    build(wire.exchange.locus).map_err(Into::into)
+    build(wire.exchange).map_err(Into::into)
 }
 
-fn build(locus: ParsedLocus) -> std::result::Result<CheckpointAccounts, String> {
-    let time = NaiveDateTime::parse_from_str(&locus.ctx.time, "%Y-%m-%dT%H:%M:%S%.f")
-        .map_err(|err| format!("ctx.time {:?}: {err}", locus.ctx.time))?;
-    let time_ms = u64::try_from(time.and_utc().timestamp_millis()).map_err(|err| format!("ctx.time before 1970: {err}"))?;
+fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, String> {
+    let WireExchange { locus, perp_dexs } = exchange;
+    let time_ms = node_time_ns(&locus.ctx.time).map_err(|err| format!("ctx.time: {err}"))? / 1_000_000;
     let mut dexes = Vec::with_capacity(locus.cls.len());
     let mut dex_users = Vec::with_capacity(locus.cls.len());
-    for clearinghouse in locus.cls {
-        let pdi = clearinghouse.meta.pdi;
-        let (meta, users) = build_dex(clearinghouse).map_err(|err| format!("dex pdi {pdi}: {err}"))?;
+    let mut first_oracle = None;
+    for WireClearinghouse { meta, oracle, user_states } in locus.cls {
+        let pdi = meta.pdi;
+        let (meta, users) = build_dex(meta, &oracle.pxs2, user_states).map_err(|err| format!("dex pdi {pdi}: {err}"))?;
+        first_oracle.get_or_insert(oracle);
         dexes.push(meta);
         dex_users.push(users);
     }
+    let native_prices = WireNativePrices { oracle: first_oracle.ok_or("locus.cls is empty")?, books: perp_dexs.0 };
     let holders: Vec<Address> = {
         let mut holders: Vec<Address> = dex_users
             .iter()
@@ -697,7 +699,16 @@ fn build(locus: ParsedLocus) -> std::result::Result<CheckpointAccounts, String> 
         accounts.insert(user, Account { mode, spot, lending, dex_states });
     }
     let spot_pairs = spot_pairs(&locus.spot.pairs, &locus.spot.tokens)?;
-    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral, reserves, accounts, spot_pairs })
+    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral, reserves, accounts, spot_pairs, native_prices })
+}
+
+/// A node time (`2026-10-19T22:09:38.119428098`, UTC, up to nanoseconds) in unix ns.
+pub(crate) fn node_time_ns(text: &str) -> std::result::Result<u64, String> {
+    let time = NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").map_err(|err| format!("time {text:?}: {err}"))?;
+    time.and_utc()
+        .timestamp_nanos_opt()
+        .and_then(|nanos| u64::try_from(nanos).ok())
+        .ok_or_else(|| format!("time {text:?} outside unix ns"))
 }
 
 fn spot_pairs(pairs: &[(u32, u32)], tokens: &[WireTokenSpec]) -> std::result::Result<Vec<SpotPair>, String> {
@@ -821,31 +832,44 @@ fn lending_shares(
     Ok(out)
 }
 
-fn build_dex(clearinghouse: WireClearinghouse) -> std::result::Result<(DexMeta, FxHashMap<Address, DexAccount>), String> {
-    let WireClearinghouse { meta, oracle, user_states } = clearinghouse;
+fn build_dex(
+    meta: WireMeta,
+    pxs2: &[Vec<WirePx>],
+    user_states: WireUserStates,
+) -> std::result::Result<(DexMeta, FxHashMap<Address, DexAccount>), String> {
     let name = dex_name(&meta.universe)?;
-    if oracle.pxs2.len() != meta.universe.len() {
-        return Err(format!("pxs2 has {} assets, universe {}", oracle.pxs2.len(), meta.universe.len()));
+    if pxs2.len() != meta.universe.len() {
+        return Err(format!("pxs2 has {} assets, universe {}", pxs2.len(), meta.universe.len()));
     }
     let assets = meta
         .universe
         .into_iter()
-        .zip(oracle.pxs2)
+        .zip(pxs2)
         .map(|(asset, pxs)| {
             // AssetMeta::mark_px relies on szDecimals <= MAX_PERP_DECIMALS
             if asset.sz_decimals > MAX_PERP_DECIMALS {
                 return Err(format!("{}: szDecimals {} above {MAX_PERP_DECIMALS}", asset.name, asset.sz_decimals));
             }
             // stored prices are integers in 10^-(6 - szDecimals)
-            let mark_raw = match pxs.as_slice() {
-                [] => None,
-                [_, mark, ..] if mark.p > 0 => Some(mark.p.unsigned_abs()),
+            let (mark_raw, mark_time_ns) = match pxs.as_slice() {
+                [] => (None, None),
+                [_, mark, ..] if mark.p > 0 => {
+                    let time_ns = mark.u.as_deref().map(node_time_ns).transpose().map_err(|err| format!("{}: mark {err}", asset.name))?;
+                    (Some(mark.p.unsigned_abs()), time_ns)
+                }
                 [_, mark, ..] => return Err(format!("{}: stored mark {} is not positive", asset.name, mark.p)),
                 [_] => return Err(format!("{}: pxs2 has one slot, the mark is slot 1", asset.name)),
             };
             let margin_mode = AssetMarginMode::of(&asset.margin_mode);
             let margin_table_id = asset.margin_table_id;
-            Ok(AssetMeta { name: asset.name, size_decimals: asset.sz_decimals, mark_raw, margin_mode, margin_table_id })
+            Ok(AssetMeta {
+                name: asset.name,
+                size_decimals: asset.sz_decimals,
+                mark_raw,
+                mark_time_ns,
+                margin_mode,
+                margin_table_id,
+            })
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
     let mut tables = FxHashMap::default();
@@ -913,6 +937,7 @@ pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::accounts::marks::seed::tests::VALIDATOR;
 
     pub(crate) const HOLDER: &str = "0x00000000000000000000000000000000000000aa";
     const CASH_ONLY: &str = "0x00000000000000000000000000000000000000bb";
@@ -945,10 +970,7 @@ pub(crate) mod tests {
                                 "collateralToken": 0,
                                 "collateralTokenName": "USDC"
                             },
-                            "oracle": {"pxs2": [
-                                [{"u": "t", "p": 828_908, "d": 1}, {"u": "t", "p": 828_576, "d": 1}, {"u": "t", "p": 828_554, "d": 1}],
-                                [{"u": "t", "p": 4479, "d": 1}, {"u": "t", "p": 4477, "d": 1}, {"u": "t", "p": 4476, "d": 1}]
-                            ], "ror": {}},
+                            "oracle": native_oracle_fixture(),
                             "user_states": {
                                 "user_to_state": [
                                     [HOLDER, {"u": -12_000_000_000_i64, "p": {"p": [
@@ -975,7 +997,7 @@ pub(crate) mod tests {
                                 "collateralToken": 0,
                                 "collateralTokenName": "USDC"
                             },
-                            "oracle": {"pxs2": [[{"u": "t", "p": 357_970, "d": 1}, {"u": "t", "p": 358_320, "d": 1}, {"u": "t", "p": 357_970, "d": 1}]]},
+                            "oracle": hip3_oracle_fixture(json!([[{"u": T22, "p": 357_970, "d": 1}, {"u": T22, "p": 358_320, "d": 1}, {"u": T22, "p": 357_970, "d": 1}]])),
                             "user_states": {"user_to_state": [
                                 [HOLDER, {"u": 30_269_700, "p": {"p": [[10_000, {"l": {"I": {"l": 3, "u": 0}}, "M": 10}]]}}],
                                 [PORTFOLIO, {"u": 1_000_000, "p": {"p": [[10_000, {"s": 1000, "l": {"I": {"u": -300_000_000_i64}}, "M": 10}]]}}]
@@ -989,7 +1011,7 @@ pub(crate) mod tests {
                                 "collateralToken": 360,
                                 "collateralTokenName": "USDH"
                             },
-                            "oracle": {"pxs2": [[{"u": "t", "p": 41_883_000, "d": 1}, {"u": "t", "p": 41_883_000, "d": 1}, {"u": "t", "p": 41_883_000, "d": 1}]]},
+                            "oracle": hip3_oracle_fixture(json!([[{"u": T22, "p": 41_883_000, "d": 1}, {"u": T22, "p": 41_883_000, "d": 1}, {"p": 41_883_000, "d": 1}]])),
                             "user_states": {"user_to_state": [[HOLDER, {"u": -4_000_000_000_i64, "p": {"p": [[20_000, {"s": 100, "M": 10}]]}}]]}
                         }
                     ],
@@ -999,7 +1021,9 @@ pub(crate) mod tests {
                         [PORTFOLIO, {"b": [[0, {}], [150, {"t": 1_000_000_000}], [299, {"t": 7, "e": 1}]]}]
                     ]},
                     "ust": [[HOLDER, {"a": "u", "C": 1, "s": "v"}], [CASH_ONLY, {"s": "v"}], [ISOLATED, {"P": 1}], [PORTFOLIO, {"a": "p"}]]
-                }
+                },
+                "perp_dexs": books_fixture(),
+                "spot_books": []
             }
         });
         let mut checkpoint = checkpoint;
@@ -1019,6 +1043,62 @@ pub(crate) mod tests {
         let spot_infos = json!([{"tokens": [1, 0], "deploy_time": "1970-01-01T00:00:00"}, {"tokens": [150, 0]}, {"tokens": [150, 360]}]);
         checkpoint["exchange"]["locus"]["scl"]["meta"] = json!({"token_infos": token_infos, "spot_infos": spot_infos});
         rmp_serde::to_vec(&checkpoint).unwrap()
+    }
+
+    const T22: &str = "2026-10-19T06:37:22";
+    const T23: &str = "2026-10-19T06:37:23";
+
+    /// The main dex's oracle in the 10-19/20 layout: BTC priced (one validator in each cache, plus a named HYPE input),
+    /// PUMP a coin the node no longer prices (no EMAs, empty `Spot` and `ExternalPerp` caches, no median).
+    fn native_oracle_fixture() -> serde_json::Value {
+        let bucket = json!({"last_bucket": 597_463_947, "bucket_millis": 3000});
+        let old_bucket = json!({"last_bucket": 593_580_423, "bucket_millis": 3000});
+        let member = |value: u64| json!([[VALIDATOR, {"t": T22, "v": value}]]);
+        let ema = |num: f64, denom: f64, decay: f64, samples: u64| {
+            json!({"num": num, "denom": denom, "decay_duration": decay, "last_sample_time": T23, "n_samples": samples})
+        };
+        json!({
+            "pxs2": [
+                [{"u": T23, "p": 828_908, "d": 1}, {"u": T23, "p": 828_576, "d": 1}, {"u": T23, "p": 828_554, "d": 1}],
+                [{"u": T23, "p": 4479, "d": 1}, {"u": T23, "p": 4477, "d": 1}, {"p": 4476, "d": 1}]
+            ],
+            "err_dur_guard": {"err_duration": 60.0},
+            "ror": {"ktm": [
+                [{"p": [0, "Spot"]}, {"v": member(828_720), "m": 828_720, "b": bucket}],
+                [{"p": [0, "Mark"]}, {"v": member(828_590), "m": 828_590, "b": bucket}],
+                [{"p": [0, "ExternalPerp"]}, {"v": member(828_554), "m": 828_554, "b": bucket}],
+                [{"s": "usdtUsdcPx"}, {"v": member(998_886), "m": 998_886, "b": bucket}],
+                [{"p": [1, "Spot"]}, {"v": [], "m": null, "b": old_bucket}],
+                [{"p": [1, "Mark"]}, {"v": member(4477), "m": null, "b": old_bucket}],
+                [{"p": [1, "ExternalPerp"]}, {"v": [], "m": null, "b": old_bucket}]
+            ], "utl": [], "roc": {}},
+            "msoe": {"e": [[0, ema(-0.04, 371.5, 120.0, 2_244_587)]], "g": 1},
+            "lmpe": [[0, ema(7_696_308.0, 93.5, 30.0, 269_229)]],
+            "psro": [],
+            "pmep": []
+        })
+    }
+
+    /// A HIP-3 dex's oracle: the same keys, its caches not read.
+    fn hip3_oracle_fixture(pxs2: serde_json::Value) -> serde_json::Value {
+        json!({"pxs2": pxs2, "ror": {"ktm": [[{"p": [0, "Mark"]}, {"v": [], "m": null, "b": {"last_bucket": 1, "bucket_millis": 1000}}]]},
+               "msoe": {"e": []}, "lmpe": []})
+    }
+
+    /// `perp_dexs`: the main dex's books (BTC with two orders around a free slot; PUMP empty), then a HIP-3 dex whose
+    /// books are skipped unread (a slot of no known kind).
+    fn books_fixture() -> serde_json::Value {
+        json!([
+            {"books": [
+                {"halfs": [{"levels": []}, {"levels": []}], "asset": 0, "last_trade_px": 828_600, "total_sz": 8, "bod": {"e": [
+                    {"o": {"o": 7, "r": 3, "O": 3, "u": HOLDER, "t": "Gtc", "c": {"t": 1, "S": 3, "s": "B", "l": 828_500}}},
+                    {"v": 2},
+                    {"o": {"n": 1, "o": 9, "r": 5, "u": HOLDER, "t": null, "c": {"t": 2, "S": 6, "s": "A", "l": 828_700}}}
+                ], "l": 2, "n": 3}},
+                {"asset": 1, "last_trade_px": 4477, "bod": {"e": [], "l": 0, "n": 0}}
+            ], "funding_tracker": {}, "twap_tracker": {}},
+            {"books": [{"asset": 10_000, "last_trade_px": 358_300, "bod": {"e": [{"x": 1}]}}]}
+        ])
     }
 
     /// The 10-19 reserve layout: `l` = [borrow side, supply side] with pool index `i` and per-account cap `u`.

@@ -12,12 +12,33 @@ use super::{
     misc::MiscEvent,
     replay::MarginStates,
 };
-use crate::types::node_data::{Batch, NodeDataFill};
+use crate::types::node_data::{Batch, NodeDataFill, OracleUpdateEvent};
 
 pub(crate) const PUMP: &str = "PUMP";
 /// The table of a test anchor's positions, and the coins' current table (the fixture's PUMP: 52, a 10x table).
 pub(crate) const ANCHOR_TABLE: u32 = 20;
 pub(crate) const CURRENT_TABLE: u32 = 52;
+
+/// The block time of `hip3_line`, unix ns (2026-10-19T06:40:00.5 UTC).
+pub(crate) const HIP3_LINE_TIME_NS: u64 = 1_792_392_000_500_000_000;
+
+/// A `hip3_oracle_updates_streaming` line of one deployer's update writing `marks` [(coin, px)] at the block's time,
+/// in the field set of 2026-10-20.
+pub(crate) fn hip3_line(block: u64, marks: &[(&str, &str)]) -> Batch<OracleUpdateEvent> {
+    let time = "2026-10-19T06:40:00.5";
+    let written: Vec<String> = marks
+        .iter()
+        .map(|(coin, px)| format!(r#"["{coin}",{{"px":"{px}","last_update_time":"{time}","daily_px":"{px}"}}]"#))
+        .collect();
+    let event = format!(
+        r#"{{"update_class":"Normal","mark_px_inputs":[],"spot_px_inputs":[],"external_perp_px_inputs":[],"oracle_pxs":{{"coin_to_mark_px":[{}],"coin_to_oracle_px":[],"coin_to_external_perp_px":[]}}}}"#,
+        written.join(",")
+    );
+    sonic_rs::from_str(&format!(
+        r#"{{"local_time":"{time}","block_time":"{time}","block_number":{block},"events":[{event}]}}"#
+    ))
+    .unwrap()
+}
 
 pub(crate) fn user(byte: u8) -> Address {
     Address::repeat_byte(byte)

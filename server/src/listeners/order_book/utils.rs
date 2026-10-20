@@ -77,7 +77,7 @@ fn checkpoint_height(path: &Path) -> Option<u64> {
 /// The node's checkpoint grid as `(newest height, interval)`, read from the two
 /// newest checkpoints - the node's own cadence, no hard-coded interval. The
 /// hl_node_ops retention always keeps the newest two.
-pub(super) fn checkpoint_grid(checkpoints: &[Checkpoint]) -> Result<(u64, u64)> {
+pub(crate) fn checkpoint_grid(checkpoints: &[Checkpoint]) -> Result<(u64, u64)> {
     let [.., previous, newest] = checkpoints else {
         return Err(format!(
             "need two periodic abci checkpoints to infer the node's grid, found {}",

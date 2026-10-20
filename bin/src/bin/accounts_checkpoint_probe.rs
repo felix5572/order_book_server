@@ -1,5 +1,6 @@
 //! Parse one node checkpoint and write every position's checkpoint-anchored liquidation price as JSON lines
-//! (design 000419, batch 1 acceptance). Prints the parse time and the process peak RSS.
+//! (design 000419, batch 1 acceptance), and optionally the node marks' seed (design 000439). Prints the parse time and
+//! the process peak RSS.
 
 use std::{fs::File, io::BufWriter, io::Write, path::PathBuf};
 
@@ -24,20 +25,29 @@ struct Args {
     /// Output file, one JSON object per position
     #[arg(long)]
     out: PathBuf,
+    /// Also write the node marks' seed here: one JSON object per main-dex asset (with its orders), then per HIP-3 coin
+    #[arg(long)]
+    mark_seed: Option<PathBuf>,
 }
 
 fn main() -> server::Result<()> {
     let args = Args::parse();
     let mut out = BufWriter::new(File::create(&args.out)?);
-    let summary = server::run_checkpoint_probe(&args.checkpoint, &args.coins, &mut out)?;
+    let mut seed_out = args.mark_seed.as_ref().map(File::create).transpose()?.map(BufWriter::new);
+    let seed_writer = seed_out.as_mut().map(|seed| -> &mut dyn Write { seed });
+    let summary = server::run_checkpoint_probe(&args.checkpoint, &args.coins, &mut out, seed_writer)?;
     out.flush()?;
+    if let Some(seed_out) = seed_out.as_mut() {
+        seed_out.flush()?;
+    }
     println!(
-        "height {} time_ms {} parse_seconds {:.2} accounts {} rows {} peak_rss_kb {}",
+        "height {} time_ms {} parse_seconds {:.2} accounts {} rows {} seed_orders {:?} peak_rss_kb {}",
         summary.height,
         summary.time_ms,
         summary.parse_seconds,
         summary.accounts,
         summary.rows,
+        summary.seed_orders,
         peak_rss_kb()?
     );
     Ok(())

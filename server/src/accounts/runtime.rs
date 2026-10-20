@@ -1,10 +1,12 @@
-//! Process wiring of the account view (design 000419 r2 3.1 / 3.4, 000429 r2, 000433 r3): the fills, misc events and
-//! block actions line watchers, the checkpoint poller thread and the owner task holding the `AccountBook`. Every input
-//! reaches the owner through a bounded channel whose full state blocks the producer, so a backlog stays in the node's
-//! files. Lines are parsed on the watcher threads; the owner hands them to the block assembly and applies the complete
-//! blocks it releases, in height order. The fills and misc events watchers also send read-through proofs, in line
-//! with their data; block actions lines carry the instant they were read. A finished watcher or poller stops the view
-//! for good (503 until restart); a gone owner answers every query with the same.
+//! Process wiring of the account view (design 000419 r2 3.1 / 3.4, 000429 r2, 000433 r3) and the node marks (design
+//! 000439 r2): the fills, misc events, HIP-3 oracle updates and block actions line watchers, the checkpoint poller
+//! thread and the owner task holding the `AccountBook` and the `NodeMarks`. Every input reaches the owner through a
+//! bounded channel whose full state blocks the producer, so a backlog stays in the node's files. Lines are parsed on the
+//! watcher threads; the owner hands them to the block assembly and applies the complete blocks it releases, in height
+//! order, to the marks and then to the account view. The other watchers also send read-through proofs, in line with
+//! their data; block actions lines carry the instant they were read. Each loss goes to both owners, which keep the
+//! streams they read. A finished watcher or poller stops the view for good (503 until restart); a gone owner answers
+//! every query with the same.
 
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
@@ -21,20 +23,24 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use super::{
     actions::{BlockActions, line_height, parse_block_actions},
     anchor::Anchor,
-    blocks::{Assembly, BlockAssembler, MiscKey},
+    blocks::{Assembly, BlockAssembler, LineKey},
     book::{
         AccountBook, BlockActionsReport, BlockReport, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport,
         QueryError, ReplayCheck, RowCheck, Stream, Touched, Unavailable,
     },
     checkpoint::parse_checkpoint_file,
+    marks::{CheckpointGrid, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild, seed::MarkSeed},
     misc::MiscEvent,
-    evidence::{LineEvidence, fill_line_reason, misc_line_reason, replay_mismatch_json, replay_row_mismatch_json, silent_change_json},
+    evidence::{
+        LineEvidence, fill_line_reason, hip3_mark_mismatch_json, misc_line_reason, replay_mismatch_json,
+        replay_row_mismatch_json, silent_change_json,
+    },
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, Publisher},
 };
 use crate::{
     listeners::order_book::{
         parallel::{FileLayout, LineStream, spawn_line_watcher},
-        utils::list_checkpoints,
+        utils::{checkpoint_grid, list_checkpoints},
     },
     metrics::{
         ACCOUNTS_ANCHOR_HEIGHT, ACCOUNTS_ANCHOR_PARSE_SECONDS, ACCOUNTS_ANCHOR_SKIPPED_TOTAL, ACCOUNTS_EVIDENCE_TOTAL,
@@ -42,9 +48,12 @@ use crate::{
         ACCOUNTS_HELD_FILLS, ACCOUNTS_OPEN_POSITIONS, ACCOUNTS_PENDING_BLOCKS, ACCOUNTS_REPLAY_CHECKED_TOTAL,
         ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL, ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL, ACCOUNTS_REPLAY_STOPPED_TOTAL, ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL,
         ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL, ACCOUNTS_STREAM_HEIGHT, ACCOUNTS_TRUSTED, ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL,
+        NODE_MARKS_AVAILABLE, NODE_MARKS_CHECKED_TOTAL, NODE_MARKS_CHECKS_SKIPPED_TOTAL, NODE_MARKS_HEIGHT,
+        NODE_MARKS_LOGGED_UPDATES, NODE_MARKS_REBUILDS_TOTAL, NODE_MARKS_SEED_FAILURES_TOTAL, NODE_MARKS_SEED_HEIGHT,
+        NODE_MARKS_UNKNOWN_COIN_UPDATES_TOTAL,
     },
     prelude::Result,
-    types::node_data::{Batch, NodeDataFill},
+    types::node_data::{Batch, NodeDataFill, OracleUpdateEvent},
 };
 
 /// Same bound as the book's watchers. A Funding line (one per dex per hour) is the largest item: ~300k users.
@@ -52,6 +61,8 @@ const INPUT_CHANNEL_CAPACITY: usize = 10_000;
 /// One Funding line of the main dex measured 42 MB (2026-10-19), above the book streams' 16 MiB cap.
 const MISC_EVENTS_MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
 const FILLS_MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+/// One deployer's update per line: ~44 coins on average, 4 price lists each (2026-10-20 11 UTC).
+const HIP3_ORACLE_UPDATES_MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// The largest `replica_cmds` line measured 6.4 MB (bm, 2026-10-19).
 const BLOCK_ACTIONS_MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 /// Checkpoints appear complete (a new file has its final size at first sight, 2026-10-19), every ~12 minutes.
@@ -65,7 +76,9 @@ const LINE_PREFIX_CHARS: usize = 300;
 enum Input {
     Fills(std::result::Result<Batch<NodeDataFill>, LineError>, Option<LineEvidence>),
     /// With the line's identity within its block.
-    MiscEvents(std::result::Result<(Batch<MiscEvent>, MiscKey), LineError>, Option<LineEvidence>),
+    MiscEvents(std::result::Result<(Batch<MiscEvent>, LineKey), LineError>, Option<LineEvidence>),
+    /// With the line's identity within its block.
+    Hip3OracleUpdates(std::result::Result<(Batch<OracleUpdateEvent>, LineKey), LineError>),
     /// With the instant the line was read.
     BlockActions(std::result::Result<BlockActions, LineError>, Instant),
     /// The stream's reader proved that every line written before the instant reached the owner (design 000433 r3).
@@ -87,7 +100,8 @@ struct LineHeader {
 }
 
 enum AnchorMessage {
-    Parsed(Box<ParsedAnchor>),
+    /// The checkpoint's anchor and, checked apart, its marks' seed.
+    Parsed { parsed: Box<ParsedAnchor>, seed: std::result::Result<Box<MarkSeed>, String> },
     Failed { height: u64, error: String },
 }
 
@@ -144,10 +158,13 @@ struct Supervised {
     handle: thread::JoinHandle<()>,
 }
 
-/// Starts the watchers, the poller and the owner task. Fails when the checkpoint directory cannot be listed.
+/// Starts the watchers, the poller and the owner task. Fails when the checkpoint directory cannot be listed or holds
+/// fewer than two checkpoints (the node marks take their grid from the two newest).
 pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::task::JoinHandle<()>)> {
+    let checkpoints = list_checkpoints(data_dir)?;
+    let (anchor, interval) = checkpoint_grid(&checkpoints)?;
     // checkpoints already on disk predate the watchers: the first anchor is the next one (design r2 3.5)
-    let start_height = list_checkpoints(data_dir)?.last().map_or(0, |checkpoint| checkpoint.height);
+    let start_height = anchor;
     let (input_tx, inputs) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
     let (anchor_tx, anchors) = mpsc::channel(1);
     let (queries_tx, queries) = mpsc::channel(64);
@@ -166,6 +183,14 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
         lag_label: "accounts_misc_events",
         dir: data_dir.join("misc_events_streaming"),
         max_line_bytes: MISC_EVENTS_MAX_LINE_BYTES,
+        start_skip_is_loss: true,
+        layout: FileLayout::Hourly,
+    };
+    let hip3_oracle_updates = LineStream {
+        name: "AccountHip3OracleUpdates",
+        lag_label: "accounts_hip3_oracle_updates",
+        dir: data_dir.join("hip3_oracle_updates_streaming"),
+        max_line_bytes: HIP3_ORACLE_UPDATES_MAX_LINE_BYTES,
         start_skip_is_loss: true,
         layout: FileLayout::Hourly,
     };
@@ -201,6 +226,17 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
             ),
         },
         Supervised {
+            name: "HIP-3 oracle updates watcher",
+            handle: spawn_line_watcher(
+                hip3_oracle_updates,
+                input_tx.clone(),
+                None,
+                hip3_input,
+                || Input::Loss(Stream::Hip3OracleUpdates),
+                Some(Box::new(|at| Input::ReadThrough(Stream::Hip3OracleUpdates, at))),
+            ),
+        },
+        Supervised {
             name: "block actions watcher",
             handle: spawn_line_watcher(
                 block_actions,
@@ -219,7 +255,9 @@ pub(crate) fn start_accounts(data_dir: &Path) -> Result<(AccountsHandle, tokio::
     info!("accounts started; first anchor is the first checkpoint above {start_height}");
     let handle = AccountsHandle { queries: queries_tx, subscriptions: subscriptions.clone(), frames: frames.downgrade() };
     let publisher = Publisher::new(subscriptions, frames);
-    let owner = tokio::spawn(run_owner(AccountBook::new(now_ms()), publisher, inputs, anchors, queries, threads));
+    let started_ms = now_ms();
+    let marks = NodeMarks::new(CheckpointGrid { anchor, interval }, started_ms);
+    let owner = tokio::spawn(run_owner(AccountBook::new(started_ms), marks, publisher, inputs, anchors, queries, threads));
     Ok((handle, owner))
 }
 
@@ -231,7 +269,7 @@ fn fills_input(line: String) -> Input {
 
 fn misc_input(line: String) -> Input {
     let parsed = parse_line(&line).and_then(|batch| {
-        let key = misc_key(&line, batch.block_number())?;
+        let key = line_key(&line, batch.block_number())?;
         Ok((batch, key))
     });
     let evidence =
@@ -239,9 +277,17 @@ fn misc_input(line: String) -> Input {
     Input::MiscEvents(parsed, evidence)
 }
 
-/// A misc events line's identity within its block (`blocks::MiscKey`): its text from `"events":` on, without the
-/// node's `local_time`, which a replayed line writes anew. A line written otherwise has no identity: an error.
-fn misc_key(line: &str, block: u64) -> std::result::Result<MiscKey, LineError> {
+fn hip3_input(line: String) -> Input {
+    Input::Hip3OracleUpdates(parse_line(&line).and_then(|batch| {
+        let key = line_key(&line, batch.block_number())?;
+        Ok((batch, key))
+    }))
+}
+
+/// A misc events or HIP-3 oracle updates line's identity within its block (`blocks::LineKey`): its text from
+/// `"events":` on, without the node's `local_time`, which a replayed line writes anew. A line written otherwise has no
+/// identity: an error.
+fn line_key(line: &str, block: u64) -> std::result::Result<LineKey, LineError> {
     let Some(start) = line.find("\"events\":") else {
         return Err(line_error(line, &"no \"events\": text to take the line's identity from", Some(block)));
     };
@@ -299,12 +345,16 @@ fn spawn_checkpoint_poller(
             let skipped = checkpoints.iter().filter(|c| c.height > last_height && c.height < newest.height).count();
             last_height = newest.height;
             let started = Instant::now();
-            let parsed = parse_checkpoint_file(&newest.path)
-                .and_then(|checkpoint| Anchor::from_checkpoint(&checkpoint).map_err(Into::into));
+            let parsed = parse_checkpoint_file(&newest.path).and_then(|checkpoint| {
+                let anchor = Anchor::from_checkpoint(&checkpoint)?;
+                let seed = MarkSeed::from_checkpoint(checkpoint).map(Box::new);
+                Ok((anchor, seed))
+            });
             let message = match parsed {
-                Ok(anchor) => {
-                    AnchorMessage::Parsed(Box::new(ParsedAnchor { anchor, parse_seconds: started.elapsed().as_secs_f64(), skipped }))
-                }
+                Ok((anchor, seed)) => AnchorMessage::Parsed {
+                    parsed: Box::new(ParsedAnchor { anchor, parse_seconds: started.elapsed().as_secs_f64(), skipped }),
+                    seed: seed.map_err(|err| format!("{}: {err}", newest.path.display())),
+                },
                 Err(err) => AnchorMessage::Failed { height: newest.height, error: format!("{}: {err}", newest.path.display()) },
             };
             if anchors.blocking_send(message).is_err() {
@@ -316,6 +366,7 @@ fn spawn_checkpoint_poller(
 
 async fn run_owner(
     mut book: AccountBook,
+    mut marks: NodeMarks,
     mut publisher: Publisher,
     mut inputs: mpsc::Receiver<Input>,
     mut anchors: mpsc::Receiver<AnchorMessage>,
@@ -324,22 +375,24 @@ async fn run_owner(
 ) {
     let mut supervision = tokio::time::interval(SUPERVISION_INTERVAL);
     let mut assembler = BlockAssembler::default();
-    // a parsed anchor whose blocks are not applied yet (design 000433 r2 3.4)
+    // a parsed anchor whose blocks are not applied yet (design 000433 r2 3.4), and a seed the marks are not ready for
     let mut held: Option<Box<ParsedAnchor>> = None;
+    let mut held_seed: Option<Box<MarkSeed>> = None;
     publisher.track(&book);
     loop {
         tokio::select! {
             Some(input) = inputs.recv() => {
-                let touched = apply_input(&mut book, &mut assembler, input);
+                let touched = apply_input(&mut book, &mut marks, &mut assembler, input);
                 if publisher.track(&book) {
                     publisher.push_changes(&mut book, &touched);
                 }
                 if install_ready(&mut book, &mut held) && publisher.track(&book) {
                     publisher.push_snapshots(&mut book);
                 }
+                install_seed_ready(&mut marks, &mut held_seed);
             }
             Some(message) = anchors.recv() => {
-                let installed = receive_anchor(&mut book, &mut held, message);
+                let installed = receive_anchor(&mut book, &mut marks, &mut held, &mut held_seed, message);
                 if publisher.track(&book) && installed {
                     publisher.push_snapshots(&mut book);
                 }
@@ -352,16 +405,17 @@ async fn run_owner(
                 answer(&book, query);
             }
             _ = supervision.tick() => {
-                supervise(&mut book, &threads);
+                supervise(&mut book, &mut marks, &threads);
                 publisher.track(&book);
                 export_status(&book.status());
+                export_marks_status(&marks.status());
             }
         }
     }
 }
 
 /// Hands one input to the block assembly and applies the blocks it releases; returns the rows they changed.
-fn apply_input(book: &mut AccountBook, assembler: &mut BlockAssembler, input: Input) -> Touched {
+fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut BlockAssembler, input: Input) -> Touched {
     let assembly = match input {
         Input::Fills(Ok(batch), evidence) => {
             if let Some(evidence) = evidence {
@@ -375,27 +429,32 @@ fn apply_input(book: &mut AccountBook, assembler: &mut BlockAssembler, input: In
             }
             assembler.receive_misc_events(batch, key)
         }
+        Input::Hip3OracleUpdates(Ok((batch, key))) => assembler.receive_hip3_oracle_updates(batch, key),
         Input::BlockActions(Ok(block), read_at) => assembler.receive_block_actions(block, read_at),
         Input::ReadThrough(stream, at) => assembler.receive_read_through(stream, at),
-        Input::Fills(Err(err), _) => return lost(book, Stream::Fills, "parse_error", &err),
-        Input::MiscEvents(Err(err), _) => return lost(book, Stream::MiscEvents, "parse_error", &err),
-        Input::BlockActions(Err(err), _) => return lost(book, Stream::BlockActions, "parse_error", &err),
+        Input::Fills(Err(err), _) => return lost(book, marks, Stream::Fills, "parse_error", &err),
+        Input::MiscEvents(Err(err), _) => return lost(book, marks, Stream::MiscEvents, "parse_error", &err),
+        Input::Hip3OracleUpdates(Err(err)) => return lost(book, marks, Stream::Hip3OracleUpdates, "parse_error", &err),
+        Input::BlockActions(Err(err), _) => return lost(book, marks, Stream::BlockActions, "parse_error", &err),
         Input::Loss(stream) => {
             let error = "the watcher skipped lines while positioning at its start, or discarded buffered data".to_string();
-            return lost(book, stream, "watcher_discard", &LineError { block: None, error });
+            return lost(book, marks, stream, "watcher_discard", &LineError { block: None, error });
         }
     };
-    apply_assembly(book, assembler, assembly)
+    apply_assembly(book, marks, assembler, assembly)
 }
 
-/// Records what the assembly could not apply, then applies the released blocks in order.
-fn apply_assembly(book: &mut AccountBook, assembler: &BlockAssembler, assembly: Assembly) -> Touched {
+const ASSEMBLED_STREAMS: [Stream; 4] = [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BlockActions];
+
+/// Records what the assembly could not apply, then applies the released blocks in order: the marks first, so the
+/// account view's block finds them at its height (design 000439 r1 4.1).
+fn apply_assembly(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &BlockAssembler, assembly: Assembly) -> Touched {
     let Assembly { completed, lost: dropped, duplicates, missing_actions, overflowed_to } = assembly;
     for (stream, count) in duplicates {
         ACCOUNTS_DUPLICATE_INPUTS_TOTAL.with_label_values(&[stream.label()]).inc_by(count as u64);
     }
     // one record per stream and input: a gap or an overflow drops many held blocks at once
-    for stream in [Stream::Fills, Stream::MiscEvents, Stream::BlockActions] {
+    for stream in ASSEMBLED_STREAMS {
         let blocks: Vec<u64> = dropped.iter().filter(|(of, _)| *of == stream).map(|(_, block)| *block).collect();
         if let Some(highest) = blocks.iter().max() {
             let error = format!(
@@ -403,24 +462,26 @@ fn apply_assembly(book: &mut AccountBook, assembler: &BlockAssembler, assembly: 
                  or a broken write order) or dropped with a gap or an overflow",
                 blocks.len()
             );
-            lost(book, stream, "late_or_dropped", &LineError { block: Some(*highest), error });
+            lost(book, marks, stream, "late_or_dropped", &LineError { block: Some(*highest), error });
         }
     }
     if let Some((first, last)) = missing_actions {
         error!("accounts block_actions data loss (height_gap): blocks {first} to {last} never arrived");
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::BlockActions.label(), "height_gap"]).inc();
-        book.record_lost_block(Stream::BlockActions, last);
+        record_lost_block(book, marks, Stream::BlockActions, last);
     }
     if let Some(block) = overflowed_to {
         error!("accounts data loss (pending_overflow): the pending blocks overflowed and were dropped up to {block}");
-        for stream in [Stream::Fills, Stream::MiscEvents, Stream::BlockActions] {
+        for stream in ASSEMBLED_STREAMS {
             ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), "pending_overflow"]).inc();
-            book.record_lost_block(stream, block);
+            record_lost_block(book, marks, stream, block);
         }
     }
     let mut touched = Touched::default();
-    for block in completed {
+    for mut block in completed {
         let height = block.actions.height;
+        let hip3_oracle_updates = std::mem::take(&mut block.hip3_oracle_updates);
+        report_marks_block(height, marks.apply_block(height, hip3_oracle_updates));
         touched.absorb(report_block(book.apply_block(block)));
         ACCOUNTS_APPLIED_HEIGHT.set(height.cast_signed());
     }
@@ -447,15 +508,37 @@ fn record_evidence(evidence: &serde_json::Value) {
     ACCOUNTS_EVIDENCE_TOTAL.with_label_values(&[kind]).inc();
 }
 
-fn lost(book: &mut AccountBook, stream: Stream, reason: &str, err: &LineError) -> Touched {
+fn lost(book: &mut AccountBook, marks: &mut NodeMarks, stream: Stream, reason: &str, err: &LineError) -> Touched {
     let at = err.block.map_or_else(|| "of unknown blocks".to_string(), |block| format!("of block {block}"));
     error!("accounts {} data loss ({reason}) {at}: {}", stream.label(), err.error);
     ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), reason]).inc();
-    match err.block {
-        Some(block) => book.record_lost_block(stream, block),
-        None => book.record_unknown_loss(stream, now_ms()),
+    if let Some(block) = err.block {
+        record_lost_block(book, marks, stream, block);
+    } else {
+        let detected_ms = now_ms();
+        book.record_unknown_loss(stream, detected_ms);
+        marks.record_unknown_loss(stream, detected_ms);
     }
     Touched::default()
+}
+
+/// Each owner keeps the losses of the streams it reads.
+fn record_lost_block(book: &mut AccountBook, marks: &mut NodeMarks, stream: Stream, block: u64) {
+    book.record_lost_block(stream, block);
+    marks.record_lost_block(stream, block);
+}
+
+fn report_marks_block(height: u64, report: MarksBlockReport) {
+    let MarksBlockReport { unknown_coin_updates, errors, log_overflowed } = report;
+    NODE_MARKS_UNKNOWN_COIN_UPDATES_TOTAL.inc_by(unknown_coin_updates as u64);
+    for err in &errors {
+        error!("accounts hip3_oracle_updates data loss (contract): {err}");
+        ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label(), "contract"]).inc();
+    }
+    if log_overflowed {
+        error!("accounts hip3_oracle_updates data loss (mark_log_overflow): the node marks' input log overflowed at block {height}");
+        ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label(), "mark_log_overflow"]).inc();
+    }
 }
 
 fn report_fills(report: FillsReport) -> Touched {
@@ -501,10 +584,17 @@ fn report_block_actions(report: BlockActionsReport) -> Touched {
 }
 
 /// A poller message: a parsed anchor is held until `AccountBook::anchor_ready` and then installed (a newer one replaces
-/// a held one); returns whether an anchor was installed.
-fn receive_anchor(book: &mut AccountBook, held: &mut Option<Box<ParsedAnchor>>, message: AnchorMessage) -> bool {
+/// a held one), its seed likewise until `NodeMarks::seed_ready`; returns whether an anchor was installed.
+fn receive_anchor(
+    book: &mut AccountBook,
+    marks: &mut NodeMarks,
+    held: &mut Option<Box<ParsedAnchor>>,
+    held_seed: &mut Option<Box<MarkSeed>>,
+    message: AnchorMessage,
+) -> bool {
     match message {
-        AnchorMessage::Parsed(parsed) => {
+        AnchorMessage::Parsed { parsed, seed } => {
+            receive_seed(marks, held_seed, parsed.anchor.height, seed);
             if let Some(replaced) = held.replace(parsed) {
                 warn!("accounts: anchor {} replaced while waiting for its blocks", replaced.anchor.height);
                 ACCOUNTS_ANCHOR_SKIPPED_TOTAL.inc();
@@ -516,11 +606,75 @@ fn receive_anchor(book: &mut AccountBook, held: &mut Option<Box<ParsedAnchor>>, 
             installed
         }
         AnchorMessage::Failed { height, error } => {
-            error!("accounts: checkpoint {height} failed to parse, withholding the view: {error}");
+            error!("accounts: checkpoint {height} failed to parse, withholding the view and the node marks: {error}");
             ACCOUNTS_CHECKPOINT_FAILURES_TOTAL.inc();
+            marks.record_seed_failure(height, error.clone());
             book.record_checkpoint_failure(height, error);
             false
         }
+    }
+}
+
+fn receive_seed(
+    marks: &mut NodeMarks,
+    held_seed: &mut Option<Box<MarkSeed>>,
+    height: u64,
+    seed: std::result::Result<Box<MarkSeed>, String>,
+) {
+    match seed {
+        Ok(seed) => {
+            if let Some(replaced) = held_seed.replace(seed) {
+                warn!("node marks: seed {} replaced while waiting for its blocks", replaced.height);
+            }
+            install_seed_ready(marks, held_seed);
+        }
+        Err(error) => {
+            error!("node marks: the seed of checkpoint {height} breaks its contract, withholding the marks: {error}");
+            NODE_MARKS_SEED_FAILURES_TOTAL.inc();
+            marks.record_seed_failure(height, error);
+        }
+    }
+}
+
+/// Installs the held seed once the marks are ready for it.
+fn install_seed_ready(marks: &mut NodeMarks, held_seed: &mut Option<Box<MarkSeed>>) {
+    let Some(seed) = held_seed.take_if(|seed| marks.seed_ready(seed.height)) else {
+        return;
+    };
+    let height = seed.height;
+    log_marks_install(height, &marks.install(*seed));
+}
+
+fn log_marks_install(height: u64, report: &MarksInstallReport) {
+    let MarksInstallReport { previous_seed, check, rebuild, errors } = report;
+    let rebuild_label = match rebuild {
+        Rebuild::Replayed { .. } => "replayed",
+        Rebuild::Ahead => "ahead",
+        Rebuild::LogDoesNotReach => "logDoesNotReach",
+    };
+    NODE_MARKS_REBUILDS_TOTAL.with_label_values(&[rebuild_label]).inc();
+    match check {
+        MarksCheck::Skipped(reason) => {
+            info!("node marks: seed {height} (previous {previous_seed:?}) not checked ({reason}); rebuild {rebuild:?}");
+            NODE_MARKS_CHECKS_SKIPPED_TOTAL.with_label_values(&[reason]).inc();
+        }
+        MarksCheck::Checked(hip3) => {
+            info!(
+                "node marks: seed {height} (previous {previous_seed:?}) against the snapshot: HIP-3 {} equal, {} differ, {} \
+                 unknown; rebuild {rebuild:?}",
+                hip3.equal, hip3.differ, hip3.unknown
+            );
+            for (result, count) in [("equal", hip3.equal), ("differ", hip3.differ), ("unknown", hip3.unknown)] {
+                NODE_MARKS_CHECKED_TOTAL.with_label_values(&["hip3", result]).inc_by(count);
+            }
+            for mismatch in &hip3.samples {
+                record_evidence(&hip3_mark_mismatch_json(mismatch, *previous_seed, height));
+            }
+        }
+    }
+    for err in errors {
+        error!("accounts hip3_oracle_updates data loss (contract, replayed at seed {height}): {err}");
+        ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label(), "contract"]).inc();
     }
 }
 
@@ -626,14 +780,29 @@ fn answer(book: &AccountBook, query: Query) {
     }
 }
 
-fn supervise(book: &mut AccountBook, threads: &[Supervised]) {
+/// A finished thread stops the view and the marks for good: every input thread feeds the block assembly both apply,
+/// and the poller their seeds (review 000440 r1 P2-2).
+fn supervise(book: &mut AccountBook, marks: &mut NodeMarks, threads: &[Supervised]) {
     if matches!(book.availability(), Err(Unavailable::Stopped(_))) {
         return;
     }
     if let Some(thread) = threads.iter().find(|thread| thread.handle.is_finished()) {
-        error!("accounts: the {} thread exited; the view stays unavailable until restart", thread.name);
-        book.stop(format!("{} thread exited", thread.name));
+        error!("accounts: the {} thread exited; the view and the node marks stay unavailable until restart", thread.name);
+        let reason = format!("{} thread exited", thread.name);
+        marks.stop(reason.clone());
+        book.stop(reason);
     }
+}
+
+fn export_marks_status(status: &MarksStatus) {
+    NODE_MARKS_AVAILABLE.set(i64::from(status.availability.is_ok()));
+    if let Ok(height) = status.availability {
+        NODE_MARKS_HEIGHT.set(height.cast_signed());
+    }
+    if let Some(height) = status.seed_height {
+        NODE_MARKS_SEED_HEIGHT.set(height.cast_signed());
+    }
+    NODE_MARKS_LOGGED_UPDATES.set((status.logged_updates as u64).cast_signed());
 }
 
 fn export_status(status: &BookStatus) {
@@ -663,7 +832,7 @@ pub(crate) struct TestOwner {
 
 #[cfg(test)]
 impl TestOwner {
-    /// Spawns the owner on the current tokio runtime.
+    /// Spawns the owner on the current tokio runtime (its marks get no seed: unavailable throughout).
     pub(crate) fn start(book: AccountBook) -> Self {
         let (inputs, input_rx) = mpsc::channel(16);
         let (anchors, anchor_rx) = mpsc::channel(1);
@@ -671,7 +840,9 @@ impl TestOwner {
         let subscriptions = CoinSubscriptions::default();
         let (frames, _) = broadcast::channel(FRAME_CHANNEL_CAPACITY);
         let handle = AccountsHandle { queries, subscriptions: subscriptions.clone(), frames: frames.downgrade() };
-        let owner = tokio::spawn(run_owner(book, Publisher::new(subscriptions, frames), input_rx, anchor_rx, query_rx, Vec::new()));
+        let marks = NodeMarks::new(tests::TEST_GRID, 0);
+        let publisher = Publisher::new(subscriptions, frames);
+        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new()));
         Self { handle, inputs, anchors, owner }
     }
 
@@ -684,7 +855,7 @@ impl TestOwner {
     }
 
     /// Feeds these fills lines of block `height` and completes the block: the `replica_cmds` lines of it and of the
-    /// next block, then a read-through of both readers after them (design 000433 r3).
+    /// next block, then a read-through of the other readers after them (design 000433 r3).
     pub(crate) async fn complete_block(&self, height: u64, fills_lines: &[String]) {
         for line in fills_lines {
             self.inputs.send(fills_input(line.clone())).await.unwrap();
@@ -693,7 +864,7 @@ impl TestOwner {
             self.inputs.send(Input::BlockActions(Ok(BlockActions { height: block, actions: Vec::new() }), Instant::now())).await.unwrap();
         }
         let after = Instant::now() + Duration::from_micros(1);
-        for stream in [Stream::Fills, Stream::MiscEvents] {
+        for stream in PROVING_STREAMS {
             self.inputs.send(Input::ReadThrough(stream, after)).await.unwrap();
         }
     }
@@ -703,9 +874,13 @@ impl TestOwner {
     }
 
     pub(crate) async fn anchor(&self, anchor: Anchor) {
-        self.anchors.send(AnchorMessage::Parsed(Box::new(ParsedAnchor { anchor, parse_seconds: 0.0, skipped: 0 }))).await.unwrap();
+        self.anchors.send(tests::parsed_without_seed(anchor)).await.unwrap();
     }
 }
+
+/// The streams whose readers send read-through proofs.
+#[cfg(test)]
+const PROVING_STREAMS: [Stream; 3] = [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates];
 
 #[cfg(test)]
 mod tests {
@@ -721,6 +896,13 @@ mod tests {
     };
 
     const USER: &str = "0x5b51db9432bc4dd2c30cadc4ab6ab44565419c9a";
+    pub(super) const TEST_GRID: CheckpointGrid = CheckpointGrid { anchor: 1_000, interval: 10_000 };
+
+    /// An account view test's anchor message: its checkpoint seeds no marks.
+    pub(super) fn parsed_without_seed(anchor: Anchor) -> AnchorMessage {
+        let parsed = Box::new(ParsedAnchor { anchor, parse_seconds: 0.0, skipped: 0 });
+        AnchorMessage::Parsed { parsed, seed: Err("an account view test seeds no marks".to_string()) }
+    }
 
     fn batch_line(block: u64, events: &str) -> String {
         format!(
@@ -756,15 +938,21 @@ mod tests {
         Anchor { height, time_ms, coins, account_modes: FxHashMap::default(), margins: MarginStates::default() }
     }
 
-    /// The `replica_cmds` lines of `blocks`, then a read-through of both readers after them: the blocks before the last
-    /// one complete.
-    fn complete_through(book: &mut AccountBook, assembler: &mut BlockAssembler, blocks: std::ops::RangeInclusive<u64>) {
+    /// The `replica_cmds` lines of `blocks`, then a read-through of the other readers after them: the blocks before
+    /// the last one complete.
+    fn complete_through(
+        book: &mut AccountBook,
+        marks: &mut NodeMarks,
+        assembler: &mut BlockAssembler,
+        blocks: std::ops::RangeInclusive<u64>,
+    ) {
         for height in blocks {
-            apply_input(book, assembler, Input::BlockActions(Ok(BlockActions { height, actions: Vec::new() }), Instant::now()));
+            let line = Input::BlockActions(Ok(BlockActions { height, actions: Vec::new() }), Instant::now());
+            apply_input(book, marks, assembler, line);
         }
         let after = Instant::now() + Duration::from_micros(1);
-        for stream in [Stream::Fills, Stream::MiscEvents] {
-            apply_input(book, assembler, Input::ReadThrough(stream, after));
+        for stream in PROVING_STREAMS {
+            apply_input(book, marks, assembler, Input::ReadThrough(stream, after));
         }
     }
 
@@ -791,20 +979,21 @@ mod tests {
         // let the watcher register its inotify watch before the first append
         thread::sleep(Duration::from_millis(200));
         let mut book = AccountBook::new(0);
+        let mut marks = NodeMarks::new(TEST_GRID, 0);
         let mut assembler = BlockAssembler::default();
-        apply_input(&mut book, &mut assembler, fills_input(batch_line(1_200, "")));
-        complete_through(&mut book, &mut assembler, 1_200..=1_201);
+        apply_input(&mut book, &mut marks, &mut assembler, fills_input(batch_line(1_200, "")));
+        complete_through(&mut book, &mut marks, &mut assembler, 1_200..=1_201);
         book.install_anchor(empty_anchor(1_300, now_ms()));
 
         append(&file, &ledger_line(1_500));
         let skipped = recv_within(&mut inputs, Duration::from_secs(2));
         assert!(matches!(skipped, Input::Loss(Stream::MiscEvents)), "the positioning skip is reported");
-        apply_input(&mut book, &mut assembler, skipped);
+        apply_input(&mut book, &mut marks, &mut assembler, skipped);
         append(&file, &ledger_line(1_202));
         let next = recv_within(&mut inputs, Duration::from_secs(2));
         assert!(matches!(next, Input::MiscEvents(Ok(_), None)), "lines after the skip flow");
-        apply_input(&mut book, &mut assembler, next);
-        complete_through(&mut book, &mut assembler, 1_202..=1_203);
+        apply_input(&mut book, &mut marks, &mut assembler, next);
+        complete_through(&mut book, &mut marks, &mut assembler, 1_202..=1_203);
         assert_eq!(assembler.released(), Some(1_202));
         assert!(matches!(
             book.availability(),
@@ -839,15 +1028,13 @@ mod tests {
     #[test]
     fn an_anchor_waits_for_its_blocks_and_a_newer_one_replaces_it() {
         use crate::accounts::test_support::{PUMP, anchor as test_anchor, block_actions, trusted_book, user};
-        let parsed = |height| {
-            let anchor = test_anchor(height, &[(PUMP, 0, &[(user(1), 5)])]);
-            AnchorMessage::Parsed(Box::new(ParsedAnchor { anchor, parse_seconds: 0.0, skipped: 0 }))
-        };
+        let parsed = |height| parsed_without_seed(test_anchor(height, &[(PUMP, 0, &[(user(1), 5)])]));
         let installed_height = |book: &AccountBook| book.availability().map(|available| available.anchor.height);
         let mut book = trusted_book(&[(user(1), 5)]);
-        let mut held = None;
-        assert!(!receive_anchor(&mut book, &mut held, parsed(1_002)), "block 1002 is not applied");
-        assert!(!receive_anchor(&mut book, &mut held, parsed(1_003)));
+        let mut marks = NodeMarks::new(TEST_GRID, 0);
+        let (mut held, mut held_seed) = (None, None);
+        assert!(!receive_anchor(&mut book, &mut marks, &mut held, &mut held_seed, parsed(1_002)), "block 1002 is not applied");
+        assert!(!receive_anchor(&mut book, &mut marks, &mut held, &mut held_seed, parsed(1_003)));
         assert_eq!(held.as_ref().map(|held| held.anchor.height), Some(1_003), "the newer one is held");
         book.apply_block_actions(block_actions(1_001, &[]));
         book.apply_block_actions(block_actions(1_002, &[]));
@@ -857,7 +1044,7 @@ mod tests {
         assert!(install_ready(&mut book, &mut held));
         assert_eq!((installed_height(&book), held.is_none()), (Ok(1_003), true));
         book.apply_block_actions(block_actions(1_004, &[]));
-        assert!(receive_anchor(&mut book, &mut held, parsed(1_004)), "applied already: installs at once");
+        assert!(receive_anchor(&mut book, &mut marks, &mut held, &mut held_seed, parsed(1_004)), "applied already: installs at once");
     }
 
     #[test]
@@ -901,6 +1088,24 @@ mod tests {
         let gone = QueryError::Unavailable(Unavailable::Stopped(OWNER_GONE.to_string()));
         assert_eq!(owner.handle.coin_positions(PUMP).await, Err(gone));
         assert!(owner.handle.frames().is_none(), "no receiver from a gone owner");
+    }
+
+    /// Review 000440 r1 P2-2, through the owner's supervision and status export: an exited input thread stops the
+    /// account view and the node marks alike, and a later seed does not revive the marks.
+    #[test]
+    fn an_exited_thread_stops_the_view_and_the_marks() {
+        use crate::accounts::test_support::{trusted_book, user};
+        let mut book = trusted_book(&[(user(1), 5)]);
+        let mut marks = NodeMarks::new(TEST_GRID, 0);
+        let handle = thread::spawn(|| {});
+        while !handle.is_finished() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let threads = [Supervised { name: "HIP-3 oracle updates watcher", handle }];
+        supervise(&mut book, &mut marks, &threads);
+        let stopped = Unavailable::Stopped("HIP-3 oracle updates watcher thread exited".to_string());
+        assert_eq!(book.availability().map(|_| ()), Err(stopped.clone()));
+        assert_eq!(marks.status().availability, Err(stopped));
     }
 
     /// Review 000422 P3-1: the poller stops at its next poll once the owner is gone, not after the next checkpoint.

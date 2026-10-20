@@ -4,6 +4,7 @@
 //! - `book`: the `AccountBook` owner (positions, merge, change marks, trust); `blocks`: the block assembly that hands it
 //!   complete blocks in height order; `replay`: the cash replay between anchors and its check at each anchor;
 //! - `misc` / `actions` / `size` / `usdc`: stream wire formats and units;
+//! - `marks`: the node's marks block by block (design 000439), `marks::seed` what a checkpoint seeds them with;
 //! - `runtime`: watchers, checkpoint poller and owner task; `view`: the served JSON;
 //! - `probe` (one checkpoint) and `follow` (live, standalone): acceptance tools. The API comes in batch 3.
 
@@ -16,6 +17,7 @@ mod evidence;
 pub(crate) mod follow;
 mod liquidation;
 mod margin;
+mod marks;
 mod misc;
 mod portfolio;
 pub(crate) mod probe;

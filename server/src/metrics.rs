@@ -498,6 +498,56 @@ lazy_static! {
         "Misc events of a kind the account view does not know"
     ).expect("metric can be created");
 
+    // ─── node marks (design 000439) ───
+
+    pub static ref NODE_MARKS_AVAILABLE: IntGauge = IntGauge::new(
+        "orderbook_node_marks_available",
+        "1 while the node marks are trusted"
+    ).expect("metric can be created");
+
+    pub static ref NODE_MARKS_HEIGHT: IntGauge = IntGauge::new(
+        "orderbook_node_marks_height",
+        "Height of the trusted node marks"
+    ).expect("metric can be created");
+
+    pub static ref NODE_MARKS_SEED_HEIGHT: IntGauge = IntGauge::new(
+        "orderbook_node_marks_seed_height",
+        "Checkpoint the node marks were last rebuilt from"
+    ).expect("metric can be created");
+
+    pub static ref NODE_MARKS_LOGGED_UPDATES: IntGauge = IntGauge::new(
+        "orderbook_node_marks_logged_updates",
+        "HIP-3 mark updates held in the node marks' input log"
+    ).expect("metric can be created");
+
+    /// Each checkpoint's marks against the node marks' snapshot at its height, by market and result (`equal`,
+    /// `differ`, `unknown`).
+    pub static ref NODE_MARKS_CHECKED_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_node_marks_checked_total", "Checkpoint marks compared with the node marks' snapshot"),
+        &["market", "result"]
+    ).expect("metric can be created");
+
+    pub static ref NODE_MARKS_CHECKS_SKIPPED_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_node_marks_checks_skipped_total", "Checkpoints the node marks were not checked against"),
+        &["reason"]
+    ).expect("metric can be created");
+
+    /// Seed installs by rebuild (`replayed`, `ahead`, `logDoesNotReach`).
+    pub static ref NODE_MARKS_REBUILDS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_node_marks_rebuilds_total", "Node mark seed installs by rebuild"),
+        &["result"]
+    ).expect("metric can be created");
+
+    pub static ref NODE_MARKS_SEED_FAILURES_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_node_marks_seed_failures_total",
+        "Checkpoints whose node mark seed broke its contract"
+    ).expect("metric can be created");
+
+    pub static ref NODE_MARKS_UNKNOWN_COIN_UPDATES_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_node_marks_unknown_coin_updates_total",
+        "HIP-3 mark updates of coins outside the seed's universe"
+    ).expect("metric can be created");
+
 }
 
 /// Register all metrics with the registry
@@ -569,6 +619,15 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ACCOUNTS_PENDING_BLOCKS.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_EVIDENCE_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_AVAILABLE.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_HEIGHT.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_SEED_HEIGHT.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_LOGGED_UPDATES.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_CHECKED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_CHECKS_SKIPPED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_REBUILDS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_SEED_FAILURES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_UNKNOWN_COIN_UPDATES_TOTAL.clone())).ok();
 
     // File watcher metrics
     REGISTRY.register(Box::new(FILE_EVENTS_TOTAL.clone())).ok();

@@ -75,6 +75,8 @@ pub(crate) enum Stream {
     MiscEvents,
     /// `replica_cmds`: every block, with its actions and their responses.
     BlockActions,
+    /// `hip3_oracle_updates_streaming`: read by the node marks (design 000439), not by the account view.
+    Hip3OracleUpdates,
 }
 
 impl Stream {
@@ -83,6 +85,7 @@ impl Stream {
             Self::Fills => "fills",
             Self::MiscEvents => "misc_events",
             Self::BlockActions => "block_actions",
+            Self::Hip3OracleUpdates => "hip3_oracle_updates",
         }
     }
 }
@@ -417,7 +420,7 @@ impl ObservedFill {
 
 /// What a stream has read and what it is known to have lost; losses only accumulate (anchors only move forward).
 #[derive(Debug)]
-struct StreamProgress {
+pub(crate) struct StreamProgress {
     /// Highest block read.
     height: Option<u64>,
     /// Highest block of a line known to be lost.
@@ -428,11 +431,24 @@ struct StreamProgress {
 
 impl StreamProgress {
     /// Nothing written before the watcher started was read.
-    const fn starting(started_ms: u64) -> Self {
+    pub(crate) const fn starting(started_ms: u64) -> Self {
         Self { height: None, lost_block: None, lost_by_ms: Some(started_ms) }
     }
 
-    fn check(&self, stream: Stream, anchor: AnchorInfo) -> Result<u64, Unavailable> {
+    pub(crate) fn record_read(&mut self, block: u64) {
+        raise(&mut self.height, block);
+    }
+
+    pub(crate) fn record_lost_block(&mut self, block: u64) {
+        raise(&mut self.lost_block, block);
+    }
+
+    pub(crate) fn record_unknown_loss(&mut self, detected_ms: u64) {
+        raise(&mut self.lost_by_ms, detected_ms);
+    }
+
+    /// The highest block read, once `anchor` covers every loss.
+    pub(crate) fn check(&self, stream: Stream, anchor: AnchorInfo) -> Result<u64, Unavailable> {
         if let Some(block) = self.lost_block.filter(|block| *block > anchor.height) {
             return Err(Unavailable::DataLoss { stream, bound: LossBound::Block(block) });
         }
@@ -738,18 +754,20 @@ impl AccountBook {
         self.anchor.is_some_and(|anchor| block <= anchor.height)
     }
 
-    const fn progress(&mut self, stream: Stream) -> &mut StreamProgress {
+    /// The view's progress on `stream`; `None` for the HIP-3 oracle updates, which it does not read.
+    const fn progress(&mut self, stream: Stream) -> Option<&mut StreamProgress> {
         match stream {
-            Stream::Fills => &mut self.fills,
-            Stream::MiscEvents => &mut self.misc_events,
-            Stream::BlockActions => &mut self.block_actions,
+            Stream::Fills => Some(&mut self.fills),
+            Stream::MiscEvents => Some(&mut self.misc_events),
+            Stream::BlockActions => Some(&mut self.block_actions),
+            Stream::Hip3OracleUpdates => None,
         }
     }
 
     /// The one entry of a released block (design 000433 r3, 3.4): its `replica_cmds` actions, then its fills, then its
-    /// misc events, each through the stream's own application below.
+    /// misc events, each through the stream's own application below. Its HIP-3 oracle updates are the node marks'.
     pub(crate) fn apply_block(&mut self, block: CompletedBlock) -> BlockReport {
-        let CompletedBlock { actions, fills, misc_events } = block;
+        let CompletedBlock { actions, fills, misc_events, hip3_oracle_updates: _ } = block;
         BlockReport {
             block_actions: self.apply_block_actions(actions),
             fills: fills.into_iter().map(|batch| self.apply_fills(batch)).collect(),
@@ -788,7 +806,9 @@ impl AccountBook {
         if self.events.len() >= MAX_EVENT_LOG
             && let Some(oldest) = self.events.pop_front()
         {
-            raise(&mut self.progress(MarkKind::of(&oldest.event).stream()).lost_block, oldest.block);
+            if let Some(progress) = self.progress(MarkKind::of(&oldest.event).stream()) {
+                progress.record_lost_block(oldest.block);
+            }
             self.events_dropped = true;
             *dropped += 1;
         }
@@ -1068,14 +1088,19 @@ impl AccountBook {
         report.replay_errors = fills_report.errors;
     }
 
-    /// A line of `block` was lost.
+    /// A line of `block` was lost; a stream the view does not read leaves it as it is.
     pub(crate) fn record_lost_block(&mut self, stream: Stream, block: u64) {
-        raise(&mut self.progress(stream).lost_block, block);
+        if let Some(progress) = self.progress(stream) {
+            progress.record_lost_block(block);
+        }
     }
 
-    /// Lines of unknown blocks were lost, detected at wall time `detected_ms` (unix ms).
+    /// Lines of unknown blocks were lost, detected at wall time `detected_ms` (unix ms); a stream the view does not read
+    /// leaves it as it is.
     pub(crate) fn record_unknown_loss(&mut self, stream: Stream, detected_ms: u64) {
-        raise(&mut self.progress(stream).lost_by_ms, detected_ms);
+        if let Some(progress) = self.progress(stream) {
+            progress.record_unknown_loss(detected_ms);
+        }
     }
 
     pub(crate) fn record_checkpoint_failure(&mut self, height: u64, error: String) {
@@ -1781,6 +1806,7 @@ mod tests {
             actions: block_actions(height, actions),
             fills: vec![fills(height, fills_specs)],
             misc_events: Vec::new(),
+            hip3_oracle_updates: Vec::new(),
         };
         let mut book = AccountBook::new(0);
         book.apply_fills(fills(100, &[]));
