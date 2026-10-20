@@ -78,6 +78,11 @@ impl DexMeta {
         &self.tables[&table_id]
     }
 
+    /// Every table a position or an asset of this dex refers to.
+    pub(crate) const fn tables(&self) -> &FxHashMap<u32, MarginTable> {
+        &self.tables
+    }
+
     /// The node's maintenance of `position` held at the stored mark, micro-USD: raw size (10^-szDecimals) times stored
     /// mark (10^-(6 - szDecimals)) is the exact notional in micro-USD. `None` without a stored mark.
     pub(crate) fn maintenance_micro(&self, position: &Position) -> Option<i128> {
@@ -135,6 +140,9 @@ pub(crate) struct AssetMeta {
     /// `None` when the asset stores no price.
     pub(crate) mark_raw: Option<u64>,
     pub(crate) margin_mode: AssetMarginMode,
+    /// `marginTableId`: the table a position opened from zero takes (research "新开仓位的档位表", 603/603); it resolves
+    /// in the dex's tables (checked at parse time).
+    pub(crate) margin_table_id: u32,
 }
 
 /// A perp's `marginMode`: which margin a new position takes. Measured, not documented (research
@@ -264,6 +272,7 @@ struct WireAsset {
     name: String,
     sz_decimals: u32,
     margin_mode: String,
+    margin_table_id: u32,
 }
 
 #[derive(Deserialize)]
@@ -835,13 +844,17 @@ fn build_dex(clearinghouse: WireClearinghouse) -> std::result::Result<(DexMeta, 
                 [_] => return Err(format!("{}: pxs2 has one slot, the mark is slot 1", asset.name)),
             };
             let margin_mode = AssetMarginMode::of(&asset.margin_mode);
-            Ok(AssetMeta { name: asset.name, size_decimals: asset.sz_decimals, mark_raw, margin_mode })
+            let margin_table_id = asset.margin_table_id;
+            Ok(AssetMeta { name: asset.name, size_decimals: asset.sz_decimals, mark_raw, margin_mode, margin_table_id })
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
     let mut tables = FxHashMap::default();
     for (table_id, table) in meta.margin_table_id_to_margin_table {
         let tiers = table.margin_tiers.iter().map(|tier| (tier.lower_bound, tier.max_leverage, tier.maintenance_deduction));
         tables.insert(table_id, MarginTable::listed(tiers).map_err(|err| format!("margin table {table_id}: {err}"))?);
+    }
+    for asset in &assets {
+        resolve_table(&mut tables, asset.margin_table_id).map_err(|err| format!("{}: {err}", asset.name))?;
     }
     let mut users = FxHashMap::default();
     for (user, WireDexUser { cash_micro, positions: wire_positions, isolated_settings }) in user_states.user_to_state.0 {
@@ -853,15 +866,7 @@ fn build_dex(clearinghouse: WireClearinghouse) -> std::result::Result<(DexMeta, 
         for (asset_id, wire) in wire_positions {
             let asset = asset_index(asset_id, meta.pdi, assets.len())?;
             let table_id = wire.table.unwrap_or(OMITTED_POSITION_TABLE);
-            if let std::collections::hash_map::Entry::Vacant(entry) = tables.entry(table_id) {
-                if table_id >= FIRST_LISTED_TABLE {
-                    return Err(format!("{user}: asset {asset_id} uses margin table {table_id}, not listed in the meta"));
-                }
-                entry.insert(
-                    MarginTable::single(table_id)
-                        .map_err(|err| format!("{user}: asset {asset_id} margin table {table_id}: {err}"))?,
-                );
-            }
+            resolve_table(&mut tables, table_id).map_err(|err| format!("{user}: asset {asset_id}: {err}"))?;
             let margin = wire
                 .l
                 .and_then(|l| l.isolated)
@@ -871,6 +876,17 @@ fn build_dex(clearinghouse: WireClearinghouse) -> std::result::Result<(DexMeta, 
         users.insert(user, DexAccount { dex: 0, cash_micro, positions, isolated_settings });
     }
     Ok((DexMeta { name, pdi: meta.pdi, collateral_token: meta.collateral_token, assets, tables }, users))
+}
+
+/// Makes `table_id` resolve: an id below `FIRST_LISTED_TABLE` is the implicit single tier, the others must be listed.
+fn resolve_table(tables: &mut FxHashMap<u32, MarginTable>, table_id: u32) -> std::result::Result<(), String> {
+    if let std::collections::hash_map::Entry::Vacant(entry) = tables.entry(table_id) {
+        if table_id >= FIRST_LISTED_TABLE {
+            return Err(format!("margin table {table_id} is not listed in the meta"));
+        }
+        entry.insert(MarginTable::single(table_id).map_err(|err| format!("margin table {table_id}: {err}"))?);
+    }
+    Ok(())
 }
 
 /// The coin prefix shared by every asset of a clearinghouse ("" for the main dex).
@@ -923,6 +939,8 @@ pub(crate) mod tests {
                                 "marginTableIdToMarginTable": [[52, {"description": "tiered 10x", "margin_tiers": [
                                     {"lower_bound": 0, "max_leverage": 10, "maintenance_deduction": 0},
                                     {"lower_bound": 20_000_000_000_000_i64, "max_leverage": 5, "maintenance_deduction": 1_000_000_000_000_i64}
+                                ], "collateral_token": 0}], [56, {"description": "tiered 40x", "margin_tiers": [
+                                    {"lower_bound": 0, "max_leverage": 40, "maintenance_deduction": 0}
                                 ], "collateral_token": 0}]],
                                 "collateralToken": 0,
                                 "collateralTokenName": "USDC"
@@ -1108,12 +1126,25 @@ pub(crate) mod tests {
         assert_eq!(position.size_raw, -2_000_000);
     }
 
+    /// Every asset's table resolves: on 1190010000 all 43 assets with a table from 50 up had it listed.
+    #[test]
+    fn an_assets_current_table_resolves_or_fails_the_parse() {
+        let parsed = parse_checkpoint_bytes(&fixture()).unwrap();
+        let tsla = &parsed.dexes[1].assets[0];
+        assert_eq!(tsla.margin_table_id, 10);
+        assert_eq!(parsed.dexes[1].table(10).maintenance_micro(1_000_000_000), 50_000_000, "implicit single tier, 10x");
+        let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        checkpoint["exchange"]["locus"]["cls"][0]["meta"]["universe"][0]["marginTableId"] = json!(57);
+        let error = parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap_err().to_string();
+        assert!(error.contains("BTC: margin table 57 is not listed"), "{error}");
+    }
+
     #[test]
     fn an_unlisted_table_id_from_50_up_fails_the_parse() {
         let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
         checkpoint["exchange"]["locus"]["cls"][0]["user_states"]["user_to_state"][0][1]["p"]["p"][0][1]["M"] = json!(77);
         let error = parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap_err().to_string();
-        assert!(error.contains("margin table 77"), "{error}");
+        assert!(error.contains("margin table 77 is not listed"), "{error}");
     }
 
     /// Values the solver must never see: a zero max leverage (implicit or listed table) or a non-positive mark.

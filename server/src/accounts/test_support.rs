@@ -15,6 +15,9 @@ use super::{
 use crate::types::node_data::{Batch, NodeDataFill};
 
 pub(crate) const PUMP: &str = "PUMP";
+/// The table of a test anchor's positions, and the coins' current table (the fixture's PUMP: 52, a 10x table).
+pub(crate) const ANCHOR_TABLE: u32 = 20;
+pub(crate) const CURRENT_TABLE: u32 = 52;
 
 pub(crate) fn user(byte: u8) -> Address {
     Address::repeat_byte(byte)
@@ -150,10 +153,10 @@ pub(crate) fn anchor(height: u64, coins: &[CoinSpec<'_>]) -> Anchor {
                 .iter()
                 .map(|(user, size_raw)| {
                     account_modes.insert(*user, AccountMode::Unified);
-                    (*user, AnchorPosition { size_raw: *size_raw, row: row() })
+                    (*user, AnchorPosition { size_raw: *size_raw, table_id: ANCHOR_TABLE, row: row() })
                 })
                 .collect();
-            ((*name).to_string(), AnchorCoin { size_decimals: *size_decimals, positions })
+            ((*name).to_string(), AnchorCoin { size_decimals: *size_decimals, table_id: CURRENT_TABLE, positions })
         })
         .collect();
     Anchor { height, time_ms: height * 1_000, coins, account_modes, margins: MarginStates::default() }

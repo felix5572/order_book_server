@@ -322,6 +322,13 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
   区块动作带 `asset` / `ntli` / `isCross` / `amount`(只在保留的类型上读, 别的动作同名字段类型不同)、checkpoint 读币的
   `marginMode`、没有持仓的逐仓设置和现货交易对。新指标 `orderbook_accounts_replay_checked_total`、`_replay_stopped_total`、
   `_replay_checks_skipped_total`。
+- **回放清算价**(设计 000437 r3, 第三批): 逐仓仓位和池里只有它一个的全仓仓位(普通账户同一 USDC dex, 统一账户所有 USDC dex)
+  在账户回放中、且已入账高度追上锚点时, 用回放的现金 + 当前数量 + 这笔仓位自己的档位表按同一个 `solve` 算清算价, 行字段
+  `liquidationPxSource: "replay"`, `liquidationPxHeight` = 已入账高度, `changedSinceLiquidationPx` 为空; 其他行仍是锚点行;
+  停止回放的账户带 `replayStoppedReason` / `replayStoppedHeight`。档位表跟着当前这笔仓位: 锚点的 `M`, 锚点之后从 0 开的取
+  币当前 `marginTableId`, 翻转保留(研究 4/4); 晚到锚点只覆盖它包含的那笔(`opened_after`)。按需在视图投影里算, 不另存
+  回放行; 账户持仓索引判断是否单仓位池; 回放中账户的每个事件都触动其行(推送量随之上升, 实测见审查)。每个锚点装入时对
+  它的仓位逐行自检(`orderbook_accounts_replay_rows_checked_total{result}`, `replayRowMismatch` 证据)。
 
 **实测**(10-19, bm): 对齐的单仓位池清算价与节点 0.1bp 以内(另有 3 个节点只给 4–5 位有效数字的显示精度差);
 锚点之间约 40 万个仓位按成交推出的数量与下一份 checkpoint 逐个相同。只核对了 USDC 抵押池。

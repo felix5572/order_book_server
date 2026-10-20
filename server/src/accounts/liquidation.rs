@@ -47,6 +47,8 @@ pub(crate) struct PositionLiquidation {
     pub(crate) asset: usize,
     /// Signed size in the asset's raw units (10^-szDecimals), as the checkpoint stores it.
     pub(crate) size_raw: i64,
+    /// The position's margin table (`M`, omitted = 20).
+    pub(crate) table_id: u32,
     pub(crate) isolated: bool,
     /// Positions sharing the pool (more than 1: the price also moves with the other positions' marks); `None` when
     /// the account's pool rule is unknown or unsupported.
@@ -127,6 +129,7 @@ fn position_liquidation(
         dex: state.dex,
         asset: position.asset,
         size_raw: position.size_raw,
+        table_id: position.table_id,
         isolated,
         pool_positions,
         liquidation_px,

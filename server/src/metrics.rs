@@ -456,6 +456,13 @@ lazy_static! {
         &["mode", "result"]
     ).expect("metric can be created");
 
+    /// Replayed rows at each anchor against the anchor's own rows (design 000437), by result (`equal`, `differ`,
+    /// `classDiffers`).
+    pub static ref ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_accounts_replay_rows_checked_total", "Replayed rows compared with the anchor's rows"),
+        &["result"]
+    ).expect("metric can be created");
+
     /// Accounts whose replay stopped in a checked interval (or at its anchor), by reason.
     pub static ref ACCOUNTS_REPLAY_STOPPED_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_accounts_replay_stopped_total", "Accounts whose cash replay stopped in a checked interval"),
@@ -556,6 +563,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ACCOUNTS_DUPLICATE_INPUTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_REPLAY_CHECKED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_REPLAY_STOPPED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_APPLIED_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_PENDING_BLOCKS.clone())).ok();

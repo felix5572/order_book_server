@@ -24,11 +24,11 @@ use super::{
     blocks::{Assembly, BlockAssembler, MiscKey},
     book::{
         AccountBook, BlockActionsReport, BlockReport, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport,
-        QueryError, ReplayCheck, Stream, Touched, Unavailable,
+        QueryError, ReplayCheck, RowCheck, Stream, Touched, Unavailable,
     },
     checkpoint::parse_checkpoint_file,
     misc::MiscEvent,
-    evidence::{LineEvidence, fill_line_reason, misc_line_reason, replay_mismatch_json, silent_change_json},
+    evidence::{LineEvidence, fill_line_reason, misc_line_reason, replay_mismatch_json, replay_row_mismatch_json, silent_change_json},
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, Publisher},
 };
 use crate::{
@@ -40,7 +40,7 @@ use crate::{
         ACCOUNTS_ANCHOR_HEIGHT, ACCOUNTS_ANCHOR_PARSE_SECONDS, ACCOUNTS_ANCHOR_SKIPPED_TOTAL, ACCOUNTS_EVIDENCE_TOTAL,
         ACCOUNTS_APPLIED_HEIGHT, ACCOUNTS_CHECKPOINT_FAILURES_TOTAL, ACCOUNTS_DATA_LOSS_TOTAL, ACCOUNTS_DUPLICATE_INPUTS_TOTAL,
         ACCOUNTS_HELD_FILLS, ACCOUNTS_OPEN_POSITIONS, ACCOUNTS_PENDING_BLOCKS, ACCOUNTS_REPLAY_CHECKED_TOTAL,
-        ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL, ACCOUNTS_REPLAY_STOPPED_TOTAL, ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL,
+        ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL, ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL, ACCOUNTS_REPLAY_STOPPED_TOTAL, ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL,
         ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL, ACCOUNTS_STREAM_HEIGHT, ACCOUNTS_TRUSTED, ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL,
     },
     prelude::Result,
@@ -563,6 +563,20 @@ fn log_install(height: u64, parse_seconds: f64, skipped: usize, report: &Install
     log_replay_check(height, report);
 }
 
+/// The replayed rows at the anchor against its own (design 000437): counts, metrics, and mismatches as evidence.
+fn log_row_check(height: u64, previous: Option<u64>, rows: &RowCheck) {
+    info!(
+        "accounts: replayed rows at anchor {height}: {} equal, {} differ, {} classed differently, {} moved after the anchor",
+        rows.equal, rows.differ, rows.class_differs, rows.moved_after
+    );
+    for (result, count) in [("equal", rows.equal), ("differ", rows.differ), ("classDiffers", rows.class_differs)] {
+        ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL.with_label_values(&[result]).inc_by(count);
+    }
+    for mismatch in &rows.samples {
+        record_evidence(&replay_row_mismatch_json(mismatch, previous, height));
+    }
+}
+
 /// The cash replay of the interval ending at this anchor (design 000433): counts, metrics, and mismatches as evidence.
 fn log_replay_check(height: u64, report: &InstallReport) {
     let check = match &report.replay_check {
@@ -571,7 +585,10 @@ fn log_replay_check(height: u64, report: &InstallReport) {
             ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL.with_label_values(&[reason]).inc();
             return;
         }
-        ReplayCheck::Checked(check) => check,
+        ReplayCheck::Checked { cash, rows } => {
+            log_row_check(height, report.previous_anchor, rows);
+            cash
+        }
     };
     let sorted = |counts: Vec<(&str, String)>| {
         let mut counts = counts;
@@ -734,7 +751,7 @@ mod tests {
     }
 
     fn empty_anchor(height: u64, time_ms: u64) -> Anchor {
-        let coin = AnchorCoin { size_decimals: 0, positions: FxHashMap::default() };
+        let coin = AnchorCoin { size_decimals: 0, table_id: 52, positions: FxHashMap::default() };
         let coins = std::iter::once(("PUMP".to_string(), coin)).collect();
         Anchor { height, time_ms, coins, account_modes: FxHashMap::default(), margins: MarginStates::default() }
     }

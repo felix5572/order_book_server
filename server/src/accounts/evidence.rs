@@ -10,7 +10,8 @@
 use serde_json::json;
 
 use super::{
-    book::SilentChange,
+    book::{RowMismatch, SilentChange},
+    liquidation::LiquidationPx,
     misc::MiscEvent,
     replay::Mismatch,
     size::format_size_raw,
@@ -125,6 +126,21 @@ pub(crate) fn replay_mismatch_json(mismatch: &Mismatch, anchor_from: Option<u64>
         "user": user_text(mismatch.user),
         "replayed": mismatch.replayed.json(),
         "anchor": mismatch.anchor.json(),
+    })
+}
+
+/// A replayed row the anchor's own row contradicts (design 000437).
+pub(crate) fn replay_row_mismatch_json(mismatch: &RowMismatch, anchor_from: Option<u64>, anchor_to: u64) -> serde_json::Value {
+    let price = |price: &LiquidationPx| format!("{price:?}");
+    json!({
+        "kind": "replayRowMismatch",
+        "anchorFrom": anchor_from,
+        "anchorTo": anchor_to,
+        "coin": mismatch.coin,
+        "user": user_text(mismatch.user),
+        "replayed": mismatch.replayed.as_ref().map(|row| json!({"isolated": row.isolated, "liquidationPx": price(&row.liquidation_px)})),
+        "anchor": json!({"isolated": mismatch.anchor.isolated, "poolPositions": mismatch.anchor.pool_positions,
+                          "liquidationPx": price(&mismatch.anchor.liquidation_px)}),
     })
 }
 

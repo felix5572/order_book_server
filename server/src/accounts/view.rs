@@ -37,7 +37,7 @@ struct PositionDto {
     szi: String,
     /// The block that set `szi`.
     position_height: u64,
-    /// The anchor's; `null` for a position opened after it.
+    /// The replay's or the anchor's; `null` while `pending`.
     margin_mode: Option<&'static str>,
     /// The anchor's; `null` for an account that held no position at it.
     account_mode: Option<String>,
@@ -46,11 +46,20 @@ struct PositionDto {
     liquidation_px: Option<String>,
     liquidation_px_status: &'static str,
     unsupported_reason: Option<String>,
-    /// The anchor height the row was computed at; `null` while `pending`.
+    /// `replay`: computed from the replayed state of block `liquidationPxHeight` (design 000437; an isolated position
+    /// or a cross position alone in its pool); `anchor`: the anchor's row; `null` while `pending`.
+    liquidation_px_source: Option<&'static str>,
+    /// The block the row's state is of: the applied height for a replayed row, the anchor height for an anchor's row;
+    /// `null` while `pending`.
     liquidation_px_height: Option<u64>,
     /// Observed sources that touched the account after the anchor; empty does not prove it unchanged (mark price moves
-    /// of the pool's other positions are not a source).
+    /// of the pool's other positions are not a source). Always empty on a replayed row: every event up to its height
+    /// is in it.
     changed_since_liquidation_px: Vec<ChangeDto>,
+    /// Why the account's replay stopped (its rows then keep the anchor's values); `null` while it replays.
+    replay_stopped_reason: Option<String>,
+    /// The block it stopped at; `null` when it stopped at the anchor (portfolio margin, an unknown mode) or replays.
+    replay_stopped_height: Option<u64>,
     /// The anchor's portfolio-margin ratio of a portfolio-margin account (node `portfolioMarginRatio`, not the official
     /// 0.95 trigger); `null` for the other modes and for pending rows.
     portfolio_margin: Option<PortfolioMarginDto>,
@@ -166,27 +175,57 @@ impl CoinPositionsFrame {
     }
 }
 
+/// What a row shows: the replayed row, else the anchor's, else nothing (`pending`).
+struct Shown<'a> {
+    source: &'static str,
+    height: u64,
+    isolated: bool,
+    pool_positions: Option<usize>,
+    liquidation_px: &'a LiquidationPx,
+}
+
 fn position_dto(size_decimals: u32, anchor: AnchorInfo, position: &PositionView) -> PositionDto {
     let row = position.anchor_row.as_ref();
-    let (liquidation_px_status, liquidation_px, unsupported_reason) = match row.map(|row| &row.liquidation_px) {
+    let shown = match (&position.replayed, row) {
+        (Some((height, replayed)), _) => Some(Shown {
+            source: "replay",
+            height: *height,
+            isolated: replayed.isolated,
+            pool_positions: Some(1),
+            liquidation_px: &replayed.liquidation_px,
+        }),
+        (None, Some(row)) => Some(Shown {
+            source: "anchor",
+            height: anchor.height,
+            isolated: row.isolated,
+            pool_positions: row.pool_positions,
+            liquidation_px: &row.liquidation_px,
+        }),
+        (None, None) => None,
+    };
+    let (liquidation_px_status, liquidation_px, unsupported_reason) = match shown.as_ref().map(|shown| shown.liquidation_px) {
         None => ("pending", None, None),
         Some(LiquidationPx::Computed(price)) => ("computed", Some(price.to_string()), None),
         Some(LiquidationPx::NoPositiveSolution) => ("none", None, None),
         Some(LiquidationPx::Unsupported(reason)) => ("unsupported", None, Some(unsupported_reason_name(reason))),
     };
+    let replayed = position.replayed.is_some();
     PositionDto {
         user: user_text(position.user),
         szi: format_size_raw(position.size_raw, size_decimals),
         position_height: position.position_height,
-        margin_mode: row.map(|row| if row.isolated { "isolated" } else { "cross" }),
+        margin_mode: shown.as_ref().map(|shown| if shown.isolated { "isolated" } else { "cross" }),
         account_mode: position.account_mode.as_ref().map(account_mode_name),
-        pool_positions: row.and_then(|row| row.pool_positions),
+        pool_positions: shown.as_ref().and_then(|shown| shown.pool_positions),
         liquidation_px,
         liquidation_px_status,
         unsupported_reason,
-        liquidation_px_height: row.map(|_| anchor.height),
-        changed_since_liquidation_px: changes(position.changes),
-        portfolio_margin: row.and_then(|row| row.portfolio_margin.as_ref()).map(PortfolioMarginDto::new),
+        liquidation_px_source: shown.as_ref().map(|shown| shown.source),
+        liquidation_px_height: shown.as_ref().map(|shown| shown.height),
+        changed_since_liquidation_px: if replayed { Vec::new() } else { changes(position.changes) },
+        replay_stopped_reason: position.replay_stop.as_ref().map(|stop| stop.reason.text()),
+        replay_stopped_height: position.replay_stop.as_ref().and_then(|stop| stop.block),
+        portfolio_margin: row.and_then(|row| row.portfolio_margin.as_ref()).filter(|_| !replayed).map(PortfolioMarginDto::new),
     }
 }
 
@@ -237,7 +276,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::accounts::{anchor::AnchorRow, book::AnchorInfo};
+    use crate::accounts::{
+        anchor::AnchorRow,
+        book::AnchorInfo,
+        replay::{ReplayedRow, Stop, StopReason},
+    };
 
     #[test]
     fn an_unsupported_portfolio_margin_names_its_reason() {
@@ -266,6 +309,8 @@ mod tests {
                 withdrawal: Some(1_001),
                 ..ChangeMarks::default()
             },
+            replayed: None,
+            replay_stop: Some(Stop { block: None, reason: StopReason::PortfolioMargin }),
         };
         let pending = PositionView {
             user: Address::repeat_byte(0x01),
@@ -274,6 +319,8 @@ mod tests {
             account_mode: None,
             anchor_row: None,
             changes: ChangeMarks { fill: Some(1_010), ..ChangeMarks::default() },
+            replayed: None,
+            replay_stop: None,
         };
         let unsupported = PositionView {
             anchor_row: Some(AnchorRow {
@@ -284,7 +331,15 @@ mod tests {
             }),
             account_mode: Some(AccountMode::Unknown("x".to_string())),
             changes: ChangeMarks::default(),
-            ..anchored
+            replay_stop: Some(Stop { block: Some(1_007), reason: StopReason::UnreadLedger("spotGenesis".to_string()) }),
+            ..anchored.clone()
+        };
+        // a cross position alone in its pool, replayed to block 1012: its row replaces the anchor's
+        let replayed = PositionView {
+            account_mode: Some(AccountMode::Unified),
+            replayed: Some((1_012, ReplayedRow { isolated: false, liquidation_px: LiquidationPx::Computed(0.004_2) })),
+            replay_stop: None,
+            ..anchored.clone()
         };
         let view = CoinPositions {
             coin: "PUMP".to_string(),
@@ -294,7 +349,7 @@ mod tests {
             misc_events_height: 1_009,
             block_actions_height: 1_012,
             size_decimals: 1,
-            positions: vec![anchored, pending, unsupported],
+            positions: vec![anchored, pending, unsupported, replayed],
         };
         let value = serde_json::to_value(CoinPositionsDto::new(&view)).unwrap();
         let ab = "0xabababababababababababababababababababab";
@@ -306,21 +361,30 @@ mod tests {
                 "positions": [
                     {"user": ab, "szi": "-269620.0", "positionHeight": 1_000, "marginMode": "cross",
                      "accountMode": "portfolioMargin", "poolPositions": 2, "liquidationPx": "0.0039515",
-                     "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxHeight": 1_000,
+                     "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxSource": "anchor",
+                     "liquidationPxHeight": 1_000,
                      "changedSinceLiquidationPx": [
                          {"kind": "ledger", "height": 1_005}, {"kind": "funding", "height": 1_003},
                          {"kind": "margin", "height": 1_002}, {"kind": "accountMode", "height": 1_004},
                          {"kind": "withdrawal", "height": 1_001}
                      ],
+                     "replayStoppedReason": "portfolioMargin", "replayStoppedHeight": null,
                      "portfolioMargin": {"status": "computed", "ratio": "0.25"}},
                     {"user": "0x0101010101010101010101010101010101010101", "szi": "0.5", "positionHeight": 1_010,
                      "marginMode": null, "accountMode": null, "poolPositions": null, "liquidationPx": null,
-                     "liquidationPxStatus": "pending", "unsupportedReason": null, "liquidationPxHeight": null,
-                     "changedSinceLiquidationPx": [{"kind": "fill", "height": 1_010}], "portfolioMargin": null},
+                     "liquidationPxStatus": "pending", "unsupportedReason": null, "liquidationPxSource": null,
+                     "liquidationPxHeight": null, "changedSinceLiquidationPx": [{"kind": "fill", "height": 1_010}],
+                     "replayStoppedReason": null, "replayStoppedHeight": null, "portfolioMargin": null},
                     {"user": ab, "szi": "-269620.0", "positionHeight": 1_000, "marginMode": "isolated",
                      "accountMode": "unknown:x", "poolPositions": null, "liquidationPx": null,
                      "liquidationPxStatus": "unsupported", "unsupportedReason": "unknownAccountMode:x",
-                     "liquidationPxHeight": 1_000, "changedSinceLiquidationPx": [], "portfolioMargin": null}
+                     "liquidationPxSource": "anchor", "liquidationPxHeight": 1_000, "changedSinceLiquidationPx": [],
+                     "replayStoppedReason": "unreadLedger:spotGenesis", "replayStoppedHeight": 1_007, "portfolioMargin": null},
+                    {"user": ab, "szi": "-269620.0", "positionHeight": 1_000, "marginMode": "cross",
+                     "accountMode": "unifiedAccount", "poolPositions": 1, "liquidationPx": "0.0042",
+                     "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxSource": "replay",
+                     "liquidationPxHeight": 1_012, "changedSinceLiquidationPx": [],
+                     "replayStoppedReason": null, "replayStoppedHeight": null, "portfolioMargin": null}
                 ]
             })
         );

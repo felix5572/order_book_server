@@ -39,7 +39,8 @@ use super::{
     blocks::CompletedBlock,
     checkpoint::AccountMode,
     misc::{FundingDelta, MiscEvent},
-    replay::{AccountEvent, FillEvent, MarginStates, SelfCheck},
+    liquidation::LiquidationPx,
+    replay::{AccountEvent, FillEvent, MarginStates, ReplayedRow, SelfCheck, Stop},
     size::parse_size_raw,
 };
 use crate::{
@@ -249,44 +250,96 @@ struct PositionRecord {
     applied: Applied,
     /// The anchor's row for this position; `None` when the anchor held no such position (`pending`).
     anchor_row: Option<AnchorRow>,
+    /// The margin table of the position the record holds (design 000437): the anchor's `M`, or the coin's current
+    /// table for a position opened from zero; a flip keeps it (research: 4/4 telling samples). `None` when unknown (a
+    /// first fill that does not start from zero, a later anchor contradicting the record).
+    table_id: Option<u32>,
+    /// The block after the anchor where this position was opened from zero; `None` for one the anchor holds.
+    opened_after: Option<u64>,
+}
+
+/// A fill applied to a position: its block, identity, the size before and after it, and the coin's current table.
+struct SizeChange {
+    block: u64,
+    identity: FillIdentity,
+    start: i64,
+    size_after: i64,
+    current_table: u32,
 }
 
 impl PositionRecord {
     fn anchored(height: u64, position: AnchorPosition) -> Self {
-        Self { size_raw: position.size_raw, version_block: height, applied: Applied::Anchor, anchor_row: Some(position.row) }
+        Self {
+            size_raw: position.size_raw,
+            version_block: height,
+            applied: Applied::Anchor,
+            anchor_row: Some(position.row),
+            table_id: Some(position.table_id),
+            opened_after: None,
+        }
     }
 
-    fn opened(block: u64, identity: FillIdentity, size_after: i64) -> Self {
-        Self { size_raw: size_after, version_block: block, applied: Applied::Fills(vec![identity]), anchor_row: None }
+    fn opened(change: &SizeChange) -> Self {
+        let mut record = Self {
+            size_raw: change.start,
+            version_block: change.block,
+            applied: Applied::Fills(vec![change.identity]),
+            anchor_row: None,
+            table_id: None,
+            opened_after: None,
+        };
+        record.set_size(change);
+        record
     }
 
     /// Returns whether the fill was applied.
-    fn apply_fill(&mut self, block: u64, identity: FillIdentity, size_after: i64) -> bool {
-        match block.cmp(&self.version_block) {
+    fn apply_fill(&mut self, change: &SizeChange) -> bool {
+        match change.block.cmp(&self.version_block) {
             // a replay of an older block
             Ordering::Less => false,
             Ordering::Equal => match &mut self.applied {
                 Applied::Anchor => false,
-                Applied::Fills(applied) if applied.contains(&identity) => false,
+                Applied::Fills(applied) if applied.contains(&change.identity) => false,
                 Applied::Fills(applied) => {
-                    applied.push(identity);
-                    self.size_raw = size_after;
+                    applied.push(change.identity);
+                    self.set_size(change);
                     true
                 }
             },
             Ordering::Greater => {
-                self.version_block = block;
-                self.applied = Applied::Fills(vec![identity]);
-                self.size_raw = size_after;
+                self.version_block = change.block;
+                self.applied = Applied::Fills(vec![change.identity]);
+                self.set_size(change);
                 true
             }
         }
+    }
+
+    /// A position opened from zero takes the coin's current table; any other change keeps the position's.
+    const fn set_size(&mut self, change: &SizeChange) {
+        if change.start == 0 && change.size_after != 0 {
+            self.table_id = Some(change.current_table);
+            self.opened_after = Some(change.block);
+        }
+        self.size_raw = change.size_after;
+    }
+
+    /// The record of a position set after anchor `height` meets that anchor: its row is the anchor's, and so is its
+    /// table unless this position was opened after the anchor (an anchor without it leaves the table unknown).
+    fn meet_earlier_anchor(&mut self, height: u64, anchored: Option<AnchorPosition>) {
+        if self.opened_after.is_none_or(|block| block <= height) {
+            self.table_id = anchored.as_ref().map(|position| position.table_id);
+            self.opened_after = None;
+        }
+        self.anchor_row = anchored.map(|position| position.row);
     }
 }
 
 #[derive(Debug)]
 struct CoinBook {
     size_decimals: u32,
+    /// The anchor's current table of the coin: a position opened from zero takes it.
+    table_id: u32,
     records: FxHashMap<Address, PositionRecord>,
     /// Bumped by every frame pushed for this coin (a `changes` batch or the snapshot after an anchor install); a new
     /// subscriber's snapshot carries it without bumping (design 000419 r2 4.2).
@@ -296,7 +349,7 @@ struct CoinBook {
 impl CoinBook {
     fn anchored(height: u64, coin: AnchorCoin, version: u64) -> Self {
         let records = coin.positions.into_iter().map(|(user, position)| (user, PositionRecord::anchored(height, position)));
-        Self { size_decimals: coin.size_decimals, records: records.collect(), version }
+        Self { size_decimals: coin.size_decimals, table_id: coin.table_id, records: records.collect(), version }
     }
 
     /// Keeps records set after `height`, takes the anchor's value for the rest, and counts (and samples) the ones the
@@ -312,7 +365,7 @@ impl CoinBook {
         self.records.retain(|user, record| {
             let anchored = positions.remove(user);
             if record.version_block > height {
-                record.anchor_row = anchored.map(|position| position.row);
+                record.meet_earlier_anchor(height, anchored);
                 return true;
             }
             let anchor_size_raw = anchored.as_ref().map_or(0, |position| position.size_raw);
@@ -346,7 +399,8 @@ impl ObservedFill {
         Self { coin: fill.coin, tid: fill.tid, side: fill.side, start_position: fill.start_position, sz: fill.sz }
     }
 
-    fn size_after(&self, size_decimals: u32) -> Result<i64, String> {
+    /// The size before and after the fill.
+    fn sizes(&self, size_decimals: u32) -> Result<(i64, i64), String> {
         let start = parse_size_raw(&self.start_position, size_decimals)?;
         let size = parse_size_raw(&self.sz, size_decimals)?;
         if size <= 0 {
@@ -356,7 +410,8 @@ impl ObservedFill {
             Side::Bid => size,
             Side::Ask => -size,
         };
-        start.checked_add(delta).ok_or_else(|| format!("startPosition {:?} + {delta} overflows", self.start_position))
+        let after = start.checked_add(delta).ok_or_else(|| format!("startPosition {:?} + {delta} overflows", self.start_position))?;
+        Ok((start, after))
     }
 }
 
@@ -464,7 +519,7 @@ pub(crate) struct SilentChange {
 }
 
 /// What an anchor install did.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub(crate) struct InstallReport {
     /// The anchor this one replaced.
     pub(crate) previous_anchor: Option<u64>,
@@ -500,6 +555,10 @@ pub(crate) struct PositionView {
     /// The anchor's row (at `CoinPositions::anchor`); `None` = opened after the anchor.
     pub(crate) anchor_row: Option<AnchorRow>,
     pub(crate) changes: ChangeMarks,
+    /// The replayed row and the block whose state it is (design 000437); when present it replaces the anchor's row.
+    pub(crate) replayed: Option<(u64, ReplayedRow)>,
+    /// Why the account's replay stopped, and where; its rows keep the anchor's values.
+    pub(crate) replay_stop: Option<Stop>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -540,6 +599,40 @@ pub(crate) struct BookStatus {
     pub(crate) held_fills: usize,
 }
 
+/// The coins each account holds a non-zero position in (design 000437): whether a cross position is alone in its pool.
+#[derive(Debug, Default)]
+struct Holdings(FxHashMap<Address, FxHashSet<String>>);
+
+impl Holdings {
+    fn record(&mut self, user: Address, coin: &str, size_raw: i64) {
+        if size_raw != 0 {
+            self.0.entry(user).or_default().insert(coin.to_string());
+            return;
+        }
+        if let Entry::Occupied(mut held) = self.0.entry(user) {
+            held.get_mut().remove(coin);
+            if held.get().is_empty() {
+                held.remove();
+            }
+        }
+    }
+
+    fn of(&self, user: &Address) -> impl Iterator<Item = &str> {
+        self.0.get(user).into_iter().flatten().map(String::as_str)
+    }
+
+    /// Every open position of the books, after an anchor install.
+    fn rebuild(coins: &FxHashMap<String, CoinBook>) -> Self {
+        let mut holdings = Self::default();
+        for (name, coin) in coins {
+            for (user, record) in &coin.records {
+                holdings.record(*user, name, record.size_raw);
+            }
+        }
+        holdings
+    }
+}
+
 /// An account event after the anchor.
 #[derive(Debug)]
 struct LoggedEvent {
@@ -556,10 +649,47 @@ struct Replay {
 }
 
 /// The previous interval's replay checked against a new anchor, or why it was not.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum ReplayCheck {
-    Checked(SelfCheck),
+    Checked { cash: SelfCheck, rows: RowCheck },
     Skipped(&'static str),
+}
+
+/// Rows below this relative distance from the anchor's are equal: the cash is equal to the last 10^-8, so the solver
+/// sees the same input but for the order of a float sum.
+const ROW_TOLERANCE: f64 = 1e-12;
+/// Row mismatches kept as evidence per anchor.
+const MAX_ROW_SAMPLES: usize = 20;
+
+/// The replayed rows at the new anchor against its own (design 000437 r2 revision 3): for every position the anchor
+/// holds of an account replaying to it on a USDC perp, the replayed cash at the anchor, the anchor's size and pool
+/// members and the record's table as of the anchor give a row. It checks the pool membership and the table choice
+/// given the anchor's sizes; the live sizes and holdings are checked by the silent position changes and the tests.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct RowCheck {
+    pub(crate) equal: u64,
+    pub(crate) differ: u64,
+    /// The replay and the anchor disagree on whether the row is a replayed one (isolated, or alone in its pool).
+    pub(crate) class_differs: u64,
+    /// Positions whose record moved after the anchor: their table as of the anchor is not kept.
+    pub(crate) moved_after: u64,
+    pub(crate) samples: Vec<RowMismatch>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RowMismatch {
+    pub(crate) coin: String,
+    pub(crate) user: Address,
+    pub(crate) replayed: Option<ReplayedRow>,
+    pub(crate) anchor: AnchorRow,
+}
+
+/// Whether two rows' prices agree within `ROW_TOLERANCE`.
+fn same_price(left: &LiquidationPx, right: &LiquidationPx) -> bool {
+    match (left, right) {
+        (LiquidationPx::Computed(left), LiquidationPx::Computed(right)) => (left - right).abs() <= ROW_TOLERANCE * right.abs(),
+        _ => left == right,
+    }
 }
 
 #[derive(Debug)]
@@ -574,6 +704,7 @@ pub(crate) struct AccountBook {
     /// Whether the event log dropped events since the anchor (the replay of the interval is then incomplete).
     events_dropped: bool,
     replay: Option<Replay>,
+    holdings: Holdings,
     fills: StreamProgress,
     misc_events: StreamProgress,
     block_actions: StreamProgress,
@@ -593,6 +724,7 @@ impl AccountBook {
             events: VecDeque::new(),
             events_dropped: false,
             replay: None,
+            holdings: Holdings::default(),
             fills: StreamProgress::starting(started_ms),
             misc_events: StreamProgress::starting(started_ms),
             block_actions: StreamProgress::starting(started_ms),
@@ -650,7 +782,8 @@ impl AccountBook {
         report
     }
 
-    /// Logs an account event, moves the replayed cash and lowers the account's mark; returns whether the mark changed.
+    /// Logs an account event, moves the replayed cash and lowers the account's mark; returns whether the account's rows
+    /// may have changed: a new mark, or a replaying account (design 000437 4).
     fn record(&mut self, user: Address, event: AccountEvent, block: u64, dropped: &mut usize) -> bool {
         if self.events.len() >= MAX_EVENT_LOG
             && let Some(oldest) = self.events.pop_front()
@@ -659,12 +792,10 @@ impl AccountBook {
             self.events_dropped = true;
             *dropped += 1;
         }
-        if let Some(replay) = &mut self.replay {
-            replay.current.apply(block, user, &event);
-        }
-        let changed = self.accounts.entry(user).or_default().marks.mark(MarkKind::of(&event), block);
+        let replaying = self.replay.as_mut().is_some_and(|replay| replay.current.apply(block, user, &event));
+        let marked = self.accounts.entry(user).or_default().marks.mark(MarkKind::of(&event), block);
         self.events.push_back(LoggedEvent { block, user, event });
-        changed
+        marked || replaying
     }
 
     fn apply_or_hold(&mut self, block: u64, user: Address, fill: ObservedFill, report: &mut FillsReport) {
@@ -681,23 +812,24 @@ impl AccountBook {
             report.held += 1;
             return;
         };
-        let size_after = match fill.size_after(coin.size_decimals) {
-            Ok(size_after) => size_after,
+        let (start, size_after) = match fill.sizes(coin.size_decimals) {
+            Ok(sizes) => sizes,
             Err(err) => {
                 report.errors.push(format!("block {block} {user} {} tid {}: {err}", fill.coin, fill.tid));
                 raise(&mut self.fills.lost_block, block);
                 return;
             }
         };
-        let identity = (fill.tid, fill.side);
+        let change = SizeChange { block, identity: (fill.tid, fill.side), start, size_after, current_table: coin.table_id };
         let applied = match coin.records.entry(user) {
             Entry::Vacant(entry) => {
-                entry.insert(PositionRecord::opened(block, identity, size_after));
+                entry.insert(PositionRecord::opened(&change));
                 true
             }
-            Entry::Occupied(mut entry) => entry.get_mut().apply_fill(block, identity, size_after),
+            Entry::Occupied(mut entry) => entry.get_mut().apply_fill(&change),
         };
         if applied {
+            self.holdings.record(user, &fill.coin, size_after);
             report.touched.positions.push((fill.coin, user));
         }
     }
@@ -777,7 +909,7 @@ impl AccountBook {
             "anchor {height} is not newer than the installed {:?}",
             self.anchor
         );
-        let replay_check = self.check_replay(&margins, height);
+        let replay_check = self.check_replay(&margins, &anchor_coins, height);
         let mut report =
             InstallReport { previous_anchor: self.anchor.map(|anchor| anchor.height), replay_check, ..InstallReport::default() };
         let mut lost_block = self.fills.lost_block;
@@ -800,6 +932,7 @@ impl AccountBook {
                 *coin = CoinBook::anchored(height, anchor_coin, coin.version);
                 return true;
             }
+            coin.table_id = anchor_coin.table_id;
             coin.merge(name, height, anchor_coin.positions, &mut report);
             true
         });
@@ -815,6 +948,7 @@ impl AccountBook {
             self.checkpoint_failure = None;
         }
         self.replay_held_fills(height, &mut report);
+        self.holdings = Holdings::rebuild(&self.coins);
         report
     }
 
@@ -845,7 +979,7 @@ impl AccountBook {
     /// Step 1 of an install (design 000433 r2 3.6): the previous anchor's state moved by the logged events up to the
     /// new anchor, compared with the new anchor's state. Only a complete interval is checked: trusted under the
     /// previous anchor (no loss), every event logged, and every block up to the new anchor applied.
-    fn check_replay(&self, anchor: &MarginStates, height: u64) -> ReplayCheck {
+    fn check_replay(&self, anchor: &MarginStates, anchor_coins: &FxHashMap<String, AnchorCoin>, height: u64) -> ReplayCheck {
         let Some(replay) = &self.replay else {
             return ReplayCheck::Skipped("noPreviousAnchor");
         };
@@ -862,7 +996,49 @@ impl AccountBook {
         for LoggedEvent { block, user, event } in self.events.iter().filter(|logged| logged.block <= height) {
             replayed.apply(*block, *user, event);
         }
-        ReplayCheck::Checked(replayed.check_against(anchor, &replay.anchored))
+        let cash = replayed.check_against(anchor, &replay.anchored);
+        ReplayCheck::Checked { cash, rows: self.check_rows(&replayed, anchor_coins, height) }
+    }
+
+    /// See `RowCheck`.
+    fn check_rows(&self, replayed: &MarginStates, anchor_coins: &FxHashMap<String, AnchorCoin>, height: u64) -> RowCheck {
+        let mut held: FxHashMap<Address, Vec<&str>> = FxHashMap::default();
+        for (name, coin) in anchor_coins {
+            for user in coin.positions.keys() {
+                held.entry(*user).or_default().push(name);
+            }
+        }
+        let mut check = RowCheck::default();
+        for (name, coin) in anchor_coins.iter().filter(|(name, _)| replayed.usdc_perp(name)) {
+            for (user, position) in coin.positions.iter().filter(|(user, _)| replayed.replays(user)) {
+                let Some(record) = self.coins.get(name).and_then(|book| book.records.get(user)) else {
+                    continue;
+                };
+                if record.version_block > height {
+                    check.moved_after += 1;
+                    continue;
+                }
+                // a record whose table is unknown has no replayed row, as in the view
+                let row = record
+                    .table_id
+                    .and_then(|table_id| replayed.replayed_row(user, name, position.size_raw, table_id, held[user].iter().copied()));
+                let anchor_alone = position.row.isolated || position.row.pool_positions == Some(1);
+                match (&row, anchor_alone) {
+                    // a pool of several positions both ways: nothing to compare
+                    (None, false) => continue,
+                    (Some(replayed), true) if same_price(&replayed.liquidation_px, &position.row.liquidation_px) => {
+                        check.equal += 1;
+                        continue;
+                    }
+                    (Some(_), true) => check.differ += 1,
+                    _ => check.class_differs += 1,
+                }
+                if check.samples.len() < MAX_ROW_SAMPLES {
+                    check.samples.push(RowMismatch { coin: name.clone(), user: *user, replayed: row, anchor: position.row.clone() });
+                }
+            }
+        }
+        check
     }
 
     /// Step 2: the new anchor's state moved by the logged events above it (the log holds only those by now).
@@ -943,7 +1119,7 @@ impl AccountBook {
             .records
             .iter()
             .filter(|(_, record)| record.size_raw != 0)
-            .map(|(user, record)| self.position_view(*user, record))
+            .map(|(user, record)| self.position_view(*user, name, record))
             .collect();
         positions.sort_unstable_by_key(|position| position.user);
         Ok(CoinPositions {
@@ -988,7 +1164,7 @@ impl AccountBook {
             .into_iter()
             .map(|user| {
                 let record = &coin.records[&user];
-                (user, (record.size_raw != 0).then(|| self.position_view(user, record)))
+                (user, (record.size_raw != 0).then(|| self.position_view(user, name, record)))
             })
             .collect();
         rows.sort_unstable_by_key(|(user, _)| *user);
@@ -1007,7 +1183,7 @@ impl AccountBook {
         }))
     }
 
-    fn position_view(&self, user: Address, record: &PositionRecord) -> PositionView {
+    fn position_view(&self, user: Address, coin: &str, record: &PositionRecord) -> PositionView {
         let account = self.accounts.get(&user);
         PositionView {
             user,
@@ -1016,7 +1192,20 @@ impl AccountBook {
             account_mode: account.and_then(|account| account.mode.clone()),
             anchor_row: record.anchor_row.clone(),
             changes: account.map_or_else(ChangeMarks::default, |account| account.marks),
+            replayed: self.replayed_row(user, coin, record),
+            replay_stop: self.replay.as_ref().and_then(|replay| replay.current.stop(&user)).cloned(),
         }
+    }
+
+    /// The position's replayed row (design 000437), once every block up to the anchor is applied: the cash and the size
+    /// are then both those of the applied height, which the row carries.
+    fn replayed_row(&self, user: Address, coin: &str, record: &PositionRecord) -> Option<(u64, ReplayedRow)> {
+        let replay = self.replay.as_ref()?;
+        let anchor = self.anchor?;
+        let applied = self.block_actions.height.filter(|applied| *applied >= anchor.height)?;
+        let table_id = record.table_id.filter(|_| record.size_raw != 0)?;
+        let row = replay.current.replayed_row(&user, coin, record.size_raw, table_id, self.holdings.of(&user))?;
+        Some((applied, row))
     }
 }
 
@@ -1025,10 +1214,15 @@ mod tests {
     use super::*;
     use crate::accounts::{
         actions::BlockAction,
-        checkpoint::tests::{HOLDER, ISOLATED, user as checkpoint_user},
+        checkpoint::{
+            parse_checkpoint_bytes,
+            tests::{HOLDER, ISOLATED, fixture as checkpoint_fixture, user as checkpoint_user},
+        },
+        liquidation::{LiquidationPx, solve},
+        margin::MarginTable,
         misc::LedgerDelta,
-        replay::{Compared, StopReason, tests::per_dex_with_main_cash},
-        test_support::FillSpec,
+        replay::{Compared, ReplayedRow, Stop, StopReason, tests::per_dex_with_main_cash},
+        test_support::{ANCHOR_TABLE, CURRENT_TABLE, FillSpec},
     };
     use crate::accounts::test_support::{
         AVAX_ADL_BLOCK, AVAX_ADL_FULL, CoinSpec, ETH_ADL_BLOCK, ETH_ADL_PARTIAL, FARTCOIN_LIQUIDATED_LONG, PUMP,
@@ -1414,7 +1608,7 @@ mod tests {
         book.apply_block_actions(block_actions(1_003, &[]));
         book.apply_block_actions(block_actions(1_004, &[]));
         book.apply_misc_events(funding(1_004, "2.0"));
-        let ReplayCheck::Checked(check) = book.install_anchor(anchor_with(1_004, -11_997_000_000)).replay_check else {
+        let ReplayCheck::Checked { cash: check, .. } = book.install_anchor(anchor_with(1_004, -11_997_000_000)).replay_check else {
             panic!("a complete interval is checked")
         };
         let compared = |exact, moved, mismatched| Compared { exact, moved, mismatched };
@@ -1426,10 +1620,156 @@ mod tests {
         let expected = per_dex_with_main_cash(-11_993_000_000);
         assert_eq!(rebuilt.check_against(&expected, &expected).compared["perDex"], compared(2, 0, 0));
         book.apply_block_actions(block_actions(1_006, &[]));
-        let ReplayCheck::Checked(check) = book.install_anchor(anchor_with(1_006, -11_997_000_000)).replay_check else {
+        let ReplayCheck::Checked { cash: check, .. } = book.install_anchor(anchor_with(1_006, -11_997_000_000)).replay_check else {
             panic!("checked")
         };
         assert_eq!((check.compared["perDex"], check.samples[0].user), (compared(1, 0, 1), holder), "the anchor contradicts +4 USDC");
+    }
+
+    // ---- replayed rows (design 000437), through the view every output uses ----
+
+    /// A book whose anchor at `height` holds these PUMP positions, with the fixture's margins (HOLDER default with main
+    /// dex cash -12000, ISOLATED's isolated PUMP cash 12000); every block up to `applied` is applied.
+    fn replay_book(height: u64, applied: u64, holders: &[(Address, i64)]) -> AccountBook {
+        let mut book = AccountBook::new(0);
+        book.apply_fills(fills(100, &[]));
+        book.apply_misc_events(misc(100, &[]));
+        book.apply_block_actions(block_actions(applied, &[]));
+        // the fixture's universe has BTC (szDecimals 5) on the main dex too
+        let mut first = anchor(height, &[(PUMP, 0, holders), ("BTC", 5, &[])]);
+        first.margins = per_dex_with_main_cash(-12_000_000_000);
+        book.install_anchor(first);
+        book
+    }
+
+    fn view_of(book: &AccountBook, holder: Address) -> PositionView {
+        let view = book.coin_positions(PUMP).unwrap();
+        view.positions.into_iter().find(|position| position.user == holder).unwrap()
+    }
+
+    fn fixture_table(table_id: u32) -> MarginTable {
+        parse_checkpoint_bytes(&checkpoint_fixture()).unwrap().dexes[0].table(table_id).clone()
+    }
+
+    fn replayed(height: u64, isolated: bool, liquidation_px: LiquidationPx) -> (u64, ReplayedRow) {
+        (height, ReplayedRow { isolated, liquidation_px })
+    }
+
+    #[test]
+    fn a_cross_position_alone_in_its_pool_shows_its_replayed_row_and_a_second_one_falls_back() {
+        let holder = checkpoint_user(HOLDER);
+        let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000)]);
+        let table = fixture_table(ANCHOR_TABLE);
+        let alone = solve(-12_000.0, 0.0, 1_000_000.0, &table);
+        assert_eq!(view_of(&book, holder).replayed, Some(replayed(1_000, false, alone.clone())));
+        book.apply_block_actions(block_actions(1_001, &[]));
+        book.apply_fills(fills(1_001, &[(holder, "BTC", "B", 1, "0.0", "0.001")]));
+        let shared = view_of(&book, holder);
+        assert_eq!((shared.replayed, shared.anchor_row.is_some()), (None, true), "BTC joined its pool: the anchor's row");
+        book.apply_block_actions(block_actions(1_002, &[]));
+        book.apply_fills(fills(1_002, &[(holder, "BTC", "A", 2, "0.001", "0.001")]));
+        assert_eq!(view_of(&book, holder).replayed, Some(replayed(1_002, false, alone)), "alone again, cash back to -12000");
+    }
+
+    #[test]
+    fn an_isolated_position_is_its_own_pool() {
+        let isolated = checkpoint_user(ISOLATED);
+        let book = replay_book(1_000, 1_000, &[(isolated, -2_000_000)]);
+        let expected = solve(12_000.0, 0.0, -2_000_000.0, &fixture_table(ANCHOR_TABLE));
+        assert_eq!(view_of(&book, isolated).replayed, Some(replayed(1_000, true, expected)));
+    }
+
+    #[test]
+    fn a_stopped_account_shows_the_anchors_row_with_its_reason_and_marks() {
+        let holder = checkpoint_user(HOLDER);
+        let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000)]);
+        book.apply_block_actions(block_actions(1_001, &[(BlockAction::SetAbstraction, holder)]));
+        let view = view_of(&book, holder);
+        assert_eq!((view.replayed, view.anchor_row.is_some()), (None, true));
+        assert_eq!(view.replay_stop, Some(Stop { block: Some(1_001), reason: StopReason::AccountModeSwitch }));
+        assert_eq!(view.changes.account_mode, Some(1_001), "the marks show again");
+    }
+
+    /// Review 000437 r1 P2: a position closed and reopened after the anchor takes the coin's current table, and a late
+    /// anchor from before the close (holding the old position at table 20) does not take it back.
+    #[test]
+    fn a_reopened_position_keeps_the_current_table_through_a_late_anchor() {
+        let holder = checkpoint_user(HOLDER);
+        let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000)]);
+        book.apply_block_actions(block_actions(1_001, &[]));
+        book.apply_block_actions(block_actions(1_002, &[]));
+        book.apply_fills(fills(1_002, &[(holder, PUMP, "A", 1, "1000000.0", "1000000.0")]));
+        book.apply_block_actions(block_actions(1_003, &[]));
+        book.apply_fills(fills(1_003, &[(holder, PUMP, "B", 2, "0.0", "2000000.0")]));
+        let mut late = anchor(1_001, &[(PUMP, 0, &[(holder, 1_000_000)]), ("BTC", 5, &[])]);
+        late.margins = per_dex_with_main_cash(-12_000_000_000);
+        book.install_anchor(late);
+        // -12000 + 1e6 (sold at 1.0) - 2e6 (bought at 1.0)
+        let current = solve(-1_012_000.0, 0.0, 2_000_000.0, &fixture_table(CURRENT_TABLE));
+        assert_ne!(current, solve(-1_012_000.0, 0.0, 2_000_000.0, &fixture_table(ANCHOR_TABLE)), "the tables tell apart");
+        assert_eq!(view_of(&book, holder).replayed, Some(replayed(1_003, false, current)));
+    }
+
+    /// Review 000437 r2 / research 52af3097: a fill flipping the position keeps its table.
+    #[test]
+    fn a_flip_keeps_the_positions_table() {
+        let holder = checkpoint_user(HOLDER);
+        let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000)]);
+        book.apply_block_actions(block_actions(1_001, &[]));
+        book.apply_fills(fills(1_001, &[(holder, PUMP, "A", 1, "1000000.0", "3000000.0")]));
+        // -12000 + 3e6 (sold at 1.0), short 2e6 at the anchor's table 20
+        let kept = solve(2_988_000.0, 0.0, -2_000_000.0, &fixture_table(ANCHOR_TABLE));
+        assert_ne!(kept, solve(2_988_000.0, 0.0, -2_000_000.0, &fixture_table(CURRENT_TABLE)));
+        assert_eq!(view_of(&book, holder).replayed, Some(replayed(1_001, false, kept)));
+    }
+
+    /// Review 000437 r1 P2: an anchor installed ahead of the applied blocks (the first, or a recovery) shows its own
+    /// rows until every block up to it is applied.
+    #[test]
+    fn no_replayed_row_until_the_applied_blocks_reach_the_anchor() {
+        let holder = checkpoint_user(HOLDER);
+        let mut book = replay_book(1_000, 998, &[(holder, 1_000_000)]);
+        book.apply_block_actions(block_actions(999, &[]));
+        let view = view_of(&book, holder);
+        assert_eq!((view.replayed, view.anchor_row.is_some()), (None, true), "the cash is of 1000, the blocks of 999");
+        book.apply_block_actions(block_actions(1_000, &[]));
+        assert!(view_of(&book, holder).replayed.is_some());
+    }
+
+    /// Design 000437 r2 revision 3: at an install, the replayed row of each position the anchor holds (replayed cash at
+    /// the anchor, the anchor's size and members, the record's table) is compared with the anchor's own row.
+    #[test]
+    fn an_install_compares_the_replayed_rows_with_the_anchors() {
+        let holder = checkpoint_user(HOLDER);
+        let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000)]);
+        book.apply_block_actions(block_actions(1_001, &[]));
+        let anchor_at = |height, liquidation_px: LiquidationPx| {
+            let mut anchor = anchor(height, &[(PUMP, 0, &[(holder, 1_000_000)]), ("BTC", 5, &[])]);
+            anchor.margins = per_dex_with_main_cash(-12_000_000_000);
+            anchor.coins.get_mut(PUMP).unwrap().positions.get_mut(&holder).unwrap().row.liquidation_px = liquidation_px;
+            anchor
+        };
+        let expected = solve(-12_000.0, 0.0, 1_000_000.0, &fixture_table(ANCHOR_TABLE));
+        let ReplayCheck::Checked { rows, .. } = book.install_anchor(anchor_at(1_001, expected.clone())).replay_check else {
+            panic!("checked")
+        };
+        assert_eq!((rows.equal, rows.differ, rows.class_differs, rows.moved_after), (1, 0, 0, 0));
+        book.apply_block_actions(block_actions(1_002, &[]));
+        let ReplayCheck::Checked { rows, .. } = book.install_anchor(anchor_at(1_002, LiquidationPx::Computed(0.004))).replay_check else {
+            panic!("checked")
+        };
+        assert_eq!((rows.equal, rows.differ, rows.samples.len()), (0, 1, 1), "the anchor's row says otherwise");
+        assert_eq!(rows.samples[0].replayed.as_ref().map(|row| row.liquidation_px.clone()), Some(expected));
+    }
+
+    /// Design 000437 4: every event of a replaying account touches its rows, not only its first mark.
+    #[test]
+    fn a_replaying_accounts_cash_change_touches_its_rows() {
+        let holder = checkpoint_user(HOLDER);
+        let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000)]);
+        let funding = |block, amount| misc(block, &[&funding_inner(&[(holder, PUMP, amount)])]);
+        assert_eq!(book.apply_misc_events(funding(1_001, "1.0")).touched.accounts, [holder]);
+        assert_eq!(book.apply_misc_events(funding(1_002, "2.0")).touched.accounts, [holder], "no new mark, new cash");
     }
 
     /// Review 000435 r1 P2: an isolated position closed in the block that switches its asset back to cross; the block's
@@ -1481,7 +1821,7 @@ mod tests {
         book.apply_block_actions(block_actions(1_002, &[]));
         assert!(book.anchor_ready(1_002));
         // the anchor says -11998: the replayed -11999 differs by 1 USDC, and the check reports it
-        let ReplayCheck::Checked(check) = book.install_anchor(anchor_with(1_002, -11_998_000_000)).replay_check else {
+        let ReplayCheck::Checked { cash: check, .. } = book.install_anchor(anchor_with(1_002, -11_998_000_000)).replay_check else {
             panic!("checked once its blocks are applied")
         };
         assert_eq!((check.compared["perDex"].mismatched, check.samples[0].user), (1, holder));

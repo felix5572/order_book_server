@@ -28,6 +28,8 @@ pub(crate) struct Anchor {
 pub(crate) struct AnchorCoin {
     /// `szDecimals`: position sizes of this coin are integers in 10^-size_decimals base units.
     pub(crate) size_decimals: u32,
+    /// The table a position opened from zero takes (`marginTableId`).
+    pub(crate) table_id: u32,
     /// Non-zero positions at the anchor.
     pub(crate) positions: FxHashMap<Address, AnchorPosition>,
 }
@@ -35,6 +37,8 @@ pub(crate) struct AnchorCoin {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AnchorPosition {
     pub(crate) size_raw: i64,
+    /// The position's margin table (`M`, omitted = 20).
+    pub(crate) table_id: u32,
     pub(crate) row: AnchorRow,
 }
 
@@ -52,7 +56,8 @@ impl Anchor {
     pub(crate) fn from_checkpoint(checkpoint: &CheckpointAccounts) -> Result<Self, String> {
         let mut coins = FxHashMap::default();
         for asset in checkpoint.dexes.iter().flat_map(|dex| &dex.assets) {
-            let coin = AnchorCoin { size_decimals: asset.size_decimals, positions: FxHashMap::default() };
+            let coin =
+                AnchorCoin { size_decimals: asset.size_decimals, table_id: asset.margin_table_id, positions: FxHashMap::default() };
             if coins.insert(asset.name.clone(), coin).is_some() {
                 return Err(format!("checkpoint {}: coin {} is listed twice", checkpoint.height, asset.name));
             }
@@ -72,7 +77,8 @@ impl Anchor {
                     .get_mut(name)
                     .ok_or_else(|| format!("checkpoint {}: {user} holds unlisted {name}", checkpoint.height))?
                     .positions;
-                if positions.insert(*user, AnchorPosition { size_raw: position.size_raw, row }).is_some() {
+                let anchored = AnchorPosition { size_raw: position.size_raw, table_id: position.table_id, row };
+                if positions.insert(*user, anchored).is_some() {
                     return Err(format!("checkpoint {}: {user} holds {name} twice", checkpoint.height));
                 }
             }

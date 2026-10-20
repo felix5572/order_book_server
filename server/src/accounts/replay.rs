@@ -14,6 +14,8 @@ use serde_json::json;
 
 use super::{
     actions::BlockAction,
+    liquidation::{LiquidationPx, solve},
+    margin::MarginTable,
     checkpoint::{
         Account, AccountMode, AssetMarginMode, CheckpointAccounts, MAX_PERP_DECIMALS, MAX_SPOT_DECIMALS, PDI_ASSET_STRIDE,
         PositionMargin, SpotPair,
@@ -52,6 +54,8 @@ pub(crate) struct Markets {
     dexes: FxHashMap<String, usize>,
     /// Whether each dex settles in USDC.
     usdc_dexes: Vec<bool>,
+    /// Each dex's margin tables by id.
+    tables: Vec<FxHashMap<u32, MarginTable>>,
     spot_pairs: Vec<SpotPair>,
 }
 
@@ -61,6 +65,7 @@ impl Markets {
         for (dex_index, dex) in checkpoint.dexes.iter().enumerate() {
             markets.dexes.insert(dex.name.clone(), dex_index);
             markets.usdc_dexes.push(checkpoint.collateral[&dex.collateral_token].name == USDC_NAME);
+            markets.tables.push(dex.tables().clone());
             for (asset_index, asset) in dex.assets.iter().enumerate() {
                 let action_id = u32::try_from(asset_index)
                     .ok()
@@ -165,7 +170,17 @@ pub(crate) enum StopReason {
 }
 
 impl StopReason {
-    /// The metric label (`replayStoppedReason` in the view).
+    /// The view's `replayStoppedReason`: the label, and what the reason names when it names one.
+    pub(crate) fn text(&self) -> String {
+        match self {
+            Self::UnknownAccountMode(detail) | Self::UnreadLedger(detail) | Self::UnknownMarket(detail) | Self::Contradiction(detail) => {
+                format!("{}:{detail}", self.label())
+            }
+            _ => self.label().to_string(),
+        }
+    }
+
+    /// The metric label.
     pub(crate) const fn label(&self) -> &'static str {
         match self {
             Self::PortfolioMargin => "portfolioMargin",
@@ -320,10 +335,11 @@ impl MarginStates {
         Ok(Self { markets, accounts })
     }
 
-    /// Moves `user`'s state by its event of `block`; accounts not tracked or stopped are left as they are.
-    pub(crate) fn apply(&mut self, block: u64, user: Address, event: &AccountEvent) {
+    /// Moves `user`'s state by its event of `block`; accounts not tracked or stopped are left as they are. Returns
+    /// whether the account was replaying, so its replayed rows may have changed (moved, or stopped here).
+    pub(crate) fn apply(&mut self, block: u64, user: Address, event: &AccountEvent) -> bool {
         let Some(account) = self.accounts.get_mut(&user).filter(|account| account.stop.is_none()) else {
-            return;
+            return false;
         };
         let markets = &self.markets;
         let outcome = match event {
@@ -336,6 +352,7 @@ impl MarginStates {
         if let Err(reason) = outcome {
             account.stop_at(block, reason);
         }
+        true
     }
 }
 
@@ -561,6 +578,72 @@ fn apply_action(account: &mut AccountMargin, markets: &Markets, block: u64, acti
         BlockAction::Withdraw { amount_wei } => add_main(account, markets, -amount_wei)?,
     }
     Ok(())
+}
+
+/// A mark-independent liquidation price from the replayed state (design 000437): an isolated position's own pool, or
+/// a cross position alone in its pool.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReplayedRow {
+    pub(crate) isolated: bool,
+    pub(crate) liquidation_px: LiquidationPx,
+}
+
+impl MarginStates {
+    /// Whether the account is tracked and its replay has not stopped.
+    pub(crate) fn replays(&self, user: &Address) -> bool {
+        self.accounts.get(user).is_some_and(|account| account.stop.is_none())
+    }
+
+    /// Whether `coin` is a perp of a USDC dex of the anchor: the only markets with replayed rows.
+    pub(crate) fn usdc_perp(&self, coin: &str) -> bool {
+        self.markets.perps.get(coin).is_some_and(|market| self.markets.usdc_dexes[market.dex])
+    }
+
+    /// The account's stop, if its replay stopped; `None` also for an account not tracked.
+    pub(crate) fn stop(&self, user: &Address) -> Option<&Stop> {
+        self.accounts.get(user).and_then(|account| account.stop.as_ref())
+    }
+
+    /// The replayed row of `user`'s position in `coin` (`size_raw` in 10^-szDecimals, margin table `table_id`), given
+    /// every coin the account holds a position in. `None` when it has none: the account is not tracked or stopped, the
+    /// coin is not a USDC perp of the anchor, or a cross position shares its pool with another (default / disabled:
+    /// the same dex; unified: every USDC dex), whose price would need its mark.
+    pub(crate) fn replayed_row<'c>(
+        &self,
+        user: &Address,
+        coin: &str,
+        size_raw: i64,
+        table_id: u32,
+        held: impl IntoIterator<Item = &'c str>,
+    ) -> Option<ReplayedRow> {
+        let account = self.accounts.get(user).filter(|account| account.stop.is_none())?;
+        let market = self.markets.perps.get(coin).filter(|market| self.markets.usdc_dexes[market.dex])?;
+        let table = self.markets.tables[market.dex].get(&table_id)?;
+        let size = size_raw as f64 / 10f64.powi(market.size_decimals.cast_signed());
+        if let Some(isolated_wei) = account.isolated.get(&(market.dex, market.asset)) {
+            let liquidation_px = solve(wei_to_usdc(*isolated_wei), 0.0, size, table);
+            return Some(ReplayedRow { isolated: true, liquidation_px });
+        }
+        for other in held.into_iter().filter(|other| *other != coin) {
+            let other = self.markets.perps.get(other)?;
+            let same_pool = match &account.pools {
+                Pools::PerDex(_) => other.dex == market.dex,
+                Pools::Unified(_) => self.markets.usdc_dexes[other.dex],
+            };
+            if same_pool && !account.isolated.contains_key(&(other.dex, other.asset)) {
+                return None;
+            }
+        }
+        let cash_wei = match &account.pools {
+            Pools::PerDex(cross) => cross.get(&market.dex).copied().unwrap_or(0),
+            Pools::Unified(pool) => *pool,
+        };
+        Some(ReplayedRow { isolated: false, liquidation_px: solve(wei_to_usdc(cash_wei), 0.0, size, table) })
+    }
+}
+
+fn wei_to_usdc(wei: i64) -> f64 {
+    wei as f64 / 1e8
 }
 
 /// The replay of one anchor interval against the next anchor.
@@ -869,6 +952,21 @@ pub(crate) mod tests {
         states.apply(5, user(HOLDER), &AccountEvent::Action(BlockAction::Leverage { asset: 110_000, is_cross: false }));
         assert_eq!(stop(&states, HOLDER), None);
         assert!(states.accounts[&user(HOLDER)].isolated_settings.contains(&(1, 0)));
+    }
+
+    /// Design 000437 1: a unified account's cross pool spans every USDC dex; a dex settled otherwise is a pool of its own.
+    #[test]
+    fn a_unified_pool_counts_every_usdc_dex_and_no_other() {
+        let unified = states(|_| {});
+        let table = 20;
+        let row = |held: &[&str]| unified.replayed_row(&user(HOLDER), PUMP_COIN, 1_000_000, table, held.iter().copied());
+        assert!(row(&[PUMP_COIN, "flx:GOLD"]).is_some(), "flx settles in USDH");
+        assert_eq!(row(&[PUMP_COIN, "BTC"]), None, "BTC shares the pool");
+        assert_eq!(row(&[PUMP_COIN, "ZZZ"]), None, "an unknown coin may share it");
+        assert_eq!(unified.replayed_row(&user(HOLDER), "flx:GOLD", 100, 10, ["flx:GOLD"]), None, "not a USDC perp");
+        let Some(ReplayedRow { isolated: false, liquidation_px }) = row(&[PUMP_COIN]) else { panic!("alone in the pool") };
+        let pool = (20_000_000_000_i64 - 1_200_000_000_000 + 3_026_970_000) as f64 / 1e8;
+        assert_eq!(liquidation_px, solve(pool, 0.0, 1_000_000.0, &MarginTable::single(table).unwrap()));
     }
 
     #[test]
