@@ -1,6 +1,8 @@
 //! USDC amounts of the cash replay (design 000433): integers in 10^-8 USDC, USDC's `weiDecimals`, so a spot balance
 //! `t` (10^-8) and a dex's cash `u` (micro) both convert exactly.
 
+use rust_decimal::{Decimal, RoundingStrategy, prelude::ToPrimitive};
+
 use super::size::parse_size_raw;
 
 /// Decimals of a replay amount.
@@ -12,6 +14,23 @@ pub(crate) const WEI_PER_MICRO: i64 = 100;
 /// a float print tail beyond that rounded away at 8 decimals.
 pub(crate) fn usdc_wei(text: &str) -> Result<i64, String> {
     parse_size_raw(text, WEI_DECIMALS).map_err(|err| format!("USDC amount: {err}"))
+}
+
+/// The accepted `withdraw3.amount`, including its fee, in replay units. Archived client `6911b792` parses a
+/// decimal (0x41b1240), multiplies by 10^6 and rounds half to even (0x44dbd10 -> 0x40bea60, mode 2). This is
+/// distinct from a ledger's 10^-8 amount and from its float print tails: the request is user-supplied decimal text.
+/// Native boundary outputs live in `withdrawal_goldens.json`. Non-decimal spellings taking the client's f64
+/// fallback are not reproduced here; they remain explicit parse errors, as in the prior adapter.
+pub(crate) fn withdrawal_wei(text: &str) -> Result<i64, String> {
+    let amount = text.parse::<Decimal>().map_err(|err| format!("withdrawal amount {text:?}: {err}"))?;
+    if amount.is_sign_negative() {
+        return Err(format!("withdrawal amount {text:?} is negative"));
+    }
+    let micro = amount.checked_mul(Decimal::from(1_000_000))
+        .map(|scaled| scaled.round_dp_with_strategy(0, RoundingStrategy::MidpointNearestEven))
+        .and_then(|rounded| rounded.to_i64())
+        .ok_or_else(|| format!("withdrawal amount {text:?} exceeds micro USDC range"))?;
+    micro_to_wei(micro)
 }
 
 /// Micro USDC (a dex's `u`, an `ntli`) in 10^-8 USDC.
@@ -42,6 +61,32 @@ mod tests {
         assert_eq!(usdc_wei("0.30000000000000004"), Ok(30_000_000), "a float print tail");
         assert!(usdc_wei("0.000000001").is_err(), "finer than 10^-8");
         assert_eq!(micro_to_wei(-4_950_000), Ok(-495_000_000));
+    }
+
+    #[test]
+    fn withdrawal_conversion_matches_original_client_boundaries() {
+        #[derive(serde::Deserialize)]
+        struct Case { amount: String, micro: Option<i64> }
+        #[derive(serde::Deserialize)]
+        struct Golden { rows: Vec<Case> }
+        let golden: Golden = serde_json::from_str(include_str!("withdrawal_goldens.json")).unwrap();
+        for row in golden.rows {
+            let actual = withdrawal_wei(&row.amount);
+            match row.micro.and_then(|micro| micro.checked_mul(WEI_PER_MICRO)) {
+                Some(expected) => assert_eq!(actual, Ok(expected), "{}", row.amount),
+                None => assert!(actual.is_err(), "{}", row.amount),
+            }
+        }
+    }
+
+    #[test]
+    fn withdrawal_conversion_rejects_invalid_and_overflowing_amounts() {
+        for text in ["", "NaN", "inf", "-1", "1.2.3", "1e0", "92233720368.547759", "999999999999999999999999999999999"] {
+            assert!(withdrawal_wei(text).is_err(), "{text:?}");
+        }
+        assert_eq!(withdrawal_wei("0"), Ok(0), "eligibility is the outer receipt's responsibility");
+        assert_eq!(withdrawal_wei("62.14531414"), Ok(6_214_531_400));
+        assert_eq!(usdc_wei("62.14531414"), Ok(6_214_531_414), "ledger/spot units keep their precision");
     }
 
     #[test]

@@ -944,6 +944,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn accepted_withdrawal_preserves_unified_dust_and_finalization_does_not_debit_again() {
+        use crate::accounts::actions::parse_block_actions;
+        let golden: serde_json::Value = serde_json::from_str(include_str!("withdrawal_goldens.json")).unwrap();
+        let request = &golden["request"];
+        let holder: Address = request["receipt"]["user"].as_str().unwrap().parse().unwrap();
+        let bundle = request["bundle"].as_str().unwrap();
+        let line = json!({"height":request["height"], "abci_block": {"time":request["time"],
+            "signed_action_bundles":[[bundle,{"signed_actions":[{"action":request["action"]}]}]]},
+            "resps":{"Full":[[bundle,[request["receipt"]]]]}}).to_string();
+        let actions = parse_block_actions(&line).unwrap();
+        assert_eq!(actions.actions, [(BlockAction::Withdraw { amount_wei: 6_214_531_400 }, holder)]);
+        let mut replay = states(|_| {});
+        let mut account = replay.accounts.remove(&user(HOLDER)).unwrap();
+        account.pools = Pools::Unified(7_245_993_914);
+        let isolated_before = account.isolated.clone();
+        replay.accounts.insert(holder, account);
+        replay.apply(actions.height, holder, &AccountEvent::Action(actions.actions[0].0.clone()));
+        assert_eq!(replay.accounts[&holder].pools, Pools::Unified(1_031_462_514));
+        replay.apply(1_191_733_582, holder, &AccountEvent::Ledger(LedgerDelta::Withdraw));
+        assert_eq!(replay.accounts[&holder].pools, Pools::Unified(1_031_462_514), "finalization is already debited");
+        assert_eq!(replay.accounts[&holder].isolated, isolated_before);
+        assert!(replay.accounts[&holder].stop.is_none());
+        let failed = line.replace("\"status\":\"ok\"", "\"status\":\"err\"");
+        assert!(parse_block_actions(&failed).unwrap().actions.is_empty(), "failed withdrawals never debit");
+    }
+
+    #[test]
     fn unverified_ledger_cases_stop_the_replay() {
         let spot_transfer = |usdc_wei| {
             AccountEvent::Ledger(LedgerDelta::SpotTransfer { user: user(HOLDER), destination: user(ISOLATED), usdc_wei, usdc_fee_wei: 100 })

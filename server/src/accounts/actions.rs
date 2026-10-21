@@ -10,7 +10,7 @@ use serde::Deserialize;
 use super::{
     checkpoint::node_time_ns,
     replica::{Action, ReplicaLine, Response},
-    usdc::usdc_wei,
+    usdc::withdrawal_wei,
 };
 
 /// The block actions that may invalidate an anchor's liquidation price.
@@ -49,7 +49,8 @@ pub(crate) enum BlockAction {
     TopUpIsolatedOnlyMargin,
     /// `userSetAbstraction`, `agentSetAbstraction`.
     SetAbstraction,
-    /// `withdraw3`: `amount` (10^-8 USDC, the 1 USDC fee included) leaves the main dex when the request is accepted.
+    /// `withdraw3`: the amount rounded to micro USDC (fee included), stored in 10^-8 USDC, leaves the main
+    /// pool when the request is accepted.
     Withdraw { amount_wei: i64 },
 }
 
@@ -71,7 +72,7 @@ impl BlockAction {
             "userSetAbstraction" | "agentSetAbstraction" => Self::SetAbstraction,
             "withdraw3" => {
                 let amount: String = action.field(action.amount.as_ref(), "amount")?;
-                Self::Withdraw { amount_wei: usdc_wei(&amount).map_err(|err| format!("withdraw3 amount: {err}"))? }
+                Self::Withdraw { amount_wei: withdrawal_wei(&amount).map_err(|err| format!("withdraw3 amount: {err}"))? }
             }
             other => return Err(format!("{other} is not a kept action type")),
         })

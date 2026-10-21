@@ -1,0 +1,248 @@
+{
+  "binary_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+  "parser": "0x41b1240",
+  "converter": "0x44dbd10",
+  "rows": [
+    {
+      "amount": "62.14531414",
+      "decimal_hex": "000008000000000056396a7201000000",
+      "status": 415,
+      "micro": 62145314
+    },
+    {
+      "amount": "62.14531449",
+      "decimal_hex": "000008000000000079396a7201000000",
+      "status": 415,
+      "micro": 62145314
+    },
+    {
+      "amount": "62.14531450",
+      "decimal_hex": "00000800000000007a396a7201000000",
+      "status": 415,
+      "micro": 62145314
+    },
+    {
+      "amount": "62.14531451",
+      "decimal_hex": "00000800000000007b396a7201000000",
+      "status": 415,
+      "micro": 62145315
+    },
+    {
+      "amount": "62.14531499",
+      "decimal_hex": "0000080000000000ab396a7201000000",
+      "status": 415,
+      "micro": 62145315
+    },
+    {
+      "amount": "62.14531550",
+      "decimal_hex": "0000080000000000de396a7201000000",
+      "status": 415,
+      "micro": 62145316
+    },
+    {
+      "amount": "34.390000",
+      "decimal_hex": "0000060000000000f0bf0c0200000000",
+      "status": 415,
+      "micro": 34390000
+    },
+    {
+      "amount": "1.0000005",
+      "decimal_hex": "00000700000000008596980000000000",
+      "status": 415,
+      "micro": 1000000
+    },
+    {
+      "amount": "1.0000015",
+      "decimal_hex": "00000700000000008f96980000000000",
+      "status": 415,
+      "micro": 1000002
+    },
+    {
+      "amount": "1.0000025",
+      "decimal_hex": "00000700000000009996980000000000",
+      "status": 415,
+      "micro": 1000002
+    },
+    {
+      "amount": "1.0000035",
+      "decimal_hex": "0000070000000000a396980000000000",
+      "status": 415,
+      "micro": 1000004
+    },
+    {
+      "amount": "0.00000049",
+      "decimal_hex": "00000800000000003100000000000000",
+      "status": 415,
+      "micro": 0
+    },
+    {
+      "amount": "0.00000050",
+      "decimal_hex": "00000800000000003200000000000000",
+      "status": 415,
+      "micro": 0
+    },
+    {
+      "amount": "0.00000051",
+      "decimal_hex": "00000800000000003300000000000000",
+      "status": 415,
+      "micro": 1
+    },
+    {
+      "amount": "-1.0000005",
+      "decimal_hex": "00000780000000008596980000000000",
+      "status": 172,
+      "micro": null
+    },
+    {
+      "amount": "92233720368.54775807",
+      "decimal_hex": "0000080000000000ffffffffffffff7f",
+      "status": 415,
+      "micro": 92233720368547758
+    },
+    {
+      "amount": "92233720368.54775850",
+      "decimal_hex": "00000800000000002a00000000000080",
+      "status": 415,
+      "micro": 92233720368547758
+    },
+    {
+      "amount": "1.0000005000000000000000000001",
+      "decimal_hex": "00001c006dcf4f20010020693e67154b",
+      "status": 415,
+      "micro": 1000001
+    },
+    {
+      "amount": "1.0000004999999999999999999999",
+      "decimal_hex": "00001c006dcf4f20ffff1f693e67154b",
+      "status": 415,
+      "micro": 1000000
+    },
+    {
+      "amount": "+1.0000015",
+      "decimal_hex": "00000700000000008f96980000000000",
+      "status": 415,
+      "micro": 1000002
+    },
+    {
+      "amount": ".5",
+      "decimal_hex": "00000100000000000500000000000000",
+      "status": 415,
+      "micro": 500000
+    },
+    {
+      "amount": "5.",
+      "decimal_hex": "00000000000000000500000000000000",
+      "status": 415,
+      "micro": 5000000
+    }
+  ],
+  "conversion": "Decimal * 1000000, round midpoint nearest even, nonnegative micro USDC; then checked conversion to replay 10^-8 units",
+  "request": {
+    "height": 1191730512,
+    "time": "2026-10-21T08:30:21.476664685",
+    "bundle": "0x005f8f97f507b9065ebfd863bfeaed544a7421c980306bee3263d7d8d902b0d8",
+    "bundle_index": 0,
+    "position": 347,
+    "action": {
+      "type": "withdraw3",
+      "signatureChainId": "0xa4b1",
+      "hyperliquidChain": "Mainnet",
+      "destination": "0x156712b8f4be2151d2213c790b1e44b9c6a259b7",
+      "amount": "62.14531414",
+      "time": 1792571418145
+    },
+    "receipt": {
+      "user": "0x156712b8f4be2151d2213c790b1e44b9c6a259b7",
+      "res": {
+        "status": "ok",
+        "response": {
+          "type": "default"
+        }
+      }
+    }
+  },
+  "reconciliation": {
+    "user": "0x156712b8f4be2151d2213c790b1e44b9c6a259b7",
+    "window": [
+      1191730000,
+      1191740000
+    ],
+    "action_height": 1191730512,
+    "request_amount": "62.14531414",
+    "requested_wei": 6214531414,
+    "actual_debit_wei": 6214531400,
+    "extra_debited_by_replay_wei": 14,
+    "states": [
+      {
+        "height": 1191730000,
+        "main_cross_micro": 10314625,
+        "spot_usdc_wei": 6214531414,
+        "unified_cash_wei": 7245993914,
+        "btc_position": {
+          "s": 944,
+          "l": {
+            "I": {
+              "l": 40,
+              "u": -745662774
+            }
+          },
+          "M": 56,
+          "f": {
+            "a": 13689172,
+            "o": 388395,
+            "c": 58637
+          },
+          "e": 770105598
+        }
+      },
+      {
+        "height": 1191740000,
+        "main_cross_micro": 10314625,
+        "spot_usdc_wei": 14,
+        "unified_cash_wei": 1031462514,
+        "btc_position": {
+          "s": 944,
+          "l": {
+            "I": {
+              "l": 40,
+              "u": -745662774
+            }
+          },
+          "M": 56,
+          "f": {
+            "a": 13689172,
+            "o": 388395,
+            "c": 58637
+          },
+          "e": 770105598
+        }
+      }
+    ],
+    "checkpoint_evidence": {
+      "anchor": {
+        "isolated": {
+          "0:0": "-745.662774"
+        },
+        "pools": {
+          "unified": "10.31462514"
+        }
+      },
+      "anchorFrom": 1191730000,
+      "anchorTo": 1191740000,
+      "kind": "replayMismatch",
+      "replayed": {
+        "isolated": {
+          "0:0": "-745.662774"
+        },
+        "pools": {
+          "unified": "10.314625"
+        }
+      },
+      "user": "0x156712b8f4be2151d2213c790b1e44b9c6a259b7"
+    }
+  },
+  "archive_sha256": {
+    "replica_cmds_new_cash_user.jsonl.gz": "9c5f9e98b9246244f6750ed0548153c90fbeebfa26c0188315f72951eb7ddd00"
+  },
+  "scope": "Original native decimal parser and converter outputs, including zero values: full withdrawal eligibility is decided by its receipt. No node entrypoint, network, or cash state runs in the probe."
+}
