@@ -1,9 +1,9 @@
-//! One feed's latest quotes and connection (design 000454 r2 revision 4). The feed task overwrites a market's quote as
+//! One feed connection's latest quotes and state (design 000454 r2 revision 4). The feed task overwrites a market's quote as
 //! it arrives and never waits for a reader; a reader copies the slot. Quotes are state, not events: an overwritten one
 //! loses nothing.
 //!
 //! Each quote carries the connection epoch it arrived on and holds only while that connection is the current, connected
-//! one: a disconnect, or a reconnect, between two reads leaves every earlier quote invalid until its market quotes anew
+//! one: a disconnect, or a reconnect, between two reads leaves this connection's earlier quotes invalid until its market quotes anew
 //! (r2 review, acceptance point 1). A new connection, a subscription ack or a pong revives nothing. A polled feed's
 //! quotes also expire by age. `Stopped` is final until restart: a write after it - a task's poll still running while
 //! its cancellation lands (review 000455 r2) - changes nothing.
@@ -25,7 +25,7 @@ pub(crate) enum Connection {
     Connected { since_ms: u64 },
     /// Lost: being reconnected.
     Disconnected { reason: String, at_ms: u64 },
-    /// A contract error stopped the feed until restart.
+    /// A contract error stopped this connection until restart.
     Stopped { reason: String, at_ms: u64 },
 }
 
@@ -56,7 +56,7 @@ pub(crate) enum Validity {
     NotQuoted,
     /// The venue shows no two-sided quote.
     NoQuote,
-    /// The feed is not connected.
+    /// This market's connection is not connected.
     NotConnected,
     /// A polled quote older than the feed's expiry.
     Expired,

@@ -13,6 +13,7 @@ pub(crate) mod rest;
 pub(crate) mod slot;
 pub(crate) mod snapshot;
 pub(crate) mod sources;
+pub(crate) mod subscriptions;
 pub(crate) mod view;
 
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -8,7 +8,8 @@ use serde::Serialize;
 
 use super::{
     feeds::LocalMarkFeeds,
-    slot::{Connection, FeedReading, Validity},
+    slot::{Connection, Validity},
+    subscriptions::{ConnectionProjection, FeedProjection},
     snapshot::Coverage,
     sources::{Feed, FeedMarkets, Kind},
 };
@@ -28,6 +29,7 @@ pub(crate) struct InputsView {
 struct FeedView {
     feed: &'static str,
     connection: ConnectionView,
+    connections: Vec<ShardView>,
     frames: u64,
     markets: usize,
     /// Markets whose quote holds now.
@@ -35,8 +37,20 @@ struct FeedView {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShardView {
+    shard: usize,
+    markets: usize,
+    connection: ConnectionView,
+    frames: u64,
+    quoting: usize,
+}
+
+#[derive(Serialize)]
 #[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum ConnectionView {
+    /// A partitioned feed is not fully connected; per-partition reasons remain in `connections`.
+    Degraded { connected: usize, total: usize },
     Connecting,
     Connected { since_ms: u64 },
     Disconnected { reason: String, at_ms: u64 },
@@ -87,10 +101,24 @@ fn connection(connection: &Connection) -> ConnectionView {
     }
 }
 
+fn feed_connection(connections: &[ConnectionProjection]) -> ConnectionView {
+    if connections.len() == 1 { return connection(&connections[0].connection); }
+    let (connected, latest) = connections.iter().fold((0, None::<u64>), |(count, latest), part| {
+        match part.connection {
+            Connection::Connected { since_ms } => (count + 1, Some(latest.map_or(since_ms, |old| old.max(since_ms)))),
+            _ => (count, latest),
+        }
+    });
+    if connected == connections.len() && let Some(since_ms) = latest {
+        return ConnectionView::Connected { since_ms };
+    }
+    ConnectionView::Degraded { connected, total: connections.len() }
+}
+
 /// The view now; `coin` narrows the coins (the feeds are always all). `Err` for a coin outside the sources.
 pub(crate) fn inputs_view(feeds: &LocalMarkFeeds, coin: Option<&str>, now_ms: u64) -> Result<InputsView, String> {
     let readings = feeds.readings(now_ms);
-    let by_feed: BTreeMap<Feed, (&FeedMarkets, &FeedReading)> = readings.iter().map(|(feed, markets, reading)| (*feed, (*markets, reading))).collect();
+    let by_feed: BTreeMap<Feed, (&FeedMarkets, &FeedProjection)> = readings.iter().map(|(feed, markets, reading)| (*feed, (*markets, reading))).collect();
     let coins: Vec<&str> = match coin {
         Some(coin) if feeds.sources.listings(coin).is_none() => return Err(format!("{coin} is not in the local marks' sources")),
         Some(coin) => vec![coin],
@@ -100,7 +128,10 @@ pub(crate) fn inputs_view(feeds: &LocalMarkFeeds, coin: Option<&str>, now_ms: u6
         .iter()
         .map(|(feed, markets, reading)| FeedView {
             feed: feed.label(),
-            connection: connection(&reading.connection),
+            connection: feed_connection(&reading.connections),
+            connections: reading.connections.iter().map(|part| ShardView {
+                shard: part.shard, markets: part.markets, connection: connection(&part.connection), frames: part.frames, quoting: part.quoting,
+            }).collect(),
             frames: reading.messages,
             markets: markets.symbols.len(),
             quoting: reading.entries.iter().filter(|(_, validity)| *validity == Validity::Valid).count(),
@@ -110,7 +141,7 @@ pub(crate) fn inputs_view(feeds: &LocalMarkFeeds, coin: Option<&str>, now_ms: u6
     Ok(InputsView { time_ms: now_ms, stopped: feeds.stopped(), feeds: feed_views, coins })
 }
 
-fn coin_inputs(feeds: &LocalMarkFeeds, by_feed: &BTreeMap<Feed, (&FeedMarkets, &FeedReading)>, coin: &str) -> CoinInputs {
+fn coin_inputs(feeds: &LocalMarkFeeds, by_feed: &BTreeMap<Feed, (&FeedMarkets, &FeedProjection)>, coin: &str) -> CoinInputs {
     let listings = feeds.sources.listings(coin).unwrap_or_else(|| unreachable!("a coin of the sources"));
     let mut views: BTreeMap<Kind, BTreeMap<&'static str, ListingView>> = BTreeMap::new();
     let mut coverage: BTreeMap<Kind, Coverage> = BTreeMap::new();

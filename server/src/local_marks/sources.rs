@@ -134,6 +134,13 @@ pub(crate) struct FeedMarkets {
 }
 
 impl FeedMarkets {
+    /// One contiguous subscription partition; indices are local to the new connection's slot.
+    pub(crate) fn slice(&self, range: std::ops::Range<usize>) -> Self {
+        let symbols = self.symbols[range.clone()].to_vec();
+        let by_symbol = symbols.iter().enumerate().map(|(index, symbol)| (symbol.clone(), index)).collect();
+        Self { symbols, coins: self.coins[range].to_vec(), by_symbol }
+    }
+
     /// The symbol's place in `symbols`; `None` for a market this build does not subscribe to.
     pub(crate) fn index(&self, symbol: &str) -> Option<usize> {
         self.by_symbol.get(symbol).copied()

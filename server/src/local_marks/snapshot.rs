@@ -14,7 +14,8 @@ use serde::Serialize;
 use super::{
     compute::{LocalMark, MarkInputs, local_mark, weighted_median},
     price::VenuePrice,
-    slot::{FeedReading, Validity},
+    slot::Validity,
+    subscriptions::FeedProjection,
     sources::{Feed, FeedMarkets, Kind, MarkSources},
 };
 use crate::{
@@ -204,7 +205,7 @@ pub(crate) struct Tick<'a> {
     /// `None` before the book's first snapshot.
     pub(crate) book: Option<&'a BestPricesAt>,
     /// Every feed's reading (`LocalMarkFeeds::readings`).
-    pub(crate) readings: &'a [(Feed, &'a FeedMarkets, FeedReading)],
+    pub(crate) readings: &'a [(Feed, &'a FeedMarkets, FeedProjection)],
 }
 
 pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>) -> LocalMarksSnapshot {
@@ -343,7 +344,7 @@ pub(crate) mod tests {
         accounts::marks::NativePriceSnapshot,
         local_marks::{
             compute::tests::btc_state,
-            slot::{Connection, Entry, Quote},
+            slot::{Entry, Quote},
             sources::Venue,
         },
     };
@@ -364,7 +365,7 @@ pub(crate) mod tests {
     pub(crate) struct World {
         pub(crate) sources: MarkSources,
         table: Arc<CoinTable>,
-        readings: Vec<FeedReading>,
+        readings: Vec<FeedProjection>,
         pub(crate) node: NodePrices,
         pub(crate) book: Option<BestPricesAt>,
     }
@@ -388,7 +389,7 @@ pub(crate) mod tests {
                             _ => quote("4000", "4000.1"),
                         })
                         .collect();
-                    FeedReading { connection: Connection::Connected { since_ms: 0 }, messages: 1, entries }
+                    FeedProjection { connections: Vec::new(), messages: 1, entries }
                 })
                 .collect();
             let mut btc = btc_state(0.0, NOW_MS * 1_000_000 - 1_000_000_000);

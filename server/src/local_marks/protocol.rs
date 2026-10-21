@@ -1,7 +1,7 @@
 //! The feeds' wire protocols (design 000454 r1 1.2, r2 revision 4): subscription requests, heartbeats, and the frames
 //! they answer with. Ported from the `hl_mark_prices` service's parsers (validated on its captures) and checked on bm
 //! frames of 10-21 (`local_marks/wire_fixtures.json`). A frame of a known type that does not parse, a refused
-//! subscription or a crossed book is a contract error: it stops that feed. A frame of an unknown type is passed up as
+//! subscription or a crossed book is a contract error: it stops that connection partition. A frame of an unknown type is passed up as
 //! `Unknown` for a warning with its raw text.
 
 use std::time::Duration;
@@ -17,7 +17,7 @@ use super::{
 
 /// Bybit subscribes 10 args per request (its documented limit); Kucoin 100 symbols per request (bm 10-21: 173 at once
 /// answered error 509 "exceed max subscription count limitation of 100 per time"); the others took every market of
-/// a venue in one request on one connection.
+/// a partition in one request. Connection partitioning lives in `subscriptions`, independently of request chunking.
 const BYBIT_ARGS_PER_REQUEST: usize = 10;
 const KUCOIN_SYMBOLS_PER_REQUEST: usize = 100;
 /// The service's heartbeat cadence; Kucoin's comes with its token.

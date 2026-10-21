@@ -644,13 +644,23 @@ lazy_static! {
         &["feed"]
     ).expect("metric can be created");
 
+    /// Bounded shard IDs assigned once from this build's source file; aggregate feed counters stay compatible.
+    pub static ref LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL: IntCounterVec = {
+        #[expect(clippy::expect_used, reason = "the metric name and label descriptor are static valid Prometheus names")]
+        let counter = IntCounterVec::new(
+            Opts::new("orderbook_local_marks_connection_disconnects_total", "Local mark connection losses by subscription partition"),
+            &["feed", "shard"]
+        ).expect("static connection metric descriptor is valid");
+        counter
+    };
+
     pub static ref LOCAL_MARKS_FEED_UNKNOWN_FRAMES_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_local_marks_feed_unknown_frames_total", "Local marks venue feed frames of an unknown type"),
         &["feed"]
     ).expect("metric can be created");
 
     pub static ref LOCAL_MARKS_FEED_STOPPED: IntGaugeVec = IntGaugeVec::new(
-        Opts::new("orderbook_local_marks_feed_stopped", "Local marks venue feed stopped by a contract error"),
+        Opts::new("orderbook_local_marks_feed_stopped", "Local marks venue feed has at least one partition stopped by a contract error"),
         &["feed"]
     ).expect("metric can be created");
 
@@ -760,6 +770,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(FORCED_FLOW_WALKED_ENTRIES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_UNKNOWN_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_STOPPED.clone())).ok();
 

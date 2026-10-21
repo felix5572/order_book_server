@@ -1,7 +1,7 @@
 //! One WS feed connection (design 000454 r2 revision 4): connect, subscribe, then read, keeping the protocol's own
 //! health - its subscription acks, its heartbeat answered in time, some frame at least every `READ_TIMEOUT` - and
 //! writing every quote into the feed's slot. It ends with the error that ended it: a transient one is reconnected by
-//! the caller, a contract error stops the feed.
+//! the caller, a contract error stops this connection partition.
 
 use std::time::Duration;
 
@@ -64,9 +64,9 @@ pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets
         Ok(url) => url,
         Err(err) => return FeedError::Contract(format!("{label}: URL {}: {err}", session.url)),
     };
-    // permessage-deflate where the venue takes it: bm 10-21, Binance's perp bookTicker stream (173 symbols) without it
-    // was cut 20 times in 13 minutes (no close frame, TCP ended), with it about once in 25 minutes; the trading
-    // system's gateway asks the same of HL (`upstream_options`)
+    // Retain negotiated compression. Early BM recordings suggested fewer disconnects with it, but later
+    // recordings reproduced frequent EOFs with compression too; it is not a proven fix. Binance perp
+    // partitions are selected upstream from the same-backend comparison in subscriptions.rs.
     let options = Options::default().with_max_payload_read(MAX_PAYLOAD).with_low_latency_compression();
     let mut ws = match timeout(timeouts.connect, WebSocket::connect(url).with_options(options)).await {
         Ok(Ok(ws)) => ws,

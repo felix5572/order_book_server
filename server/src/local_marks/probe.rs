@@ -61,7 +61,7 @@ fn interval_line(feeds: &LocalMarkFeeds, covered: &mut Covered, elapsed: Duratio
                 }
             }
             let quoting = reading.entries.iter().filter(|(_, validity)| *validity == Validity::Valid).count();
-            json!({"feed": feed.label(), "connection": format!("{:?}", reading.connection), "frames": reading.messages, "markets": markets.symbols.len(), "quoting": quoting})
+            json!({"feed": feed.label(), "connections": reading.connections.iter().map(|part| json!({"shard":part.shard,"markets":part.markets,"state":format!("{:?}",part.connection),"frames":part.frames,"quoting":part.quoting})).collect::<Vec<_>>(), "frames": reading.messages, "markets": markets.symbols.len(), "quoting": quoting})
         })
         .collect();
     let (mut no_oracle, mut no_external) = (Vec::new(), Vec::new());
