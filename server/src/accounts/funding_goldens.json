@@ -1,0 +1,104 @@
+{
+  "binary_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+  "note": "Expected cash adjustments independently matched two checkpoint intervals. Offline archive test uses preceding checkpoint oracle prices to verify recipient stability; exact begin-block timing is covered separately by runtime tests, not claimed as full historical price replay.",
+  "sources": [
+    {
+      "path": "20261021T073919Z/misc_events_streaming_affected_accounts.jsonl.gz",
+      "sha256": "ad82e152c492a9e0711f36315b0bb07c92c062713355ff692b657191c94d40ec"
+    },
+    {
+      "path": "account_funding_followup_0755/funding_0800_raw.jsonl.gz",
+      "sha256": "e20776c43cbb0bfcbbdc8808220303a6a1e7585ab6664a1f958cdee8d14d27ba"
+    },
+    {
+      "path": "account_funding_followup_0755/1191650000_selected_states.json",
+      "sha256": "83d297bc337fae357985d6aa472145eee1c06e8ea420423b98b64ecf3f4e3459"
+    },
+    {
+      "path": "account_funding_followup_0755/1191700000_selected_states.json",
+      "sha256": "f79e540bdb02426c7402bca57e86de45ff4026290daf437f5132a0038222e746"
+    }
+  ],
+  "cases": [
+    {
+      "height": 1191654810,
+      "dex": "",
+      "user": "0x5b5d51203a0f9079f8aeb098a6523a13f298c060",
+      "coin": "ETH",
+      "adjustment_wei": -4290100,
+      "count": 320939
+    },
+    {
+      "height": 1191654810,
+      "dex": "xyz",
+      "user": "0x8af700ba841f30e0a3fcb0ee4c4a9d223e1efa05",
+      "coin": "xyz:SP500",
+      "adjustment_wei": -1138500,
+      "count": 94460
+    },
+    {
+      "height": 1191654810,
+      "dex": "mkts",
+      "user": "0xc2b14fde015fe4da3a238aa0e6fb7365af32760b",
+      "coin": "mkts:USTECH",
+      "adjustment_wei": -11100,
+      "count": 616
+    },
+    {
+      "height": 1191654810,
+      "dex": "para",
+      "user": "0x64b766b07362405a9cc19c2226490f3015929da9",
+      "coin": "para:UNITREE",
+      "adjustment_wei": 15100,
+      "count": 1636
+    },
+    {
+      "height": 1191654810,
+      "dex": "io",
+      "user": "0x9a80d88c21be60e870d07d852390e92d09223cf2",
+      "coin": "io:ANTH",
+      "adjustment_wei": -40800,
+      "count": 6668
+    },
+    {
+      "height": 1191705145,
+      "dex": "",
+      "user": "0x5b5d51203a0f9079f8aeb098a6523a13f298c060",
+      "coin": "ETH",
+      "adjustment_wei": -4174800,
+      "count": 321309
+    },
+    {
+      "height": 1191705145,
+      "dex": "xyz",
+      "user": "0x8af700ba841f30e0a3fcb0ee4c4a9d223e1efa05",
+      "coin": "xyz:SP500",
+      "adjustment_wei": -2079200,
+      "count": 94721
+    },
+    {
+      "height": 1191705145,
+      "dex": "para",
+      "user": "0x64b766b07362405a9cc19c2226490f3015929da9",
+      "coin": "para:UNITREE",
+      "adjustment_wei": 8600,
+      "count": 1621
+    },
+    {
+      "height": 1191705145,
+      "dex": "mkts",
+      "user": "0xc2b14fde015fe4da3a238aa0e6fb7365af32760b",
+      "coin": "mkts:USTECH",
+      "adjustment_wei": -10700,
+      "count": 615
+    },
+    {
+      "height": 1191705145,
+      "dex": "io",
+      "user": "0x9a80d88c21be60e870d07d852390e92d09223cf2",
+      "coin": "io:ANTH",
+      "adjustment_wei": -43900,
+      "count": 6683
+    }
+  ]
+}

@@ -339,6 +339,12 @@ impl NativePrices {
         self.by_name.get(coin).copied()
     }
 
+    /// Stored oracle at the current state, subject to the same reconstruction gate as the mark.
+    pub(crate) fn stored_oracle(&self, asset: usize) -> Option<u64> {
+        let coin = &self.coins[asset];
+        coin.unsupported.is_none().then_some(coin.stored_oracle)
+    }
+
     /// Every coin's state the replay claims: not one unsupported, nor one without its EMAs.
     pub(crate) fn price_states(&self) -> impl Iterator<Item = (&str, CoinPriceState)> + '_ {
         self.coins.iter().filter(|coin| coin.unsupported.is_none()).filter_map(|coin| {

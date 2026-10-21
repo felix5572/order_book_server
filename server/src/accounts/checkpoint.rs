@@ -170,6 +170,8 @@ pub(crate) struct Lending {
 
 #[derive(Debug)]
 pub(crate) struct AssetMeta {
+    /// `pxs2[asset][0].p`, in native price units; distinct from mark slot 1.
+    pub(crate) oracle_raw: Option<i64>,
     pub(crate) name: String,
     /// `szDecimals`: raw sizes are integers in 10^-size_decimals base units (at most `MAX_PERP_DECIMALS`).
     pub(crate) size_decimals: u32,
@@ -895,6 +897,8 @@ fn build_dex(
                 [_, mark, ..] => return Err(format!("{}: stored mark {} is not positive", asset.name, mark.p)),
                 [_] => return Err(format!("{}: pxs2 has one slot, the mark is slot 1", asset.name)),
             };
+            // Preserve the wire slot; price validity belongs to the mark seed, not account parsing.
+            let oracle_raw = pxs.first().map(|px| px.p);
             let margin_mode = AssetMarginMode::of(&asset.margin_mode);
             let margin_table_id = asset.margin_table_id;
             Ok(AssetMeta {
@@ -902,6 +906,7 @@ fn build_dex(
                 size_decimals: asset.sz_decimals,
                 mark_raw,
                 mark_time_ns,
+                oracle_raw,
                 margin_mode,
                 margin_table_id,
             })

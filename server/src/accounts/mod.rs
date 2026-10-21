@@ -17,6 +17,7 @@ pub(crate) mod book;
 mod checkpoint;
 mod cooldown;
 mod evidence;
+mod funding;
 pub(crate) mod forced_flow;
 pub(crate) mod forced_flow_owner;
 pub(crate) mod forced_flow_reader;

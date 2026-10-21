@@ -4,8 +4,8 @@
 //! books follow the node's raw book diffs order by order (`book`), each price action reads them at its place in the
 //! block (`execution`), and the node's rules move the prices (`rules`).
 //!
-//! `NodeMarks` lives in the account view's owner task and gets every completed block before the account view does, so
-//! both stand at one height. Trust (revision 2):
+//! `NodeMarks` lives in the account view's owner task. Funding reads its preceding-block oracles, then both owners
+//! consume the completed block before publication, so both stand at one height. Trust (revision 2):
 //!
 //! - a checkpoint's seed installs once every block up to it is applied, or at once while the marks are unavailable;
 //! - at each grid height G whose seed is not installed yet the state is kept as a snapshot and a log of the mark inputs
@@ -32,7 +32,7 @@ use self::{
     actions::{MarkActions, Rank},
     book::{Applied, BookDiff, BooksCheck, NativeBooks},
     execution::{BlockFill, BlockStatuses, BookCuts},
-    native::{CoinCut, CoinPriceState, NativePrices, PricesCheck},
+    native::{CoinCut, CoinPriceState, NativePrices, PriceMismatch, PricesCheck},
     rules::wire_units,
     seed::{Hip3Coin, MarkSeed, StoredMark, exact_price_units},
 };
@@ -64,10 +64,12 @@ impl CheckpointGrid {
     }
 }
 
-/// One written HIP-3 mark (`oracle_pxs.coin_to_mark_px` entry), its price still the wire decimal: its units need the
+/// One written HIP-3 mark or stored oracle, its price still the wire decimal: its units need the
 /// coin's `szDecimals`, which only a seed's universe gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Hip3MarkUpdate {
+struct Hip3PriceUpdate {
+    /// true for stored-oracle slot 0, false for mark slot 1.
+    oracle: bool,
     coin: String,
     px: String,
     /// `last_update_time`, unix ns (the block time on all 215,769 entries of 2026-10-20 11 UTC).
@@ -92,7 +94,7 @@ pub(crate) struct MarkInputs {
 /// One block's mark inputs as logged and applied.
 #[derive(Debug, Default)]
 struct BlockInputs {
-    hip3: Vec<Hip3MarkUpdate>,
+    hip3: Vec<Hip3PriceUpdate>,
     diffs: Vec<BookDiff>,
     /// `None` when the line broke the marks' contract.
     actions: Option<MarkActions>,
@@ -106,9 +108,11 @@ impl BlockInputs {
     fn of(height: u64, inputs: MarkInputs, report: &mut MarksBlockReport) -> Self {
         let mut out = Self::default();
         for event in inputs.hip3_oracle_updates.into_iter().flat_map(Batch::events) {
-            for (coin, written) in event.oracle_pxs.coin_to_mark_px {
+            let prices = event.oracle_pxs.coin_to_mark_px.into_iter().map(|(coin, px)| (false, coin, px))
+                .chain(event.oracle_pxs.coin_to_oracle_px.into_iter().map(|(coin, px)| (true, coin, px)));
+            for (oracle, coin, written) in prices {
                 match node_time_ns(&written.last_update_time) {
-                    Ok(time_ns) => out.hip3.push(Hip3MarkUpdate { coin, px: written.px, time_ns }),
+                    Ok(time_ns) => out.hip3.push(Hip3PriceUpdate { oracle, coin, px: written.px, time_ns }),
                     Err(err) => report.errors.push((Stream::Hip3OracleUpdates, format!("block {height} {coin}: {err}"))),
                 }
             }
@@ -196,13 +200,14 @@ impl MarkState {
         self.height = height;
     }
 
-    fn apply_hip3(&mut self, height: u64, updates: &[Hip3MarkUpdate], report: &mut MarksBlockReport) {
+    fn apply_hip3(&mut self, height: u64, updates: &[Hip3PriceUpdate], report: &mut MarksBlockReport) {
         for update in updates {
             let Some(coin) = self.hip3.get_mut(&update.coin) else {
                 report.unknown_coin_updates += 1;
                 continue;
             };
             match exact_price_units(&update.px, coin.size_decimals) {
+                Ok(px) if update.oracle => coin.oracle = Some(px),
                 Ok(px) => coin.mark = Some(StoredMark { px, time_ns: update.time_ns }),
                 Err(err) => report.errors.push((Stream::Hip3OracleUpdates, format!("block {height} {}: {err}", update.coin))),
             }
@@ -438,6 +443,9 @@ pub(crate) enum MarksCheck {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Hip3Check {
+    pub(crate) oracle_equal: u64,
+    pub(crate) oracle_differ: u64,
+    pub(crate) oracle_samples: Vec<PriceMismatch>,
     pub(crate) equal: u64,
     pub(crate) differ: u64,
     /// Coins of the checkpoint the state did not know (listed since its seed).
@@ -566,6 +574,18 @@ impl NodeMarks {
         let state = self.state.as_ref().ok_or(Unavailable::Initializing)?;
         self.streams.check(state.seed)?;
         Ok(state.height)
+    }
+
+    /// Funding is a begin-block operation: only the state immediately before this block can select its recipient.
+    /// HIP-3 and main-dex oracles share this owner and its loss/seed lifecycle. Never substitute a mark or HTTP quote.
+    pub(crate) fn funding_oracle(&self, block: u64, coin: &str) -> Option<(u64, u32)> {
+        if self.availability().ok()?.checked_add(1)? != block { return None; }
+        let state = self.state.as_ref()?;
+        if let Some(asset) = state.prices.asset(coin) {
+            return Some((state.prices.stored_oracle(asset)?, state.prices.size_decimals(asset)));
+        }
+        let coin = state.hip3.get(coin)?;
+        Some((coin.oracle?, coin.size_decimals))
     }
 
     /// The trusted state's main-dex prices for the local marks; why not while the marks are unavailable.
@@ -725,6 +745,15 @@ fn check_hip3(replayed: &FxHashMap<String, Hip3Coin>, checkpoint: &FxHashMap<Str
             check.unknown += 1;
             continue;
         };
+        if state.oracle == stored.oracle {
+            check.oracle_equal += 1;
+        } else {
+            check.oracle_differ += 1;
+            if check.oracle_samples.len() < MAX_CHECK_SAMPLES {
+                check.oracle_samples.push(PriceMismatch { coin: coin.clone(), field: "hip3StoredOracle",
+                    replayed: format!("{:?}", state.oracle), checkpoint: format!("{:?}", stored.oracle) });
+            }
+        }
         if state.mark == stored.mark {
             check.equal += 1;
             continue;
@@ -861,7 +890,7 @@ pub(crate) mod tests {
         let mut checkpoint = seed(1_000);
         checkpoint.hip3.get_mut("xyz:TSLA").unwrap().mark = Some(written(360_000));
         let report = marks.install(checkpoint);
-        let hip3 = Hip3Check { equal: 2, ..Hip3Check::default() };
+        let hip3 = Hip3Check { equal: 2, oracle_equal: 2, ..Hip3Check::default() };
         assert_eq!(report.check, MarksCheck::Checked { hip3, books: seed_books(), prices: seed_prices() });
         assert_eq!(report.rebuild, Rebuild::Replayed { blocks: 3 }, "blocks 1001 to 1003 replayed onto the seed");
         assert_eq!((marks.availability(), tsla(&marks)), (Ok(1_003), Some(written(361_500))));
@@ -879,7 +908,7 @@ pub(crate) mod tests {
             replayed: Some(written(360_000)),
             checkpoint: Some(StoredMark { px: 358_320, time_ns: 1_792_391_842_000_000_000 }),
         };
-        let hip3 = Hip3Check { equal: 1, differ: 1, unknown: 0, samples: vec![mismatch] };
+        let hip3 = Hip3Check { equal: 1, differ: 1, samples: vec![mismatch], oracle_equal: 2, ..Hip3Check::default() };
         assert_eq!(report.check, MarksCheck::Checked { hip3, books: seed_books(), prices: seed_prices() });
         assert_eq!(tsla(&marks).map(|mark| mark.px), Some(358_320), "the checkpoint's value, nothing logged above it");
     }
@@ -964,14 +993,14 @@ pub(crate) mod tests {
         assert_eq!(marks.apply_block(1_001, hip3_only(vec![line(1_001, &[("xyz:NEW", "2.5")])])).unknown_coin_updates, 1);
         assert_eq!(marks.apply_block(1_002, hip3_only(vec![line(1_002, &[("xyz:NEW", "2.75")])])).unknown_coin_updates, 1);
         let mut listing = seed(1_000);
-        listing.hip3.insert("xyz:NEW".to_string(), Hip3Coin { size_decimals: 4, mark: None });
+        listing.hip3.insert("xyz:NEW".to_string(), Hip3Coin { size_decimals: 4, mark: None, oracle: None });
         let report = marks.install(listing);
         assert_eq!((report.rebuild, report.errors.as_slice()), (Rebuild::Replayed { blocks: 2 }, [].as_slice()));
         assert_eq!(marks.state.as_ref().unwrap().hip3["xyz:NEW"].mark, Some(written(275)), "block 1002, at 2 decimals");
         run(&mut marks, 1_003..=1_100, &[]);
         marks.apply_block(1_101, hip3_only(vec![line(1_101, &[("xyz:NEW", "2.75")])]));
         let mut coarser = seed(1_100);
-        coarser.hip3.insert("xyz:NEW".to_string(), Hip3Coin { size_decimals: 5, mark: None });
+        coarser.hip3.insert("xyz:NEW".to_string(), Hip3Coin { size_decimals: 5, mark: None, oracle: None });
         let report = marks.install(coarser);
         assert_eq!(report.errors.len(), 1, "2.75 has more than one decimal at szDecimals 5");
         let lost = Unavailable::DataLoss { stream: Stream::Hip3OracleUpdates, bound: LossBound::Block(1_101) };
@@ -1326,7 +1355,7 @@ pub(crate) mod tests {
     fn an_overflowing_log_is_a_loss_and_starts_over() {
         let mut log = InputLog::new(2);
         log.restart(9);
-        let update = Hip3MarkUpdate { coin: "xyz:TSLA".to_string(), px: "1.0".to_string(), time_ns: 1 };
+        let update = Hip3PriceUpdate { oracle: false, coin: "xyz:TSLA".to_string(), px: "1.0".to_string(), time_ns: 1 };
         assert!(log.push(10, BlockInputs { hip3: vec![update.clone(); 2], ..BlockInputs::default() }));
         assert!(!log.push(11, BlockInputs { hip3: vec![update], ..BlockInputs::default() }), "one more overflows");
         assert_eq!((log.base, log.inputs, log.reaches(10), log.reaches(11)), (Some(11), 0, false, true));
@@ -1338,6 +1367,32 @@ pub(crate) mod tests {
         assert!(marks.availability().is_err());
         assert_eq!(marks.install(seed(1_001)).rebuild, Rebuild::Replayed { blocks: 0 });
         assert_eq!(marks.availability(), Ok(1_001));
+    }
+
+    #[test]
+    fn funding_reads_stored_oracles_at_exact_pre_block_height_and_follows_hip3_loss_rebuild() {
+        let mut marks = trusted_marks();
+        assert_eq!(marks.funding_oracle(1_002, "BTC"), Some((828_908, 5)), "oracle, not mark 828576");
+        assert_eq!(marks.funding_oracle(1_002, "xyz:TSLA"), Some((357_970, 3)));
+        assert_eq!(marks.funding_oracle(1_001, "BTC"), None, "never post-action state");
+        assert_eq!(marks.funding_oracle(1_003, "BTC"), None, "never skip a block");
+        let mut update = line(1_002, &[("xyz:TSLA", "360")]);
+        let mut wire = serde_json::to_value(&update).unwrap();
+        wire["events"][0]["oracle_pxs"]["coin_to_oracle_px"] = serde_json::json!([
+            ["xyz:TSLA", {"px":"359.111", "last_update_time":"2026-10-19T06:40:00.5", "daily_px":"350"}]
+        ]);
+        update = serde_json::from_value(wire).unwrap();
+        marks.apply_block(1_002, hip3_only(vec![update]));
+        assert_eq!(marks.funding_oracle(1_003, "xyz:TSLA"), Some((359_111, 3)));
+        marks.record_lost_block(Stream::Hip3OracleUpdates, 1_002);
+        assert_eq!(marks.funding_oracle(1_003, "xyz:TSLA"), None);
+        marks.install(seed(1_002));
+        assert_eq!(marks.funding_oracle(1_003, "xyz:TSLA"), Some((357_970, 3)));
+        let mut actual = seed(1_002).hip3;
+        actual.get_mut("xyz:TSLA").unwrap().oracle = Some(357_971);
+        let check = check_hip3(&marks.state.as_ref().unwrap().hip3, &actual);
+        assert_eq!((check.equal, check.oracle_equal, check.oracle_differ), (2, 1, 1));
+        assert_eq!(check.oracle_samples[0].field, "hip3StoredOracle");
     }
 
 }

@@ -717,9 +717,9 @@ mod tests {
         let cooldown_after = |lines: Vec<Batch<NodeDataFill>>| {
             let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000)]);
             for block in 1_001..=1_031 {
-                book.apply_block(block_actions(block, &[]), Vec::new(), Vec::new());
+                book.apply_block(block_actions(block, &[]), Vec::new(), Vec::new(), |_| None);
             }
-            book.apply_block(block_actions(1_032, &[]), lines, Vec::new());
+            book.apply_block(block_actions(1_032, &[]), lines, Vec::new(), |_| None);
             book.cooldown(&holder)
         };
         let (first, second) = (liquidation(1_032, 1, "1000000.0", "200000.0"), liquidation(1_032, 2, "800000.0", "800000.0"));
@@ -823,7 +823,7 @@ mod tests {
     fn a_partial_liquidation_holds_the_cooldown_for_thirty_seconds() {
         let holder = checkpoint_user(HOLDER);
         let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000)]);
-        book.apply_block(block_actions(1_001, &[]), vec![liquidation(1_001, 1, "1000000.0", "100000.0")], Vec::new());
+        book.apply_block(block_actions(1_001, &[]), vec![liquidation(1_001, 1, "1000000.0", "100000.0")], Vec::new(), |_| None);
         let mark = units(alone_px(-12_000.0 + 1_250.0, 900_000.0) * 1.02);
         let mut candidates = Candidates::new(None);
         let first = changes(candidates.refresh(&book, Some(&marks(1_001, &[(PUMP, mark)])), &[holder]));

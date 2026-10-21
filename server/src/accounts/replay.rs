@@ -93,6 +93,10 @@ pub(crate) enum AccountEvent {
     /// A fill whose USDC fee did not read: a fills data loss up to its block.
     UnreadableFill(String),
     Funding { coin: String, amount_wei: i64 },
+    /// Derived cash-only balancing of one full dex batch, never another wire funding payment.
+    FundingBalance { coin: String, amount_wei: i64 },
+    /// The batch's balancing recipient cannot be established; all its potential recipients are withdrawn.
+    FundingBalanceUnknown,
     Ledger(LedgerDelta),
     Action(BlockAction),
 }
@@ -140,6 +144,7 @@ impl FillEvent {
 pub(crate) enum StopReason {
     /// Portfolio margin accounts do not replay (design 000433 r2 3.3).
     PortfolioMargin,
+    FundingBalanceUnknown,
     UnknownAccountMode(String),
     /// A fill of an isolated position: how much moves between cross and isolated is not known.
     IsolatedFill,
@@ -184,6 +189,7 @@ impl StopReason {
     pub(crate) const fn label(&self) -> &'static str {
         match self {
             Self::PortfolioMargin => "portfolioMargin",
+            Self::FundingBalanceUnknown => "fundingBalanceUnknown",
             Self::UnknownAccountMode(_) => "unknownAccountMode",
             Self::IsolatedFill => "isolatedFill",
             Self::BackstopLiquidation => "backstopLiquidation",
@@ -345,7 +351,9 @@ impl MarginStates {
         let outcome = match event {
             AccountEvent::Fill(fill) => apply_fill(account, markets, block, fill),
             AccountEvent::UnreadableFill(err) => Err(StopReason::Contradiction(format!("unreadable fill: {err}"))),
-            AccountEvent::Funding { coin, amount_wei } => apply_funding(account, markets, coin, *amount_wei),
+            AccountEvent::Funding { coin, amount_wei } | AccountEvent::FundingBalance { coin, amount_wei } =>
+                apply_funding(account, markets, coin, *amount_wei),
+            AccountEvent::FundingBalanceUnknown => Err(StopReason::FundingBalanceUnknown),
             AccountEvent::Ledger(delta) => apply_ledger(account, markets, user, delta),
             AccountEvent::Action(action) => apply_action(account, markets, block, action),
         };
@@ -1078,6 +1086,24 @@ pub(crate) mod tests {
         assert_eq!(cross(&states, ISOLATED), per_dex_pools(&[(0, -6_729_717_000)]));
         assert_eq!(states.accounts[&user(ISOLATED)].isolated[&(0, 1)], 1_200_000_000_000 + 6_729_717_000);
         assert_eq!(stop(&states, ISOLATED), None);
+    }
+
+    #[test]
+    fn funding_balance_uses_the_same_cross_unified_and_isolated_cash_routing() {
+        let adjustment = |coin: &str| AccountEvent::FundingBalance { coin: coin.to_string(), amount_wei: -15100 };
+        let mut standard = per_dex();
+        standard.apply(5, user(HOLDER), &adjustment("BTC"));
+        assert_eq!(cross(&standard, HOLDER), per_dex_pools(&[(0, -1_200_000_015_100), (1, 3_026_970_000)]));
+        standard.apply(5, user(ISOLATED), &adjustment(PUMP_COIN));
+        assert_eq!(standard.accounts[&user(ISOLATED)].isolated[&(0, 1)], 1_200_000_000_000 - 15100);
+        assert_eq!(cross(&standard, ISOLATED), per_dex_pools(&[(0, 0)]));
+        let mut unified = states(|_| {});
+        let Pools::Unified(before) = cross(&unified, HOLDER) else { panic!() };
+        unified.apply(5, user(HOLDER), &adjustment("xyz:TSLA"));
+        assert_eq!(cross(&unified, HOLDER), Pools::Unified(before - 15100));
+        unified.apply(6, user(HOLDER), &AccountEvent::FundingBalanceUnknown);
+        assert_eq!(stop(&unified, HOLDER), Some(StopReason::FundingBalanceUnknown));
+        assert_eq!(stop(&unified, ISOLATED), None, "only potential recipients stop");
     }
 
 }

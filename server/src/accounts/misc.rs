@@ -43,6 +43,8 @@ pub(crate) struct FundingDelta {
     pub(crate) coin: String,
     /// `funding_amount`, signed for the account, 10^-8 USDC.
     pub(crate) amount_wei: i64,
+    /// Settlement-time size from the full dex batch, not the later account position.
+    pub(crate) size: String,
 }
 
 /// Where a `send` takes or puts funds.
@@ -258,14 +260,15 @@ struct WireFundingDelta {
     user: Address,
     coin: String,
     funding_amount: String,
+    szi: String,
 }
 
 impl<'de> Deserialize<'de> for FundingDelta {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let WireFundingDelta { user, coin, funding_amount } = WireFundingDelta::deserialize(deserializer)?;
+        let WireFundingDelta { user, coin, funding_amount, szi: size } = WireFundingDelta::deserialize(deserializer)?;
         let amount_wei =
             usdc_wei(&funding_amount).map_err(|err| serde::de::Error::custom(format!("funding {user} {coin}: {err}")))?;
-        Ok(Self { user, coin, amount_wei })
+        Ok(Self { user, coin, amount_wei, size })
     }
 }
 
@@ -353,10 +356,10 @@ mod tests {
         let funding = format!(
             r#"{{"Funding":{{"deltas":[{{"user":"{USER_B}","coin":"HYPE","funding_amount":"-1.311558","szi":"-2159.89","funding_rate":"0.0000076023"}}]}}}}"#
         );
-        let expected = FundingDelta { user: address(USER_B), coin: "HYPE".to_string(), amount_wei: -131_155_800 };
+        let expected = FundingDelta { user: address(USER_B), coin: "HYPE".to_string(), amount_wei: -131_155_800, size: "-2159.89".to_string() };
         assert_eq!(parse(&funding), Ok(MiscEvent::Funding(vec![expected])));
         assert_eq!(parse(r#"{"Funding":{"deltas":[]}}"#), Ok(MiscEvent::Funding(Vec::new())));
-        let broken = format!(r#"{{"Funding":{{"deltas":[{{"user":"{USER_B}","coin":"HYPE","funding_amount":"1.0000000001"}}]}}}}"#);
+        let broken = format!(r#"{{"Funding":{{"deltas":[{{"user":"{USER_B}","coin":"HYPE","funding_amount":"1.0000000001","szi":"1"}}]}}}}"#);
         assert!(parse(&broken).unwrap_err().contains("funding"), "an amount finer than 10^-8");
     }
 

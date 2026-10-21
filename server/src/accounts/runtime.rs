@@ -692,8 +692,8 @@ fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut Bl
 const ASSEMBLED_STREAMS: [Stream; 7] =
     [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses, Stream::BlockActions, Stream::SystemActions];
 
-/// Records what the assembly could not apply, then applies the released blocks in order: the marks first, so the
-/// account view's block finds them at its height (design 000439 r1 4.1).
+/// Applies complete blocks. Funding first reads the preceding stored oracles; marks then consume this block's
+/// actions. Publication/query happens only after both owners reach the same height.
 fn apply_assembly(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &BlockAssembler, assembly: Assembly) -> Touched {
     let Assembly { completed, lost: dropped, duplicates, missing_actions, overflowed_to } = assembly;
     for (stream, count) in duplicates {
@@ -729,8 +729,9 @@ fn apply_assembly(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &Blo
         let height = actions.height;
         let mark_fills = fills.iter().flat_map(Batch::events_ref).map(BlockFill::of).collect();
         let inputs = MarkInputs { hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions, fills: mark_fills };
+        let accounts = book.apply_block(actions, fills, misc_events, |coin| marks.funding_oracle(height, coin));
         report_marks_block(height, marks.apply_block(height, inputs));
-        touched.absorb(report_block(book.apply_block(actions, fills, misc_events)));
+        touched.absorb(report_block(accounts));
         ACCOUNTS_APPLIED_HEIGHT.set(height.cast_signed());
     }
     ACCOUNTS_PENDING_BLOCKS.set((assembler.pending_blocks() as u64).cast_signed());
@@ -827,6 +828,9 @@ fn report_dropped_marks(dropped: usize) {
 }
 
 fn report_misc(report: MiscReport) -> Touched {
+    for error in &report.funding_errors {
+        warn!("accounts funding balance unavailable (affected cash replay withdrawn): {error}");
+    }
     ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL.inc_by(report.unknown_events as u64);
     for kind in &report.new_unknown_kinds {
         warn!("accounts: unknown misc event kind {kind:?} (skipped; counted from now on)");
@@ -931,6 +935,8 @@ fn log_marks_install(height: u64, report: &MarksInstallReport) {
                 ("hip3", "equal", hip3.equal),
                 ("hip3", "differ", hip3.differ),
                 ("hip3", "unknown", hip3.unknown),
+                ("hip3StoredOracle", "equal", hip3.oracle_equal),
+                ("hip3StoredOracle", "differ", hip3.oracle_differ),
                 ("nativeBooks", "equal", books.books_equal),
                 ("nativeBooks", "differ", books.books_differ),
                 ("nativeBooks", "unknown", books.unknown),
@@ -941,6 +947,10 @@ fn log_marks_install(height: u64, report: &MarksInstallReport) {
             ];
             for (market, result, count) in counts {
                 NODE_MARKS_CHECKED_TOTAL.with_label_values(&[market, result]).inc_by(count);
+            }
+            info!("node marks: seed {height} HIP-3 stored oracle {} equal, {} differ", hip3.oracle_equal, hip3.oracle_differ);
+            for mismatch in &hip3.oracle_samples {
+                record_evidence(&price_mismatch_json(mismatch, *previous_seed, height));
             }
             for mismatch in &hip3.samples {
                 record_evidence(&hip3_mark_mismatch_json(mismatch, *previous_seed, height));
@@ -1572,6 +1582,25 @@ mod tests {
         assert_eq!(marks.availability(), Err(loss), "a seed before the dropped block cannot recover it");
         marks.install(marks_seed(1_001));
         assert_eq!(marks.availability(), Ok(1_001));
+    }
+
+    #[test]
+    fn settlement_uses_pre_block_oracle_even_when_this_blocks_price_actions_fail() {
+        use crate::accounts::{checkpoint::tests::{HOLDER, user as account},
+            marks::tests::trusted_marks, test_support::{PUMP, block_actions, funding_inner, misc, replay_book, user}};
+        let holder = account(HOLDER);
+        let mut book = replay_book(1_000, 1_001, &[(holder, 1_000_000)]);
+        let mut marks = trusted_marks();
+        let funding = funding_inner(&[(holder, "BTC", "1"), (user(99), "BTC", "-0.999999")]);
+        let block = CompletedBlock { actions: block_actions(1_002, &[]), fills: Vec::new(),
+            misc_events: vec![misc(1_002, &[&funding])], hip3_oracle_updates: Vec::new(), book_diffs: Vec::new(),
+            mark_actions: Err("this block's price actions cannot be reconstructed".to_string()),
+            order_statuses: Vec::new(), system_actions: Vec::new() };
+        apply_assembly(&mut book, &mut marks, &BlockAssembler::default(),
+            Assembly { completed: vec![block], ..Assembly::default() });
+        assert!(marks.availability().is_err());
+        let view = book.coin_positions(PUMP, None).unwrap();
+        assert_eq!(view.positions[0].replay_stop, None, "cash used the valid preceding state, not this block's failed state");
     }
 
 }

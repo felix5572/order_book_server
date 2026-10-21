@@ -324,7 +324,7 @@ pub(crate) mod tests {
         case["action"]["payload"] = serde_json::json!(null);
         assert!(parse_block_actions(&multisig_line(&case)).unwrap().actions.is_empty(), "failed payload need not parse");
         for (value, expected) in [(serde_json::json!(null), "without payload"),
-            (serde_json::json!({"action":{"type":"updateIsolatedMargin","asset":110104}}), "without ntli"),
+            (serde_json::json!({"action":{"type":"updateIsolatedMargin","asset":110_104}}), "without ntli"),
             (serde_json::json!({"action":{"type":"multiSig"}}), "nested multiSig")] {
             let mut case = original.clone();
             case["action"]["payload"] = value;

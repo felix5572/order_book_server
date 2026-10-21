@@ -185,7 +185,7 @@ impl MarkKind {
     const fn of(event: &AccountEvent) -> Self {
         match event {
             AccountEvent::Fill(_) | AccountEvent::UnreadableFill(_) => Self::Fill,
-            AccountEvent::Funding { .. } => Self::Funding,
+            AccountEvent::Funding { .. } | AccountEvent::FundingBalance { .. } | AccountEvent::FundingBalanceUnknown => Self::Funding,
             AccountEvent::Ledger(_) => Self::Ledger,
             AccountEvent::Action(action) => Self::Action(action.kind()),
         }
@@ -523,6 +523,7 @@ pub(crate) struct BlockReport {
 /// What one misc events batch did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct MiscReport {
+    pub(crate) funding_errors: Vec<String>,
     pub(crate) stale: bool,
     pub(crate) touched: Touched,
     /// Oldest mark events dropped for room (recorded as losses up to their blocks).
@@ -800,8 +801,24 @@ impl AccountBook {
         &mut self,
         actions: BlockActions,
         fills: Vec<Batch<NodeDataFill>>,
-        misc_events: Vec<Batch<MiscEvent>>,
+        mut misc_events: Vec<Batch<MiscEvent>>,
+        oracle: impl Fn(&str) -> Option<(u64, u32)>,
     ) -> BlockReport {
+        // Funding settles before this block's user actions/fills and before marks consume SGA/updates.
+        let mut funding_reports = Vec::new();
+        for batch in &mut misc_events {
+            let height = batch.block_number();
+            let mut report = MiscReport::default();
+            if !self.covered(height) {
+                for event in batch.events_ref() {
+                    if let MiscEvent::Funding(deltas) = event {
+                        self.apply_funding(deltas, height, &oracle, &mut report);
+                    }
+                }
+            }
+            batch.retain_events(|event| !matches!(event, MiscEvent::Funding(_)));
+            funding_reports.push(report);
+        }
         let time_ms = actions.time_ms;
         let block_actions = self.apply_block_actions(actions);
         // the cooldown evidence follows every block, the ones an anchor covers included, and takes the block whole
@@ -814,7 +831,10 @@ impl AccountBook {
         BlockReport {
             block_actions,
             fills: fills.into_iter().map(|batch| self.apply_fills(batch)).collect(),
-            misc_events: misc_events.into_iter().map(|batch| self.apply_misc_events(batch)).collect(),
+            misc_events: {
+                funding_reports.extend(misc_events.into_iter().map(|batch| self.apply_misc_events(batch)));
+                funding_reports
+            },
         }
     }
 
@@ -897,6 +917,31 @@ impl AccountBook {
         }
     }
 
+    /// Select from the complete batch, even accounts outside our position view. Log derived effects once so seed
+    /// replay reuses the settlement-time decision, rather than recomputing it from a later price or position.
+    fn apply_funding(&mut self, deltas: &[FundingDelta], block: u64,
+        oracle: &impl Fn(&str) -> Option<(u64, u32)>, report: &mut MiscReport)
+    {
+        let balance = super::funding::balance(deltas, oracle);
+        let payments = deltas.iter().map(|delta| (delta.user,
+            AccountEvent::Funding { coin: delta.coin.clone(), amount_wei: delta.amount_wei }));
+        self.record_all(payments, block, &mut report.touched, &mut report.marks_dropped);
+        match balance {
+            Ok(Some(adjustment)) => {
+                self.record_all([(adjustment.user, AccountEvent::FundingBalance {
+                    coin: adjustment.coin, amount_wei: adjustment.amount_wei,
+                })], block, &mut report.touched, &mut report.marks_dropped);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                report.funding_errors.push(format!("block {block}: {err}"));
+                let users: FxHashSet<_> = deltas.iter().map(|delta| delta.user).collect();
+                self.record_all(users.into_iter().map(|user| (user, AccountEvent::FundingBalanceUnknown)),
+                    block, &mut report.touched, &mut report.marks_dropped);
+            }
+        }
+    }
+
     pub(crate) fn apply_misc_events(&mut self, batch: Batch<MiscEvent>) -> MiscReport {
         let block = batch.block_number();
         raise(&mut self.misc_events.height, block);
@@ -911,12 +956,7 @@ impl AccountBook {
                     let events = users.into_iter().map(|user| (user, AccountEvent::Ledger(delta.clone())));
                     self.record_all(events, block, &mut report.touched, &mut report.marks_dropped);
                 }
-                MiscEvent::Funding(deltas) => {
-                    let events = deltas
-                        .into_iter()
-                        .map(|FundingDelta { user, coin, amount_wei }| (user, AccountEvent::Funding { coin, amount_wei }));
-                    self.record_all(events, block, &mut report.touched, &mut report.marks_dropped);
-                }
+                MiscEvent::Funding(deltas) => self.apply_funding(&deltas, block, &|_| None, &mut report),
                 MiscEvent::Irrelevant => {}
                 MiscEvent::Unknown(kind) => {
                     report.unknown_events += 1;
@@ -1732,12 +1772,16 @@ mod tests {
         assert_eq!(book.block_actions.lost_block, Some(5_000_001), "the dropped block action bounds its own stream");
     }
 
+    fn deposit_inner(user: Address, amount: &str) -> String {
+        serde_json::json!({"LedgerUpdate":{"users":[user],"delta":{"type":"deposit","usdc":amount}}}).to_string()
+    }
+
     /// Design 000433 r2 3.6: an install checks the replay of the interval it closes against its own state, then
     /// replays the logged events above it onto that state.
     #[test]
     fn an_anchor_checks_the_replayed_interval_and_rebuilds_from_its_own_state() {
         let holder = checkpoint_user(HOLDER);
-        let funding = |block, amount| misc(block, &[&funding_inner(&[(holder, "BTC", amount)])]);
+        let deposit = |block, amount| misc(block, &[&deposit_inner(holder, amount)]);
         let anchor_with = |height, main_cash_micro| {
             let mut anchor = anchor(height, &[(PUMP, 0, &[(holder, 5)])]);
             anchor.margins = per_dex_with_main_cash(main_cash_micro);
@@ -1749,13 +1793,13 @@ mod tests {
         book.apply_block_actions(block_actions(1_000, &[]));
         assert_eq!(book.install_anchor(anchor_with(1_000, -12_000_000_000)).replay_check, ReplayCheck::Skipped("noPreviousAnchor"));
         book.apply_block_actions(block_actions(1_001, &[]));
-        book.apply_misc_events(funding(1_001, "1.0"));
+        book.apply_misc_events(deposit(1_001, "1.0"));
         book.apply_block_actions(block_actions(1_002, &[]));
         let early = book.install_anchor(anchor_with(1_003, -11_999_000_000)).replay_check;
         assert_eq!(early, ReplayCheck::Skipped("behindTheAnchor"), "block 1003 is not applied yet");
         book.apply_block_actions(block_actions(1_003, &[]));
         book.apply_block_actions(block_actions(1_004, &[]));
-        book.apply_misc_events(funding(1_004, "2.0"));
+        book.apply_misc_events(deposit(1_004, "2.0"));
         let ReplayCheck::Checked { cash: check, .. } = book.install_anchor(anchor_with(1_004, -11_997_000_000)).replay_check else {
             panic!("a complete interval is checked")
         };
@@ -1763,7 +1807,7 @@ mod tests {
         let both_exact = (compared(2, 1, 0), 1);
         assert_eq!((check.compared["perDex"], check.stopped["portfolioMargin"]), both_exact, "HOLDER moved, ISOLATED did not");
         book.apply_block_actions(block_actions(1_005, &[]));
-        book.apply_misc_events(funding(1_005, "4.0"));
+        book.apply_misc_events(deposit(1_005, "4.0"));
         let rebuilt = &book.replay.as_ref().unwrap().current;
         let expected = per_dex_with_main_cash(-11_993_000_000);
         assert_eq!(rebuilt.check_against(&expected, &expected).compared["perDex"], compared(2, 0, 0));
@@ -1972,9 +2016,9 @@ mod tests {
     fn a_replaying_accounts_cash_change_touches_its_rows() {
         let holder = checkpoint_user(HOLDER);
         let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000)]);
-        let funding = |block, amount| misc(block, &[&funding_inner(&[(holder, PUMP, amount)])]);
-        assert_eq!(book.apply_misc_events(funding(1_001, "1.0")).touched.accounts, [holder]);
-        assert_eq!(book.apply_misc_events(funding(1_002, "2.0")).touched.accounts, [holder], "no new mark, new cash");
+        let deposit = |block, amount| misc(block, &[&deposit_inner(holder, amount)]);
+        assert_eq!(book.apply_misc_events(deposit(1_001, "1.0")).touched.accounts, [holder]);
+        assert_eq!(book.apply_misc_events(deposit(1_002, "2.0")).touched.accounts, [holder], "no new mark, new cash");
     }
 
     /// Review 000435 r1 P2: an isolated position closed in the block that switches its asset back to cross; the block's
@@ -1983,7 +2027,7 @@ mod tests {
     fn a_fill_in_the_block_that_switched_its_asset_stops_the_replay() {
         let isolated = checkpoint_user(ISOLATED);
         let apply = |book: &mut AccountBook, height, actions: &[(BlockAction, Address)], fills_specs: &[FillSpec<'_>]| {
-            book.apply_block(block_actions(height, actions), vec![fills(height, fills_specs)], Vec::new())
+            book.apply_block(block_actions(height, actions), vec![fills(height, fills_specs)], Vec::new(), |_| None)
         };
         let mut book = AccountBook::new(0);
         book.apply_fills(fills(100, &[]));
@@ -2019,7 +2063,7 @@ mod tests {
         assert!(book.anchor_ready(1_000), "the first anchor has no interval to check");
         book.install_anchor(anchor_with(1_000, -12_000_000_000));
         book.apply_block_actions(block_actions(1_001, &[]));
-        book.apply_misc_events(misc(1_001, &[&funding_inner(&[(holder, "BTC", "1.0")])]));
+        book.apply_misc_events(misc(1_001, &[&deposit_inner(holder, "1.0")]));
         assert!(!book.anchor_ready(1_002), "block 1002 is not applied yet");
         book.apply_block_actions(block_actions(1_002, &[]));
         assert!(book.anchor_ready(1_002));
@@ -2196,4 +2240,55 @@ mod tests {
         assert_eq!(shown(&book, PUMP), [(user(1), -4, 1_000), (user(2), -2, 1_100)]);
         assert_eq!(book.status().open_positions, 2);
     }
+    #[test]
+    fn a_whole_funding_batch_balances_once_before_actions_and_logs_the_selected_cash_effect() {
+        let holder = checkpoint_user(HOLDER);
+        let isolated = checkpoint_user(ISOLATED);
+        let outside = user(99);
+        let mut book = replay_book(999, 1_000, &[(holder, 1_000_000), (isolated, -2_000_000)]);
+        let wire = funding_inner(&[(holder, "BTC", "1"), (outside, "BTC", "-0.999999")]);
+        let oracle = |_: &str| Some((828_908, 5));
+        // Same sizes: lower address HOLDER wins. A leverage change later in the block cannot affect selection.
+        let report = book.apply_block(block_actions(1_001, &[]), Vec::new(), vec![misc(1_001, &[&wire])], oracle);
+        assert!(report.misc_events.iter().all(|r| r.funding_errors.is_empty()));
+        let balances: Vec<_> = book.events.iter().filter_map(|event| match &event.event {
+            AccountEvent::FundingBalance { coin, amount_wei } => Some((event.user, coin.as_str(), *amount_wei)),
+            _ => None,
+        }).collect();
+        assert_eq!(balances, [(holder, "BTC", -100)]);
+        let expected = per_dex_with_main_cash(-11_999_000_001);
+        let replayed = &book.replay.as_ref().unwrap().current;
+        assert_eq!(replayed.check_against(&expected, &expected).compared["perDex"].mismatched, 0);
+        // Installing an earlier anchor replays the logged adjustment once, with no oracle lookup.
+        let mut anchor = anchor(1_000, &[(PUMP, 0, &[(holder, 1_000_000)])]);
+        anchor.margins = per_dex_with_main_cash(-12_000_000_000);
+        book.install_anchor(anchor);
+        let replayed = &book.replay.as_ref().unwrap().current;
+        assert_eq!(replayed.check_against(&expected, &expected).compared["perDex"].mismatched, 0);
+        let before = book.events.len();
+        book.apply_block(block_actions(1_000, &[]), Vec::new(), vec![misc(1_000, &[&wire])], |_| panic!("covered by seed"));
+        assert_eq!(book.events.len(), before, "covered funding is not reapplied");
+    }
+
+    #[test]
+    fn a_funding_recipient_outside_the_view_still_wins_and_missing_oracle_stops_only_candidates() {
+        let holder = checkpoint_user(HOLDER);
+        let isolated = checkpoint_user(ISOLATED);
+        let outside = user(99);
+        let wire = funding_inner(&[(holder, "BTC", "1"), (outside, "PUMP", "-0.999999")]);
+        let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000), (isolated, -2_000_000)]);
+        // PUMP has greater notional under this synthetic oracle; the view does not track its outside owner.
+        book.apply_block(block_actions(1_001, &[]), Vec::new(), vec![misc(1_001, &[&wire])],
+            |coin| Some(if coin == "BTC" { (1, 5) } else { (200_000, 0) }));
+        assert!(book.events.iter().any(|event| event.user == outside && matches!(event.event, AccountEvent::FundingBalance { .. })));
+        let expected = per_dex_with_main_cash(-11_999_000_000);
+        assert_eq!(book.replay.as_ref().unwrap().current.check_against(&expected, &expected).compared["perDex"].mismatched, 0);
+        let report = book.apply_block(block_actions(1_002, &[]), Vec::new(), vec![misc(1_002, &[&wire])], |_| None);
+        assert_eq!(report.misc_events.iter().map(|r| r.funding_errors.len()).sum::<usize>(), 1);
+        let current = &book.replay.as_ref().unwrap().current;
+        assert_eq!(current.stop_reason(&holder), Some(&StopReason::FundingBalanceUnknown));
+        assert_eq!(current.stop_reason(&isolated), None);
+        assert!(book.availability().is_ok(), "does not stop the account view or mark service");
+    }
+
 }

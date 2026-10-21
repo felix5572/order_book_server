@@ -328,6 +328,7 @@ pub(crate) struct RestingOrder {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Hip3Coin {
+    pub(crate) oracle: Option<u64>,
     pub(crate) size_decimals: u32,
     /// `None` when the asset stores no price.
     pub(crate) mark: Option<StoredMark>,
@@ -350,7 +351,7 @@ impl MarkSeed {
                     (Some(px), Some(time_ns)) => Some(StoredMark { px, time_ns }),
                     (Some(_), None) => return Err(format!("{}: a stored mark without its time", asset.name)),
                 };
-                hip3.insert(asset.name.clone(), Hip3Coin { size_decimals: asset.size_decimals, mark });
+                hip3.insert(asset.name.clone(), Hip3Coin { size_decimals: asset.size_decimals, mark, oracle: asset.oracle_raw.map(price_units).transpose().map_err(|err| format!("{}: stored oracle {err}", asset.name))? });
             }
         }
         Ok(Self { height, time_ms, native, hip3 })
@@ -601,6 +602,7 @@ pub(crate) mod tests {
         );
         assert_eq!((pump.emas.as_ref(), pump.references.spot.median, pump.orders.len()), (None, None, 0), "an unpriced coin");
         assert_eq!(seed.hip3["xyz:TSLA"], Hip3Coin {
+            oracle: Some(357_970),
             size_decimals: 3,
             mark: Some(StoredMark { px: 358_320, time_ns: 1_792_391_842_000_000_000 })
         });
