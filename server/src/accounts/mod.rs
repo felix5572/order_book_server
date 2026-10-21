@@ -20,7 +20,7 @@ mod evidence;
 pub(crate) mod follow;
 mod liquidation;
 mod margin;
-mod marks;
+pub(crate) mod marks;
 mod misc;
 mod portfolio;
 pub(crate) mod probe;

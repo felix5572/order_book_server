@@ -40,6 +40,14 @@ pub(crate) struct Entry {
     epoch: u64,
 }
 
+#[cfg(test)]
+impl Entry {
+    /// An observation on the connection `epoch`.
+    pub(crate) const fn for_test(quote: Option<Quote>, received_ms: u64, epoch: u64) -> Self {
+        Self { quote, received_ms, event_ms: None, epoch }
+    }
+}
+
 /// Whether a market's latest observation is a quote that holds now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Validity {

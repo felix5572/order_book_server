@@ -393,6 +393,25 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
   `local_marks_probe` 可在不重启 OB 的情况下单独跑行情。指标 `orderbook_local_marks_feed_{frames,disconnects,unknown_frames}_total`、
   `orderbook_local_marks_feed_stopped`。
 
+## 2026-10-21 本地 mark 第 2 批: 节点状态导出 + 计算 + `extMarkPrices`(设计 000454 r2)
+
+- **节点状态**: 账户 owner 在每个已应用块之后(以及种子重建状态时)经 `watch` 发布主站节点价格快照 `NativePriceSnapshot`
+  (逐币 szDecimals、存储 oracle、存储 mark、msoe/lmpe、Mark 参考缓存中位数、最新成交, 以及种子高度、块高、块时间), 只含重放认领的币;
+  账户视图或节点 mark 一不可用就立即发布原因。发布点是已有的 `track_marks`(输入、锚点、监督三条分支都调用), 与订阅者无关;
+  状态(种子高度, 块高)和原因都没变时不重发。
+- **盘口**: `OrderBookListener::best_prices`: 每拍一次监听器锁, 按币顺序只复制最优买卖价, 带盘口进度(两条盘口流都已应用到的块时间)、
+  高度和是否可信。
+- **计算**(`local_marks/compute.rs`, 用 `accounts::marks::rules` 即重放的同一份实现): oracle = 现在有报价的现货所中间价加权中位数
+  (币安 3、OKX 2、Bybit 2、其余 1, 至少一家; 同 `hl_mark_prices` 的 `weighted_median`), HALF_EVEN 换成价格单位;
+  A = oracle × (1 + basis), basis 为 msoe 按现在时刻、盘口中间价、存储 oracle 预览; L = median(bid, ask, 最新成交); C = 永续加权中位数;
+  参考 mark = median(A, L, C); 预测 mark = 相对节点存储 mark 的 1% 限幅(median(参考, Mark 缓存, L)), 是有条件的估计, 不写回。
+- **快照与撤价**(`snapshot.rs`, `owner.rs`): 每 50ms 全部币算一遍。两条进度时钟对全部币一起判: 节点块时间落后本地时钟超过 3 秒 →
+  两条腿 `stale`(`nodeProgress`); 盘口超过 3 秒 → 本地腿 `stale`(`bookProgress`); 安静币不会因自己没变化被撤。节点不可用(`node`)、
+  盘口未就绪或失信(`hlBook`)、行情全停或账户 owner 退出(`stopped`, 直到重启)同样撤价; 逐币原因 `nodeCoin`、`markCache`、`hlBook`、
+  `oracleCoverage`、`externalCoverage`、`calculation`。owner 任务结束(内部错误)关闭快照通道: WS 订阅带原因撤回, HTTP 503, 盘口照常。
+- **接口**: WS `{"type":"extMarkPrices","coin":"BTC"}` 每 50ms 一帧(schema 2, 订阅时先给最新一帧); `GET /extMarkPrices[?coin=]`。
+  每家报价仍在 `GET /extMarkInputs`。交易系统网关改接 OB(去掉 BTC/ETH/SOL/ZEC 白名单和 schema 1 检查)在第 3 批。
+
 ## 已移植(2026-07-05, 底座 47ce696 之上)
 
 1. **官方 PR#9:新单进簿价用 diff 的 px**(status px 对 trigger/转化单可能不同)。

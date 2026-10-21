@@ -23,6 +23,10 @@ pub(crate) const EXT_COIN_POSITIONS: &str = "extCoinPositions";
 pub(crate) const EXT_COIN_POSITIONS_PATH: &str = "/extCoinPositions";
 /// The local marks' venue inputs (design 000454 batch 1).
 pub(crate) const EXT_MARK_INPUTS_PATH: &str = "/extMarkInputs";
+/// The subscription type and channel of the node and local marks, and the `GET` path of the same (design 000454
+/// batch 2).
+pub(crate) const EXT_MARK_PRICES: &str = "extMarkPrices";
+pub(crate) const EXT_MARK_PRICES_PATH: &str = "/extMarkPrices";
 /// The subscription type and channel of the liquidation candidates.
 pub(crate) const EXT_LIQUIDATION_CANDIDATES: &str = "extLiquidationCandidates";
 
@@ -66,6 +70,9 @@ pub(crate) enum Subscription {
     /// all (design 000443): a snapshot, then enter / update / exit; needs `--accounts`.
     #[serde(rename = "extLiquidationCandidates", rename_all = "camelCase")]
     LiquidationCandidates { coin: Option<String>, max_distance_bps: u32 },
+    /// `extMarkPrices`: one coin's node and local marks every 50 ms (design 000454); needs `--local-marks`.
+    #[serde(rename = "extMarkPrices", rename_all = "camelCase")]
+    MarkPrices { coin: String },
 }
 
 impl Subscription {
@@ -136,9 +143,9 @@ impl Subscription {
                 debug!("Valid {} subscription for user: {}", self.type_label(), user);
                 true
             }
-            // Coins of the account anchor's universe, which the book universe does not bound (it is market-filtered);
-            // the owner answers an unknown coin when the snapshot is taken.
-            Self::CoinPositions { coin } => !coin.is_empty(),
+            // Coins of the account anchor's universe, or of the local marks' sources, which the book universe does not
+            // bound (it is market-filtered): an unknown coin is refused when the subscription takes its first frame.
+            Self::CoinPositions { coin } | Self::MarkPrices { coin } => !coin.is_empty(),
             Self::LiquidationCandidates { coin, max_distance_bps } => {
                 coin.as_ref().is_none_or(|coin| !coin.is_empty()) && *max_distance_bps <= MAX_CANDIDATE_DISTANCE_BPS
             }
@@ -172,6 +179,7 @@ impl Subscription {
             Self::Oracle { .. } => "oracleUpdates",
             Self::CoinPositions { .. } => EXT_COIN_POSITIONS,
             Self::LiquidationCandidates { .. } => EXT_LIQUIDATION_CANDIDATES,
+            Self::MarkPrices { .. } => EXT_MARK_PRICES,
         }
     }
 }
@@ -527,6 +535,7 @@ mod test {
         assert_eq!(positions.type_label(), super::EXT_COIN_POSITIONS);
         let candidates = parse(r#"{"type":"extLiquidationCandidates","coin":null,"maxDistanceBps":50}"#);
         assert_eq!(candidates.type_label(), super::EXT_LIQUIDATION_CANDIDATES);
+        assert_eq!(parse(r#"{"type":"extMarkPrices","coin":"BTC"}"#).type_label(), super::EXT_MARK_PRICES);
         for old in [r#"{"type":"coinPositions","coin":"BTC"}"#, r#"{"type":"liquidationCandidates","coin":null,"maxDistanceBps":50}"#] {
             assert!(serde_json::from_str::<Subscription>(old).is_err(), "{old}");
         }

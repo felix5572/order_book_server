@@ -79,6 +79,13 @@ impl LocalMarkFeeds {
         Self { sources, slots, stopped, supervisor }
     }
 
+    /// The feeds' slots without a task: nothing connects or quotes.
+    #[cfg(test)]
+    pub(crate) fn idle_for_test(sources: Arc<MarkSources>) -> Self {
+        let slots = sources.feeds().map(|(feed, markets)| Arc::new(FeedSlot::new(feed, markets.symbols.len(), None))).collect();
+        Self::supervised(sources, slots, JoinSet::new(), HashMap::new())
+    }
+
     /// Why every feed stopped, once a task failed.
     pub(crate) fn stopped(&self) -> Option<String> {
         self.stopped.lock().unwrap_or_else(PoisonError::into_inner).clone()

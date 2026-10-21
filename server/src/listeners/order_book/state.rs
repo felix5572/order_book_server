@@ -5,7 +5,7 @@ use crate::{
     },
     order_book::{
         Coin, InnerOrder, Oid, Px, PxBand, Snapshot,
-        multi_book::{OrderBooks, Snapshots, TriggerSection},
+        multi_book::{BidAsk, OrderBooks, Snapshots, TriggerSection},
     },
     prelude::*,
     types::{
@@ -401,6 +401,11 @@ impl OrderBookState {
     ) {
         let bbos = self.order_book.get_bbos_for_coins(coins);
         (self.book_time(), bbos)
+    }
+
+    /// The best prices of `coins`, in their order, with the book's progress: (time, height, prices).
+    pub(super) fn best_prices(&self, coins: &[Coin]) -> (u64, u64, Vec<BidAsk>) {
+        (self.book_time(), self.height(), coins.iter().map(|coin| self.order_book.best_prices(coin)).collect())
     }
 
     /// HFT-specific: Process OrderStatuses independently without block synchronization

@@ -16,7 +16,7 @@ use crate::{
     },
     order_book::{
         Coin, Px, PxBand, Side, Snapshot, Sz,
-        multi_book::{Snapshots, TriggerSection, load_snapshots_from_cli_json},
+        multi_book::{BidAsk, Snapshots, TriggerSection, load_snapshots_from_cli_json},
     },
     prelude::*,
     types::{
@@ -945,6 +945,13 @@ impl OrderBookListener {
         })
     }
 
+    /// The best bid and ask of each of `coins`, in their order (design 000454 r2 revision 1), with the book's progress
+    /// and trust under the lock; `None` before the first snapshot.
+    pub(crate) fn best_prices(&self, coins: &[Coin]) -> Option<BestPricesAt> {
+        let (time, height, prices) = self.order_book_state.as_ref()?.best_prices(coins);
+        Some(BestPricesAt { time, height, trusted: self.book_trusted(), prices })
+    }
+
     /// Untriggered trigger orders - all coins, or one coin when given - as
     /// (time, height, orders). None until the first snapshot install. Only
     /// bumps Arc refcounts under the listener lock; callers convert/serialize
@@ -965,6 +972,17 @@ impl OrderBookListener {
         let (time, height, band) = self.order_book_state.as_ref()?.untriggered_in_band(coin, lo, hi, max);
         Some(TriggerBandAt { time, height, trusted: self.book_trusted(), withheld_periods: self.book_trust.withheld_periods(), band })
     }
+}
+
+/// `OrderBookListener::best_prices`.
+#[derive(Debug, Clone)]
+pub(crate) struct BestPricesAt {
+    /// The book's progress: the block time both book streams applied (ms), and the latest height.
+    pub(crate) time: u64,
+    pub(crate) height: u64,
+    pub(crate) trusted: bool,
+    /// Each requested coin's; `(None, None)` without its book.
+    pub(crate) prices: Vec<BidAsk>,
 }
 
 /// `OrderBookListener::untriggered_in_band`.
@@ -1961,8 +1979,8 @@ impl ActiveSubs {
             // Low-frequency side stream: the listener broadcasts it whenever any receiver
             // exists (it never touches the book), so it registers no gated family.
             Subscription::Oracle { .. } => Vec::new(),
-            // Pushed by the account view's own broadcast, never through the book.
-            Subscription::CoinPositions { .. } | Subscription::LiquidationCandidates { .. } => Vec::new(),
+            // Pushed by the account view's own broadcast, or the local marks', never through the book.
+            Subscription::CoinPositions { .. } | Subscription::LiquidationCandidates { .. } | Subscription::MarkPrices { .. } => Vec::new(),
         }
     }
 

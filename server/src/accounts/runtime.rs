@@ -19,7 +19,7 @@ use std::{
 
 use log::{error, info, warn};
 use serde::{Deserialize, de::DeserializeOwned};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::{
     actions::{BlockActions, block_actions},
@@ -40,7 +40,7 @@ use super::{
         LineEvidence, ambiguous_cut_json, book_mismatch_json, fill_line_reason, hip3_mark_mismatch_json, misc_line_reason,
         price_mismatch_json, replay_mismatch_json, replay_row_mismatch_json, silent_change_json,
     },
-    publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, Publisher},
+    publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, NodePrices, Publisher},
     candidates::{BookLink, Candidates, CandidatesSnapshot},
     walk::{WalkMailbox, WalkResult, run_walker},
 };
@@ -142,12 +142,19 @@ pub(crate) struct AccountsHandle {
     subscriptions: CoinSubscriptions,
     /// Weak: only the owner's publisher keeps the broadcast open, so its exit closes every receiver (review 000423 P2).
     frames: broadcast::WeakSender<Arc<AccountsFrame>>,
+    /// The publisher holds the sender: its exit closes the channel.
+    node_prices: watch::Receiver<NodePrices>,
 }
 
 impl AccountsHandle {
     /// Every frame the owner broadcasts from now on; `None` once the owner is gone.
     pub(crate) fn frames(&self) -> Option<broadcast::Receiver<Arc<AccountsFrame>>> {
         self.frames.upgrade().map(|frames| frames.subscribe())
+    }
+
+    /// The main-dex node prices after every applied block (design 000454 r2 revision 1).
+    pub(crate) fn node_prices(&self) -> watch::Receiver<NodePrices> {
+        self.node_prices.clone()
     }
 
     /// Counts a subscriber of `coin`, so the owner builds its frames; take it before asking for the snapshot.
@@ -282,8 +289,9 @@ pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Resul
         },
     ];
     info!("accounts started; first anchor is the first checkpoint above {start_height}");
-    let handle = AccountsHandle { queries: queries_tx, subscriptions: subscriptions.clone(), frames: frames.downgrade() };
-    let publisher = Publisher::new(subscriptions, frames);
+    let frames_handle = frames.downgrade();
+    let publisher = Publisher::new(subscriptions.clone(), frames);
+    let handle = AccountsHandle { queries: queries_tx, subscriptions, frames: frames_handle, node_prices: publisher.subscribe_prices() };
     let started_ms = now_ms();
     let marks = NodeMarks::new(CheckpointGrid { anchor, interval }, started_ms);
     let feed = CandidateFeed::start(book);
@@ -1012,9 +1020,10 @@ impl TestOwner {
         let (queries, query_rx) = mpsc::channel(16);
         let subscriptions = CoinSubscriptions::default();
         let (frames, _) = broadcast::channel(FRAME_CHANNEL_CAPACITY);
-        let handle = AccountsHandle { queries, subscriptions: subscriptions.clone(), frames: frames.downgrade() };
+        let frames_handle = frames.downgrade();
+        let publisher = Publisher::new(subscriptions.clone(), frames);
+        let handle = AccountsHandle { queries, subscriptions, frames: frames_handle, node_prices: publisher.subscribe_prices() };
         let marks = NodeMarks::new(tests::TEST_GRID, 0);
-        let publisher = Publisher::new(subscriptions, frames);
         let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None)));
         Self { handle, inputs, anchors, owner }
     }

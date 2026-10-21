@@ -10,12 +10,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use alloy::primitives::Address;
 use log::{error, warn};
 use rustc_hash::{FxHashMap, FxHashSet};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 use super::{
-    book::{AccountBook, QueryError, Touched},
+    book::{AccountBook, QueryError, Touched, Unavailable},
     candidates::{CandidateChanges, Refresh},
-    marks::{MarksAt, NodeMarks},
+    marks::{MarksAt, NativePriceSnapshot, NodeMarks},
     view::CoinPositionsFrame,
 };
 use crate::metrics::ACCOUNTS_FRAMES_TOTAL;
@@ -37,6 +37,10 @@ pub(crate) enum AccountsFrame {
     /// The liquidation candidates stopped being available: every candidate subscription ends.
     CandidatesWithdrawn { reason: String },
 }
+
+/// The node price state the local marks read (design 000454 r2 revision 1): the trusted state after the latest applied
+/// block, or why there is none (the account view or the node marks are unavailable).
+pub(crate) type NodePrices = Result<Arc<NativePriceSnapshot>, String>;
 
 /// Live subscriber counts per coin.
 #[derive(Clone, Default)]
@@ -82,6 +86,7 @@ impl Drop for CoinSubscriptionGuard {
 pub(crate) struct Publisher {
     subscriptions: CoinSubscriptions,
     frames: broadcast::Sender<Arc<AccountsFrame>>,
+    prices: watch::Sender<NodePrices>,
     /// Whether the view was available after the previous step.
     available: bool,
     /// Whether the node marks were.
@@ -89,8 +94,14 @@ pub(crate) struct Publisher {
 }
 
 impl Publisher {
-    pub(crate) const fn new(subscriptions: CoinSubscriptions, frames: broadcast::Sender<Arc<AccountsFrame>>) -> Self {
-        Self { subscriptions, frames, available: false, marks_available: false }
+    pub(crate) fn new(subscriptions: CoinSubscriptions, frames: broadcast::Sender<Arc<AccountsFrame>>) -> Self {
+        let (prices, _) = watch::channel(Err(marks_unavailable(&Unavailable::Initializing)));
+        Self { subscriptions, frames, prices, available: false, marks_available: false }
+    }
+
+    /// The node prices from now on; closed once the owner (holding this publisher) is gone.
+    pub(crate) fn subscribe_prices(&self) -> watch::Receiver<NodePrices> {
+        self.prices.subscribe()
     }
 
     /// Withdraws every subscription when the view stops being available; returns whether it is available now.
@@ -107,14 +118,37 @@ impl Publisher {
 
     /// A snapshot of every subscribed coin when the node marks become unavailable or available again while the view is
     /// (design 000442 r2 revision 1): rows that read them fall back to the anchor's, or replay again. Called after every
-    /// step that may change them, once the view is tracked; the marks' ordinary moves push nothing.
+    /// step that may change them, once the view is tracked; the marks' ordinary moves push nothing. The node prices
+    /// follow every step (`publish_prices`).
     pub(crate) fn track_marks(&mut self, book: &mut AccountBook, marks: &NodeMarks) {
+        self.publish_prices(book, marks);
         let available = marks.at().is_some();
         let changed = available != self.marks_available;
         self.marks_available = available;
         if changed && self.available {
             self.push_snapshots(book, marks.at());
         }
+    }
+
+    /// The node prices of the state as it stands: a new snapshot once a block applies or a seed rebuilds the state, the
+    /// reason the moment the view or the marks become unavailable (design 000454 r2 revision 1 and acceptance point 2:
+    /// every applied block, whoever subscribes); nothing when neither moved.
+    fn publish_prices(&self, book: &AccountBook, marks: &NodeMarks) {
+        let status = marks.status();
+        let next = book
+            .availability()
+            .map_err(|reason| format!("the account view is unavailable: {reason}"))
+            .and_then(|_| status.availability.map_err(|reason| marks_unavailable(&reason)));
+        let unchanged = match (&*self.prices.borrow(), &next) {
+            (Ok(published), Ok(height)) => (Some(published.seed_height), published.height) == (status.seed_height, *height),
+            (Err(published), Err(reason)) => published == reason,
+            _ => false,
+        };
+        if unchanged {
+            return;
+        }
+        let prices = next.and_then(|_| marks.price_snapshot().map(Arc::new).map_err(|reason| marks_unavailable(&reason)));
+        drop(self.prices.send_replace(prices));
     }
 
     /// After an input batch: a changes frame for every subscribed coin with a changed row.
@@ -176,12 +210,16 @@ impl Publisher {
     }
 }
 
+fn marks_unavailable(reason: &Unavailable) -> String {
+    format!("the node marks are unavailable: {reason}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::accounts::{
         book::Stream,
-        marks::{CheckpointGrid, tests::trusted_marks},
+        marks::{CheckpointGrid, MarkInputs, tests::trusted_marks},
         test_support::{PUMP, SEED_TIME_MS, anchor, marks_seed, trusted_book, user},
     };
 
@@ -280,6 +318,42 @@ mod tests {
         marks.record_lost_block(Stream::BookDiffs, 1_105);
         publisher.track_marks(&mut book, &marks);
         assert_eq!(kinds(), ["withdrawn"], "the view's withdrawal only");
+    }
+
+    /// Design 000454 r2 revision 1 and acceptance point 2: the node prices follow every applied block and every rebuild,
+    /// whoever subscribes to the coins; the reason is published the moment the marks or the view stop being available,
+    /// and a step that moved neither publishes nothing.
+    #[test]
+    fn the_node_prices_follow_every_block_and_withdraw_at_once() {
+        let mut book = trusted_book(&[(user(1), 5)]);
+        let (frames, _received) = broadcast::channel(16);
+        let mut publisher = Publisher::new(CoinSubscriptions::default(), frames);
+        let mut prices = publisher.subscribe_prices();
+        assert!(publisher.track(&book));
+        let mut marks = trusted_marks();
+        let mut step = |publisher: &mut Publisher, book: &mut AccountBook, marks: &NodeMarks| {
+            publisher.track_marks(book, marks);
+            prices.has_changed().unwrap().then(|| prices.borrow_and_update().clone())
+        };
+        let first = step(&mut publisher, &mut book, &marks).unwrap().unwrap();
+        assert_eq!((first.seed_height, first.height), (995, 1_001));
+        assert!(first.coins.contains_key("BTC"), "{:?}", first.coins.keys().collect::<Vec<_>>());
+        assert!(step(&mut publisher, &mut book, &marks).is_none(), "nothing moved");
+        marks.install(marks_seed(1_000));
+        let rebuilt = step(&mut publisher, &mut book, &marks).unwrap().unwrap();
+        assert_eq!((rebuilt.seed_height, rebuilt.height), (1_000, 1_001), "a rebuild at the same height");
+        marks.apply_block(1_002, MarkInputs::default());
+        assert_eq!(step(&mut publisher, &mut book, &marks).unwrap().unwrap().height, 1_002);
+        marks.record_lost_block(Stream::BookDiffs, 1_002);
+        let lost = step(&mut publisher, &mut book, &marks).unwrap().unwrap_err();
+        assert!(lost.starts_with("the node marks are unavailable: "), "{lost}");
+        assert!(step(&mut publisher, &mut book, &marks).is_none(), "the same reason once");
+        marks.install(marks_seed(1_100));
+        assert_eq!(step(&mut publisher, &mut book, &marks).unwrap().unwrap().seed_height, 1_100, "a rebuild");
+        book.record_lost_block(Stream::Fills, 2_000);
+        assert!(!publisher.track(&book));
+        let view_lost = step(&mut publisher, &mut book, &marks).unwrap().unwrap_err();
+        assert!(view_lost.starts_with("the account view is unavailable: "), "{view_lost}");
     }
 
     #[test]

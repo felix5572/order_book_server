@@ -10,6 +10,9 @@ use std::{
 
 pub(crate) struct Snapshots<O>(HashMap<Coin, Snapshot<O>>);
 
+/// A book's best bid and ask prices; `None` for an empty side.
+pub(crate) type BidAsk = (Option<Px>, Option<Px>);
+
 impl<O> Snapshots<O> {
     pub(crate) const fn new(value: HashMap<Coin, Snapshot<O>>) -> Self {
         Self(value)
@@ -116,6 +119,13 @@ impl<O: InnerOrder> OrderBooks<O> {
             .iter()
             .map(|coin| (coin.clone(), self.order_books.get(coin).map_or((None, None), OrderBook::get_bbo)))
             .collect()
+    }
+
+    /// One coin's best bid and ask prices; `(None, None)` without its book.
+    #[must_use]
+    pub(crate) fn best_prices(&self, coin: &Coin) -> BidAsk {
+        let (bid, ask) = self.order_books.get(coin).map_or((None, None), OrderBook::get_bbo);
+        (bid.map(|(px, _, _)| px), ask.map(|(px, _, _)| px))
     }
 
     /// Evicts books whose order count dropped to zero: the per-event path covers

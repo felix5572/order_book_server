@@ -31,7 +31,7 @@ use self::{
     actions::{MarkActions, Rank},
     book::{Applied, BookDiff, BooksCheck, NativeBooks},
     execution::{BlockFill, BlockStatuses, BookCuts, price_points},
-    native::{CoinCut, NativePrices, PricesCheck},
+    native::{CoinCut, CoinPriceState, NativePrices, PricesCheck},
     rules::wire_units,
     seed::{Hip3Coin, MarkSeed, StoredMark, exact_price_units},
 };
@@ -142,6 +142,8 @@ struct MarkState {
     seed: AnchorInfo,
     /// Highest block applied; the seed's height while no later block is.
     height: u64,
+    /// The block time of `height`, unix ms (the seed's for the seed).
+    time_ms: u64,
     hip3: FxHashMap<String, Hip3Coin>,
     books: NativeBooks,
     prices: NativePrices,
@@ -156,7 +158,7 @@ impl MarkState {
         let MarkSeed { height, time_ms, native, hip3 } = seed;
         let prices = NativePrices::seeded(&native);
         let books = NativeBooks::seeded(native);
-        Self { seed: AnchorInfo { height, time_ms }, height, hip3, books, prices, books_broken: false, prices_broken: false }
+        Self { seed: AnchorInfo { height, time_ms }, height, time_ms, hip3, books, prices, books_broken: false, prices_broken: false }
     }
 
     /// Applies block `height`; coins outside the seed's universe (listed since) are counted and skipped, a value that
@@ -165,6 +167,7 @@ impl MarkState {
         self.apply_hip3(height, &inputs.hip3, report);
         if let Some(actions) = &inputs.actions {
             self.prices.begin_block(actions.time_ns);
+            self.time_ms = actions.time_ns / 1_000_000;
         }
         let cuts = self.apply_diffs(height, &inputs.diffs, report);
         let trades = self.block_trades(height, &inputs.fills, report);
@@ -451,6 +454,16 @@ pub(crate) struct MarksInstallReport {
     pub(crate) errors: Vec<(Stream, String)>,
 }
 
+/// The main-dex node price state after one applied block, for the local marks (design 000454 r1 1.3): every coin the
+/// replay claims, the checkpoint the state was rebuilt from, and the block's height and time.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NativePriceSnapshot {
+    pub(crate) seed_height: u64,
+    pub(crate) height: u64,
+    pub(crate) block_time_ms: u64,
+    pub(crate) coins: FxHashMap<String, CoinPriceState>,
+}
+
 /// The marks of one height, as the account view reads them (design 000442 r1 1): the node marks of the applied height,
 /// or a checkpoint's stored marks for the row check at an anchor.
 pub(crate) trait MarksAt {
@@ -534,6 +547,14 @@ impl NodeMarks {
         let state = self.state.as_ref().ok_or(Unavailable::Initializing)?;
         self.streams.check(state.seed)?;
         Ok(state.height)
+    }
+
+    /// The trusted state's main-dex prices for the local marks; why not while the marks are unavailable.
+    pub(crate) fn price_snapshot(&self) -> Result<NativePriceSnapshot, Unavailable> {
+        self.availability()?;
+        let state = self.state.as_ref().ok_or(Unavailable::Initializing)?;
+        let coins = state.prices.price_states().map(|(coin, price)| (coin.to_string(), price)).collect();
+        Ok(NativePriceSnapshot { seed_height: state.seed.height, height: state.height, block_time_ms: state.time_ms, coins })
     }
 
     /// The marks while they are trusted, of their height.

@@ -9,6 +9,7 @@ use serde::Serialize;
 use super::{
     feeds::LocalMarkFeeds,
     slot::{Connection, FeedReading, Validity},
+    snapshot::Coverage,
     sources::{Feed, FeedMarkets, Kind},
 };
 
@@ -65,15 +66,6 @@ struct ListingView {
     /// `valid`, `notQuoted` (nothing on the current connection yet), `noQuote` (no two-sided book), `notConnected`,
     /// `expired` (a polled quote too old).
     status: &'static str,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Coverage {
-    used_venues: Vec<&'static str>,
-    missing_venues: Vec<&'static str>,
-    used_weight: u32,
-    configured_weight: u32,
 }
 
 const fn status(validity: Validity) -> &'static str {
@@ -139,14 +131,7 @@ fn coin_inputs(feeds: &LocalMarkFeeds, by_feed: &BTreeMap<Feed, (&FeedMarkets, &
                 status: status(validity),
             },
         );
-        let covered = coverage.entry(feed.kind).or_insert_with(|| Coverage { used_venues: Vec::new(), missing_venues: Vec::new(), used_weight: 0, configured_weight: 0 });
-        covered.configured_weight += feed.weight();
-        if validity == Validity::Valid {
-            covered.used_venues.push(feed.venue.name());
-            covered.used_weight += feed.weight();
-        } else {
-            covered.missing_venues.push(feed.venue.name());
-        }
+        coverage.entry(feed.kind).or_default().add(*feed, validity);
     }
     let mut take = |kind| coverage.remove(&kind).unwrap_or_else(|| unreachable!("every coin has a spot and a perp listing"));
     CoinInputs {

@@ -284,6 +284,19 @@ pub(crate) struct PricesCheck {
     pub(crate) samples: Vec<PriceMismatch>,
 }
 
+/// A main-dex coin's node price state at the applied height, as the local marks preview it (design 000454 r1 1.3):
+/// the stored oracle and mark, the EMAs, the Mark reference cache's median and the last trade, in price units.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CoinPriceState {
+    pub(crate) size_decimals: u32,
+    pub(crate) stored_oracle: u64,
+    pub(crate) stored_mark: u64,
+    pub(crate) emas: NativeEmas,
+    /// `None` before the cache has a median.
+    pub(crate) mark_cache: Option<u64>,
+    pub(crate) last_trade: u64,
+}
+
 /// A main-dex price field where the replay and the checkpoint differ, both values as evidence text.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PriceMismatch {
@@ -324,6 +337,21 @@ impl NativePrices {
 
     pub(crate) fn asset(&self, coin: &str) -> Option<usize> {
         self.by_name.get(coin).copied()
+    }
+
+    /// Every coin's state the replay claims: not one unsupported, nor one without its EMAs.
+    pub(crate) fn price_states(&self) -> impl Iterator<Item = (&str, CoinPriceState)> + '_ {
+        self.coins.iter().filter(|coin| coin.unsupported.is_none()).filter_map(|coin| {
+            let state = CoinPriceState {
+                size_decimals: coin.size_decimals,
+                stored_oracle: coin.stored_oracle,
+                stored_mark: coin.mark.px,
+                emas: coin.emas.clone()?,
+                mark_cache: coin.marks.median,
+                last_trade: coin.last_trade,
+            };
+            Some((coin.name.as_str(), state))
+        })
     }
 
     /// The coin's mark in price units; `None` while it is unsupported.

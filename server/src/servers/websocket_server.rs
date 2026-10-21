@@ -1,8 +1,10 @@
 mod coin_positions;
 mod liquidation_candidates;
 mod mark_inputs;
+mod mark_prices;
 
 use coin_positions::{AccountsSession, coin_positions_handler};
+use mark_prices::{MarkPricesSession, mark_prices_handler};
 
 use crate::{
     accounts::runtime::{AccountsHandle, BookSource, start_accounts},
@@ -10,7 +12,7 @@ use crate::{
         ActiveL2Params, ActiveSubGuard, ActiveSubs, BookTrust, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey,
         L2ParamGuard, L2SnapshotParams, OrderBookListener, hl_listen_hft, triggers::TriggerAvailability,
     },
-    local_marks::{feeds::LocalMarkFeeds, sources::MarkSources},
+    local_marks::{feeds::LocalMarkFeeds, owner::LocalMarks, sources::MarkSources},
     metrics::{
         BBO_CHANGES_TOTAL, BROADCAST_RECEIVERS, BROADCASTS_TOTAL, CHANNEL_DROPS_TOTAL, CHANNEL_LAG,
         LAST_EVENT_APPLIED_MS, MESSAGES_SENT_TOTAL, ORDERBOOK_HEIGHT, ORDERBOOK_READY, WS_CONNECTIONS_ACTIVE,
@@ -22,7 +24,7 @@ use crate::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
         subscription::{
-            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_MARK_INPUTS_PATH, EXT_LIQUIDATION_CANDIDATES,
+            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_MARK_INPUTS_PATH, EXT_MARK_PRICES, EXT_MARK_PRICES_PATH, EXT_LIQUIDATION_CANDIDATES,
             OrderUpdate, ServerResponse, Subscription, SubscriptionManager, UserFills,
         },
     },
@@ -152,7 +154,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     let book_trust = listener.book_trust();
     let listener = Arc::new(Mutex::new(listener));
     let accounts = start_account_view(&config, BookSource { trust: book_trust.clone(), listener: listener.clone() })?;
-    let local_marks = start_local_marks(&config)?;
+    let local_marks = start_local_marks(&config, accounts.as_ref(), &listener)?;
     let listener_task = {
         let listener = listener.clone();
         let config = config.clone();
@@ -190,6 +192,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                 let l4_cache = l4_cache.clone();
                 let book_trust = book_trust.clone();
                 let accounts = accounts.clone();
+                let local_marks = local_marks.clone();
                 move |ws_upgrade| async move {
                     ws_handler(
                         ws_upgrade,
@@ -198,6 +201,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                         l4_cache.clone(),
                         book_trust.clone(),
                         accounts.clone(),
+                        local_marks.clone(),
                         bbo_only,
                         l2book_heartbeat_ms,
                         bbo_heartbeat_ms,
@@ -284,7 +288,12 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         None => app,
     };
     let app = match local_marks {
-        Some(feeds) => app.route(EXT_MARK_INPUTS_PATH, get(move |query| mark_inputs::mark_inputs_handler(query, Arc::clone(&feeds)))),
+        Some(marks) => app
+            .route(EXT_MARK_INPUTS_PATH, {
+                let feeds = Arc::clone(&marks.feeds);
+                get(move |query| mark_inputs::mark_inputs_handler(query, Arc::clone(&feeds)))
+            })
+            .route(EXT_MARK_PRICES_PATH, get(move |query| mark_prices_handler(query, marks.clone()))),
         None => app,
     };
 
@@ -310,18 +319,21 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     Ok(())
 }
 
-/// Starts the local marks' venue feeds when `--local-marks` is set (design 000454); they need the account view, whose
-/// node replica the marks read (batch 2).
-fn start_local_marks(config: &ServerConfig) -> Result<Option<Arc<LocalMarkFeeds>>> {
+/// Starts the local marks when `--local-marks` is set (design 000454): the venue feeds and the owner, which reads the
+/// node replica of the account view and the listener's book.
+fn start_local_marks(
+    config: &ServerConfig,
+    accounts: Option<&AccountsHandle>,
+    listener: &Arc<Mutex<OrderBookListener>>,
+) -> Result<Option<LocalMarks>> {
     if !config.local_marks {
         return Ok(None);
     }
-    if !config.accounts {
-        return Err("--local-marks needs --accounts: the local marks read the node replica of the account view".into());
-    }
+    let accounts = accounts.ok_or("--local-marks needs --accounts: the local marks read the node replica of the account view")?;
     let sources = MarkSources::embedded()?;
     info!("Local marks: {} coins, venue feeds starting", sources.coins().count());
-    Ok(Some(Arc::new(LocalMarkFeeds::start(Arc::new(sources)))))
+    let feeds = Arc::new(LocalMarkFeeds::start(Arc::new(sources)));
+    Ok(Some(LocalMarks::start(feeds, accounts.node_prices(), Arc::clone(listener))))
 }
 
 /// Starts the account view when `--accounts` is set. Its owner ending leaves the view answering 503 (design 000419 r3
@@ -383,6 +395,7 @@ fn ws_handler(
     l4_cache: Arc<L4SnapshotCache>,
     book_trust: BookTrust,
     accounts: Option<AccountsHandle>,
+    local_marks: Option<LocalMarks>,
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
@@ -414,6 +427,7 @@ fn ws_handler(
             l4_cache,
             book_trust,
             accounts,
+            local_marks,
             bbo_only,
             l2book_heartbeat_ms,
             bbo_heartbeat_ms,
@@ -432,6 +446,7 @@ async fn handle_socket(
     l4_cache: Arc<L4SnapshotCache>,
     book_trust: BookTrust,
     accounts: Option<AccountsHandle>,
+    local_marks: Option<LocalMarks>,
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
@@ -481,6 +496,7 @@ async fn handle_socket(
     let mut sub_guards: HashMap<Subscription, Vec<ActiveSubGuard>> = HashMap::new();
     // Joined at connect time, like the book's broadcast above.
     let mut coin_positions = accounts.map(|accounts| AccountsSession::new(accounts, book_trust.clone()));
+    let mut mark_prices = local_marks.as_ref().map(MarkPricesSession::new);
 
     // Split the socket into an owned write half (driven by the writer task) and
     // a read half polled by this session task. Every send enqueues onto a
@@ -511,6 +527,7 @@ async fn handle_socket(
             &active_subs,
             &mut sub_guards,
             &mut coin_positions,
+            &mut mark_prices,
             &listener,
             &l4_cache,
             &book_trust,
@@ -573,6 +590,7 @@ async fn run_session(
     active_subs: &ActiveSubs,
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
     coin_positions: &mut Option<AccountsSession>,
+    mark_prices: &mut Option<MarkPricesSession>,
     listener: &Arc<Mutex<OrderBookListener>>,
     l4_cache: &Arc<L4SnapshotCache>,
     book_trust: &BookTrust,
@@ -761,6 +779,12 @@ async fn run_session(
                 }
             }
 
+            snapshot = next_mark_prices(mark_prices) => {
+                if let Some(session) = mark_prices.as_mut() {
+                    alive &= session.on_snapshot(outbound, manager, snapshot).await;
+                }
+            }
+
             _ = heartbeat_tick(&mut heartbeat_ticker) => {
                 let now = Instant::now();
                 let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
@@ -832,7 +856,7 @@ async fn run_session(
                                         alive &= outbound.send_pong();
                                     }
                                     _ => {
-                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions).await;
+                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices).await;
                                     }
                                 }
                             }
@@ -881,6 +905,7 @@ async fn receive_client_message(
     active_subs: &ActiveSubs,
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
     coin_positions: &mut Option<AccountsSession>,
+    mark_prices: &mut Option<MarkPricesSession>,
 ) -> bool {
     let subscription = match &client_message {
         ClientMessage::Unsubscribe { subscription } | ClientMessage::Subscribe { subscription } => subscription.clone(),
@@ -904,6 +929,13 @@ async fn receive_client_message(
             return outbound
                 .send_message(ServerResponse::Error(format!("{EXT_COIN_POSITIONS} needs the server started with --accounts")))
                 .await;
+        };
+        return session.on_client_message(outbound, manager, client_message, coin).await;
+    }
+    if let Subscription::MarkPrices { coin } = &subscription {
+        let Some(session) = mark_prices.as_mut() else {
+            let refused = format!("{EXT_MARK_PRICES} needs the server started with --local-marks");
+            return outbound.send_message(ServerResponse::Error(refused)).await;
         };
         return session.on_client_message(outbound, manager, client_message, coin).await;
     }
@@ -1009,6 +1041,16 @@ async fn next_coin_positions_frame(
 ) -> std::result::Result<Arc<crate::accounts::publish::AccountsFrame>, tokio::sync::broadcast::error::RecvError> {
     match session {
         Some(session) => session.next_frame().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The next local marks snapshot of a connection; pending forever without `--local-marks`. Cancel-safe.
+async fn next_mark_prices(
+    session: &mut Option<MarkPricesSession>,
+) -> std::result::Result<Arc<crate::local_marks::snapshot::LocalMarksSnapshot>, tokio::sync::watch::error::RecvError> {
+    match session {
+        Some(session) => session.next().await,
         None => std::future::pending().await,
     }
 }
@@ -2096,7 +2138,7 @@ mod tests {
             get(move |incoming| {
                 let (listener, tx, cache, trust, accounts) =
                     (listener.clone(), tx.clone(), cache.clone(), trust.clone(), accounts.clone());
-                async move { ws_handler(incoming, tx, listener, cache, trust, accounts, false, 0, 0, yawc::Options::default()) }
+                async move { ws_handler(incoming, tx, listener, cache, trust, accounts, None, false, 0, 0, yawc::Options::default()) }
             }),
         );
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2233,7 +2275,7 @@ mod tests {
                     let (listener, tx) = (listener.clone(), tx.clone());
                     move |incoming| {
                         let (listener, tx, cache, trust) = (listener.clone(), tx.clone(), cache.clone(), trust.clone());
-                        async move { ws_handler(incoming, tx, listener, cache, trust, None, false, 0, 50, yawc::Options::default()) }
+                        async move { ws_handler(incoming, tx, listener, cache, trust, None, None, false, 0, 50, yawc::Options::default()) }
                     }
                 }),
             );

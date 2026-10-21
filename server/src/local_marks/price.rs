@@ -3,6 +3,8 @@
 
 use std::{cmp::Ordering, fmt};
 
+use crate::accounts::marks::rules::wire_units;
+
 /// Decimals a price may carry once its exponent is applied (u128 holds 38 digits).
 const MAX_SCALE: u32 = 30;
 
@@ -52,9 +54,21 @@ impl VenuePrice {
     }
 
     /// The price times `multiplier` (a listing's), exactly; `None` out of range.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the marks' medians take HL units (design 000454 batch 2)"))]
     pub(crate) fn scaled(self, multiplier: Self) -> Option<Self> {
         Self::from_parts(self.mantissa.checked_mul(multiplier.mantissa)?, i64::from(self.scale) + i64::from(multiplier.scale))
+    }
+
+    /// The midpoint of two prices, exactly: `(a + b) / 2 = (a + b) × 5 / 10`.
+    pub(crate) fn midpoint(self, other: Self) -> Option<Self> {
+        let scale = self.scale.max(other.scale);
+        let aligned = |price: Self| 10_u128.checked_pow(scale - price.scale).and_then(|factor| factor.checked_mul(price.mantissa));
+        let sum = aligned(self)?.checked_add(aligned(other)?)?;
+        Self::from_parts(sum.checked_mul(5)?, i64::from(scale) + 1)
+    }
+
+    /// In the node's price units (10^-(6 - szDecimals)), rounded half to even: the reference ingestion rule.
+    pub(crate) fn node_units(self, size_decimals: u32) -> Result<u64, String> {
+        wire_units(&self.to_string(), size_decimals)
     }
 
     /// The value in 10^-decimals; `None` when it has more decimals or is out of range.
@@ -128,5 +142,16 @@ mod tests {
         assert_eq!(price("0.004507").scaled(price("1")).unwrap(), price("0.004507"));
         assert_eq!(price("82806.01").exact_units(2), Some(8_280_601));
         assert_eq!(price("82806.015").exact_units(2), None, "more decimals than the unit");
+    }
+
+    #[test]
+    fn midpoints_are_exact_and_node_units_round_half_to_even() {
+        assert_eq!(price("2390.15").midpoint(price("2390.16")).unwrap().to_string(), "2390.155");
+        assert_eq!(price("0.000004507").midpoint(price("0.000004508")).unwrap().to_string(), "0.0000045075");
+        assert_eq!(price("100").midpoint(price("101")).unwrap().to_string(), "100.5");
+        // ETH (szDecimals 4): 2 decimals; the half tie goes to even
+        assert_eq!(price("2390.155").node_units(4), Ok(239_016));
+        assert_eq!(price("2390.145").node_units(4), Ok(239_014));
+        assert_eq!(price("82806.005").node_units(5), Ok(828_060));
     }
 }
