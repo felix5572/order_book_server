@@ -1,9 +1,11 @@
 mod coin_positions;
+mod delivery;
 mod forced_flow;
 mod liquidation_candidates;
 mod mark_inputs;
 mod mark_prices;
 
+use delivery::{ConnectionDiagnostics, UserFillsDelivery, record_lag};
 use coin_positions::{AccountsSession, coin_positions_handler};
 use mark_prices::{MarkPricesSession, mark_prices_handler};
 
@@ -15,7 +17,7 @@ use crate::{
     },
     local_marks::{feeds::LocalMarkFeeds, owner::LocalMarks, sources::MarkSources},
     metrics::{
-        BBO_CHANGES_TOTAL, BROADCAST_RECEIVERS, BROADCASTS_TOTAL, CHANNEL_DROPS_TOTAL, CHANNEL_LAG,
+        BBO_CHANGES_TOTAL, BROADCAST_RECEIVERS, BROADCASTS_TOTAL,
         LAST_EVENT_APPLIED_MS, MESSAGES_SENT_TOTAL, ORDERBOOK_HEIGHT, ORDERBOOK_READY, WS_CONNECTIONS_ACTIVE,
         WS_CONNECTIONS_TOTAL, WS_SEND_ERRORS_TOTAL,
     },
@@ -30,7 +32,7 @@ use crate::{
         },
     },
 };
-use axum::{Router, routing::get};
+use axum::{Router, extract::ConnectInfo, routing::get};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info};
 use std::{
@@ -114,19 +116,8 @@ async fn heartbeat_tick(ticker: &mut Option<tokio::time::Interval>) {
 }
 
 pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
-    // One channel multiplexes every event (L2/BBO/L4/fills) to all connections.
-    // In `--stream-with-block-info` mode the listener emits one message per node
-    // event (order statuses/diffs: thousands/s), so depth 32 drained in
-    // milliseconds and any consumer jitter tripped `RecvError::Lagged`, evicting
-    // messages across all channels. Even with batch draining and shared frames,
-    // a single trades subscriber lost ~71% of trades on a busy mainnet window at
-    // depth 32 vs ~1.7% at 16384, in the same conditions. 16384 gives seconds of
-    // headroom; each slot is one Arc pointer and a persistently-slow consumer
-    // still sheds via Lagged, so memory stays bounded.
-    // TODO: this is a mitigation, not a fix — loss is still cross-channel
-    // (residual ~1.7% above) and every connection is woken for the full L4
-    // firehose. Splitting into per-message-type channels, subscribed per
-    // connection as needed, would decouple loss domains and wakeup cost.
+    // Public book/trade ring. Private userFills uses the listener's independent ring,
+    // so unrelated L4 bursts cannot evict private execution events.
     let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(16384);
 
     // Market filter flags from config
@@ -198,7 +189,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                 let book_trust = book_trust.clone();
                 let accounts = accounts.clone();
                 let local_marks = local_marks.clone();
-                move |ws_upgrade| async move {
+                move |ws_upgrade, ConnectInfo(peer): ConnectInfo<SocketPeer>| async move {
                     ws_handler(
                         ws_upgrade,
                         internal_message_tx.clone(),
@@ -211,6 +202,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                         l2book_heartbeat_ms,
                         bbo_heartbeat_ms,
                         websocket_opts,
+                        Some(peer.0),
                     )
                 }
             }),
@@ -314,7 +306,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     info!("WebSocket server running at ws://{}", config.address);
 
     tokio::select! {
-        result = axum::serve(NoDelayListener(tcp_listener), app) => {
+        result = axum::serve(NoDelayListener(tcp_listener), app.into_make_service_with_connect_info::<SocketPeer>()) => {
             if let Err(err) = result {
                 error!("Server fatal error: {err}");
                 std::process::exit(2);
@@ -382,6 +374,16 @@ fn websocket_options(compression_level: u32) -> yawc::Options {
 /// hundred bytes) by up to an RTT while an unacked segment is outstanding.
 struct NoDelayListener(TcpListener);
 
+#[derive(Clone, Copy)]
+struct SocketPeer(std::net::SocketAddr);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, NoDelayListener>> for SocketPeer {
+    fn connect_info(stream: axum::serve::IncomingStream<'_, NoDelayListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
+}
+
+
 impl axum::serve::Listener for NoDelayListener {
     type Io = tokio::net::TcpStream;
     type Addr = std::net::SocketAddr;
@@ -413,6 +415,7 @@ fn ws_handler(
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
     websocket_opts: yawc::Options,
+    peer: Option<std::net::SocketAddr>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     // Reject malformed WS handshakes cleanly. The previous `.unwrap()` would panic
@@ -444,6 +447,7 @@ fn ws_handler(
             bbo_only,
             l2book_heartbeat_ms,
             bbo_heartbeat_ms,
+            peer,
         )
         .await;
     });
@@ -463,30 +467,35 @@ async fn handle_socket(
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
+    peer: Option<std::net::SocketAddr>,
 ) {
     // Track connection metrics
     WS_CONNECTIONS_ACTIVE.inc();
     WS_CONNECTIONS_TOTAL.inc();
 
     // Use a guard to decrement active connections when this function exits
-    struct ConnectionGuard;
+    let diagnostics = Arc::new(ConnectionDiagnostics::new(peer));
+    info!("WebSocket connected: {diagnostics}");
+    struct ConnectionGuard(Arc<ConnectionDiagnostics>);
     impl Drop for ConnectionGuard {
         fn drop(&mut self) {
+            info!("WebSocket disconnected: {}", self.0);
             WS_CONNECTIONS_ACTIVE.dec();
             BROADCAST_RECEIVERS.dec();
         }
     }
-    let _connection_guard = ConnectionGuard;
+    let _connection_guard = ConnectionGuard(Arc::clone(&diagnostics));
 
     let mut internal_message_rx = internal_message_tx.subscribe();
     BROADCAST_RECEIVERS.set(internal_message_tx.receiver_count() as i64);
     // One lock hold for all setup state (previously four separate acquisitions:
     // during a reconnect storm every new connection queued four times behind
     // the FIFO-fair listener lock, exactly when it was most contended).
-    let (is_ready, mut universe, active_l2_params, active_subs) = {
+    let (is_ready, mut universe, active_l2_params, active_subs, fills_sender) = {
         let listener_state = listener.lock().await;
-        (listener_state.is_ready(), listener_state.universe(), listener_state.active_l2_params(), listener_state.active_subs())
+        (listener_state.is_ready(), listener_state.universe(), listener_state.active_l2_params(), listener_state.active_subs(), listener_state.user_fills_sender())
     };
+    let mut user_fills = UserFillsDelivery::new(fills_sender);
     let mut manager = SubscriptionManager::default();
     // `universe` above: market-filtered universe for subscription validation.
     // Refreshed from Snapshot broadcasts (Arc-shared, built once in the
@@ -522,14 +531,15 @@ async fn handle_socket(
     let (sink, mut ws_read) = socket.split();
     let (data_tx, data_rx) = mpsc::channel(OUTBOUND_QUEUE_DEPTH);
     let (pong_tx, pong_rx) = mpsc::channel(PONG_QUEUE_DEPTH);
-    let outbound = Outbound { data_tx, pong_tx };
-    let mut writer = tokio::spawn(write_task(sink, data_rx, pong_rx));
+    let outbound = Outbound { data_tx, pong_tx, diagnostics: Arc::clone(&diagnostics) };
+    let mut writer = tokio::spawn(write_task(sink, data_rx, pong_rx, diagnostics));
 
     if is_ready {
         run_session(
             &mut ws_read,
             &outbound,
             &mut internal_message_rx,
+            &mut user_fills,
             &mut manager,
             &mut universe,
             &mut last_l2,
@@ -593,6 +603,7 @@ async fn run_session(
     ws_read: &mut futures_util::stream::SplitStream<HttpWebSocket>,
     outbound: &Outbound,
     internal_message_rx: &mut tokio::sync::broadcast::Receiver<Arc<InternalMessage>>,
+    user_fills: &mut UserFillsDelivery,
     manager: &mut SubscriptionManager,
     universe: &mut Arc<HashSet<String>>,
     last_l2: &mut HashMap<String, L2Entry>,
@@ -627,11 +638,13 @@ async fn run_session(
     let mut force_full_l2 = false;
     // Withheld periods this connection has accounted for (see `forget_pre_withholding_frames`).
     let mut withheld_seen = book_trust.withheld_periods();
+    let mut last_market_receive = Instant::now();
     while alive {
         select! {
             recv_result = internal_message_rx.recv() => {
                 match recv_result {
                     Ok(msg) => {
+                        last_market_receive = Instant::now();
                         match msg.as_ref() {
                             InternalMessage::Snapshot{ l2_snapshots, time, dirty, universe: new_universe, l2_frames, withheld_period } => {
                                 force_full_l2 |= forget_pre_withholding_frames(book_trust, &mut withheld_seen, last_l2, last_bbo);
@@ -682,26 +695,18 @@ async fn run_session(
                                     }
                                 }
                             },
-                            InternalMessage::Fills{ trades_by_coin, fills } => {
+                            InternalMessage::Trades{ trades_by_coin } => {
                                 // Per-coin payloads were grouped once in the listener; the
                                 // wire frame is serialized once by the first subscribed
                                 // connection and shared (refcounted bytes) by every other.
                                 for sub in manager.subscriptions() {
                                     if !alive { break; }
-                                    match sub {
-                                        Subscription::Trades { coin } => {
-                                            if let Some(ct) = trades_by_coin.get(coin.as_str()) {
-                                                BROADCASTS_TOTAL.with_label_values(&["trades"]).inc();
-                                                let frame = ct.frame.get_or_serialize(|| ServerResponse::Trades(Arc::clone(&ct.trades)));
-                                                alive &= outbound.send_frame(frame).await;
-                                            }
+                                    if let Subscription::Trades { coin } = sub {
+                                        if let Some(ct) = trades_by_coin.get(coin.as_str()) {
+                                            BROADCASTS_TOTAL.with_label_values(&["trades"]).inc();
+                                            let frame = ct.frame.get_or_serialize(|| ServerResponse::Trades(Arc::clone(&ct.trades)));
+                                            alive &= outbound.send_frame(frame).await;
                                         }
-                                        Subscription::UserFills { user } => {
-                                            if let Some(fills) = fills {
-                                                alive &= send_ws_user_fills(outbound, user, fills, user_addrs).await;
-                                            }
-                                        }
-                                        _ => {}
                                     }
                                 }
                             },
@@ -763,24 +768,39 @@ async fn run_session(
 
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        CHANNEL_LAG.set(n as i64);
-                        CHANNEL_DROPS_TOTAL.inc();
-                        if lagged_outcome(manager) == LaggedOutcome::CloseUserFills {
-                            // Fills are events: the next message cannot bring back the ones
-                            // overwritten in the broadcast. Ending the connection lets the
-                            // subscriber see the gap (the gateway treats it as this source going
-                            // down and backs off), instead of a silently gapped fill stream.
-                            log::warn!("Receiver lagged {n} messages on a userFills connection: fills cannot be re-sent, closing it");
-                            return;
-                        }
+                        record_lag("market", n);
+                        // Private fills were never in this ring. Market lag cannot establish
+                        // a private execution gap, even on a mixed-subscription connection.
                         // A dropped Snapshot may have carried dirty coins we never
                         // saw - process the next one in full (hash dedup still
                         // suppresses sends whose payload didn't actually change).
                         force_full_l2 = true;
-                        log::debug!("Receiver lagged: {n} messages");
+                        log::debug!("Market broadcast lag: {} skipped_messages={n} pending_messages={} since_last_receive_ms={} outbound_pending={}",
+                            outbound.diagnostics, internal_message_rx.len(), last_market_receive.elapsed().as_millis(), outbound.pending());
                     }
                     Err(err) => {
                         error!("Receiver error: {err}");
+                        return;
+                    }
+                }
+            }
+
+            received = user_fills.next() => {
+                match received {
+                    Ok(fills) => {
+                        for sub in manager.subscriptions() {
+                            if !alive { break; }
+                            if let Subscription::UserFills { user } = sub {
+                                alive &= send_ws_user_fills(outbound, user, &fills, user_addrs).await;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        user_fills.lagged(skipped, outbound, manager);
+                        return;
+                    }
+                    Err(err) => {
+                        error!("Private fill broadcast closed: {} error={err}", outbound.diagnostics);
                         return;
                     }
                 }
@@ -869,7 +889,7 @@ async fn run_session(
                                         alive &= outbound.send_pong();
                                     }
                                     _ => {
-                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices).await;
+                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, user_fills).await;
                                     }
                                 }
                             }
@@ -879,13 +899,13 @@ async fn run_session(
                             }
                         }
                         OpCode::Close => {
-                            info!("Client disconnected");
+                            info!("Client disconnected: {}", outbound.diagnostics);
                             return;
                         }
                         _ => {}
                     }
                 } else {
-                    info!("Client connection closed");
+                    info!("Client connection closed: {}", outbound.diagnostics);
                     return;
                 }
             }
@@ -898,7 +918,7 @@ async fn run_session(
             }
         }
     }
-    info!("Dropping connection: socket write failed or timed out");
+    info!("Dropping connection: {} socket write failed or timed out", outbound.diagnostics);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -919,6 +939,7 @@ async fn receive_client_message(
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
     coin_positions: &mut Option<AccountsSession>,
     mark_prices: &mut Option<MarkPricesSession>,
+    user_fills: &mut UserFillsDelivery,
 ) -> bool {
     let subscription = match &client_message {
         ClientMessage::Unsubscribe { subscription } | ClientMessage::Subscribe { subscription } => subscription.clone(),
@@ -985,6 +1006,7 @@ async fn receive_client_message(
                 // first guarantees no update falls between the snapshot and
                 // the stream.
                 if inserted {
+                    user_fills.sync_subscriptions(manager);
                     let guards = active_subs.acquire_for(&subscription);
                     if !guards.is_empty() {
                         sub_guards.insert(subscription.clone(), guards);
@@ -1003,6 +1025,7 @@ async fn receive_client_message(
             // the same coin (or BBO across coins) leaks one entry per cycle until disconnect.
             if removed {
                 sub_guards.remove(&subscription);
+                user_fills.sync_subscriptions(manager);
                 match &subscription {
                     Subscription::L2Book { coin, n_sig_figs, mantissa, n_levels } => {
                         last_l2.remove(&l2_cache_key(coin, *n_sig_figs, *mantissa, *n_levels));
@@ -1029,6 +1052,7 @@ async fn receive_client_message(
         ClientMessage::Ping => unreachable!(),
     };
     if success {
+        info!("WebSocket {word}subscribe: {} subscription={sub}", outbound.diagnostics);
         let snapshot_msg = if let ClientMessage::Subscribe { subscription } = &client_message {
             let msg = subscription.handle_immediate_snapshot(listener, l4_cache, book_trust).await;
             match msg {
@@ -1036,6 +1060,7 @@ async fn receive_client_message(
                 Err(err) => {
                     manager.unsubscribe(subscription.clone());
                     sub_guards.remove(subscription);
+                    user_fills.sync_subscriptions(manager);
                     return outbound.send_message(
                         ServerResponse::Error(format!("Unable to grab order book snapshot: {err}"))).await;
                 }
@@ -1146,9 +1171,19 @@ const PONG_FRAME: &[u8] = br#"{"channel":"pong"}"#;
 struct Outbound {
     data_tx: mpsc::Sender<bytes::Bytes>,
     pong_tx: mpsc::Sender<bytes::Bytes>,
+    diagnostics: Arc<ConnectionDiagnostics>,
 }
 
 impl Outbound {
+    #[cfg(test)]
+    fn for_test(data_tx: mpsc::Sender<bytes::Bytes>, pong_tx: mpsc::Sender<bytes::Bytes>) -> Self {
+        Self { data_tx, pong_tx, diagnostics: Arc::new(ConnectionDiagnostics::new(None)) }
+    }
+
+    fn pending(&self) -> usize {
+        self.data_tx.max_capacity() - self.data_tx.capacity()
+    }
+
     /// Serialize and enqueue a `ServerResponse`. Returns `false` when the
     /// connection is doomed (writer gone or queue wedged); callers in the
     /// session loop must bail out on `false`, mirroring the old direct sends.
@@ -1176,12 +1211,22 @@ impl Outbound {
     }
 
     async fn send_payload(&self, payload: bytes::Bytes) -> bool {
-        match tokio::time::timeout(WS_SEND_TIMEOUT, self.data_tx.send(payload)).await {
+        // No timer/diagnostic allocation on an uncongested queue. When full, keep the
+        // same five-second budget and record actual waiting separately from socket IO.
+        let payload = match self.data_tx.try_send(payload) {
+            Ok(()) => return true,
+            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+            Err(mpsc::error::TrySendError::Full(payload)) => payload,
+        };
+        let started = Instant::now();
+        let result = tokio::time::timeout(WS_SEND_TIMEOUT, self.data_tx.send(payload)).await;
+        self.diagnostics.queue_wait(started.elapsed());
+        match result {
             Ok(Ok(())) => true,
-            // Writer exited; it already logged and counted the send failure.
             Ok(Err(_)) => false,
             Err(_) => {
-                error!("Outbound queue full for >{WS_SEND_TIMEOUT:?}; dropping slow client");
+                error!("Outbound queue timeout: {} waited_ms={} pending={} capacity={}; dropping slow client",
+                    self.diagnostics, started.elapsed().as_millis(), self.pending(), self.data_tx.max_capacity());
                 WS_SEND_ERRORS_TOTAL.inc();
                 false
             }
@@ -1197,7 +1242,7 @@ impl Outbound {
         match self.pong_tx.try_send(bytes::Bytes::from_static(PONG_FRAME)) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
-                error!("Pong queue full; dropping wedged client");
+                error!("Pong queue full; dropping wedged client: {}", self.diagnostics);
                 WS_SEND_ERRORS_TOTAL.inc();
                 false
             }
@@ -1211,7 +1256,7 @@ impl Outbound {
 /// Exits on a send error/timeout or once both queue senders are dropped, then
 /// attempts a best-effort close handshake (`poll_ready`/`close` also flush
 /// yawc's internally-queued control replies, e.g. protocol-level pongs).
-async fn write_task<S>(mut sink: S, mut data_rx: mpsc::Receiver<bytes::Bytes>, mut pong_rx: mpsc::Receiver<bytes::Bytes>)
+async fn write_task<S>(mut sink: S, mut data_rx: mpsc::Receiver<bytes::Bytes>, mut pong_rx: mpsc::Receiver<bytes::Bytes>, diagnostics: Arc<ConnectionDiagnostics>)
 where
     S: futures_util::Sink<Frame> + Unpin,
     S::Error: std::fmt::Display,
@@ -1231,15 +1276,18 @@ where
                 None => { data_open = false; continue; }
             },
         };
-        match tokio::time::timeout(WS_SEND_TIMEOUT, sink.send(Frame::text(frame))).await {
+        let started = Instant::now();
+        let result = tokio::time::timeout(WS_SEND_TIMEOUT, sink.send(Frame::text(frame))).await;
+        diagnostics.socket_write(started.elapsed());
+        match result {
             Ok(Ok(())) => MESSAGES_SENT_TOTAL.inc(),
             Ok(Err(err)) => {
-                error!("Failed to send: {err}");
+                error!("WebSocket send failed: {diagnostics} error={err} pending={}", data_rx.len());
                 WS_SEND_ERRORS_TOTAL.inc();
                 break;
             }
             Err(_) => {
-                error!("Send timeout (>{WS_SEND_TIMEOUT:?}); dropping slow client");
+                error!("Socket write timeout: {diagnostics} waited_ms={} pending={}; dropping slow client", started.elapsed().as_millis(), data_rx.len());
                 WS_SEND_ERRORS_TOTAL.inc();
                 break;
             }
@@ -1801,21 +1849,6 @@ async fn send_ws_order_updates(
     true
 }
 
-/// What a broadcast lag means for one connection. Book subscriptions recover from the next full
-/// snapshot; a userFills subscription cannot get back fills overwritten in the broadcast.
-#[derive(Debug, PartialEq, Eq)]
-enum LaggedOutcome {
-    ResyncBook,
-    CloseUserFills,
-}
-
-fn lagged_outcome(manager: &SubscriptionManager) -> LaggedOutcome {
-    if manager.subscriptions().iter().any(|sub| matches!(sub, Subscription::UserFills { .. })) {
-        return LaggedOutcome::CloseUserFills;
-    }
-    LaggedOutcome::ResyncBook
-}
-
 /// Send a userFills subscriber the user's fills from one fills batch, in node
 /// order, as one official-shape `userFills` frame (nothing when it has none).
 /// Clones only the matching fills; the user is echoed exactly as subscribed.
@@ -1973,7 +2006,7 @@ mod tests {
         drop((data_tx, pong_tx));
 
         let sink = RecordingSink::default();
-        write_task(sink.clone(), data_rx, pong_rx).await;
+        write_task(sink.clone(), data_rx, pong_rx, Arc::new(ConnectionDiagnostics::new(None))).await;
 
         let frames = sink.0.lock().unwrap();
         assert_eq!(frames.len(), 4, "all queued frames must drain before exit");
@@ -1987,29 +2020,11 @@ mod tests {
         let (data_tx, data_rx) = mpsc::channel(8);
         let (pong_tx, pong_rx) = mpsc::channel(8);
         drop((data_rx, pong_rx));
-        let outbound = Outbound { data_tx, pong_tx };
+        let outbound = Outbound::for_test(data_tx, pong_tx);
         assert!(!outbound.send_payload(bytes::Bytes::from_static(b"x")).await);
         assert!(!outbound.send_pong());
         // And the idle-session watchdog branch fires.
         outbound.data_tx.closed().await;
-    }
-
-    /// A broadcast lag closes a connection that holds userFills (book-only or mixed alike: the
-    /// overwritten fills cannot come back), and keeps the book-only resync for the rest.
-    #[test]
-    fn test_lag_closes_user_fills_connections_and_resyncs_book_only_ones() {
-        let user_fills = Subscription::UserFills { user: "0x00000000000000000000000000000000000000aa".to_string() };
-        let book = Subscription::Bbo { coin: "BTC".to_string() };
-        let manager = |subs: Vec<Subscription>| {
-            let mut manager = SubscriptionManager::default();
-            for sub in subs {
-                manager.subscribe(sub).unwrap();
-            }
-            manager
-        };
-        assert_eq!(lagged_outcome(&manager(vec![book.clone()])), LaggedOutcome::ResyncBook);
-        assert_eq!(lagged_outcome(&manager(vec![user_fills.clone()])), LaggedOutcome::CloseUserFills);
-        assert_eq!(lagged_outcome(&manager(vec![book, user_fills])), LaggedOutcome::CloseUserFills, "mixed");
     }
 
     /// A userFills subscriber gets only its own fills from a batch, in node order,
@@ -2028,7 +2043,7 @@ mod tests {
         let other = "0x00000000000000000000000000000000000000bb";
         let (data_tx, mut data_rx) = mpsc::channel(8);
         let (pong_tx, _pong_rx) = mpsc::channel(8);
-        let outbound = Outbound { data_tx, pong_tx };
+        let outbound = Outbound::for_test(data_tx, pong_tx);
         let mut user_addrs = HashMap::new();
         // Subscribed in mixed case: matched by address, echoed as subscribed.
         let subscribed = "0x00000000000000000000000000000000000000AA";
@@ -2051,7 +2066,7 @@ mod tests {
     async fn test_send_pong_full_lane_means_wedged_client() {
         let (data_tx, _data_rx) = mpsc::channel(8);
         let (pong_tx, _pong_rx) = mpsc::channel(2);
-        let outbound = Outbound { data_tx, pong_tx };
+        let outbound = Outbound::for_test(data_tx, pong_tx);
         assert!(outbound.send_pong());
         assert!(outbound.send_pong());
         // Lane full and nothing draining: the client is wedged.
@@ -2066,8 +2081,8 @@ mod tests {
         // inline sends compounded the timeout per subscription.
         let (data_tx, data_rx) = mpsc::channel(1);
         let (pong_tx, pong_rx) = mpsc::channel(1);
-        let outbound = Outbound { data_tx, pong_tx };
-        let writer = tokio::spawn(write_task(StuckSink, data_rx, pong_rx));
+        let outbound = Outbound::for_test(data_tx, pong_tx);
+        let writer = tokio::spawn(write_task(StuckSink, data_rx, pong_rx, Arc::clone(&outbound.diagnostics)));
 
         assert!(outbound.send_payload(bytes::Bytes::from_static(b"x")).await);
         writer.await.unwrap();
@@ -2158,7 +2173,7 @@ mod tests {
             get(move |incoming| {
                 let (listener, tx, cache, trust, accounts) =
                     (listener.clone(), tx.clone(), cache.clone(), trust.clone(), accounts.clone());
-                async move { ws_handler(incoming, tx, listener, cache, trust, accounts, None, false, 0, 0, yawc::Options::default()) }
+                async move { ws_handler(incoming, tx, listener, cache, trust, accounts, None, false, 0, 0, yawc::Options::default(), None) }
             }),
         );
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2283,7 +2298,11 @@ mod tests {
     #[allow(clippy::future_not_send)]
     impl BboSession {
         async fn open() -> Self {
-            let (tx, _rx) = channel(32);
+            Self::with_capacity(32).await
+        }
+
+        async fn with_capacity(capacity: usize) -> Self {
+            let (tx, _rx) = channel(capacity);
             let mut state = OrderBookListener::new(Some(tx.clone()), false, ActiveL2Params::new(), (true, true, true));
             state.init_from_snapshot(btc_bid_snapshot(PX_100), 10);
             let trust = state.book_trust();
@@ -2293,15 +2312,15 @@ mod tests {
                 "/ws",
                 get({
                     let (listener, tx) = (listener.clone(), tx.clone());
-                    move |incoming| {
+                    move |incoming, ConnectInfo(peer): ConnectInfo<SocketPeer>| {
                         let (listener, tx, cache, trust) = (listener.clone(), tx.clone(), cache.clone(), trust.clone());
-                        async move { ws_handler(incoming, tx, listener, cache, trust, None, None, false, 0, 50, yawc::Options::default()) }
+                        async move { ws_handler(incoming, tx, listener, cache, trust, None, None, false, 0, 50, yawc::Options::default(), Some(peer.0)) }
                     }
                 }),
             );
             let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = tcp.local_addr().unwrap();
-            let server = tokio::spawn(async move { axum::serve(tcp, app).await.unwrap() });
+            let server = tokio::spawn(async move { axum::serve(NoDelayListener(tcp), app.into_make_service_with_connect_info::<SocketPeer>()).await.unwrap() });
             let mut ws = yawc::WebSocket::connect(format!("ws://{addr}/ws").parse().unwrap()).await.unwrap();
             ws.send(Frame::text(r#"{"method":"subscribe","subscription":{"type":"bbo","coin":"BTC"}}"#.as_bytes().to_vec()))
                 .await
@@ -2348,6 +2367,87 @@ mod tests {
             assert_eq!(heartbeat.as_deref(), Some(expected), "{case}: heartbeats resend only the fresh frame");
             self.server.abort();
         }
+    }
+
+    fn private_fill_batch(tid: u64) -> Arc<Vec<crate::types::node_data::NodeDataFill>> {
+        Arc::new(vec![serde_json::from_value(serde_json::json!([
+            "0x00000000000000000000000000000000000000aa", {
+                "coin":"BTC", "px":"100", "sz":"1", "side":"B", "time":1, "startPosition":"0",
+                "dir":"Open Long", "closedPnl":"0", "hash":"0xabc", "oid":tid, "crossed":true,
+                "fee":"0.01", "tid":tid, "feeToken":"USDC"
+            }
+        ])).unwrap()])
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn subscribe_private_fills(session: &mut BboSession, mixed: bool) {
+        let mut requests = Vec::new();
+        if !mixed {
+            requests.push(r#"{"method":"unsubscribe","subscription":{"type":"bbo","coin":"BTC"}}"#);
+        }
+        requests.push(r#"{"method":"subscribe","subscription":{"type":"userFills","user":"0x00000000000000000000000000000000000000aa"}}"#);
+        for request in requests {
+            session.ws.send(Frame::text(request.as_bytes().to_vec())).await.unwrap();
+            loop {
+                if next_json(&mut session.ws).await["channel"] == "subscriptionResponse" { break; }
+            }
+        }
+    }
+
+    /// Production-sized ring and the historical failure shape: unrelated L4 messages
+    /// overflow the market lane, yet both private-only and mixed clients retain fills.
+    #[tokio::test]
+    #[allow(clippy::future_not_send)]
+    async fn market_overflow_preserves_user_fills_and_pings() {
+        for mixed in [false, true] {
+            let mut session = BboSession::with_capacity(16_384).await;
+            subscribe_private_fills(&mut session, mixed).await;
+            let fills_tx = session.listener.lock().await.user_fills_sender();
+            let irrelevant = Arc::new(InternalMessage::L4OrderDiffs { time:1, height:11, diffs_by_coin:HashMap::new() });
+            for _ in 0..16_385 { assert!(session.tx.send(Arc::clone(&irrelevant)).is_ok()); }
+            fills_tx.send(private_fill_batch(123)).unwrap();
+            session.ws.send(Frame::text(br#"{"method":"ping"}"#.to_vec())).await.unwrap();
+            let mut fill_seen = false;
+            let mut pong_seen = false;
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !fill_seen || !pong_seen {
+                    let frame = next_json(&mut session.ws).await;
+                    match frame["channel"].as_str() {
+                        Some("userFills") => {
+                            assert!(!fill_seen, "one fill delivered once");
+                            assert_eq!(frame["data"]["fills"][0]["tid"], 123);
+                            fill_seen = true;
+                        }
+                        Some("pong") => pong_seen = true,
+                        Some("bbo") if mixed => {}
+                        other => panic!("unexpected frame {other:?}: {frame}"),
+                    }
+                }
+            }).await.unwrap();
+            session.server.abort();
+        }
+    }
+
+    /// Loss on the private lane still closes the socket: an event cannot be
+    /// repaired by the next fill. The ring count is batches, not this user's lost fills.
+    #[tokio::test]
+    #[allow(clippy::future_not_send)]
+    async fn private_fill_overflow_still_closes_the_connection() {
+        let mut session = BboSession::open().await;
+        subscribe_private_fills(&mut session, false).await;
+        let fills_tx = session.listener.lock().await.user_fills_sender();
+        let batch = private_fill_batch(456);
+        for _ in 0..=crate::listeners::order_book::USER_FILLS_BROADCAST_CAPACITY {
+            fills_tx.send(Arc::clone(&batch)).unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(frame) = session.ws.next().await {
+                if frame.opcode() == OpCode::Close { return; }
+                let body: serde_json::Value = serde_json::from_slice(frame.payload()).unwrap();
+                assert_ne!(body["channel"], "userFills", "no apparently continuous fills after a known gap");
+            }
+        }).await.unwrap();
+        session.server.abort();
     }
 
     /// Review 000251 P2 (from the reviewer's loopback probe): a withheld period

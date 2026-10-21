@@ -176,7 +176,7 @@ mod tests {
     fn outbound() -> (Outbound, mpsc::Receiver<bytes::Bytes>) {
         let (data_tx, data_rx) = mpsc::channel(64);
         let (pong_tx, _pong_rx) = mpsc::channel(1);
-        (Outbound { data_tx, pong_tx }, data_rx)
+        (Outbound::for_test(data_tx, pong_tx), data_rx)
     }
 
     fn subscription(coin: Option<&str>, max_distance_bps: u32) -> Subscription {

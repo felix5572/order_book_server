@@ -23,6 +23,17 @@ lazy_static! {
         "Number of active WebSocket connections"
     ).expect("metric can be created");
 
+    /// Batches overwritten in each independent delivery ring, not per-user fill counts.
+    pub static ref WS_BROADCAST_SKIPPED_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("ws_broadcast_skipped_messages_total", "Broadcast messages overwritten per lane"), &["lane"]
+    ).expect("metric can be created");
+
+    /// Queue observations only occur when waiting for a full queue; socket observations include every write.
+    pub static ref WS_DELIVERY_WAIT: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("ws_delivery_wait_seconds", "Time awaiting a queue slot or socket write")
+            .buckets(vec![0.0001, 0.001, 0.01, 0.1, 0.5, 1.0, 5.0]), &["stage"]
+    ).expect("metric can be created");
+
     /// Total WebSocket connections since startup
     pub static ref WS_CONNECTIONS_TOTAL: IntCounter = IntCounter::new(
         "ws_connections_total",
@@ -717,6 +728,8 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(PARSE_ERRORS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(WS_SEND_ERRORS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(CHANNEL_DROPS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(WS_BROADCAST_SKIPPED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(WS_DELIVERY_WAIT.clone())).ok();
     REGISTRY.register(Box::new(ORDERBOOK_DESYNCS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ORACLE_DATA_LOSS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(INSERT_BEFORE_FALLBACK_TOTAL.clone())).ok();

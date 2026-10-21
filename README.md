@@ -44,7 +44,7 @@ Other requirements:
 - **Disk:** negligible for the server itself (~10 MB binary). The Hyperliquid node's `*_streaming/` directories grow with traffic — size them per the node's documentation, not this server's.
 - **Network:** outbound bandwidth scales with `(connected clients) × (subscription mix)`. L2 snapshots with many `(coin, n_sig_figs, mantissa)` variants are the largest payloads — use `--compression-level 1` and/or `--markets perps` to bound it.
 
-**Sizing rule of thumb.** Memory grows roughly with (a) the universe of coins the node serves, and (b) the number of distinct L2 subscription tuples your clients open. The 256-per-connection subscription cap and the broadcast channel capacity bound the worst case. If you see `channel_drops_total` rising or `broadcast_channel_lag` non-zero, you have a slow consumer — not a server-side leak.
+**Sizing rule of thumb.** Memory grows roughly with (a) the universe of coins the node serves, and (b) the number of distinct L2 subscription tuples your clients open. The 256-per-connection subscription cap and the broadcast channel capacity bound the worst case. Rising `channel_drops_total` or non-zero `broadcast_channel_lag` means a receiver fell behind. Client backpressure, server scheduling and producer bursts all need distinguishing; these counters alone do not identify the cause.
 
 ### Build
 
@@ -319,7 +319,9 @@ Response (`user` echoed as subscribed; each fill carries the modeled fields — 
 ```json
 { "channel": "userFills", "data": { "user": "0x...", "fills": [{ "coin": "ETH", "px": "2512.0", "sz": "0.1201", "side": "A", "time": 1791829884085, "startPosition": "13.3473", "dir": "Close Long", "closedPnl": "0.134512", "hash": "0x...", "oid": 572293425349, "crossed": false, "fee": "-0.00905", "tid": 706893944732179, "cloid": "0x...", "feeToken": "USDC", "twapId": null }] } }
 ```
-> **Note:** Requires node to run with `--write-fills`. A raw event stream: it continues while the book is withheld. Replayed fills after a node restart are sent as written: deduplicate by the fill identity `(coin, time, tid)` and gate freshness on the consumer side. A connection holding `userFills` is closed when it lags the internal broadcast (overwritten fills cannot be re-sent).
+> **Note:** Requires node to run with `--write-fills`. A raw event stream: it continues while the book is withheld. Replayed fills after a node restart are sent as written: deduplicate by the fill identity `(coin, time, tid)` and gate freshness on the consumer side. Private fill legs use an independent 16,384-batch broadcast ring: public L4/BBO/L2/trade traffic cannot evict them. The receiver attaches before the first userFills producer subscription and detaches after the last; a later subscription starts live. A private-ring overrun still closes the connection because overwritten events cannot be recovered here; public-ring lag no longer implies lost private fills, including on mixed connections. Each lane preserves its own order; there is no cross-lane ordering guarantee. The skipped count is batches of all users’ fills, not the number of lost trades or fills for the subscribed user.
+
+Delivery logs carry a process-local connection ID and the actual TCP peer (a local proxy remains a local peer), plus successful ordinary subscription changes (including userFills) for attribution. Private gaps report queued/skipped batch counts, elapsed time since the last receive and outbound queue occupancy. Queue waits and socket writes have separate metrics and per-connection lifetime maxima; a long receive interval or lifetime maximum is evidence to correlate, not proof of the cause of that specific gap. Raw market payloads are not included in these diagnostics.
 
 ### Account view: extCoinPositions
 Our own feeds are named with an `ext` prefix, apart from the official API's subscription types.
@@ -592,6 +594,8 @@ curl http://localhost:9090/metrics
 | **Connections** | `ws_connections_active` | Current WebSocket connections |
 | | `ws_connections_total` | Total connections since startup |
 | | `ws_subscriptions_active{type}` | Active subscriptions by type (bbo/l2Book/l4Book/trades/bookDiffs/orderUpdates/userFills) |
+| | `ws_broadcast_skipped_messages_total{lane}` | Messages overwritten in `market` or `user_fills` rings, summed over lagging receivers |
+| | `ws_delivery_wait_seconds{stage}` | `outbound_queue`: waits on a full send queue; `socket_write`: each socket write, including failures/timeouts |
 | | `broadcast_receivers` | Number of broadcast channel receivers |
 | **Throughput** | `events_processed_total{type}` | Events by type (orders/diffs/fills) |
 | | `broadcasts_total{channel}` | Broadcasts by channel (bbo/l2/l4/trades/bookDiffs/userFills) |
@@ -803,7 +807,7 @@ The original has no monitoring. This fork adds:
 
 ### WebSocket Compression
 
-Both use `yawc` with `permessage-deflate`. This fork increases the broadcast channel buffer from 100 to 256 to reduce "channel lagged" drops under load, and adds detailed documentation on compression level tradeoffs.
+Both use `yawc` with `permessage-deflate`. This fork uses separate bounded public and private-fill broadcast rings (16,384 messages each), and documents compression level tradeoffs.
 
 ### Other Improvements
 

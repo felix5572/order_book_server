@@ -508,6 +508,7 @@ pub(crate) struct OrderBookListener {
     last_status_height: u64,
     last_diff_height: u64,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
+    user_fills_tx: Sender<Arc<Vec<NodeDataFill>>>,
     // Pairs fill legs into public-schema trades; holds at most the one leg
     // awaiting its counterpart across Fills batches (single-event batches in
     // --stream-with-block-info mode).
@@ -571,6 +572,7 @@ impl OrderBookListener {
             last_status_height: 0,
             last_diff_height: 0,
             internal_message_tx,
+            user_fills_tx: tokio::sync::broadcast::channel(USER_FILLS_BROADCAST_CAPACITY).0,
             trade_pairer: TradePairer::default(),
             l2_snapshot_cache: HashMap::new(),
             l2_conflation: l2_conflation::L2Conflation::default(),
@@ -591,6 +593,11 @@ impl OrderBookListener {
     /// connections (which acquire/release guards on subscribe/unsubscribe).
     pub(crate) fn active_subs(&self) -> ActiveSubs {
         self.active_subs.clone()
+    }
+
+    /// Private fill events have their own bounded ring: public book bursts must not evict them.
+    pub(crate) fn user_fills_sender(&self) -> Sender<Arc<Vec<NodeDataFill>>> {
+        self.user_fills_tx.clone()
     }
 
     /// Opt out of snapshot re-fetch on data loss. The book keeps applying live
@@ -1530,24 +1537,19 @@ impl OrderBookListener {
                 }
                 EventBatch::Fills(batch) => {
                     EVENTS_PROCESSED_TOTAL.with_label_values(&["fills"]).inc();
+                    // Copy raw legs only for live private subscriptions, before public trade pairing
+                    // consumes the batch. This ring contains fills only, in the original node order.
+                    if self.active_subs.wants(BroadcastKind::UserFills) && batch.events_len() > 0 {
+                        drop(self.user_fills_tx.send(Arc::new(batch.events_ref().to_vec())));
+                    }
                     if let Some(tx) = &self.internal_message_tx {
-                        // userFills subscribers filter the raw fills per user. Copied
-                        // before the pairing below consumes the batch; a streaming
-                        // batch carries one fill, so the copy is one event.
-                        let fills = (self.active_subs.wants(BroadcastKind::UserFills) && batch.events_len() > 0)
-                            .then(|| Arc::new(batch.events_ref().to_vec()));
-                        // Trades grouped per coin (move-only - the batch is never
-                        // applied to the book). Skipping the pairing with zero trades
-                        // subscribers is safe: its output would be discarded, and a
-                        // leg left waiting in the pairer is dropped by the next
-                        // matching leg anyway.
                         let trades_by_coin = if self.active_subs.wants(BroadcastKind::Trades) {
                             self.trade_pairer.group(batch)
                         } else {
                             HashMap::new()
                         };
-                        if !trades_by_coin.is_empty() || fills.is_some() {
-                            drop(tx.send(Arc::new(InternalMessage::Fills { trades_by_coin, fills })));
+                        if !trades_by_coin.is_empty() {
+                            drop(tx.send(Arc::new(InternalMessage::Trades { trades_by_coin })));
                         }
                     }
                     Ok(HashSet::new())
@@ -1793,6 +1795,10 @@ impl L2Snapshots {
     }
 }
 
+/// Independent private-fill capacity, in batches (not trades or per-user fills). Same bounded
+/// budget as the public ring, without eviction by unrelated book/status updates.
+pub(crate) const USER_FILLS_BROADCAST_CAPACITY: usize = 16_384;
+
 // Messages sent from node data listener to websocket dispatch to support streaming
 pub(crate) enum InternalMessage {
     Snapshot {
@@ -1814,13 +1820,9 @@ pub(crate) enum InternalMessage {
         /// began, it must not re-seed the heartbeat/dedup cache (review 000251 r2).
         withheld_period: u64,
     },
-    /// Trades grouped per coin ONCE in the listener; connections share the
-    /// Arc'd vectors AND the lazily-serialized wire frame per coin. `fills` is
-    /// the batch's raw fills, present only while a userFills subscription is
-    /// live; each connection filters it by its subscribed users.
-    Fills {
+    /// Public trades grouped once; private fill legs travel on `user_fills_tx` instead.
+    Trades {
         trades_by_coin: HashMap<String, CoinTrades>,
-        fills: Option<Arc<Vec<NodeDataFill>>>,
     },
     /// Fast BBO-only broadcast path - bypasses expensive L2 snapshot computation.
     /// Connections dedup on the raw values and share the per-coin wire frame.
@@ -3172,7 +3174,7 @@ mod tests {
                 InternalMessage::Snapshot { .. } => "l2",
                 InternalMessage::L4OrderDiffs { .. } => "l4_diffs",
                 InternalMessage::L4OrderStatuses { .. } => "l4_statuses",
-                InternalMessage::Fills { .. } => "trades",
+                InternalMessage::Trades { .. } => "trades",
                 InternalMessage::OracleUpdates { .. } => "oracle",
             });
         }
@@ -3314,8 +3316,7 @@ mod tests {
 
         let mut found = false;
         while let Ok(msg) = rx.try_recv() {
-            if let InternalMessage::Fills { trades_by_coin, fills } = msg.as_ref() {
-                assert!(fills.is_none(), "raw fills ride along only for userFills subscribers");
+            if let InternalMessage::Trades { trades_by_coin } = msg.as_ref() {
                 assert_eq!(trades_by_coin.len(), 2);
                 assert_eq!(trades_by_coin.get("BTC").map(|t| t.trades.len()), Some(2));
                 assert_eq!(trades_by_coin.get("ETH").map(|t| t.trades.len()), Some(1));
@@ -3332,20 +3333,19 @@ mod tests {
         assert!(found, "a grouped Fills message must be broadcast");
     }
 
-    /// The raw fills of every Fills message, in order.
-    fn drain_raw_fills(rx: &mut tokio::sync::broadcast::Receiver<Arc<InternalMessage>>) -> Vec<Vec<NodeDataFill>> {
+    /// Raw fill batches on the private lane, in order.
+    fn drain_raw_fills(rx: &mut tokio::sync::broadcast::Receiver<Arc<Vec<NodeDataFill>>>) -> Vec<Vec<NodeDataFill>> {
         let mut raw = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            if let InternalMessage::Fills { fills, .. } = msg.as_ref() {
-                raw.push(fills.as_ref().map(|fills| fills.as_ref().clone()).unwrap_or_default());
-            }
+        while let Ok(fills) = rx.try_recv() {
+            raw.push(fills.as_ref().clone());
         }
         raw
     }
 
     #[test]
     fn test_user_fills_subscription_carries_the_raw_fills_without_trades() {
-        let (mut listener, mut rx) = ready_listener();
+        let (mut listener, mut market_rx) = ready_listener();
+        let mut rx = listener.user_fills_sender().subscribe();
         listener.apply_event_batch(1, EventBatch::Fills(make_fills_batch(&["BTC"], 1)), EventSource::Fills);
         assert!(drain_raw_fills(&mut rx).is_empty(), "no trades/userFills subscriber: nothing is broadcast");
 
@@ -3354,22 +3354,19 @@ mod tests {
         });
         listener.apply_event_batch(2, EventBatch::Fills(make_fills_batch(&["BTC", "ETH"], 2)), EventSource::Fills);
         let mut found = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let InternalMessage::Fills { trades_by_coin, fills } = msg.as_ref() {
-                assert!(trades_by_coin.is_empty(), "no trades subscriber: no pairing");
-                let fills = fills.as_ref().expect("a userFills subscriber gets the raw fills");
-                let legs: Vec<(String, u64, &str)> =
-                    fills.iter().map(|f| (format!("{:#x}", f.0), f.1.tid, f.1.coin.as_str())).collect();
-                assert_eq!(legs, [
-                    ("0x0000000000000000000000000000000000000001".to_string(), 0, "BTC"),
-                    ("0x0000000000000000000000000000000000000002".to_string(), 0, "BTC"),
-                    ("0x0000000000000000000000000000000000000001".to_string(), 1, "ETH"),
-                    ("0x0000000000000000000000000000000000000002".to_string(), 1, "ETH"),
-                ], "every leg, in node order");
-                found = true;
-            }
+        while let Ok(fills) = rx.try_recv() {
+            let legs: Vec<(String, u64, &str)> =
+                fills.iter().map(|f| (format!("{:#x}", f.0), f.1.tid, f.1.coin.as_str())).collect();
+            assert_eq!(legs, [
+                ("0x0000000000000000000000000000000000000001".to_string(), 0, "BTC"),
+                ("0x0000000000000000000000000000000000000002".to_string(), 0, "BTC"),
+                ("0x0000000000000000000000000000000000000001".to_string(), 1, "ETH"),
+                ("0x0000000000000000000000000000000000000002".to_string(), 1, "ETH"),
+            ], "every leg, in node order");
+            found = true;
         }
-        assert!(found, "a Fills message must be broadcast for the userFills subscriber");
+        assert!(found, "a private fill batch must be broadcast");
+        assert!(market_rx.try_recv().is_err(), "private legs never enter the public ring");
 
         drop(guards);
         listener.apply_event_batch(3, EventBatch::Fills(make_fills_batch(&["BTC"], 3)), EventSource::Fills);
@@ -3379,7 +3376,8 @@ mod tests {
     /// Fills are raw events: a known loss withholds the book, not the user's fills.
     #[test]
     fn test_user_fills_continue_while_the_book_is_withheld() {
-        let (mut listener, mut rx) = ready_listener();
+        let (mut listener, _market_rx) = ready_listener();
+        let mut rx = listener.user_fills_sender().subscribe();
         let _guards = listener.active_subs().acquire_for(&Subscription::UserFills {
             user: "0x0000000000000000000000000000000000000001".to_string(),
         });
