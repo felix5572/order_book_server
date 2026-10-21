@@ -1,0 +1,63 @@
+{
+ "spot_binance": [
+  "{\"stream\":\"btcusdt@bookTicker\",\"data\":{\"u\":101714809848,\"s\":\"BTCUSDT\",\"b\":\"82806.00000000\",\"B\":\"6.33111000\",\"a\":\"82806.01000000\",\"A\":\"4.42490000\"}}",
+  "{\"stream\":\"btcusdt@bookTicker\",\"data\":{\"u\":101714809849,\"s\":\"BTCUSDT\",\"b\":\"82806.00000000\",\"B\":\"6.33111000\",\"a\":\"82806.01000000\",\"A\":\"4.42483000\"}}"
+ ],
+ "perp_binance": [
+  "{\"stream\":\"btcusdt@bookTicker\",\"data\":{\"e\":\"bookTicker\",\"u\":11878034735740,\"s\":\"BTCUSDT\",\"ps\":\"BTCUSDT\",\"b\":\"82772.00\",\"B\":\"2.027\",\"a\":\"82772.10\",\"A\":\"12.762\",\"T\":1792556633986,\"E\":1792556633987,\"st\":1}}",
+  "{\"stream\":\"btcusdt@bookTicker\",\"data\":{\"e\":\"bookTicker\",\"u\":11878034736851,\"s\":\"BTCUSDT\",\"ps\":\"BTCUSDT\",\"b\":\"82772.00\",\"B\":\"2.027\",\"a\":\"82772.10\",\"A\":\"13.030\",\"T\":1792556633992,\"E\":1792556633993,\"st\":1}}"
+ ],
+ "spot_okx": [
+  "{\"event\":\"subscribe\",\"arg\":{\"channel\":\"bbo-tbt\",\"instId\":\"BTC-USDT\"},\"connId\":\"95a50a25\"}",
+  "{\"arg\":{\"channel\":\"bbo-tbt\",\"instId\":\"BTC-USDT\"},\"data\":[{\"asks\":[[\"82804\",\"2.1305543\",\"0\",\"14\"]],\"bids\":[[\"82803.9\",\"0.24241801\",\"0\",\"17\"]],\"ts\":\"1792556634005\",\"seqId\":82676330180}]}",
+  "pong"
+ ],
+ "perp_okx": [
+  "{\"event\":\"subscribe\",\"arg\":{\"channel\":\"bbo-tbt\",\"instId\":\"BTC-USDT-SWAP\"},\"connId\":\"c12ede1c\"}",
+  "{\"arg\":{\"channel\":\"bbo-tbt\",\"instId\":\"PEPE-USDT-SWAP\"},\"data\":[{\"asks\":[[\"0.000004509\",\"225.4\",\"0\",\"16\"]],\"bids\":[[\"0.000004508\",\"345.6\",\"0\",\"35\"]],\"ts\":\"1792556634003\",\"seqId\":103789000373}]}"
+ ],
+ "spot_bybit": [
+  "{\"success\":true,\"ret_msg\":\"subscribe\",\"conn_id\":\"d9avsh4mqckv5v06jtng-ix2to\",\"op\":\"subscribe\"}",
+  "{\"topic\":\"orderbook.1.BTCUSDT\",\"ts\":1792556634079,\"type\":\"snapshot\",\"data\":{\"s\":\"BTCUSDT\",\"b\":[[\"82806.3\",\"0.516055\"]],\"a\":[[\"82806.4\",\"0.87682\"]],\"u\":128133306,\"seq\":115829746283},\"cts\":1792556634078}",
+  "{\"success\":true,\"ret_msg\":\"pong\",\"conn_id\":\"d9avt102s6rvd2rcabm0-j0mux\",\"op\":\"ping\"}"
+ ],
+ "perp_bybit": [
+  "{\"topic\":\"orderbook.1.BTCUSDT\",\"ts\":1792556634159,\"type\":\"snapshot\",\"data\":{\"s\":\"BTCUSDT\",\"b\":[[\"82765.6\",\"0.243\"]],\"a\":[[\"82765.7\",\"11.808\"]],\"u\":133306442,\"seq\":829755401454},\"cts\":1792556634157}",
+  "{\"success\":true,\"ret_msg\":\"\",\"conn_id\":\"db294gb5ksre14c5fc4g-4ry9o\",\"req_id\":\"\",\"op\":\"subscribe\"}",
+  "{\"success\":true,\"ret_msg\":\"pong\",\"conn_id\":\"db295lfi86sc4s02i730-4x97k\",\"req_id\":\"\",\"op\":\"ping\"}"
+ ],
+ "spot_gate": [
+  "{\"time\":1792556633,\"time_ms\":1792556633923,\"conn_id\":\"5bb4230099bd9344\",\"trace_id\":\"1287f6faa4191f92edcb1ead511d96bd\",\"channel\":\"spot.book_ticker\",\"event\":\"subscribe\",\"payload\":[\"BTC_USDT\", \"PEPE_USDT\"],\"result\":{\"status\":\"success\"},\"requestId\":\"1287f6faa4191f92edcb1ead511d96bd\"}",
+  "{\"time\":1792556633,\"time_ms\":1792556633938,\"channel\":\"spot.book_ticker\",\"event\":\"update\",\"result\":{\"t\":1792556633937,\"u\":40489144765,\"s\":\"BTC_USDT\",\"b\":\"82809.9\",\"B\":\"0.049388\",\"a\":\"82810\",\"A\":\"0.423208\"}}",
+  "{\"time\":1792556711,\"time_ms\":1792556711562,\"conn_id\":\"ccda503a679efc3f\",\"channel\":\"spot.pong\",\"event\":\"\",\"result\":null,\"requestId\":\"816b7d1bcbb97b93eb5f14d32b251315\"}"
+ ],
+ "perp_gate": [
+  "{\"time\":1792556633,\"time_ms\":1792556633922,\"conn_id\":\"8930a505abcc299c\",\"trace_id\":\"52eec87fee9c9329a4894dfab8f61e50\",\"channel\":\"futures.book_ticker\",\"event\":\"subscribe\",\"payload\":[\"BTC_USDT\", \"PEPE_USDT\"],\"result\":{\"status\":\"success\"}}",
+  "{\"time\":1792556633,\"time_ms\":1792556633936,\"channel\":\"futures.book_ticker\",\"event\":\"update\",\"result\":{\"t\":1792556633935,\"u\":23250793037,\"s\":\"PEPE_USDT\",\"b\":\"0.000004506\",\"B\":12,\"a\":\"0.000004508\",\"A\":18}}",
+  "{\"time\":1792556711,\"time_ms\":1792556711564,\"conn_id\":\"86c0159c0c01aef3\",\"channel\":\"futures.pong\",\"event\":\"\",\"result\":null}"
+ ],
+ "spot_kraken": [
+  "{\"channel\":\"status\",\"type\":\"update\",\"data\":[{\"version\":\"2.0.10\",\"system\":\"online\",\"api_version\":\"v2\",\"connection_id\":6884090788994167833,\"upcoming_maintenance\":[{\"affected_services\":[\"spot_fix\",\"spot_ws\"],\"cancel_before_utc\":\"2026-10-21T22:55:00.000000Z\",\"event_id\":44,\"expected_end_utc\":\"2026-10-21T23:10:00.000000Z\",\"expected_start_utc\":\"2026-10-21T23:00:00.000000Z\",\"order_submission\":\"allowed\",\"phase\":\"reminder_24h\",\"recommended_action\":\"continue\",\"source_url\":\"https://stspg.io/tg0jns7rnvty\",\"time_to_start_s\":66963,\"title\":\"Kraken Prime and its WS/FIX APIs\"}],\"emergency\":[]}]}",
+  "{\"method\":\"subscribe\",\"result\":{\"channel\":\"ticker\",\"event_trigger\":\"bbo\",\"snapshot\":true,\"symbol\":\"BTC/USDT\"},\"success\":true,\"time_in\":\"2026-10-21T04:23:56.359312Z\",\"time_out\":\"2026-10-21T04:23:56.359361Z\"}",
+  "{\"channel\":\"ticker\",\"type\":\"snapshot\",\"data\":[{\"symbol\":\"SHIB/USDT\",\"bid\":0.000005118,\"bid_qty\":309012712.48167,\"ask\":0.000005132,\"ask_qty\":112415058.34185,\"last\":0.000005143,\"volume\":1742691623.78986,\"vwap\":0.000005076,\"low\":0.000004973,\"high\":0.000005143,\"change\":0.000000125,\"change_pct\":2.49,\"trades\":31,\"timestamp\":\"2026-10-21T04:23:19.606208Z\"}]}",
+  "{\"method\":\"pong\",\"time_in\":\"2026-10-21T04:25:12.952227Z\",\"time_out\":\"2026-10-21T04:25:12.952236Z\"}",
+  "{\"channel\":\"heartbeat\"}"
+ ],
+ "spot_kucoin": [
+  "{\"id\":\"45ede58e-5d35-4ee9-bd49-682d900e129f\",\"type\":\"welcome\"}",
+  "{\"id\":\"1\",\"type\":\"ack\"}",
+  "{\"topic\":\"/market/ticker:PEPE-USDT\",\"type\":\"message\",\"subject\":\"trade.ticker\",\"data\":{\"bestAsk\":\"0.000004508\",\"bestAskSize\":\"121932430\",\"bestBid\":\"0.000004507\",\"bestBidSize\":\"116259712\",\"price\":\"0.0000045\",\"sequence\":\"5441302287\",\"size\":\"83430674\",\"time\":1792556584341}}",
+  "{\"id\":\"ping\",\"type\":\"pong\",\"timestamp\":1792556711580433}"
+ ],
+ "perp_mexc": [
+  "{\"channel\":\"rs.sub.depth.full\",\"data\":\"success\",\"ts\":1792556633931}",
+  "{\"symbol\":\"BTC_USDT\",\"data\":{\"cts\":1792556634121,\"asks\":[[82771.9,4900,1],[82772.0,4967,1],[82772.1,14016,4],[82772.2,13287,4],[82772.3,5313,1]],\"bids\":[[82771.8,1,1],[82771.5,77273,1],[82771.4,4836,1],[82771.3,4891,1],[82771.2,5556,1]],\"version\":42815266865},\"channel\":\"push.depth.full\",\"ts\":1792556634125}",
+  "{\"channel\":\"pong\",\"data\":1792556711569,\"ts\":1792556711569}"
+ ],
+ "spot_mexc_rest": [
+  "[{\"symbol\": \"PEPEUSDT\", \"bidPrice\": \"0.000004503\", \"bidQty\": \"25834365\", \"askPrice\": \"0.000004506\", \"askQty\": \"25834365\"}, {\"symbol\": \"BTCUSDT\", \"bidPrice\": \"82799.65\", \"bidQty\": \"0.38231700\", \"askPrice\": \"82799.66\", \"askQty\": \"0.14296796\"}]"
+ ],
+ "kucoin_bullet_public": [
+  "{\"code\": \"200000\", \"data\": {\"token\": \"<token>\", \"instanceServers\": [{\"endpoint\": \"wss://ws-api-spot.kucoin.com/\", \"encrypt\": true, \"protocol\": \"websocket\", \"pingInterval\": 18000, \"pingTimeout\": 10000}]}}"
+ ]
+}

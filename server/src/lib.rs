@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::significant_drop_tightening))]
 mod accounts;
 mod listeners;
+mod local_marks;
 pub mod metrics;
 mod order_book;
 mod prelude;
@@ -13,6 +14,7 @@ use clap::ValueEnum;
 
 pub use accounts::probe::{ProbeSummary, run_checkpoint_probe};
 pub use accounts::follow::{FollowOptions, run_accounts_follow};
+pub use local_marks::probe::run_local_marks_probe;
 pub use prelude::Result;
 pub use servers::websocket_server::run_websocket_server;
 
@@ -73,6 +75,8 @@ pub struct ServerConfig {
     /// periodic checkpoints and its fills / misc events streams, and serves `GET /extCoinPositions` and the
     /// `extCoinPositions` subscription.
     pub accounts: bool,
+    /// Run the local marks' venue feeds (design 000454; needs `accounts`) and serve `GET /extMarkInputs`.
+    pub local_marks: bool,
 }
 
 impl ServerConfig {

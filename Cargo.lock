@@ -3350,6 +3350,9 @@ dependencies = [
  "dirs",
  "flate2",
  "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "itertools 0.14.0",
  "lazy_static",
  "log",
@@ -3364,6 +3367,9 @@ dependencies = [
  "sonic-rs",
  "strum_macros",
  "tokio",
+ "tokio-rustls",
+ "url",
+ "webpki-roots",
  "yawc",
 ]
 

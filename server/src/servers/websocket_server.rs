@@ -1,5 +1,6 @@
 mod coin_positions;
 mod liquidation_candidates;
+mod mark_inputs;
 
 use coin_positions::{AccountsSession, coin_positions_handler};
 
@@ -9,6 +10,7 @@ use crate::{
         ActiveL2Params, ActiveSubGuard, ActiveSubs, BookTrust, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey,
         L2ParamGuard, L2SnapshotParams, OrderBookListener, hl_listen_hft, triggers::TriggerAvailability,
     },
+    local_marks::{feeds::LocalMarkFeeds, sources::MarkSources},
     metrics::{
         BBO_CHANGES_TOTAL, BROADCAST_RECEIVERS, BROADCASTS_TOTAL, CHANNEL_DROPS_TOTAL, CHANNEL_LAG,
         LAST_EVENT_APPLIED_MS, MESSAGES_SENT_TOTAL, ORDERBOOK_HEIGHT, ORDERBOOK_READY, WS_CONNECTIONS_ACTIVE,
@@ -20,7 +22,7 @@ use crate::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
         subscription::{
-            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_LIQUIDATION_CANDIDATES,
+            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_MARK_INPUTS_PATH, EXT_LIQUIDATION_CANDIDATES,
             OrderUpdate, ServerResponse, Subscription, SubscriptionManager, UserFills,
         },
     },
@@ -150,6 +152,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     let book_trust = listener.book_trust();
     let listener = Arc::new(Mutex::new(listener));
     let accounts = start_account_view(&config, BookSource { trust: book_trust.clone(), listener: listener.clone() })?;
+    let local_marks = start_local_marks(&config)?;
     let listener_task = {
         let listener = listener.clone();
         let config = config.clone();
@@ -280,6 +283,10 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         ),
         None => app,
     };
+    let app = match local_marks {
+        Some(feeds) => app.route(EXT_MARK_INPUTS_PATH, get(move |query| mark_inputs::mark_inputs_handler(query, Arc::clone(&feeds)))),
+        None => app,
+    };
 
     let tcp_listener = TcpListener::bind(&config.address).await?;
     info!("WebSocket server running at ws://{}", config.address);
@@ -301,6 +308,20 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Starts the local marks' venue feeds when `--local-marks` is set (design 000454); they need the account view, whose
+/// node replica the marks read (batch 2).
+fn start_local_marks(config: &ServerConfig) -> Result<Option<Arc<LocalMarkFeeds>>> {
+    if !config.local_marks {
+        return Ok(None);
+    }
+    if !config.accounts {
+        return Err("--local-marks needs --accounts: the local marks read the node replica of the account view".into());
+    }
+    let sources = MarkSources::embedded()?;
+    info!("Local marks: {} coins, venue feeds starting", sources.coins().count());
+    Ok(Some(Arc::new(LocalMarkFeeds::start(Arc::new(sources)))))
 }
 
 /// Starts the account view when `--accounts` is set. Its owner ending leaves the view answering 503 (design 000419 r3

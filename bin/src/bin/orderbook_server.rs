@@ -114,6 +114,11 @@ struct Args {
     /// ~750 MB peak RSS) and reads the fills and misc events streams.
     #[arg(long, default_value = "false")]
     accounts: bool,
+
+    /// Local marks (design 000454; needs --accounts): the venue feeds of every main-dex coin's oracle and external
+    /// price - 12 connections to Binance, OKX, Bybit, Kraken, Kucoin, Gate and MEXC - served at GET /extMarkInputs.
+    #[arg(long, default_value = "false")]
+    local_marks: bool,
 }
 
 /// Start the Prometheus metrics HTTP server
@@ -180,6 +185,7 @@ async fn main() -> Result<()> {
         no_resync: args.no_resync,
         replay_cache_events: args.replay_cache_events,
         accounts: args.accounts,
+        local_marks: args.local_marks,
     };
 
     println!("Orderbook Server v{}", env!("CARGO_PKG_VERSION"));
@@ -202,6 +208,9 @@ async fn main() -> Result<()> {
     println!("  Log level: {}", args.log_level);
     if config.accounts {
         println!("  Accounts: ON (GET /extCoinPositions, extCoinPositions and extLiquidationCandidates subscriptions)");
+    }
+    if config.local_marks {
+        println!("  Local marks: ON (venue feeds, GET /extMarkInputs)");
     }
     if config.no_resync {
         println!("  Re-sync: DISABLED (--no-resync) — drift tolerated, book will NOT self-heal");

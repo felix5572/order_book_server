@@ -371,6 +371,28 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
   `withheld_periods`(状态流丢数据可能丢了条件单的状态, 消费方要同时看表完整和盘口可信)。
 - **接口**: `GET /untriggeredOrders` 多一个 `complete` 字段, 只在表 `Complete` 时为 true; 其余行为不变。
 
+## 2026-10-21 本地 mark 第 1 批: 外所行情接入(`--local-marks`, 设计 000454 r2)
+
+**用途**: 用外所现货(oracle)和永续(外部价)报价, 加上节点重放的精确状态, 在本进程算 HL 主站的本地 mark(第 2 批);
+被迫成交阶梯的距离要节点和本地两个口径。本批只接行情、提供核对接口。
+
+- **数据源**: `server/data/mark_sources.json`(`scripts/discover_mark_sources.py` 由各所公开交易对列表生成, 逐条与 HL 的
+  oracle / mark 核对量级, 剔除同名不同资产和错误倍数), 编译时嵌入。10-21: 176 个币(HYPE、PURR 是 USDC 计价永续, 本批不做;
+  HIP-3 不做), 每币至少一家现货和一家永续; 启动时校验所名、倍数、交易对唯一。
+- **12 路行情**(`local_marks/`): 现货 币安/OKX/Bybit/Kraken/Kucoin(先取令牌)/Gate 走 WS, MEXC 现货 REST 每 250ms 轮询
+  (其 WS 是 protobuf); 永续 币安/OKX/Bybit/Gate/MEXC 走 WS。WS 用 `yawc`, REST 用依赖树里已有的 hyper + tokio-rustls。
+  订阅按实测上限分批(Bybit 每次 10 个, Kucoin 每次 100 个——一次 173 个回 509)。解析移植自 `hl_mark_prices` 服务, 用 bm 10-21
+  的实帧做测试样本(`wire_fixtures.json`); 价格按原文精确解析(字符串、JSON 数字、指数写法), 倍数精确相乘。
+- **最新值槽**(`slot.rs`): 行情任务覆盖写入、永不等待读方; 每笔报价带连接代次, 只在当前且已连接的连接上有效——断开重连发生在
+  两次读之间, 旧报价也保持无效, 直到该交易对收到新报价; 新连接、订阅确认、pong 都不恢复旧报价。MEXC 现货报价 5 秒过期。
+- **健康与恢复**: 各家订阅确认 10 秒内到齐、心跳 10 秒内回(Gate 现货 `spot.ping`、永续 `futures.ping`)、30 秒内总有帧; 断线
+  撤回该路报价, 退避重连(0.5s 倍增到 10s, 连上 30 秒重置)。拒订、已知帧解析失败、交叉盘口 → 只停这一路(带原因), 不影响盘口和
+  账户; 未知类型的帧原样 WARN、不采用(先按类型分流、再严格解析载荷: 已知行情缺载荷是契约错误, 审查 000455 r1)。任务由监督者持有:
+  某一路 panic 或被取消(内部错误)→ 停掉全部行情、撤回全部报价直到重启(同账户 owner 退出的约定), 盘口照常。
+- **接口**: `GET /extMarkInputs?coin=`: 各路连接状态, 逐币逐所的报价(原价 + 倍数 + 状态)和覆盖(用到 / 缺哪几家、权重)。
+  `local_marks_probe` 可在不重启 OB 的情况下单独跑行情。指标 `orderbook_local_marks_feed_{frames,disconnects,unknown_frames}_total`、
+  `orderbook_local_marks_feed_stopped`。
+
 ## 已移植(2026-07-05, 底座 47ce696 之上)
 
 1. **官方 PR#9:新单进簿价用 diff 的 px**(status px 对 trigger/转化单可能不同)。

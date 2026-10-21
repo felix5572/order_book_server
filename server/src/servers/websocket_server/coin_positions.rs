@@ -225,7 +225,7 @@ pub(super) async fn coin_positions_handler(
     json_response(StatusCode::OK, None, body)
 }
 
-fn json_response(status: axum::http::StatusCode, encoding: Option<&str>, body: bytes::Bytes) -> axum::response::Response {
+pub(super) fn json_response(status: axum::http::StatusCode, encoding: Option<&str>, body: bytes::Bytes) -> axum::response::Response {
     let builder = axum::response::Response::builder().status(status).header("content-type", "application/json");
     let builder = match encoding {
         Some(encoding) => builder.header("content-encoding", encoding),

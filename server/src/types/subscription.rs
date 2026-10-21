@@ -21,6 +21,8 @@ pub(crate) const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 256;
 /// account view's positions, and the `GET` path of the same view.
 pub(crate) const EXT_COIN_POSITIONS: &str = "extCoinPositions";
 pub(crate) const EXT_COIN_POSITIONS_PATH: &str = "/extCoinPositions";
+/// The local marks' venue inputs (design 000454 batch 1).
+pub(crate) const EXT_MARK_INPUTS_PATH: &str = "/extMarkInputs";
 /// The subscription type and channel of the liquidation candidates.
 pub(crate) const EXT_LIQUIDATION_CANDIDATES: &str = "extLiquidationCandidates";
 

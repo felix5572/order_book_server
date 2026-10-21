@@ -1,0 +1,8262 @@
+{
+ "coins": {
+  "0G": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "0GUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "0GUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "0G_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "0G_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "0G-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "0GUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "0GUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "0G_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "0G-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "0GUSDT"
+    }
+   }
+  },
+  "2Z": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "2ZUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "2ZUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "2Z_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "2Z_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "2Z-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "2ZUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "2ZUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "2Z_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "2Z-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "2ZUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "2Z-USDT"
+    }
+   }
+  },
+  "AAVE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AAVEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AAVEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AAVE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AAVE_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AAVE-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AAVEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AAVEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AAVE_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "AAVE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AAVEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AAVE-USDT"
+    }
+   }
+  },
+  "ACE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ACEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ACEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ACE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ACE_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ACEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ACE_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ACE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ACEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ACE-USDT"
+    }
+   }
+  },
+  "ADA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ADAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ADAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ADA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ADA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ADA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ADAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ADAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ADA_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "ADA/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ADA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ADAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ADA-USDT"
+    }
+   }
+  },
+  "AERO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AEROUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AEROUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AERO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AERO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AERO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AEROUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AEROUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AERO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "AERO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AEROUSDT"
+    }
+   }
+  },
+  "AIXBT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AIXBTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AIXBTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AIXBT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AIXBT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AIXBT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AIXBTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AIXBTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AIXBT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "AIXBT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AIXBTUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AIXBT-USDT"
+    }
+   }
+  },
+  "ALGO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ALGOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ALGOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ALGO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ALGO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ALGO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ALGOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ALGOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ALGO_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "ALGO/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ALGO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ALGOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ALGO-USDT"
+    }
+   }
+  },
+  "ALT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ALTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ALTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ALT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ALT_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ALTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ALTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ALT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ALT-USDT"
+    }
+   }
+  },
+  "ANIME": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ANIMEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ANIMEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ANIME_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ANIME_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ANIME-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ANIMEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ANIMEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ANIME_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ANIME-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ANIMEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ANIME-USDT"
+    }
+   }
+  },
+  "APE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "APEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "APEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "APE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "APE_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "APE-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "APEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "APEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "APE_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "APE/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "APE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "APEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "APE-USDT"
+    }
+   }
+  },
+  "APEX": {
+   "perp": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "APEXUSDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "APEX_USDT"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "APEXUSDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "APEXUSDT"
+    }
+   }
+  },
+  "APT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "APTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "APTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "APT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "APT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "APT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "APTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "APTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "APT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "APT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "APTUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "APT-USDT"
+    }
+   }
+  },
+  "AR": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ARUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ARUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AR_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AR_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AR-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ARUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ARUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AR_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "AR-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ARUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AR-USDT"
+    }
+   }
+  },
+  "ARB": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ARBUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ARBUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ARB_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ARB_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ARB-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ARBUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ARBUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ARB_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ARB-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ARBUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ARB-USDT"
+    }
+   }
+  },
+  "ASTER": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ASTERUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ASTERUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ASTER_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ASTER_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ASTER-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ASTERUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ASTERUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ASTER_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ASTER-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ASTERUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ASTER-USDT"
+    }
+   }
+  },
+  "ATOM": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ATOMUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ATOMUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ATOM_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ATOM_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ATOM-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ATOMUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ATOMUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ATOM_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "ATOM/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ATOM-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ATOMUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ATOM-USDT"
+    }
+   }
+  },
+  "AVAX": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AVAXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AVAXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AVAX_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AVAX_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AVAX-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AVAXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AVAXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AVAX_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "AVAX/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "AVAX-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AVAXUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AVAX-USDT"
+    }
+   }
+  },
+  "AVNT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AVNTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AVNTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AVNT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AVNT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AVNT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AVNTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AVNTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AVNT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "AVNT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AVNTUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AVNT-USDT"
+    }
+   }
+  },
+  "AXS": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AXSUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AXSUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AXS_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AXS_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AXS-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AXSUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AXSUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AXS_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "AXS-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AXSUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AXS-USDT"
+    }
+   }
+  },
+  "AZTEC": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "AZTECUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AZTECUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AZTEC_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AZTEC_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "AZTEC-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "AZTECUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "AZTEC_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "AZTEC-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "AZTECUSDT"
+    }
+   }
+  },
+  "BABY": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BABYUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BABYUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BABY_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BABY_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BABY-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BABYUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BABY_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BABY-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BABYUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BABY-USDT"
+    }
+   }
+  },
+  "BANANA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BANANAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BANANAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BANANA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BANANA_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BANANAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BANANA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BANANA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BANANAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BANANA-USDT"
+    }
+   }
+  },
+  "BCH": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BCHUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BCHUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BCH_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BCH_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BCH-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BCHUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BCHUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BCH_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "BCH/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BCH-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BCHUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BCH-USDT"
+    }
+   }
+  },
+  "BERA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BERAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BERAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BERA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BERA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BERA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BERAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BERAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BERA_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "BERA/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BERA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BERAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BERA-USDT"
+    }
+   }
+  },
+  "BIGTIME": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BIGTIMEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BIGTIMEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BIGTIME_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BIGTIME_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BIGTIME-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BIGTIMEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BIGTIME_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BIGTIME-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BIGTIMEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BIGTIME-USDT"
+    }
+   }
+  },
+  "BIO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BIOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BIOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BIO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BIO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BIO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BIOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BIO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BIO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BIOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BIO-USDT"
+    }
+   }
+  },
+  "BLUR": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BLURUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BLURUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BLUR_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BLUR_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BLUR-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BLURUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BLURUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BLUR_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BLUR-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BLURUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BLUR-USDT"
+    }
+   }
+  },
+  "BNB": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BNBUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BNBUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BNB_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BNB_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BNB-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BNBUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BNBUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BNB_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "BNB/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BNB-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BNBUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BNB-USDT"
+    }
+   }
+  },
+  "BOME": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BOMEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BOMEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BOME_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BOME_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BOME-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BOMEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BOMEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BOME_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BOME-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BOMEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BOME-USDT"
+    }
+   }
+  },
+  "BRETT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BRETTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BRETTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BRETT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BRETT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BRETT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BRETTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BRETT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BRETT-USDT"
+    }
+   }
+  },
+  "BSV": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BSVUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BSVUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BSV_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BSV_USDT"
+    }
+   },
+   "spot": {
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BSV_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BSV-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BSVUSDT"
+    }
+   }
+  },
+  "BTC": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BTCUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BTCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BTC_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BTC_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BTC-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "BTCUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "BTCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "BTC_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "BTC/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "BTC-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "BTCUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "BTC-USDT"
+    }
+   }
+  },
+  "CAKE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "CAKEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CAKEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CAKE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CAKE_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "CAKEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CAKEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CAKE_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "CAKE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CAKEUSDT"
+    }
+   }
+  },
+  "CASHCAT": {
+   "perp": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CASHCATUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CASHCAT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CASHCAT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "CASHCAT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CASHCAT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "CASHCAT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CASHCATUSDT"
+    }
+   }
+  },
+  "CC": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "CCUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CC_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CC_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "CC-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CC_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "CC/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "CC-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CCUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "CC-USDT"
+    }
+   }
+  },
+  "CELO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "CELOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CELOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CELO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CELO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "CELO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "CELOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CELOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CELO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "CELO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CELOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "CELO-USDT"
+    }
+   }
+  },
+  "CFX": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "CFXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CFXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CFX_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CFX_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "CFX-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "CFXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CFX_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "CFX-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CFXUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "CFX-USDT"
+    }
+   }
+  },
+  "CHIP": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "CHIPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CHIPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CHIP_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CHIP_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "CHIP-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "CHIPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CHIPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CHIP_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "CHIP-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CHIPUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "CHIP-USDT"
+    }
+   }
+  },
+  "COMP": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "COMPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "COMPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "COMP_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "COMP_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "COMP-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "COMPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "COMPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "COMP_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "COMP-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "COMPUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "COMP-USDT"
+    }
+   }
+  },
+  "CRV": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "CRVUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CRVUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CRV_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CRV_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "CRV-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "CRVUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "CRVUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "CRV_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "CRV-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "CRVUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "CRV-USDT"
+    }
+   }
+  },
+  "DASH": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "DASHUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "DASHUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "DASH_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "DASH_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "DASH-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "DASHUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "DASH_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "DASH-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "DASHUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "DASH-USDT"
+    }
+   }
+  },
+  "DOGE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "DOGEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "DOGEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "DOGE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "DOGE_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "DOGE-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "DOGEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "DOGEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "DOGE_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "DOGE/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "DOGE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "DOGEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "DOGE-USDT"
+    }
+   }
+  },
+  "DOT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "DOTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "DOTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "DOT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "DOT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "DOT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "DOTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "DOTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "DOT_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "DOT/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "DOT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "DOTUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "DOT-USDT"
+    }
+   }
+  },
+  "DYDX": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "DYDXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "DYDXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "DYDX_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "DYDX_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "DYDX-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "DYDXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "DYDXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "DYDX_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "DYDX-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "DYDXUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "DYDX-USDT"
+    }
+   }
+  },
+  "DYM": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "DYMUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "DYMUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "DYM_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "DYM_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "DYMUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "DYMUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "DYM_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "DYM-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "DYMUSDT"
+    }
+   }
+  },
+  "EIGEN": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "EIGENUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "EIGENUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "EIGEN_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "EIGEN_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "EIGEN-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "EIGENUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "EIGENUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "EIGEN_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "EIGEN-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "EIGENUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "EIGEN-USDT"
+    }
+   }
+  },
+  "ENA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ENAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ENAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ENA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ENA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ENA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ENAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ENAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ENA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ENA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ENAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ENA-USDT"
+    }
+   }
+  },
+  "ENS": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ENSUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ENSUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ENS_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ENS_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ENS-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ENSUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ENSUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ENS_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ENS-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ENSUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ENS-USDT"
+    }
+   }
+  },
+  "ETC": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ETCUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ETCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ETC_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ETC_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ETC-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ETCUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ETCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ETC_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ETC-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ETCUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ETC-USDT"
+    }
+   }
+  },
+  "ETH": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ETHUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ETHUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ETH_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ETH_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ETH-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ETHUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ETHUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ETH_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "ETH/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ETH-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ETHUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ETH-USDT"
+    }
+   }
+  },
+  "ETHFI": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ETHFIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ETHFIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ETHFI_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ETHFI_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ETHFI-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ETHFIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ETHFIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ETHFI_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ETHFI-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ETHFIUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ETHFI-USDT"
+    }
+   }
+  },
+  "FARTCOIN": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "FARTCOINUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "FARTCOINUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "FARTCOIN_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "FARTCOIN_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "FARTCOIN-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "FARTCOIN_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "FARTCOIN/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "FARTCOIN-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "FARTCOINUSDT"
+    }
+   }
+  },
+  "FET": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "FETUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "FET_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "FET_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "FET-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "FETUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "FETUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "FET_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "FET-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "FETUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "FET-USDT"
+    }
+   }
+  },
+  "FIL": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "FILUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "FILUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "FIL_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "FIL-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "FILUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "FILUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "FIL_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "FIL-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "FILUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "FIL-USDT"
+    }
+   }
+  },
+  "FOGO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "FOGOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "FOGOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "FOGO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "FOGO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "FOGO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "FOGOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "FOGOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "FOGO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "FOGO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "FOGOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "FOGO-USDT"
+    }
+   }
+  },
+  "GALA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GALAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GALAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GALA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GALA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GALA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GALAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GALAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GALA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "GALA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GALAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GALA-USDT"
+    }
+   }
+  },
+  "GAS": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GASUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GASUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GAS_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GAS_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GAS-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GASUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GAS_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "GAS-USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GAS-USDT"
+    }
+   }
+  },
+  "GMT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GMTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GMTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GMT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GMT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GMT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GMTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GMTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GMT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "GMT-USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GMT-USDT"
+    }
+   }
+  },
+  "GMX": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GMXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GMXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GMX_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GMX_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GMX-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GMXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GMXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GMX_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "GMX-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GMXUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GMX-USDT"
+    }
+   }
+  },
+  "GOAT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GOATUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GOATUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GOAT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GOAT_USDT"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GOATUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GOAT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "GOAT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GOATUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GOAT-USDT"
+    }
+   }
+  },
+  "GRAM": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GRAMUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GRAMUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GRAM_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GRAM_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GRAM-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GRAMUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GRAMUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GRAM_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "GRAM-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GRAMUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GRAM-USDT"
+    }
+   }
+  },
+  "GRASS": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GRASSUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GRASSUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GRASS_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GRASS_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GRASS-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GRASSUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GRASS_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "GRASS-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GRASSUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "GRASS-USDT"
+    }
+   }
+  },
+  "GRIFFAIN": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "GRIFFAINUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "GRIFFAINUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GRIFFAIN_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GRIFFAIN_USDT"
+    }
+   },
+   "spot": {
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "GRIFFAIN_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "GRIFFAIN-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "GRIFFAINUSDT"
+    }
+   }
+  },
+  "HBAR": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "HBARUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "HBARUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "HBAR_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "HBAR_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "HBAR-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "HBARUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "HBARUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "HBAR_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "HBAR-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "HBARUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "HBAR-USDT"
+    }
+   }
+  },
+  "HEMI": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "HEMIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "HEMIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "HEMI_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "HEMI_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "HEMIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "HEMI_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "HEMIUSDT"
+    }
+   }
+  },
+  "HMSTR": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "HMSTRUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "HMSTRUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "HMSTR_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "HMSTR_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "HMSTR-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "HMSTRUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "HMSTRUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "HMSTR_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "HMSTR-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "HMSTRUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "HMSTR-USDT"
+    }
+   }
+  },
+  "HYPER": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "HYPERUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "HYPERUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "HYPER_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "HYPER_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "HYPERUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "HYPERUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "HYPER_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "HYPER-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "HYPERUSDT"
+    }
+   }
+  },
+  "ICP": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ICPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ICPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ICP_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ICP_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ICP-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ICPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ICPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ICP_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ICP-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ICPUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ICP-USDT"
+    }
+   }
+  },
+  "IMX": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "IMXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "IMXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "IMX_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "IMX_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "IMX-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "IMXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "IMXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "IMX_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "IMX-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "IMXUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "IMX-USDT"
+    }
+   }
+  },
+  "INIT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "INITUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "INITUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "INIT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "INIT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "INIT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "INITUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "INITUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "INIT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "INIT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "INITUSDT"
+    }
+   }
+  },
+  "INJ": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "INJUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "INJUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "INJ_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "INJ_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "INJ-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "INJUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "INJUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "INJ_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "INJ-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "INJUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "INJ-USDT"
+    }
+   }
+  },
+  "IO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "IOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "IOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "IO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "IO_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "IOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "IOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "IO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "IO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "IOUSDT"
+    }
+   }
+  },
+  "IOTA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "IOTAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "IOTAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "IOTA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "IOTA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "IOTA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "IOTAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "IOTA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "IOTA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "IOTAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "IOTA-USDT"
+    }
+   }
+  },
+  "JTO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "JTOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "JTOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "JTO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "JTO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "JTO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "JTOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "JTOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "JTO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "JTO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "JTOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "JTO-USDT"
+    }
+   }
+  },
+  "JUP": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "JUPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "JUPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "JUP_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "JUP_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "JUP-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "JUPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "JUPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "JUP_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "JUP-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "JUPUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "JUP-USDT"
+    }
+   }
+  },
+  "KAITO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "KAITOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "KAITOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "KAITO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "KAITO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "KAITO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "KAITOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "KAITO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "KAITO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "KAITOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "KAITO-USDT"
+    }
+   }
+  },
+  "KAS": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "KASUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "KASUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "KAS_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "KAS_USDT"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "KASUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "KAS_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "KAS/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "KAS-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "KASUSDT"
+    }
+   }
+  },
+  "LAYER": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "LAYERUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LAYER_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LAYER_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LAYER-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "LAYERUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "LAYERUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LAYER_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "LAYER-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LAYERUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LAYER-USDT"
+    }
+   }
+  },
+  "LDO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "LDOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "LDOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LDO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LDO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LDO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "LDOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "LDOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LDO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "LDO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LDOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LDO-USDT"
+    }
+   }
+  },
+  "LINEA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "LINEAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "LINEAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LINEA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LINEA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LINEA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "LINEAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "LINEAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LINEA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "LINEA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LINEAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LINEA-USDT"
+    }
+   }
+  },
+  "LINK": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "LINKUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "LINKUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LINK_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LINK_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LINK-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "LINKUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "LINKUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LINK_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "LINK/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "LINK-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LINKUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LINK-USDT"
+    }
+   }
+  },
+  "LIT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "LITUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "LITUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LIT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LIT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LIT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "LITUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LIT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "LIT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LITUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LIT-USDT"
+    }
+   }
+  },
+  "LTC": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "LTCUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "LTCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LTC_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LTC_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LTC-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "LTCUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "LTCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "LTC_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "LTC/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "LTC-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "LTCUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "LTC-USDT"
+    }
+   }
+  },
+  "MANTA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MANTAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MANTAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MANTA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MANTA_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MANTAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MANTAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MANTA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MANTA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MANTAUSDT"
+    }
+   }
+  },
+  "ME": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ME_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ME_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ME-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ME_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ME-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ME-USDT"
+    }
+   }
+  },
+  "MEGA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MEGAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MEGAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MEGA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MEGA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MEGA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MEGAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MEGAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MEGA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MEGA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MEGAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MEGA-USDT"
+    }
+   }
+  },
+  "MELANIA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MELANIAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MELANIAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MELANIA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MELANIA_USDT"
+    }
+   },
+   "spot": {
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MELANIA_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "MELANIA/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MELANIA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MELANIAUSDT"
+    }
+   }
+  },
+  "MEME": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MEMEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MEMEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MEME_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MEME_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MEME-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MEMEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MEMEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MEME_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MEME-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MEMEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MEME-USDT"
+    }
+   }
+  },
+  "MERL": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MERLUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MERLUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MERL_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MERL_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MERL-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MERLUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MERL_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MERL-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MERLUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MERL-USDT"
+    }
+   }
+  },
+  "MET": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "METUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "METUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MET_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MET_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MET-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "METUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "METUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MET_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MET-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "METUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MET-USDT"
+    }
+   }
+  },
+  "MINA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MINAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MINAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MINA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MINA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MINA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MINAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MINAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MINA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MINA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MINAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MINA-USDT"
+    }
+   }
+  },
+  "MNT": {
+   "perp": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MNTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MNT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MNT_USDT"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MNTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MNT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MNT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MNTUSDT"
+    }
+   }
+  },
+  "MON": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MONUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MONUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MON_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MON-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MONUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MON_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MON-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MONUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MON-USDT"
+    }
+   }
+  },
+  "MOODENG": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MOODENGUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MOODENGUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MOODENG_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MOODENG_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MOODENG-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MOODENG_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MOODENG-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MOODENGUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MOODENG-USDT"
+    }
+   }
+  },
+  "MORPHO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MORPHOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MORPHOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MORPHO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MORPHO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MORPHO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MORPHOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MORPHOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MORPHO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MORPHO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MORPHOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MORPHO-USDT"
+    }
+   }
+  },
+  "MOVE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MOVEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MOVEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MOVE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MOVE_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MOVE-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "MOVEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "MOVEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "MOVE_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "MOVE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "MOVEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "MOVE-USDT"
+    }
+   }
+  },
+  "NEAR": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "NEARUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "NEARUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "NEAR_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "NEAR_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "NEAR-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "NEARUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "NEARUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "NEAR_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "NEAR-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "NEARUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "NEAR-USDT"
+    }
+   }
+  },
+  "NEO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "NEOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "NEOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "NEO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "NEO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "NEO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "NEOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "NEO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "NEO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "NEOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "NEO-USDT"
+    }
+   }
+  },
+  "NIL": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "NILUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "NILUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "NIL_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "NIL_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "NILUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "NIL_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "NIL-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "NILUSDT"
+    }
+   }
+  },
+  "NOT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "NOTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "NOTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "NOT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "NOT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "NOT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "NOTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "NOTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "NOT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "NOT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "NOTUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "NOT-USDT"
+    }
+   }
+  },
+  "NXPC": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "NXPCUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "NXPCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "NXPC_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "NXPC_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "NXPCUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "NXPCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "NXPC_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "NXPC-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "NXPCUSDT"
+    }
+   }
+  },
+  "ONDO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ONDOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ONDOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ONDO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ONDO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ONDO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ONDOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ONDOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ONDO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ONDO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ONDOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ONDO-USDT"
+    }
+   }
+  },
+  "OP": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "OPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "OPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "OP_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "OP_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "OP-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "OPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "OPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "OP_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "OP-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "OPUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "OP-USDT"
+    }
+   }
+  },
+  "ORDI": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ORDIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ORDIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ORDI_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ORDI_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ORDI-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ORDIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ORDIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ORDI_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ORDI-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ORDIUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ORDI-USDT"
+    }
+   }
+  },
+  "PAXG": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PAXGUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PAXGUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PAXG_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PAXG_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PAXGUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PAXG_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "PAXG-USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PAXG-USDT"
+    }
+   }
+  },
+  "PENDLE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PENDLEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PENDLEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PENDLE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PENDLE_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PENDLE-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PENDLEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PENDLEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PENDLE_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "PENDLE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PENDLEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PENDLE-USDT"
+    }
+   }
+  },
+  "PENGU": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PENGUUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PENGUUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PENGU_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PENGU_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PENGU-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PENGUUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PENGUUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PENGU_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "PENGU/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "PENGU-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PENGUUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PENGU-USDT"
+    }
+   }
+  },
+  "PEOPLE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PEOPLEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PEOPLEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PEOPLE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PEOPLE_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PEOPLE-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PEOPLEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PEOPLEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PEOPLE_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "PEOPLE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PEOPLEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PEOPLE-USDT"
+    }
+   }
+  },
+  "PNUT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PNUTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PNUTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PNUT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PNUT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PNUT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PNUTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PNUTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PNUT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "PNUT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PNUTUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PNUT-USDT"
+    }
+   }
+  },
+  "POL": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "POLUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "POLUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "POL_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "POL_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "POL-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "POLUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "POLUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "POL_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "POL-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "POLUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "POL-USDT"
+    }
+   }
+  },
+  "POLYX": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "POLYXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "POLYXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "POLYX_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "POLYX_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "POLYXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "POLYX_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "POLYX-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "POLYXUSDT"
+    }
+   }
+  },
+  "PONS": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PONSUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PONSUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PONS_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PONS_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PONS-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PONSUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PONS_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "PONS-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PONSUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PONS-USDT"
+    }
+   }
+  },
+  "POPCAT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "POPCATUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "POPCATUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "POPCAT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "POPCAT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "POPCAT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "POPCATUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "POPCAT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "POPCAT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "POPCATUSDT"
+    }
+   }
+  },
+  "PROVE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PROVEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PROVEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PROVE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PROVE_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PROVE-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PROVEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PROVEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PROVE_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "PROVE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PROVEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PROVE-USDT"
+    }
+   }
+  },
+  "PUMP": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PUMPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PUMP_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PUMP-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PUMPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PUMPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PUMP_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "PUMP-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PUMPUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PUMP-USDT"
+    }
+   }
+  },
+  "PYTH": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PYTHUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PYTHUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PYTH_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PYTH_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PYTH-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "PYTHUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "PYTHUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "PYTH_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "PYTH-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "PYTHUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "PYTH-USDT"
+    }
+   }
+  },
+  "RENDER": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "RENDERUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "RENDERUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "RENDER_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "RENDER_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "RENDER-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "RENDERUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "RENDERUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "RENDER_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "RENDER-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "RENDERUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "RENDER-USDT"
+    }
+   }
+  },
+  "RESOLV": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "RESOLVUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "RESOLVUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "RESOLV_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "RESOLV_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "RESOLV-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "RESOLVUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "RESOLVUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "RESOLV_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "RESOLV-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "RESOLVUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "RESOLV-USDT"
+    }
+   }
+  },
+  "REZ": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "REZUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "REZUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "REZ_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "REZ_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "REZUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "REZ_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "REZ-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "REZUSDT"
+    }
+   }
+  },
+  "RSR": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "RSRUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "RSRUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "RSR_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "RSR_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "RSR-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "RSRUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "RSR_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "RSR-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "RSRUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "RSR-USDT"
+    }
+   }
+  },
+  "RUNE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "RUNEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "RUNEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "RUNE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "RUNE_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "RUNEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "RUNEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "RUNE_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "RUNE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "RUNEUSDT"
+    }
+   }
+  },
+  "S": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "S_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "S_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "S-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "S_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "S/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "S-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "S-USDT"
+    }
+   }
+  },
+  "SAGA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SAGAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SAGAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SAGA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SAGA_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SAGAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SAGA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SAGAUSDT"
+    }
+   }
+  },
+  "SAND": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SANDUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SANDUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SAND_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SAND_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SAND-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SANDUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SANDUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SAND_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SAND-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SANDUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SAND-USDT"
+    }
+   }
+  },
+  "SEI": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SEIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SEIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SEI_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SEI_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SEI-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SEIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SEIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SEI_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SEI-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SEIUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SEI-USDT"
+    }
+   }
+  },
+  "SKR": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SKRUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SKRUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SKR_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SKR_USDT"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SKRUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SKR_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SKR-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SKRUSDT"
+    }
+   }
+  },
+  "SKY": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SKYUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SKYUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SKY_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SKY_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SKY-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SKYUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SKYUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SKY_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SKY-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SKYUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SKY-USDT"
+    }
+   }
+  },
+  "SNX": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SNXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SNXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SNX_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SNX_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SNX-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SNXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SNXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SNX_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SNX-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SNXUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SNX-USDT"
+    }
+   }
+  },
+  "SOL": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SOLUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SOLUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SOL_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SOL_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SOL-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SOLUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SOLUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SOL_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "SOL/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SOL-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SOLUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SOL-USDT"
+    }
+   }
+  },
+  "SOPH": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SOPHUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SOPHUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SOPH_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SOPH_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SOPH-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SOPHUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SOPH_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SOPH-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SOPHUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SOPH-USDT"
+    }
+   }
+  },
+  "SPX": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SPXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SPXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SPX_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SPX_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SPX-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SPXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SPX_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SPX-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SPXUSDT"
+    }
+   }
+  },
+  "STABLE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "STABLEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "STABLEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "STABLE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "STABLE_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "STABLE-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "STABLEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "STABLE_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "STABLE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "STABLEUSDT"
+    }
+   }
+  },
+  "STBL": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "STBLUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "STBLUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "STBL_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "STBL_USDT"
+    }
+   },
+   "spot": {
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "STBL_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "STBL-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "STBLUSDT"
+    }
+   }
+  },
+  "STRK": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "STRKUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "STRKUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "STRK_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "STRK_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "STRK-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "STRKUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "STRKUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "STRK_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "STRK-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "STRKUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "STRK-USDT"
+    }
+   }
+  },
+  "STX": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "STXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "STXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "STX_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "STX_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "STX-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "STXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "STXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "STX_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "STX-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "STXUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "STX-USDT"
+    }
+   }
+  },
+  "SUI": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SUIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SUIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SUI_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SUI_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SUI-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SUIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SUIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SUI_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SUI-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SUIUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SUI-USDT"
+    }
+   }
+  },
+  "SUPER": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SUPERUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SUPERUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SUPER_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SUPER_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SUPERUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SUPER_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SUPER-USDT"
+    }
+   }
+  },
+  "SUSHI": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SUSHIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SUSHIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SUSHI_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SUSHI_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SUSHI-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SUSHIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SUSHIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SUSHI_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SUSHI-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SUSHIUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SUSHI-USDT"
+    }
+   }
+  },
+  "SYRUP": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SYRUPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "SYRUPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SYRUP_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SYRUP_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "SYRUP-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "SYRUPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "SYRUP_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "SYRUP-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "SYRUPUSDT"
+    }
+   }
+  },
+  "TAO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TAOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "TAOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TAO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TAO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TAO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TAOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TAO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "TAO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TAOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TAO-USDT"
+    }
+   }
+  },
+  "TIA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TIAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "TIAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TIA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TIA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TIA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TIAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "TIAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TIA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "TIA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TIAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TIA-USDT"
+    }
+   }
+  },
+  "TNSR": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TNSRUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "TNSRUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TNSR_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TNSR_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TNSRUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "TNSRUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TNSR_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "TNSR-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TNSRUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TNSR-USDT"
+    }
+   }
+  },
+  "TRB": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TRBUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "TRBUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TRB_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TRB_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TRB-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TRBUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TRB_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "TRB-USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TRB-USDT"
+    }
+   }
+  },
+  "TRUMP": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TRUMPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "TRUMPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TRUMP_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TRUMP-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TRUMPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "TRUMPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TRUMP_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "TRUMP/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "TRUMP-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TRUMPUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TRUMP-USDT"
+    }
+   }
+  },
+  "TRX": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TRXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "TRXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TRX_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TRX_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TRX-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TRXUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "TRXUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TRX_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "TRX-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TRXUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TRX-USDT"
+    }
+   }
+  },
+  "TURBO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TURBOUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "0.001",
+     "symbol": "1000TURBOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TURBO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TURBO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TURBO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "TURBOUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "TURBO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "TURBO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "TURBOUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "TURBO-USDT"
+    }
+   }
+  },
+  "UMA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "UMAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "UMAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "UMA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "UMA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "UMA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "UMAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "UMAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "UMA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "UMA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "UMAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "UMA-USDT"
+    }
+   }
+  },
+  "UNI": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "UNIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "UNIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "UNI_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "UNI_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "UNI-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "UNIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "UNIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "UNI_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "UNI-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "UNIUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "UNI-USDT"
+    }
+   }
+  },
+  "USELESS": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "USELESSUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "USELESSUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "USELESS_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "USELESS_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "USELESS-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "USELESS_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "USELESS-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "USELESSUSDT"
+    }
+   }
+  },
+  "USUAL": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "USUALUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "USUALUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "USUAL_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "USUAL_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "USUALUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "USUAL_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "USUAL-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "USUALUSDT"
+    }
+   }
+  },
+  "VIRTUAL": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUALUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUALUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUAL_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUAL_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUAL-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUALUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUALUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUAL_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUAL/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUAL-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUALUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "VIRTUAL-USDT"
+    }
+   }
+  },
+  "VVV": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "VVVUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "VVVUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "VVV_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "VVV_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "VVV-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "VVVUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "VVV_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "VVV-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "VVVUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "VVV-USDT"
+    }
+   }
+  },
+  "W": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "WUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "WUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "W_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "W_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "W-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "WUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "WUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "W_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "W-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "WUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "W-USDT"
+    }
+   }
+  },
+  "WCT": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "WCTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "WCTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "WCT_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "WCT_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "WCT-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "WCTUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "WCTUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "WCT_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "WCT-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "WCTUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "WCT-USDT"
+    }
+   }
+  },
+  "WIF": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "WIFUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "WIFUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "WIF_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "WIF_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "WIF-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "WIFUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "WIFUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "WIF_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "WIF-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "WIFUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "WIF-USDT"
+    }
+   }
+  },
+  "WLD": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "WLDUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "WLDUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "WLD_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "WLD_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "WLD-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "WLDUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "WLDUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "WLD_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "WLD-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "WLDUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "WLD-USDT"
+    }
+   }
+  },
+  "WLFI": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "WLFIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "WLFIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "WLFI_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "WLFI_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "WLFI-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "WLFIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "WLFIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "WLFI_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "WLFI-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "WLFIUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "WLFI-USDT"
+    }
+   }
+  },
+  "XAI": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "XAIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "XAIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "XAI_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "XAI_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "XAIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "XAIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "XAI_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "XAI-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "XAIUSDT"
+    }
+   }
+  },
+  "XLM": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "XLMUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "XLMUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "XLM_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "XLM_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "XLM-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "XLMUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "XLMUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "XLM_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "XLM-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "XLMUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "XLM-USDT"
+    }
+   }
+  },
+  "XMR": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "XMRUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "XMRUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "XMR_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "XMR_USDT"
+    }
+   },
+   "spot": {
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "XMR/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "XMR-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "XMRUSDT"
+    }
+   }
+  },
+  "XPL": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "XPLUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "XPLUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "XPL_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "XPL_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "XPL-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "XPLUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "XPLUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "XPL_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "XPL-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "XPLUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "XPL-USDT"
+    }
+   }
+  },
+  "XRP": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "XRPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "XRPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "XRP_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "XRP_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "XRP-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "XRPUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "XRPUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "XRP_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1",
+     "symbol": "XRP/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "XRP-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "XRPUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "XRP-USDT"
+    }
+   }
+  },
+  "YGG": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "YGGUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "YGGUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "YGG_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "YGG_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "YGG-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "YGGUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "YGG_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "YGG-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "YGGUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "YGG-USDT"
+    }
+   }
+  },
+  "ZEC": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ZECUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ZECUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ZEC_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ZEC_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZEC-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ZECUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ZEC_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ZEC-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ZECUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZEC-USDT"
+    }
+   }
+  },
+  "ZEN": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ZENUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ZENUSDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ZEN_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZEN-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ZENUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ZENUSDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ZEN-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ZENUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZEN-USDT"
+    }
+   }
+  },
+  "ZETA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ZETAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ZETAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ZETA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ZETA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZETA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ZETAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ZETA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ZETA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ZETAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZETA-USDT"
+    }
+   }
+  },
+  "ZK": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ZKUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ZKUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ZK_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZK-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ZKUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ZKUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ZK_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ZK-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ZKUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZK-USDT"
+    }
+   }
+  },
+  "ZORA": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ZORAUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ZORAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ZORA_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ZORA_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZORA-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ZORAUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ZORA_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ZORA-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ZORAUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZORA-USDT"
+    }
+   }
+  },
+  "ZRO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ZROUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ZROUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ZRO_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ZRO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZRO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "ZROUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "ZROUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1",
+     "symbol": "ZRO_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1",
+     "symbol": "ZRO-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "ZROUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1",
+     "symbol": "ZRO-USDT"
+    }
+   }
+  },
+  "kBONK": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "1000BONKUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "1000BONKUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1000",
+     "symbol": "BONK_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1",
+     "symbol": "1000BONK_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1000",
+     "symbol": "BONK-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1000",
+     "symbol": "BONKUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1000",
+     "symbol": "BONKUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1000",
+     "symbol": "BONK_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1000",
+     "symbol": "BONK-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1000",
+     "symbol": "BONKUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1000",
+     "symbol": "BONK-USDT"
+    }
+   }
+  },
+  "kFLOKI": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "1000FLOKIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "1000FLOKIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1000",
+     "symbol": "FLOKI_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1000",
+     "symbol": "FLOKI_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1000",
+     "symbol": "FLOKI-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1000",
+     "symbol": "FLOKIUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1000",
+     "symbol": "FLOKIUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1000",
+     "symbol": "FLOKI_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1000",
+     "symbol": "FLOKI-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1000",
+     "symbol": "FLOKIUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1000",
+     "symbol": "FLOKI-USDT"
+    }
+   }
+  },
+  "kLUNC": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "1000LUNCUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "1000LUNCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1000",
+     "symbol": "LUNC_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1000",
+     "symbol": "LUNC_USDT"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1000",
+     "symbol": "LUNCUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1000",
+     "symbol": "LUNCUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1000",
+     "symbol": "LUNC_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1000",
+     "symbol": "LUNC-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1000",
+     "symbol": "LUNCUSDT"
+    }
+   }
+  },
+  "kNEIRO": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1000",
+     "symbol": "NEIROUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1000",
+     "symbol": "NEIRO-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1000",
+     "symbol": "NEIROUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1000",
+     "symbol": "NEIRO_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1000",
+     "symbol": "NEIRO-USDT"
+    }
+   }
+  },
+  "kPEPE": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "1000PEPEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1",
+     "symbol": "1000PEPEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1000",
+     "symbol": "PEPE_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1000",
+     "symbol": "PEPE_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1000",
+     "symbol": "PEPE-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1000",
+     "symbol": "PEPEUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1000",
+     "symbol": "PEPEUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1000",
+     "symbol": "PEPE_USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1000",
+     "symbol": "PEPE-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1000",
+     "symbol": "PEPEUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1000",
+     "symbol": "PEPE-USDT"
+    }
+   }
+  },
+  "kSHIB": {
+   "perp": {
+    "binance": {
+     "pxMultiplier": "1",
+     "symbol": "1000SHIBUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1000",
+     "symbol": "SHIB_USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1000",
+     "symbol": "SHIB_USDT"
+    },
+    "okx": {
+     "pxMultiplier": "1000",
+     "symbol": "SHIB-USDT-SWAP"
+    }
+   },
+   "spot": {
+    "binance": {
+     "pxMultiplier": "1000",
+     "symbol": "SHIBUSDT"
+    },
+    "bybit": {
+     "pxMultiplier": "1000",
+     "symbol": "SHIBUSDT"
+    },
+    "gate": {
+     "pxMultiplier": "1000",
+     "symbol": "SHIB_USDT"
+    },
+    "kraken": {
+     "pxMultiplier": "1000",
+     "symbol": "SHIB/USDT"
+    },
+    "kucoin": {
+     "pxMultiplier": "1000",
+     "symbol": "SHIB-USDT"
+    },
+    "mexc": {
+     "pxMultiplier": "1000",
+     "symbol": "SHIBUSDT"
+    },
+    "okx": {
+     "pxMultiplier": "1000",
+     "symbol": "SHIB-USDT"
+    }
+   }
+  }
+ },
+ "generatedAt": "2026-10-21T03:57:19Z",
+ "perpVenues": [
+  "binance",
+  "okx",
+  "bybit",
+  "gate",
+  "mexc"
+ ],
+ "spotVenues": [
+  "binance",
+  "okx",
+  "bybit",
+  "kraken",
+  "kucoin",
+  "gate",
+  "mexc"
+ ],
+ "tolerance": 0.03
+}

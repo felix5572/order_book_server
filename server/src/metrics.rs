@@ -515,6 +515,7 @@ lazy_static! {
         "Checkpoint the node marks were last rebuilt from"
     ).expect("metric can be created");
 
+
     pub static ref NODE_MARKS_LOGGED_INPUTS: IntGauge = IntGauge::new(
         "orderbook_node_marks_logged_inputs",
         "HIP-3 mark updates and main-dex book diffs held in the node marks' input log"
@@ -566,6 +567,28 @@ lazy_static! {
     pub static ref LIQUIDATION_CANDIDATES: IntGauge = IntGauge::new(
         "orderbook_liquidation_candidates",
         "Positions within the server's distance of their liquidation price"
+    ).expect("metric can be created");
+
+    /// The local marks' venue feeds (design 000454): frames parsed, lost connections, frames of an unknown type, and
+    /// whether a contract error stopped the feed (1) until restart.
+    pub static ref LOCAL_MARKS_FEED_FRAMES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_local_marks_feed_frames_total", "Local marks venue feed frames parsed"),
+        &["feed"]
+    ).expect("metric can be created");
+
+    pub static ref LOCAL_MARKS_FEED_DISCONNECTS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_local_marks_feed_disconnects_total", "Local marks venue feed connections lost (reconnected)"),
+        &["feed"]
+    ).expect("metric can be created");
+
+    pub static ref LOCAL_MARKS_FEED_UNKNOWN_FRAMES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_local_marks_feed_unknown_frames_total", "Local marks venue feed frames of an unknown type"),
+        &["feed"]
+    ).expect("metric can be created");
+
+    pub static ref LOCAL_MARKS_FEED_STOPPED: IntGaugeVec = IntGaugeVec::new(
+        Opts::new("orderbook_local_marks_feed_stopped", "Local marks venue feed stopped by a contract error"),
+        &["feed"]
     ).expect("metric can be created");
 
     /// Price actions whose cut is not unique; each reads the book at the first line not known to run before it.
@@ -665,6 +688,10 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(LIQUIDATION_CANDIDATES.clone())).ok();
     REGISTRY.register(Box::new(LIQUIDATION_WALK_LOCK_WAIT_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(LIQUIDATION_WALK_LOCK_HOLD_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(LOCAL_MARKS_FEED_FRAMES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(LOCAL_MARKS_FEED_UNKNOWN_FRAMES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(LOCAL_MARKS_FEED_STOPPED.clone())).ok();
 
     // File watcher metrics
     REGISTRY.register(Box::new(FILE_EVENTS_TOTAL.clone())).ok();
