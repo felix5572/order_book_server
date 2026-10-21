@@ -19,4 +19,5 @@ ionice -c2 -n7 cargo run --release --manifest-path ~/order_book_server/Cargo.tom
     --metrics-port 9090 \
     --log-level info \
     --accounts \
+    --local-marks \
     2>&1 | tee -a "$LOG_FILE"
