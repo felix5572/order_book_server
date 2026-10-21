@@ -23,9 +23,11 @@ use crate::{
     order_book::{Coin, Px},
 };
 
-/// The node lines reach the account owner 0.43 s after their block at the median, 0.83 s at most (bm 10-21, 109,000
-/// lines); the node mark moves about every 3 s, so a state further behind has likely missed a move.
-pub(crate) const MAX_PROGRESS_LAG_MS: u64 = 3_000;
+/// The applied block runs behind the local clock 0.7 s at the median and 2.4–2.9 s at each minute's P99 (bm 10-21
+/// 06:43–06:57Z, the acceptance recording), its block times sometimes 3.5 s apart: at 3 s every coin flickered stale
+/// ten times in 14 minutes, each time for at most a second. 5 s withholds a stalled state, not that jitter; a state up
+/// to 5 s behind may have missed one mark move (about every 3 s).
+pub(crate) const MAX_PROGRESS_LAG_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -436,22 +438,24 @@ pub(crate) mod tests {
         assert_eq!(statuses(&snapshot, "ETH"), (Some("nodeCoin"), Some("nodeCoin")), "the node replay does not claim ETH");
     }
 
-    /// Design 000454 r2 revision 1: each progress clock behind by more than 3 s withdraws the legs reading it for every
-    /// coin; advancing again restores them. The venues keep quoting throughout.
+    /// Design 000454 r2 revision 1: each progress clock behind by more than `MAX_PROGRESS_LAG_MS` withdraws the legs
+    /// reading it for every coin; advancing again restores them. The venues keep quoting throughout.
     #[test]
     fn either_progress_clock_behind_withdraws_until_it_moves_again() {
         let mut world = World::new();
-        assert_eq!(statuses(&world.snapshot(NOW_MS + 2_500), "BTC"), (None, None), "3,000 ms behind the node, 2,900 the book");
-        let node_behind = world.snapshot(NOW_MS + 2_501);
+        let node_at_limit = NOW_MS - 500 + MAX_PROGRESS_LAG_MS;
+        assert_eq!(statuses(&world.snapshot(node_at_limit), "BTC"), (None, None), "the node at the limit, the book 100 ms within it");
+        let node_behind = world.snapshot(node_at_limit + 1);
         assert_eq!(statuses(&node_behind, "BTC"), (Some("nodeProgress"), Some("nodeProgress")));
         assert_eq!(node_behind.coin("BTC").unwrap().local.as_ref().unwrap_err().status, Status::Stale);
         let Ok(node) = &mut world.node else { unreachable!() };
-        Arc::make_mut(node).block_time_ms = NOW_MS + 2_000;
-        assert_eq!(statuses(&world.snapshot(NOW_MS + 2_501), "BTC"), (None, None), "a new block restores both legs");
-        let book_behind = world.snapshot(NOW_MS + 2_601);
+        Arc::make_mut(node).block_time_ms = node_at_limit - 500;
+        assert_eq!(statuses(&world.snapshot(node_at_limit + 1), "BTC"), (None, None), "a new block restores both legs");
+        let book_at_limit = NOW_MS - 400 + MAX_PROGRESS_LAG_MS;
+        let book_behind = world.snapshot(book_at_limit + 1);
         assert_eq!(statuses(&book_behind, "BTC"), (None, Some("bookProgress")), "the node leg does not read the book");
-        world.book.as_mut().unwrap().time = NOW_MS + 2_000;
-        assert_eq!(statuses(&world.snapshot(NOW_MS + 2_601), "BTC"), (None, None));
+        world.book.as_mut().unwrap().time = book_at_limit - 500;
+        assert_eq!(statuses(&world.snapshot(book_at_limit + 1), "BTC"), (None, None));
     }
 
     /// The book withheld or not read yet, the node prices unavailable, or the module stopped withdraw the legs with
