@@ -2,7 +2,7 @@
 // Each event source runs on its own thread for maximum throughput
 
 use crate::{
-    metrics::NODE_LINE_LAG,
+    metrics::{NODE_LINE_LAG, NODE_FILE_IO_ERRORS_TOTAL},
     types::node_data::{EventSource, line_local_time_unix_nanos},
 };
 use log::{error, info, warn};
@@ -194,9 +194,8 @@ struct FileReader {
     // Set when buffered data had to be discarded (oversized partial line);
     // drained by take_desynced so the watcher can notify the listener.
     desynced: bool,
-    // Last path whose open failed, so the 1ms poll loop logs the failure once
-    // instead of thousands of times per second while the path is unopenable.
-    open_error_path: Option<PathBuf>,
+    // Failed opens and reads share an episode: reopening a bad reader is not recovery.
+    io_failures: FileIoFailures,
     // (dev, ino) of the file that file_position refers to. Catches same-path
     // recreation: node catch-up writes by BLOCK time, so after a long stop it
     // recreates the very hour file retention pruned - same path, new inode,
@@ -205,6 +204,31 @@ struct FileReader {
     // Cap on one un-terminated line (MAX_PARTIAL_LINE_BYTES for the book streams).
     max_line_bytes: usize,
     layout: FileLayout,
+}
+
+/// File I/O retry diagnostics belong to the reader; failures never change its cursor or validity rules.
+#[derive(Default)]
+struct FileIoFailures {
+    path: Option<PathBuf>,
+    attempts: u64,
+}
+impl FileIoFailures {
+    fn failed(&mut self, path: &Path, operation: &'static str, err: &std::io::Error) {
+        NODE_FILE_IO_ERRORS_TOTAL.with_label_values(&[operation]).inc();
+        if self.path.as_deref() != Some(path) {
+            warn!("node stream {operation} unavailable at {} (retrying with the cursor retained): {err}", path.display());
+            self.path = Some(path.to_path_buf());
+            self.attempts = 0;
+        }
+        self.attempts += 1;
+    }
+    fn read_succeeded(&mut self, path: &Path) {
+        if let Some(failed) = self.path.take() {
+            info!("node stream I/O available at {} after {} failed attempts (previous failure at {})",
+                path.display(), self.attempts, failed.display());
+            self.attempts = 0;
+        }
+    }
 }
 
 /// (dev, ino) identity of a metadata handle.
@@ -221,7 +245,7 @@ impl FileReader {
             partial_line: Vec::new(),
             base_dir,
             desynced: false,
-            open_error_path: None,
+            io_failures: FileIoFailures::default(),
             open_file_id: None,
             max_line_bytes,
             layout,
@@ -366,13 +390,10 @@ impl FileReader {
                             self.open_file_id = Some(id);
                         }
                         self.file = Some(file);
-                        self.open_error_path = None;
+                        // Only a successful read or EOF clears an I/O failure episode.
                     }
                     Err(err) => {
-                        if self.open_error_path.as_ref() != Some(path) {
-                            error!("Failed to open {} (retrying silently): {err}", path.display());
-                            self.open_error_path = Some(path.clone());
-                        }
+                        self.io_failures.failed(path, "open", &err);
                         return (lines, ReadStatus::NotRead);
                     }
                 }
@@ -380,13 +401,15 @@ impl FileReader {
             let Some(file) = self.file.as_mut() else {
                 return (lines, ReadStatus::NotRead);
             };
-            let buf = match read_chunk(file, self.file_position) {
+            let read = read_chunk(file, self.file_position);
+            if read.is_ok() { self.io_failures.read_succeeded(path); }
+            let buf = match read {
                 Ok(Some(buf)) if !buf.is_empty() => buf,
                 Ok(Some(_)) => return (lines, ReadStatus::NotRead),
                 Ok(None) => return (lines, ReadStatus::AtEnd),
                 Err(err) => {
                     // drop the failed handle so the next call re-opens fresh
-                    error!("Read of {} at {} failed (re-opening): {err}", path.display(), self.file_position);
+                    self.io_failures.failed(path, "read", &err);
                     self.file = None;
                     return (lines, ReadStatus::NotRead);
                 }
@@ -618,7 +641,7 @@ pub(super) fn spawn_file_watcher(
         start_skip_is_loss: false,
         layout: FileLayout::Hourly,
     };
-    spawn_line_watcher(stream, tx, Some(last_event), move |line| file_event(source, line), move || FileEvent::Desync(source), None)
+    spawn_line_watcher(stream, tx, Some(last_event), move |line| file_event(source, line), move |_| FileEvent::Desync(source), None)
 }
 
 const fn file_event(source: EventSource, line: String) -> FileEvent {
@@ -632,6 +655,10 @@ const fn file_event(source: EventSource, line: String) -> FileEvent {
 
 /// Wraps a proven read-through instant for the channel.
 pub(crate) type ReadThroughMark<E> = Box<dyn Fn(Instant) -> E + Send>;
+
+/// Both withdraw state until an anchor covers them, but initial EOF positioning is expected initialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WatchLoss { Positioning, Discard }
 
 /// One newline-delimited node stream for `spawn_line_watcher`.
 pub(crate) struct LineStream {
@@ -661,7 +688,7 @@ fn send_read_through<E>(
 ) -> bool {
     match reader.read_through() {
         ReadThrough::Lines(lines) => send(lines),
-        ReadThrough::Proven(at) => tx.blocking_send(mark(at)).inspect_err(|_| error!("{name} channel closed, exiting")).is_ok(),
+        ReadThrough::Proven(at) => tx.blocking_send(mark(at)).inspect_err(|_| info!("{name} consumer closed, exiting")).is_ok(),
         ReadThrough::Unproven => true,
     }
 }
@@ -683,7 +710,7 @@ pub(crate) fn spawn_line_watcher<E, F, D>(
 where
     E: Send + 'static,
     F: Fn(String) -> E + Send + 'static,
-    D: Fn() -> E + Send + 'static,
+    D: Fn(WatchLoss) -> E + Send + 'static,
 {
     let LineStream { name, lag_label, dir, max_line_bytes, start_skip_is_loss, layout } = stream;
     thread::spawn(move || {
@@ -695,7 +722,7 @@ where
             observe_read_lag(lag_label, &lines);
             for line in lines {
                 if tx.blocking_send(wrap(line)).is_err() {
-                    error!("{name} channel closed, exiting");
+                    info!("{name} consumer closed, exiting");
                     return false;
                 }
                 // Update health timestamp
@@ -710,7 +737,7 @@ where
         let adopt_at_end = |reader: &mut FileReader, path: &PathBuf| {
             info!("{} tracking: {:?}", name, path.file_name());
             reader.start_tracking(path);
-            !(start_skip_is_loss && tx.blocking_send(desync()).is_err())
+            !(start_skip_is_loss && tx.blocking_send(desync(WatchLoss::Positioning)).is_err())
         };
 
         // Create watcher with callback
@@ -755,7 +782,7 @@ where
                                 return;
                             }
                         } else if reader.current_path.is_none() && !adopt_at_end(&mut reader, path) {
-                            error!("{name} channel closed, exiting");
+                            info!("{name} consumer closed, exiting");
                             return;
                         }
 
@@ -783,8 +810,8 @@ where
 
             // If the reader had to discard buffered data, tell the listener so it
             // can re-sync the book from a fresh snapshot.
-            if reader.take_desynced() && tx.blocking_send(desync()).is_err() {
-                error!("{name} channel closed, exiting");
+            if reader.take_desynced() && tx.blocking_send(desync(WatchLoss::Discard)).is_err() {
+                info!("{name} consumer closed, exiting");
                 return;
             }
 
@@ -820,7 +847,7 @@ where
                 match reader.periodic_check() {
                     Some(FileCheck::Adopt(path)) => {
                         if !adopt_at_end(&mut reader, &path) {
-                            error!("{name} channel closed, exiting");
+                            info!("{name} consumer closed, exiting");
                             return;
                         }
                     }
@@ -955,7 +982,7 @@ mod tests {
             append(&path, "{\"old\":0}\n");
             let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
             let stream = test_stream(dir, start_skip_is_loss);
-            let _watcher = spawn_line_watcher(stream, tx, None, |line| line, || "DESYNC".to_string(), None);
+            let _watcher = spawn_line_watcher(stream, tx, None, |line| line, |_| "DESYNC".to_string(), None);
             thread::sleep(Duration::from_millis(200));
             append(&path, "{\"skipped\":1}\n");
             thread::sleep(Duration::from_millis(200));
@@ -980,7 +1007,7 @@ mod tests {
         let dir = test_dir("consumer_gone");
         let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
         let stream = test_stream(dir, false);
-        let handle = spawn_line_watcher(stream, tx, None, |line| line, String::new, None);
+        let handle = spawn_line_watcher(stream, tx, None, |line| line, |_| String::new(), None);
         drop(rx);
         let deadline = Instant::now() + Duration::from_secs(2);
         while !handle.is_finished() && Instant::now() < deadline {
@@ -1124,7 +1151,7 @@ mod tests {
         append(&path, "");
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
         let mark: ReadThroughMark<String> = Box::new(|_| "PROVEN".to_string());
-        let _watcher = spawn_line_watcher(test_stream(dir, false), tx, None, |line| line, || "DESYNC".to_string(), Some(mark));
+        let _watcher = spawn_line_watcher(test_stream(dir, false), tx, None, |line| line, |_| "DESYNC".to_string(), Some(mark));
         thread::sleep(Duration::from_millis(200));
         append(&path, "{\"positioned\":0}\n");
         thread::sleep(Duration::from_millis(200));
@@ -1558,7 +1585,7 @@ mod tests {
         let old = hourly_file(&dir, "20261021", "0");
         append(&old, "");
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
-        let handle = spawn_line_watcher(test_stream(dir.clone(), false), tx, None, |line| line, || "DESYNC".to_string(), None);
+        let handle = spawn_line_watcher(test_stream(dir.clone(), false), tx, None, |line| line, |_| "DESYNC".to_string(), None);
         thread::sleep(Duration::from_millis(200));
         append(&old, "{\"skipped\":0}\n");
         thread::sleep(Duration::from_millis(200));
@@ -1704,6 +1731,28 @@ mod tests {
         assert_eq!(drained.len(), 3, "all three old rows survive the switch");
         assert!(drained[2].contains("tail"));
         assert!(!loss_reported, "a complete drain is not data loss");
+    }
+
+    #[test]
+    fn repeated_read_failures_keep_the_cursor_and_clear_only_after_a_read() {
+        let dir = test_dir("read_error_episode");
+        let path = hourly_file(&dir, "20261021", "14");
+        append(&path, "");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&path);
+        append(&path, "{\"block\":100}\n");
+        for attempts in 1..=100 {
+            reader.file = Some(std::fs::OpenOptions::new().append(true).open(&path).unwrap());
+            assert_eq!(reader.read_lines().1, ReadStatus::NotRead);
+            assert_eq!(reader.file_position, 0);
+            assert_eq!(reader.io_failures.attempts, attempts);
+            assert_eq!(reader.io_failures.path.as_ref(), Some(&path));
+        }
+        assert_eq!(reader.on_modify(), vec!["{\"block\":100}".to_string()]);
+        assert_eq!(reader.io_failures.path, None);
+        assert_eq!(reader.io_failures.attempts, 0);
+        assert!(reader.on_modify().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Review 000434 r2 P2: the old file's read fails with a line of block 100 unread; the switch leaves that tail

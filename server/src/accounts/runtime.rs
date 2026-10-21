@@ -23,6 +23,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::{
     actions::{BlockActions, block_actions},
+    diagnostics::{AccountDiagnostics, Cause},
     replica::{ReplicaLine, line_height},
     anchor::Anchor,
     blocks::{Assembly, BlockAssembler, CompletedBlock, LineKey},
@@ -51,7 +52,7 @@ use crate::{
     local_marks::snapshot::LocalMarksSnapshot,
     listeners::order_book::{
         BookTrust, OrderBookListener,
-        parallel::{FileLayout, LineStream, spawn_line_watcher},
+        parallel::{FileLayout, LineStream, WatchLoss, spawn_line_watcher},
         utils::{checkpoint_grid, list_checkpoints},
     },
     metrics::{
@@ -108,7 +109,7 @@ enum Input {
     /// The stream's reader proved that every line written before the instant reached the owner (design 000433 r3).
     ReadThrough(Stream, Instant),
     /// The watcher did not deliver lines of unknown blocks: the skip while positioning at its start, or a discard.
-    Loss(Stream),
+    Loss(Stream, WatchLoss),
 }
 
 /// An unparsable line; `block` when its header still reads (the body broke the schema).
@@ -358,7 +359,7 @@ pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Resul
                 input_tx,
                 None,
                 block_actions_input,
-                || Input::Loss(Stream::BlockActions),
+                |cause| Input::Loss(Stream::BlockActions, cause),
                 None,
             ),
         },
@@ -400,12 +401,12 @@ fn proving_watcher(
     inputs: mpsc::Sender<Input>,
 ) -> Supervised {
     let read_through = Box::new(move |at| Input::ReadThrough(stream, at));
-    Supervised { name, handle: spawn_line_watcher(lines, inputs, None, wrap, move || Input::Loss(stream), Some(read_through)) }
+    Supervised { name, handle: spawn_line_watcher(lines, inputs, None, wrap, move |cause| Input::Loss(stream, cause), Some(read_through)) }
 }
 
 fn fills_input(line: String) -> Input {
     let parsed = parse_line(&line);
-    let evidence = parsed.as_ref().ok().and_then(fill_line_reason).map(|reason| LineEvidence { reason, raw_line: line });
+    let evidence = parsed.as_ref().ok().and_then(fill_line_reason).map(|reason| LineEvidence::new(reason, &line));
     Input::Fills(parsed, evidence)
 }
 
@@ -415,7 +416,7 @@ fn misc_input(line: String) -> Input {
         Ok((batch, key))
     });
     let evidence =
-        parsed.as_ref().ok().and_then(|(batch, _)| misc_line_reason(batch)).map(|reason| LineEvidence { reason, raw_line: line });
+        parsed.as_ref().ok().and_then(|(batch, _)| misc_line_reason(batch)).map(|reason| LineEvidence::new(reason, &line));
     Input::MiscEvents(parsed, evidence)
 }
 
@@ -559,6 +560,7 @@ async fn run_owner(
     flow_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut supervision = tokio::time::interval(SUPERVISION_INTERVAL);
     let mut assembler = BlockAssembler::default();
+    let mut diagnostics = AccountDiagnostics::default();
     // a parsed anchor whose blocks are not applied yet (design 000433 r2 3.4), and a seed the marks are not ready for
     let mut held: Option<Box<ParsedAnchor>> = None;
     let mut held_seed: Option<Box<MarkSeed>> = None;
@@ -566,21 +568,21 @@ async fn run_owner(
     loop {
         tokio::select! {
             Some(input) = inputs.recv() => {
-                let touched = apply_input(&mut book, &mut marks, &mut assembler, input);
+                let touched = apply_input(&mut diagnostics, &mut book, &mut marks, &mut assembler, input);
                 // a seed made ready by these blocks installs before anything is pushed: the frames carry the marks a
                 // query would read (review 000445 r1 P2)
-                install_seed_ready(&mut marks, &mut held_seed);
+                install_seed_ready(&mut diagnostics, &mut marks, &mut held_seed);
                 if publisher.track(&book) {
                     publisher.push_changes(&mut book, &touched, marks.at());
                 }
-                if install_ready(&mut book, &mut held) && publisher.track(&book) {
+                if install_ready(&mut diagnostics, &mut book, &mut held) && publisher.track(&book) {
                     publisher.push_snapshots(&mut book, marks.at());
                 }
                 publisher.track_marks(&mut book, &marks);
                 refresh_candidates(&mut candidates, &book, &marks, &touched, &publisher);
             }
             Some(message) = anchors.recv() => {
-                let installed = receive_anchor(&mut book, &mut marks, &mut held, &mut held_seed, message);
+                let installed = receive_anchor(&mut diagnostics, &mut book, &mut marks, &mut held, &mut held_seed, message);
                 if publisher.track(&book) && installed {
                     publisher.push_snapshots(&mut book, marks.at());
                 }
@@ -635,6 +637,9 @@ async fn run_owner(
                 publisher.track(&book);
                 publisher.track_marks(&mut book, &marks);
                 refresh_candidates(&mut candidates, &book, &marks, &Touched::default(), &publisher);
+                let recovered_through = book.availability().ok().filter(|_| marks.availability().is_ok())
+                    .and_then(|available| marks.status().seed_height.map(|seed| seed.min(available.anchor.height)));
+                diagnostics.tick(Instant::now(), recovered_through);
                 export_status(&book.status());
                 export_marks_status(&marks.status());
             }
@@ -643,18 +648,18 @@ async fn run_owner(
 }
 
 /// Hands one input to the block assembly and applies the blocks it releases; returns the rows they changed.
-fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut BlockAssembler, input: Input) -> Touched {
+fn apply_input(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut BlockAssembler, input: Input) -> Touched {
     let assembly = match input {
         Input::Fills(Ok(batch), evidence) => {
-            if let Some(evidence) = evidence {
-                record_evidence(&evidence.json(Stream::Fills.label(), batch.block_number()));
-            }
+            if let Some(evidence) = evidence
+                && diagnostics.sample_research(Stream::Fills, Instant::now())
+            { record_evidence(&evidence.json(Stream::Fills.label(), batch.block_number())); }
             assembler.receive_fills(batch)
         }
         Input::MiscEvents(Ok((batch, key)), evidence) => {
-            if let Some(evidence) = evidence {
-                record_evidence(&evidence.json(Stream::MiscEvents.label(), batch.block_number()));
-            }
+            if let Some(evidence) = evidence
+                && diagnostics.sample_research(Stream::MiscEvents, Instant::now())
+            { record_evidence(&evidence.json(Stream::MiscEvents.label(), batch.block_number())); }
             assembler.receive_misc_events(batch, key)
         }
         Input::Hip3OracleUpdates(Ok((batch, key))) => assembler.receive_hip3_oracle_updates(batch, key),
@@ -674,19 +679,22 @@ fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut Bl
             assembler.receive_block_actions(block, mark_actions, read_at)
         }
         Input::ReadThrough(stream, at) => assembler.receive_read_through(stream, at),
-        Input::Fills(Err(err), _) => return lost(book, marks, Stream::Fills, "parse_error", &err),
-        Input::MiscEvents(Err(err), _) => return lost(book, marks, Stream::MiscEvents, "parse_error", &err),
-        Input::Hip3OracleUpdates(Err(err)) => return lost(book, marks, Stream::Hip3OracleUpdates, "parse_error", &err),
-        Input::BookDiffs(Err(err)) => return lost(book, marks, Stream::BookDiffs, "parse_error", &err),
-        Input::OrderStatuses(Err(err)) => return lost(book, marks, Stream::OrderStatuses, "parse_error", &err),
-        Input::SystemActions(Err(err)) => return lost(book, marks, Stream::SystemActions, "parse_error", &err),
-        Input::BlockActions(Err(err), _, _) => return lost(book, marks, Stream::BlockActions, "parse_error", &err),
-        Input::Loss(stream) => {
-            let error = "the watcher skipped lines while positioning at its start, or discarded buffered data".to_string();
-            return lost(book, marks, stream, "watcher_discard", &LineError { block: None, error });
+        Input::Fills(Err(err), _) => return lost(diagnostics, book, marks, Stream::Fills, Cause::Parse, &err),
+        Input::MiscEvents(Err(err), _) => return lost(diagnostics, book, marks, Stream::MiscEvents, Cause::Parse, &err),
+        Input::Hip3OracleUpdates(Err(err)) => return lost(diagnostics, book, marks, Stream::Hip3OracleUpdates, Cause::Parse, &err),
+        Input::BookDiffs(Err(err)) => return lost(diagnostics, book, marks, Stream::BookDiffs, Cause::Parse, &err),
+        Input::OrderStatuses(Err(err)) => return lost(diagnostics, book, marks, Stream::OrderStatuses, Cause::Parse, &err),
+        Input::SystemActions(Err(err)) => return lost(diagnostics, book, marks, Stream::SystemActions, Cause::Parse, &err),
+        Input::BlockActions(Err(err), _, _) => return lost(diagnostics, book, marks, Stream::BlockActions, Cause::Parse, &err),
+        Input::Loss(stream, cause) => {
+            let (cause, error) = match cause {
+                WatchLoss::Positioning => (Cause::Positioning, "following the existing file from EOF; waiting for the first covering checkpoint"),
+                WatchLoss::Discard => (Cause::WatcherDiscard, "the watcher discarded or could not deliver input; waiting for a covering checkpoint"),
+            };
+            return lost(diagnostics, book, marks, stream, cause, &LineError { block: None, error: error.to_string() });
         }
     };
-    apply_assembly(book, marks, assembler, assembly)
+    apply_assembly(diagnostics, book, marks, assembler, assembly)
 }
 
 const ASSEMBLED_STREAMS: [Stream; 7] =
@@ -694,30 +702,29 @@ const ASSEMBLED_STREAMS: [Stream; 7] =
 
 /// Applies complete blocks. Funding first reads the preceding stored oracles; marks then consume this block's
 /// actions. Publication/query happens only after both owners reach the same height.
-fn apply_assembly(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &BlockAssembler, assembly: Assembly) -> Touched {
+fn apply_assembly(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, marks: &mut NodeMarks, assembler: &BlockAssembler, assembly: Assembly) -> Touched {
     let Assembly { completed, lost: dropped, duplicates, missing_actions, overflowed_to } = assembly;
     for (stream, count) in duplicates {
         ACCOUNTS_DUPLICATE_INPUTS_TOTAL.with_label_values(&[stream.label()]).inc_by(count as u64);
     }
-    // one record per stream and input: a gap or an overflow drops many held blocks at once
+    // Every loss still reaches both validity owners. Only repeated diagnostic text is coalesced.
     for stream in ASSEMBLED_STREAMS {
-        let blocks: Vec<u64> = dropped.iter().filter(|(of, _)| *of == stream).map(|(_, block)| *block).collect();
-        if let Some(highest) = blocks.iter().max() {
-            let error = format!(
-                "{} inputs up to block {highest} will not be applied: their block was released already (a node replay \
-                 or a broken write order) or dropped with a gap or an overflow",
-                blocks.len()
-            );
-            lost(book, marks, stream, "late_or_dropped", &LineError { block: Some(*highest), error });
+        let (count, highest) = dropped.iter().filter(|(of, _)| *of == stream)
+            .fold((0_usize, None::<u64>), |(count, high), (_, block)| (count + 1, Some(high.map_or(*block, |old| old.max(*block)))));
+        if let Some(highest) = highest {
+            diagnostics.report(Some(stream), Cause::LateOrDropped, Some(highest), || format!(
+                "{count} inputs cannot join released blocks; node replay, late arrival or an earlier gap/overflow; continuity unproven"));
+            ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), "late_or_dropped"]).inc();
+            record_lost_block(book, marks, stream, highest);
         }
     }
     if let Some((first, last)) = missing_actions {
-        error!("accounts block_actions data loss (height_gap): blocks {first} to {last} never arrived");
+        diagnostics.report(Some(Stream::BlockActions), Cause::HeightGap, Some(last), || format!("blocks {first} to {last} were not available to this replay"));
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::BlockActions.label(), "height_gap"]).inc();
         record_lost_block(book, marks, Stream::BlockActions, last);
     }
     if let Some(block) = overflowed_to {
-        error!("accounts data loss (pending_overflow): the pending blocks overflowed and were dropped up to {block}");
+        diagnostics.report(None, Cause::PendingOverflow, Some(block), || "pending block assembly exceeded its bound; affected inputs withdrawn".into());
         for stream in ASSEMBLED_STREAMS {
             ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), "pending_overflow"]).inc();
             record_lost_block(book, marks, stream, block);
@@ -730,36 +737,39 @@ fn apply_assembly(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &Blo
         let mark_fills = fills.iter().flat_map(Batch::events_ref).map(BlockFill::of).collect();
         let inputs = MarkInputs { hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions, fills: mark_fills };
         let accounts = book.apply_block(actions, fills, misc_events, |coin| marks.funding_oracle(height, coin));
-        report_marks_block(height, marks.apply_block(height, inputs));
-        touched.absorb(report_block(accounts));
+        report_marks_block(diagnostics, height, marks.apply_block(height, inputs));
+        touched.absorb(report_block(diagnostics, height, accounts));
         ACCOUNTS_APPLIED_HEIGHT.set(height.cast_signed());
     }
     ACCOUNTS_PENDING_BLOCKS.set((assembler.pending_blocks() as u64).cast_signed());
     touched
 }
 
-fn report_block(report: BlockReport) -> Touched {
+fn report_block(diagnostics: &mut AccountDiagnostics, height: u64, report: BlockReport) -> Touched {
     let BlockReport { block_actions, fills, misc_events } = report;
-    let mut touched = report_block_actions(block_actions);
+    let mut touched = report_block_actions(diagnostics, height, block_actions);
     for report in fills {
-        touched.absorb(report_fills(report));
+        touched.absorb(report_fills(diagnostics, height, report));
     }
     for report in misc_events {
-        touched.absorb(report_misc(report));
+        touched.absorb(report_misc(diagnostics, height, report));
     }
     touched
 }
 
 /// One `ACCOUNTS_EVIDENCE` line (see `evidence.rs`).
 fn record_evidence(evidence: &serde_json::Value) {
-    warn!("ACCOUNTS_EVIDENCE {evidence}");
     let kind = evidence["kind"].as_str().unwrap_or("unlabelled");
+    match kind {
+        "rareLine" | "nodeMarkAmbiguousCut" => info!("ACCOUNTS_EVIDENCE {evidence}"),
+        _ => warn!("ACCOUNTS_EVIDENCE {evidence}"),
+    }
     ACCOUNTS_EVIDENCE_TOTAL.with_label_values(&[kind]).inc();
 }
 
-fn lost(book: &mut AccountBook, marks: &mut NodeMarks, stream: Stream, reason: &str, err: &LineError) -> Touched {
-    let at = err.block.map_or_else(|| "of unknown blocks".to_string(), |block| format!("of block {block}"));
-    error!("accounts {} data loss ({reason}) {at}: {}", stream.label(), err.error);
+fn lost(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, marks: &mut NodeMarks, stream: Stream, cause: Cause, err: &LineError) -> Touched {
+    diagnostics.report(Some(stream), cause, err.block, || err.error.clone());
+    let reason = if cause == Cause::Positioning { "watcher_discard" } else { cause.label() };
     ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), reason]).inc();
     if let Some(block) = err.block {
         record_lost_block(book, marks, stream, block);
@@ -777,7 +787,7 @@ fn record_lost_block(book: &mut AccountBook, marks: &mut NodeMarks, stream: Stre
     marks.record_lost_block(stream, block);
 }
 
-fn report_marks_block(height: u64, report: MarksBlockReport) {
+fn report_marks_block(diagnostics: &mut AccountDiagnostics, height: u64, report: MarksBlockReport) {
     let MarksBlockReport { unknown_coin_updates, unknown_coin_diffs, errors, log_overflowed, ambiguous_cuts, ambiguous_samples } =
         report;
     NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label()]).inc_by(unknown_coin_updates as u64);
@@ -786,71 +796,72 @@ fn report_marks_block(height: u64, report: MarksBlockReport) {
     for cut in &ambiguous_samples {
         record_evidence(&ambiguous_cut_json(height, cut));
     }
-    report_contract_errors(&errors, "");
+    report_reconstruction_errors(diagnostics, &errors, height, "live");
     if log_overflowed {
-        error!("node marks data loss (mark_log_overflow): the input log overflowed at block {height}");
+        diagnostics.report(None, Cause::LogOverflow, Some(height), || "node mark input log exceeded its bound".into());
         for stream in MARK_STREAMS {
             ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), "mark_log_overflow"]).inc();
         }
     }
 }
 
-/// Inputs the marks could not apply; `when` says where they were met (empty while applying the block).
-fn report_contract_errors(errors: &[(Stream, String)], when: &str) {
+/// Inputs our reconstruction could not apply. The diagnostic names the replay phase, not an upstream protocol verdict.
+fn report_reconstruction_errors(diagnostics: &mut AccountDiagnostics, errors: &[(Stream, String)], height: u64, when: &str) {
     for (stream, err) in errors {
-        error!("accounts {} data loss (contract{when}): {err}", stream.label());
+        diagnostics.report(Some(*stream), Cause::Reconstruction, Some(height), || format!("{when}: {err}; reconstruction withheld, upstream protocol violation not established"));
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), "contract"]).inc();
     }
 }
 
-fn report_fills(report: FillsReport) -> Touched {
+fn report_fills(diagnostics: &mut AccountDiagnostics, height: u64, report: FillsReport) -> Touched {
     if report.stale {
         ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL.inc();
     }
     if report.hold_overflowed {
-        error!("accounts fills data loss (hold_overflow): the hold of fills outside the anchor universe overflowed");
+        diagnostics.report(Some(Stream::Fills), Cause::HeldOverflow, Some(height), || "held fills outside the anchor universe exceeded their bound".into());
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Fills.label(), "hold_overflow"]).inc();
     }
     for err in &report.errors {
-        error!("accounts fills data loss (size_contract): {err}");
+        diagnostics.report(Some(Stream::Fills), Cause::SizeReconstruction, Some(height), || err.clone());
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Fills.label(), "size_contract"]).inc();
     }
-    report_dropped_marks(report.marks_dropped);
+    report_dropped_marks(diagnostics, height, report.marks_dropped);
     report.touched
 }
 
 /// Oldest change-mark events dropped for room: hours without an anchor (losses up to their blocks are recorded).
-fn report_dropped_marks(dropped: usize) {
+fn report_dropped_marks(diagnostics: &mut AccountDiagnostics, height: u64, dropped: usize) {
     if dropped > 0 {
-        error!("accounts data loss (mark_log_overflow): {dropped} oldest change-mark events dropped");
+        diagnostics.report(None, Cause::LogOverflow, Some(height), || format!("account event log discarded {dropped} oldest events"));
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&["marks", "mark_log_overflow"]).inc_by(dropped as u64);
     }
 }
 
-fn report_misc(report: MiscReport) -> Touched {
+fn report_misc(diagnostics: &mut AccountDiagnostics, height: u64, report: MiscReport) -> Touched {
     for error in &report.funding_errors {
-        warn!("accounts funding balance unavailable (affected cash replay withdrawn): {error}");
+        diagnostics.report(Some(Stream::MiscEvents), Cause::FundingDependency, Some(height), || format!("affected account cash replay withdrawn: {error}"));
     }
     ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL.inc_by(report.unknown_events as u64);
     for kind in &report.new_unknown_kinds {
         warn!("accounts: unknown misc event kind {kind:?} (skipped; counted from now on)");
     }
-    report_dropped_marks(report.marks_dropped);
+    report_dropped_marks(diagnostics, height, report.marks_dropped);
     report.touched
 }
 
-fn report_block_actions(report: BlockActionsReport) -> Touched {
+fn report_block_actions(diagnostics: &mut AccountDiagnostics, height: u64, report: BlockActionsReport) -> Touched {
     if let Some((first, last)) = report.missing {
-        error!("accounts block_actions data loss (height_gap): blocks {first} to {last} never arrived");
+        diagnostics.report(Some(Stream::BlockActions), Cause::HeightGap, Some(last), || format!("blocks {first} to {last} were not available to this replay"));
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::BlockActions.label(), "height_gap"]).inc();
     }
-    report_dropped_marks(report.marks_dropped);
+    report_dropped_marks(diagnostics, height, report.marks_dropped);
     report.touched
 }
 
 /// A poller message: a parsed anchor is held until `AccountBook::anchor_ready` and then installed (a newer one replaces
 /// a held one), its seed likewise until `NodeMarks::seed_ready`; returns whether an anchor was installed.
 fn receive_anchor(
+    diagnostics: &mut AccountDiagnostics,
     book: &mut AccountBook,
     marks: &mut NodeMarks,
     held: &mut Option<Box<ParsedAnchor>>,
@@ -859,12 +870,12 @@ fn receive_anchor(
 ) -> bool {
     match message {
         AnchorMessage::Parsed { parsed, seed } => {
-            receive_seed(marks, held_seed, parsed.anchor.height, seed);
+            receive_seed(diagnostics, marks, held_seed, parsed.anchor.height, seed);
             if let Some(replaced) = held.replace(parsed) {
-                warn!("accounts: anchor {} replaced while waiting for its blocks", replaced.anchor.height);
+                info!("accounts: anchor {} superseded while waiting for its blocks", replaced.anchor.height);
                 ACCOUNTS_ANCHOR_SKIPPED_TOTAL.inc();
             }
-            let installed = install_ready(book, held);
+            let installed = install_ready(diagnostics, book, held);
             if let Some(waiting) = held {
                 info!("accounts: anchor {} waits until its blocks are applied", waiting.anchor.height);
             }
@@ -881,6 +892,7 @@ fn receive_anchor(
 }
 
 fn receive_seed(
+    diagnostics: &mut AccountDiagnostics,
     marks: &mut NodeMarks,
     held_seed: &mut Option<Box<MarkSeed>>,
     height: u64,
@@ -889,12 +901,12 @@ fn receive_seed(
     match seed {
         Ok(seed) => {
             if let Some(replaced) = held_seed.replace(seed) {
-                warn!("node marks: seed {} replaced while waiting for its blocks", replaced.height);
+                info!("node marks: seed {} superseded while waiting for its blocks", replaced.height);
             }
-            install_seed_ready(marks, held_seed);
+            install_seed_ready(diagnostics, marks, held_seed);
         }
         Err(error) => {
-            error!("node marks: the seed of checkpoint {height} breaks its contract, withholding the marks: {error}");
+            error!("node marks: checkpoint {height} cannot seed our reconstruction, withholding the marks: {error}");
             NODE_MARKS_SEED_FAILURES_TOTAL.inc();
             marks.record_seed_failure(height, error);
         }
@@ -902,15 +914,15 @@ fn receive_seed(
 }
 
 /// Installs the held seed once the marks are ready for it.
-fn install_seed_ready(marks: &mut NodeMarks, held_seed: &mut Option<Box<MarkSeed>>) {
+fn install_seed_ready(diagnostics: &mut AccountDiagnostics, marks: &mut NodeMarks, held_seed: &mut Option<Box<MarkSeed>>) {
     let Some(seed) = held_seed.take_if(|seed| marks.seed_ready(seed.height)) else {
         return;
     };
     let height = seed.height;
-    log_marks_install(height, &marks.install(*seed));
+    log_marks_install(diagnostics, height, &marks.install(*seed));
 }
 
-fn log_marks_install(height: u64, report: &MarksInstallReport) {
+fn log_marks_install(diagnostics: &mut AccountDiagnostics, height: u64, report: &MarksInstallReport) {
     let MarksInstallReport { previous_seed, check, rebuild, errors } = report;
     let rebuild_label = match rebuild {
         Rebuild::Replayed { .. } => "replayed",
@@ -981,18 +993,18 @@ fn log_marks_install(height: u64, report: &MarksInstallReport) {
             }
         }
     }
-    report_contract_errors(errors, &format!(", replayed at seed {height}"));
+    report_reconstruction_errors(diagnostics, errors, height, "seed replay");
 }
 
 /// Installs the held anchor once the book is ready for it; returns whether it did.
-fn install_ready(book: &mut AccountBook, held: &mut Option<Box<ParsedAnchor>>) -> bool {
+fn install_ready(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, held: &mut Option<Box<ParsedAnchor>>) -> bool {
     let Some(parsed) = held.take_if(|parsed| book.anchor_ready(parsed.anchor.height)) else {
         return false;
     };
     let ParsedAnchor { anchor, parse_seconds, skipped } = *parsed;
     let height = anchor.height;
     let report = book.install_anchor(anchor);
-    log_install(height, parse_seconds, skipped, &report);
+    log_install(diagnostics, height, parse_seconds, skipped, &report);
     ACCOUNTS_ANCHOR_HEIGHT.set(height.cast_signed());
     ACCOUNTS_ANCHOR_PARSE_SECONDS.set(parse_seconds);
     ACCOUNTS_ANCHOR_SKIPPED_TOTAL.inc_by(skipped as u64);
@@ -1000,7 +1012,7 @@ fn install_ready(book: &mut AccountBook, held: &mut Option<Box<ParsedAnchor>>) -
     true
 }
 
-fn log_install(height: u64, parse_seconds: f64, skipped: usize, report: &InstallReport) {
+fn log_install(diagnostics: &mut AccountDiagnostics, height: u64, parse_seconds: f64, skipped: usize, report: &InstallReport) {
     info!(
         "accounts: installed anchor {height} (parsed in {parse_seconds:.2}s, {skipped} skipped): {} silent position \
          changes, {} held fills covered, {} replayed, {} records of coins that left the universe",
@@ -1010,14 +1022,14 @@ fn log_install(height: u64, parse_seconds: f64, skipped: usize, report: &Install
         record_evidence(&silent_change_json(change, report.previous_anchor, height));
     }
     if report.dropped_coin_records > 0 {
-        warn!("accounts: anchor {height} dropped {} records of coins no longer listed", report.dropped_coin_records);
+        info!("accounts: anchor {height} retired {} records of coins no longer listed", report.dropped_coin_records);
     }
     for err in &report.merge_errors {
-        error!("accounts fills data loss (anchor {height} merge): {err}");
+        diagnostics.report(Some(Stream::Fills), Cause::Merge, Some(height), || err.clone());
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Fills.label(), "merge"]).inc();
     }
     for err in &report.replay_errors {
-        error!("accounts fills data loss (size_contract, replayed at anchor {height}): {err}");
+        diagnostics.report(Some(Stream::Fills), Cause::SizeReconstruction, Some(height), || format!("anchor replay: {err}"));
         ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[Stream::Fills.label(), "size_contract"]).inc();
     }
     log_replay_check(height, report);
@@ -1191,7 +1203,7 @@ impl TestOwner {
     }
 
     pub(crate) async fn loss(&self, stream: Stream) {
-        self.inputs.send(Input::Loss(stream)).await.unwrap();
+        self.inputs.send(Input::Loss(stream, WatchLoss::Discard)).await.unwrap();
     }
 
     pub(crate) async fn anchor(&self, anchor: Anchor) {
@@ -1271,11 +1283,11 @@ mod tests {
         for height in blocks {
             let parsed = (BlockActions { height, time_ms: height * 1_000, actions: Vec::new() }, Err("an account test line".to_string()));
             let line = Input::BlockActions(Ok(parsed), Instant::now(), PairingDiagnostics::default());
-            apply_input(book, marks, assembler, line);
+            apply_input(&mut AccountDiagnostics::default(), book, marks, assembler, line);
         }
         let after = Instant::now() + Duration::from_micros(1);
         for stream in PROVING_STREAMS {
-            apply_input(book, marks, assembler, Input::ReadThrough(stream, after));
+            apply_input(&mut AccountDiagnostics::default(), book, marks, assembler, Input::ReadThrough(stream, after));
         }
     }
 
@@ -1299,24 +1311,24 @@ mod tests {
             start_skip_is_loss: true,
             layout: FileLayout::Hourly,
         };
-        let _watcher = spawn_line_watcher(stream, tx, None, misc_input, || Input::Loss(Stream::MiscEvents), None);
+        let _watcher = spawn_line_watcher(stream, tx, None, misc_input, |cause| Input::Loss(Stream::MiscEvents, cause), None);
         // let the watcher register its inotify watch before the first append
         thread::sleep(Duration::from_millis(200));
         let mut book = AccountBook::new(0);
         let mut marks = NodeMarks::new(TEST_GRID, 0);
         let mut assembler = BlockAssembler::default();
-        apply_input(&mut book, &mut marks, &mut assembler, fills_input(batch_line(1_200, "")));
+        apply_input(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut assembler, fills_input(batch_line(1_200, "")));
         complete_through(&mut book, &mut marks, &mut assembler, 1_200..=1_201);
         book.install_anchor(empty_anchor(1_300, now_ms()));
 
         append(&file, &ledger_line(1_500));
         let skipped = recv_within(&mut inputs, Duration::from_secs(2));
-        assert!(matches!(skipped, Input::Loss(Stream::MiscEvents)), "the positioning skip is reported");
-        apply_input(&mut book, &mut marks, &mut assembler, skipped);
+        assert!(matches!(skipped, Input::Loss(Stream::MiscEvents, WatchLoss::Positioning)), "the positioning skip is reported");
+        apply_input(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut assembler, skipped);
         append(&file, &ledger_line(1_202));
         let next = recv_within(&mut inputs, Duration::from_secs(2));
         assert!(matches!(next, Input::MiscEvents(Ok(_), None)), "lines after the skip flow");
-        apply_input(&mut book, &mut marks, &mut assembler, next);
+        apply_input(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut assembler, next);
         complete_through(&mut book, &mut marks, &mut assembler, 1_202..=1_203);
         assert_eq!(assembler.released(), Some(1_202));
         assert!(matches!(
@@ -1334,7 +1346,7 @@ mod tests {
         assert!(matches!(fills_input(ordinary.clone()), Input::Fills(Ok(_), None)));
         let rare = ordinary.replace("\"Open Long\"", "\"Auto-Deleveraging\"");
         let Input::Fills(Ok(_), Some(evidence)) = fills_input(rare.clone()) else { panic!("rare line without evidence") };
-        assert_eq!(evidence, LineEvidence { reason: "fill dir \"Auto-Deleveraging\"".to_string(), raw_line: rare });
+        assert_eq!(evidence, LineEvidence::new("fill dir \"Auto-Deleveraging\"".to_string(), &rare));
     }
 
     #[test]
@@ -1357,18 +1369,18 @@ mod tests {
         let mut book = trusted_book(&[(user(1), 5)]);
         let mut marks = NodeMarks::new(TEST_GRID, 0);
         let (mut held, mut held_seed) = (None, None);
-        assert!(!receive_anchor(&mut book, &mut marks, &mut held, &mut held_seed, parsed(1_002)), "block 1002 is not applied");
-        assert!(!receive_anchor(&mut book, &mut marks, &mut held, &mut held_seed, parsed(1_003)));
+        assert!(!receive_anchor(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut held, &mut held_seed, parsed(1_002)), "block 1002 is not applied");
+        assert!(!receive_anchor(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut held, &mut held_seed, parsed(1_003)));
         assert_eq!(held.as_ref().map(|held| held.anchor.height), Some(1_003), "the newer one is held");
         book.apply_block_actions(block_actions(1_001, &[]));
         book.apply_block_actions(block_actions(1_002, &[]));
-        assert!(!install_ready(&mut book, &mut held));
+        assert!(!install_ready(&mut AccountDiagnostics::default(), &mut book, &mut held));
         assert_eq!(installed_height(&book), Ok(1_000));
         book.apply_block_actions(block_actions(1_003, &[]));
-        assert!(install_ready(&mut book, &mut held));
+        assert!(install_ready(&mut AccountDiagnostics::default(), &mut book, &mut held));
         assert_eq!((installed_height(&book), held.is_none()), (Ok(1_003), true));
         book.apply_block_actions(block_actions(1_004, &[]));
-        assert!(receive_anchor(&mut book, &mut marks, &mut held, &mut held_seed, parsed(1_004)), "applied already: installs at once");
+        assert!(receive_anchor(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut held, &mut held_seed, parsed(1_004)), "applied already: installs at once");
     }
 
     #[test]
@@ -1571,10 +1583,10 @@ mod tests {
         let mut assembler = BlockAssembler::default();
         let account_before = book.availability().map(|_| ());
         let actions = MarkActions { height: 1_002, time_ns: 0, actions: Vec::new() };
-        apply_input(&mut book, &mut marks, &mut assembler,
+        apply_input(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut assembler,
             Input::BlockActions(Ok((block_actions(1_002, &[]), Ok(actions))), Instant::now(), PairingDiagnostics::default()));
         assert_eq!(marks.availability(), Ok(1_001));
-        apply_input(&mut book, &mut marks, &mut assembler, system_actions_input(batch_line(1_000, "")));
+        apply_input(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut assembler, system_actions_input(batch_line(1_000, "")));
         let loss = Unavailable::DataLoss { stream: Stream::SystemActions, bound: LossBound::Block(1_000) };
         assert_eq!(marks.availability(), Err(loss.clone()));
         assert_eq!(marks.price_snapshot(), Err(loss.clone()), "local marks must not consume the invalid state");
@@ -1583,6 +1595,25 @@ mod tests {
         assert_eq!(marks.availability(), Err(loss), "a seed before the dropped block cannot recover it");
         marks.install(marks_seed(1_001));
         assert_eq!(marks.availability(), Ok(1_001));
+    }
+
+    #[test]
+    fn coalesced_late_input_reports_keep_every_loss_and_cannot_restore_state() {
+        use crate::accounts::{marks::tests::trusted_marks, test_support::{trusted_book, user}};
+        let mut book = trusted_book(&[(user(1), 5)]);
+        let mut marks = trusted_marks();
+        let mut diagnostics = AccountDiagnostics::default();
+        for block in 1_002..=1_101 {
+            apply_assembly(&mut diagnostics, &mut book, &mut marks, &BlockAssembler::default(),
+                Assembly { lost: vec![(Stream::Fills, block)], ..Assembly::default() });
+        }
+        let expected = Unavailable::DataLoss { stream: Stream::Fills, bound: LossBound::Block(1_101) };
+        assert_eq!(book.availability(), Err(expected.clone()));
+        assert_eq!(marks.availability(), Err(expected.clone()));
+        // Even clearing the diagnostic episode is incapable of restoring either validity owner.
+        diagnostics.tick(Instant::now(), Some(1_101));
+        assert_eq!(book.availability(), Err(expected.clone()));
+        assert_eq!(marks.availability(), Err(expected));
     }
 
     #[test]
@@ -1597,7 +1628,7 @@ mod tests {
             misc_events: vec![misc(1_002, &[&funding])], hip3_oracle_updates: Vec::new(), book_diffs: Vec::new(),
             mark_actions: Err("this block's price actions cannot be reconstructed".to_string()),
             order_statuses: Vec::new(), system_actions: Vec::new() };
-        apply_assembly(&mut book, &mut marks, &BlockAssembler::default(),
+        apply_assembly(&mut AccountDiagnostics::default(), &mut book, &mut marks, &BlockAssembler::default(),
             Assembly { completed: vec![block], ..Assembly::default() });
         assert!(marks.availability().is_err());
         let view = book.coin_positions(PUMP, None).unwrap();

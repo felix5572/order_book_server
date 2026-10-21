@@ -16,6 +16,7 @@ pub(crate) mod candidates_view;
 pub(crate) mod book;
 mod checkpoint;
 mod cooldown;
+mod diagnostics;
 mod evidence;
 mod funding;
 pub(crate) mod forced_flow;

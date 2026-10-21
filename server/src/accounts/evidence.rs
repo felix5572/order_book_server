@@ -1,11 +1,6 @@
-//! Rare events kept as first-hand evidence. Backstop liquidation and ADL happen only in extreme markets, so their raw
-//! data must already be on record the day one happens: each piece is one `ACCOUNTS_EVIDENCE <json>` log line at WARN,
-//! counted by kind in `orderbook_accounts_evidence_total`. Line evidence carries the raw node line it came from.
-//!
-//! "Ordinary" below is what one full hour of 2026-10-19 contained; anything else, and every non-market liquidation or
-//! `liquidation` ledger record (the documented backstop record), is evidence. A non-market liquidation names its `dir`
-//! too: ADL fills carry method `backstop` with dir `Auto-Deleveraging`, and the liquidated side of the same trade the
-//! same method with dir `Liquidated Cross …` (official fills of 2025-10-10, Codex handoff `adl_replay_20261020`).
+//! Bounded research samples and checkpoint mismatch evidence. A rare business event is not a protocol error.
+//! Full wire facts belong to the node's original stream archive; logs retain an explicitly truncated excerpt,
+//! byte length and a bounded reason. The runtime independently limits how many research samples it writes.
 
 use serde_json::json;
 
@@ -43,8 +38,9 @@ const ORDINARY_FILL_DIRS: [&str; 13] = [
 ];
 /// The only liquidation method of 752 liquidation fills (2026-10-16..19).
 const MARKET_LIQUIDATION: &str = "market";
-/// `LedgerUpdate` delta types of 2026-10-19 06:00-07:00 UTC (3,298 updates). `liquidation` is never ordinary.
-const ORDINARY_LEDGER_TYPES: [&str; 15] = [
+/// Baseline ledger types from 2026-10-19 (3,298 updates), plus the verified vault-distribution path.
+/// Other types, including liquidation, remain research targets; this is not a protocol-validity whitelist.
+const ORDINARY_LEDGER_TYPES: [&str; 16] = [
     "accountClassTransfer",
     "borrowLend",
     "spotTransfer",
@@ -60,6 +56,7 @@ const ORDINARY_LEDGER_TYPES: [&str; 15] = [
     "withdraw",
     "vaultDeposit",
     "vaultLeaderCommission",
+    "vaultDistribution",
 ];
 
 /// Why a fills line is evidence, if it is.
@@ -71,10 +68,11 @@ pub(crate) fn fill_line_reason(batch: &Batch<NodeDataFill>) -> Option<String> {
             if let Some(liquidation) = &fill.liquidation
                 && liquidation.method != MARKET_LIQUIDATION
             {
-                return Some(format!("liquidation method {:?} dir {:?}", liquidation.method, fill.dir));
+                return Some(format!("liquidation method {:?} dir {:?}", bounded_prefix(&liquidation.method, 256), bounded_prefix(&fill.dir, 256)));
             }
-            (!ORDINARY_FILL_DIRS.contains(&fill.dir.as_str())).then(|| format!("fill dir {:?}", fill.dir))
+            (!ORDINARY_FILL_DIRS.contains(&fill.dir.as_str())).then(|| format!("fill dir {:?}", bounded_prefix(&fill.dir, 256)))
         })
+        .take(4)
         .collect();
     (!reasons.is_empty()).then(|| reasons.join("; "))
 }
@@ -86,25 +84,38 @@ pub(crate) fn misc_line_reason(batch: &Batch<MiscEvent>) -> Option<String> {
         .iter()
         .filter_map(|event| match event {
             MiscEvent::Ledger { delta, .. } if !ORDINARY_LEDGER_TYPES.contains(&delta.delta_type()) => {
-                Some(format!("ledger type {:?}", delta.delta_type()))
+                Some(format!("ledger type {:?}", bounded_prefix(delta.delta_type(), 256)))
             }
-            MiscEvent::Unknown(kind) => Some(format!("misc kind {kind:?}")),
+            MiscEvent::Unknown(kind) => Some(format!("misc kind {:?}", bounded_prefix(kind, 256))),
             MiscEvent::Ledger { .. } | MiscEvent::Funding(_) | MiscEvent::Irrelevant => None,
         })
+        .take(4)
         .collect();
     (!reasons.is_empty()).then(|| reasons.join("; "))
 }
 
-/// A node line kept whole because of `reason`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LineEvidence {
-    pub(crate) reason: String,
-    pub(crate) raw_line: String,
+/// A byte-bounded UTF-8 prefix; never pretend a truncated wire excerpt is a complete JSON document.
+fn bounded_prefix(text: &str, limit: usize) -> &str {
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) { end -= 1; }
+    &text[..end]
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LineEvidence {
+    reason: String,
+    raw_prefix: String,
+    original_bytes: usize,
+}
 impl LineEvidence {
+    pub(crate) fn new(reason: String, raw_line: &str) -> Self {
+        let reason = if reason.len() > 1024 { format!("{} [reason truncated]", bounded_prefix(&reason, 1024)) } else { reason };
+        Self { reason, raw_prefix: bounded_prefix(raw_line, 4096).to_string(), original_bytes: raw_line.len() }
+    }
     pub(crate) fn json(&self, stream: &str, block: u64) -> serde_json::Value {
-        json!({"kind": "rareLine", "stream": stream, "block": block, "reason": self.reason, "rawLine": self.raw_line})
+        json!({"kind": "rareLine", "category": "researchSample", "stream": stream, "block": block,
+            "reason": self.reason, "rawLine": self.raw_prefix, "rawLineOriginalBytes": self.original_bytes,
+            "rawLineTruncated": self.raw_prefix.len() < self.original_bytes})
     }
 }
 
@@ -249,6 +260,31 @@ mod tests {
         assert_eq!(misc_line_reason(&misc(1_100, &[&liquidation])).as_deref(), Some("ledger type \"liquidation\""));
         assert_eq!(misc_line_reason(&misc(1_100, &[r#"{"NewKind":{}}"#])).as_deref(), Some("misc kind \"NewKind\""));
         assert_eq!(misc_line_reason(&misc(1_100, &[r#"{"Funding":{"deltas":[]}}"#])), None);
+    }
+
+    #[test]
+    fn research_excerpt_is_bounded_before_it_enters_the_runtime_queue() {
+        let raw = "测".repeat(100_000);
+        let evidence = LineEvidence::new("a business event".into(), &raw);
+        assert!(evidence.raw_prefix.len() <= 4096);
+        let wire = evidence.json("fills", 1_100);
+        assert_eq!(wire["rawLineOriginalBytes"], raw.len());
+        assert_eq!(wire["rawLineTruncated"], true);
+        assert_eq!(wire["category"], "researchSample");
+        let short = LineEvidence::new("reason".into(), "{}").json("fills", 1_100);
+        assert_eq!(short["rawLine"], "{}");
+        assert_eq!(short["rawLineTruncated"], false);
+    }
+
+    #[test]
+    fn repeated_adl_directions_do_not_make_an_unbounded_reason() {
+        let ordinary = fills_line(1_100, &[(user(1), PUMP, "B", 1, "0.0", "1.0")]);
+        let adl = ordinary.replace("\"Open Long\"", "\"Auto-Deleveraging\"");
+        let mut wire: serde_json::Value = serde_json::from_str(&adl).unwrap();
+        let event = wire["events"][0].clone();
+        wire["events"] = json!(vec![event; 10_000]);
+        let reason = fill_line_reason(&fills_batch(&wire.to_string())).unwrap();
+        assert!(reason.len() < 200);
     }
 
     #[test]

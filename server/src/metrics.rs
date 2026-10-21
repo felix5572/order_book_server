@@ -182,6 +182,16 @@ lazy_static! {
         "Oracle update lines lost (watcher discard or oversize batch drop)"
     ).unwrap();
 
+    /// Every failed open/read, including retries coalesced in the log until file I/O succeeds.
+    pub static ref NODE_FILE_IO_ERRORS_TOTAL: IntCounterVec = {
+        #[expect(clippy::expect_used, reason = "the metric name and label descriptor are static valid Prometheus names")]
+        let counter = IntCounterVec::new(
+            Opts::new("orderbook_node_file_io_errors_total", "Node stream file I/O failures including repeated retries"),
+            &["operation"]
+        ).expect("metric can be created");
+        counter
+    };
+
     /// Seconds from the node writing a line (its `local_time`, same host clock) to
     /// a stage here: `read` = the watcher read it (newest line of each read),
     /// `apply` = the batch was applied to the book (once per book batch),
@@ -439,9 +449,19 @@ lazy_static! {
     ).expect("metric can be created");
 
     pub static ref ACCOUNTS_DATA_LOSS_TOTAL: IntCounterVec = IntCounterVec::new(
-        Opts::new("orderbook_accounts_data_loss_total", "Account stream data losses"),
+        Opts::new("orderbook_accounts_data_loss_total", "Input/replay validity observations, including startup positioning (legacy metric name)"),
         &["stream", "reason"]
     ).expect("metric can be created");
+
+    /// Every diagnostic observation, including those coalesced instead of written to the log.
+    pub static ref ACCOUNTS_DIAGNOSTIC_EVENTS_TOTAL: IntCounterVec = {
+        #[expect(clippy::expect_used, reason = "the metric name and label descriptor are static valid Prometheus names")]
+        let counter = IntCounterVec::new(
+            Opts::new("orderbook_accounts_diagnostic_events_total", "Diagnostic observations by category, cause and sampling result"),
+            &["category", "cause", "output"]
+        ).expect("metric can be created");
+        counter
+    };
 
     /// First-hand evidence of rare events logged as `ACCOUNTS_EVIDENCE` lines, by kind.
     pub static ref ACCOUNTS_EVIDENCE_TOTAL: IntCounterVec = IntCounterVec::new(
@@ -660,6 +680,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(L2_BROADCAST_LATENCY.clone())).ok();
     REGISTRY.register(Box::new(L2_FLUSH_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_LINE_LAG.clone())).ok();
+    REGISTRY.register(Box::new(NODE_FILE_IO_ERRORS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(L2_CONFLATION_BATCH_SIZE.clone())).ok();
     REGISTRY.register(Box::new(EVENT_PROCESSING_LATENCY.clone())).ok();
 
@@ -717,6 +738,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ACCOUNTS_PENDING_BLOCKS.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_EVIDENCE_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_DIAGNOSTIC_EVENTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_AVAILABLE.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_SEED_HEIGHT.clone())).ok();
