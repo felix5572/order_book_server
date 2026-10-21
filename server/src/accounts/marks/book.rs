@@ -17,7 +17,10 @@ use super::{
     seed::{NativeSeed, RestingOrder},
 };
 use crate::{
-    accounts::{checkpoint::MAX_PERP_DECIMALS, size::parse_size_raw},
+    accounts::{
+        checkpoint::{MAX_PERP_DECIMALS, SPOT_ORDER_ASSET_OFFSET, spot_pair_of_coin},
+        size::parse_size_raw,
+    },
     order_book::Side,
     types::{OrderDiff, node_data::NodeDataOrderDiff},
 };
@@ -214,6 +217,16 @@ impl NativeBooks {
         self.by_coin.get(coin).copied()
     }
 
+    /// The asset id an order on `coin` names: a main-dex perp of the universe its index, any spot pair
+    /// `SPOT_ORDER_ASSET_OFFSET` plus its index; `None` for other markets (HIP-3, outcomes) and coins listed since.
+    pub(crate) fn order_asset(&self, coin: &str) -> Option<u32> {
+        if is_main_perp(coin) {
+            return self.book(coin).and_then(|index| u32::try_from(index).ok());
+        }
+        let pair = u32::try_from(spot_pair_of_coin(coin)?).ok()?;
+        SPOT_ORDER_ASSET_OFFSET.checked_add(pair)
+    }
+
     /// The book index of the spot book giving main-dex asset `asset` its Spot reference.
     pub(crate) fn spot_reference(&self, asset: usize) -> Option<usize> {
         self.spot_reference.get(&asset).copied()
@@ -362,6 +375,13 @@ pub(crate) mod tests {
         let update = diff("PUMP", 5, "A", "0.004", r#"{"update":{"origSz":"2460032.6","newSz":"2460032.5999999996"}}"#);
         assert_eq!(books.apply(&update), Ok(Applied::Book(1)));
         assert_eq!(books.books[1].orders[&5].remaining, 24_600_326);
+    }
+
+    #[test]
+    fn orders_name_main_perps_by_index_and_spot_pairs_past_the_offset() {
+        let books = NativeBooks::seeded(spot_referenced_seed());
+        let assets: Vec<Option<u32>> = ["BTC", "PUMP", "@1", "@107", "PURR/USDC", "xyz:TSLA", "NEW", "#5"].iter().map(|coin| books.order_asset(coin)).collect();
+        assert_eq!(assets, [Some(0), Some(1), Some(10_001), Some(10_107), Some(10_000), None, None, None]);
     }
 
     #[test]

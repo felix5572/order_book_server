@@ -119,7 +119,10 @@ impl BlockInputs {
             Ok(actions) => out.actions = Some(actions),
             Err(err) => report.errors.push((Stream::BlockActions, err)),
         }
-        out.statuses = BlockStatuses::of(inputs.order_statuses.into_iter().flat_map(Batch::events));
+        match BlockStatuses::of(inputs.order_statuses.into_iter().flat_map(Batch::events)) {
+            Ok(statuses) => out.statuses = statuses,
+            Err(err) => report.errors.push((Stream::OrderStatuses, format!("block {height}: {err}"))),
+        }
         out.fills = inputs.fills;
         out
     }
@@ -240,7 +243,7 @@ impl MarkState {
         report: &mut MarksBlockReport,
     ) -> Result<(), String> {
         let books = &self.books;
-        for point in price_points(actions, &inputs.statuses, &inputs.diffs, &inputs.fills)? {
+        for point in price_points(actions, &inputs.statuses, &inputs.diffs, &inputs.fills, |coin| books.order_asset(coin))? {
             if point.cut.lo < point.cut.hi {
                 report.ambiguous_cuts += 1;
                 report.ambiguous_samples.push(AmbiguousCut { rank: point.action.rank, lo: point.cut.lo, hi: point.cut.hi });

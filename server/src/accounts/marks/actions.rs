@@ -9,6 +9,7 @@
 use alloy::primitives::Address;
 use serde::Deserialize;
 
+use super::decimal::ExactDecimal;
 use crate::accounts::{checkpoint::node_time_ns, replica::{PairedAction, ReplicaLine}};
 
 /// (bundle, category, position): actions run in this order.
@@ -51,6 +52,20 @@ pub(crate) struct BookAnchors {
     pub(crate) created_cloids: Vec<(String, u64)>,
     pub(crate) cancelled: Vec<u64>,
     pub(crate) cancelled_cloids: Vec<String>,
+    /// The orders it submitted that may trade on entry (limit orders but ALO: an ALO only rests, a trigger order waits),
+    /// whatever their status: a self-trade cancel names the action by its account, coin, the opposite side and a limit
+    /// reaching the removed order (bm block 1191373718: an IOC buy with an order error removed its account's resting
+    /// RUNE sell, while the account's ALO batch of the same bundle also bought RUNE; research
+    /// `rune_1191370000_1191380000`).
+    pub(crate) takers: Vec<Taker>,
+}
+
+/// An order that may trade on entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Taker {
+    pub(crate) asset: u32,
+    pub(crate) is_buy: bool,
+    pub(crate) limit_px: ExactDecimal,
 }
 
 impl MarkActions {
@@ -84,19 +99,21 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
     let (category, action) = match kind {
         "order" => {
             let orders: Vec<WireOrder> = action.field(action.orders.as_ref(), "orders")?;
-            (category(orders.iter().all(WireOrder::is_alo)), MarkAction::Book(created_by(&statuses()?)))
+            let anchors = BookAnchors { takers: takers(&orders)?, ..created_by(&statuses()?) };
+            (category(orders.iter().all(WireOrder::is_alo)), MarkAction::Book(anchors))
         }
         "modify" => {
             let order: WireOrder = action.field(action.order.as_ref(), "order")?;
             let old: OrderRef = action.field(action.oid.as_ref(), "oid")?;
-            let mut anchors = created_by(&statuses()?);
+            let mut anchors = BookAnchors { takers: takers(std::slice::from_ref(&order))?, ..created_by(&statuses()?) };
             old.add_to(&mut anchors);
             (category(order.is_alo()), MarkAction::Book(anchors))
         }
         "batchModify" => {
             let modifies: Vec<WireModify> = action.field(action.modifies.as_ref(), "modifies")?;
             let statuses = statuses()?;
-            let mut anchors = created_by(&statuses);
+            let orders: Vec<&WireOrder> = modifies.iter().map(|modify| &modify.order).collect();
+            let mut anchors = BookAnchors { takers: takers(orders)?, ..created_by(&statuses) };
             // only a modify that placed its new order replaced the old one (research method 2)
             if statuses.len() != modifies.len() {
                 return Err(format!("batchModify of {} modifies with {} statuses", modifies.len(), statuses.len()));
@@ -138,6 +155,11 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
         }
     };
     Ok(Some(RankedAction { rank: (paired.bundle, category, paired.position), user, action }))
+}
+
+/// The orders that may trade on entry; a limit price that does not read breaks the contract.
+fn takers<'o>(orders: impl IntoIterator<Item = &'o WireOrder>) -> Result<Vec<Taker>, String> {
+    orders.into_iter().filter_map(WireOrder::taker).collect()
 }
 
 const fn category(all_alo: bool) -> u8 {
@@ -208,6 +230,12 @@ impl WireStatus {
 
 #[derive(Deserialize)]
 struct WireOrder {
+    /// The asset id.
+    a: u32,
+    /// Is buy.
+    b: bool,
+    /// The limit price.
+    p: String,
     t: WireOrderType,
 }
 
@@ -225,6 +253,13 @@ impl WireOrder {
     /// An ALO limit order; a trigger order is not.
     fn is_alo(&self) -> bool {
         self.t.limit.as_ref().is_some_and(|limit| limit.tif == "Alo")
+    }
+
+    /// An order that may trade on entry: a limit order but ALO.
+    fn taker(&self) -> Option<Result<Taker, String>> {
+        self.t.limit.as_ref().filter(|limit| limit.tif != "Alo")?;
+        let limit_px = ExactDecimal::parse(&self.p).map_err(|err| format!("order price {err}"));
+        Some(limit_px.map(|limit_px| Taker { asset: self.a, is_buy: self.b, limit_px }))
     }
 }
 
@@ -321,17 +356,32 @@ pub(crate) mod tests {
             MarkAction::Book(anchors) => anchors.clone(),
             other => panic!("{other:?}"),
         };
-        assert_eq!(book(0).created, [5]);
+        let gtc_taker = Taker { asset: 0, is_buy: true, limit_px: ExactDecimal::parse("81349").unwrap() };
+        assert_eq!((book(0).created.as_slice(), book(0).takers.as_slice()), (&[5][..], &[gtc_taker][..]), "a GTC may take");
+        assert_eq!(book(1).takers, [], "an ALO only rests");
         assert_eq!(book(2).cancelled_cloids, ["0x0a"], "only the cancel that succeeded");
         let modified = BookAnchors {
             created: vec![8],
             created_cloids: vec![("0xfe63".to_string(), 8)],
             cancelled: vec![],
             cancelled_cloids: vec!["0xfe63".to_string()],
+            takers: Vec::new(),
         };
         assert_eq!(book(3), modified, "the failed modify of 77 removed nothing");
         assert_eq!(parsed.actions[4].action, MarkAction::SetGlobal(vec![Some(("81520".to_string(), "81503".to_string())), None]));
         assert_eq!(parsed.actions[4].user, Some(USER.parse().unwrap()));
+    }
+
+    /// bm block 1191373718 (research `rune_1191370000_1191380000`): an IOC that matched nothing has an order error for
+    /// a status and creates nothing, yet keeps its taking order, for the self-trade cancel it caused.
+    #[test]
+    fn an_order_with_an_order_error_keeps_its_taking_order() {
+        let ioc = r#"{"type":"order","orders":[{"a":41,"b":true,"p":"0.67331","s":"34.9","r":false,"t":{"limit":{"tif":"Ioc"}}}],"grouping":"na"}"#;
+        let error = r#"{"type":"order","data":{"statuses":[{"error":"Order could not immediately match against any resting orders. asset=41"}]}}"#;
+        let parsed = mark_actions(&replica_line(1_191_373_718, &[&[(ioc, &ok(error))]]));
+        let MarkAction::Book(anchors) = &parsed.actions[0].action else { panic!("{:?}", parsed.actions) };
+        let ioc_taker = Taker { asset: 41, is_buy: true, limit_px: ExactDecimal::parse("0.67331").unwrap() };
+        assert_eq!((anchors.created.as_slice(), anchors.takers.as_slice()), (&[][..], &[ioc_taker][..]));
     }
 
     #[test]

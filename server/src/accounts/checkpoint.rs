@@ -87,6 +87,18 @@ pub(crate) fn spot_pair_coin(pair: usize) -> String {
     if pair == 0 { SPOT_PAIR_ZERO_COIN.to_string() } else { format!("@{pair}") }
 }
 
+/// The spot pair a coin names (`spot_pair_coin` reversed); `None` for any other coin, or an `@` without an index.
+pub(crate) fn spot_pair_of_coin(coin: &str) -> Option<usize> {
+    if coin == SPOT_PAIR_ZERO_COIN {
+        return Some(0);
+    }
+    coin.strip_prefix('@')?.parse().ok()
+}
+
+/// An order's asset id (`a`) for spot pair `N` is this plus `N`; a main-dex perp's is its index (official "Asset IDs"
+/// page of the API docs).
+pub(crate) const SPOT_ORDER_ASSET_OFFSET: u32 = 10_000;
+
 #[derive(Debug)]
 pub(crate) struct DexMeta {
     /// "" for the main dex, else the coin prefix of a HIP-3 dex ("xyz").

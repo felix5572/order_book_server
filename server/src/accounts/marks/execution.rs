@@ -10,6 +10,20 @@
 //! An anchor of a later action before one of an earlier action contradicts the line order: the block breaks the
 //! contract.
 //!
+//! A self-trade cancel (`selfTradeCanceled`) removes a resting order inside the order that would have traded with it.
+//! Its remove anchors to a book action only when that action is the one possible cause:
+//! - the removed order was created in the block, by a book action: one resting before it could have met a block-start
+//!   taker the marks do not model, a TWAP slice (review 000452 r2);
+//! - the one book action after that creation of that account submitting an order that may take (a limit order but
+//!   ALO) on that coin's asset, the opposite side and a limit reaching the removed order, whatever its status, while
+//!   the creating action itself submits no such order (a batch's taker may remove its own sibling, review 000452 r3);
+//! - no order of the block's `triggered` statuses of that account, coin and opposite side reaches it (a triggered order
+//!   runs inside the `SetGlobalAction`, review 000452 r1).
+//!
+//! bm block 1191373718: the account's ALO batch created a RUNE sell, then its IOC buy of the same bundle, with an order
+//! error and no fill, removed it before the `SetGlobalAction` of the next bundle (the ALO batch also bought RUNE: an ALO
+//! takes nothing; research `rune_1191370000_1191380000`). Otherwise the remove anchors nothing, as before.
+//!
 //! A reference by cloid names the order holding the cloid when the action runs: a modify keeps the cloid on its new
 //! order, so one cloid can name several orders in a block (bm block 1190808326: a batchModify in bundle 0 and another in
 //! bundle 1 of the same cloid; resolving through the last cancelled status, as the research did, placed bundle 1's
@@ -27,10 +41,14 @@ use alloy::primitives::Address;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
-    actions::{MarkAction, MarkActions, Rank, RankedAction},
+    actions::{MarkAction, MarkActions, Rank, RankedAction, Taker},
     book::{BestPrices, BookDiff, DiffKind},
 };
-use crate::types::node_data::{NodeDataFill, NodeDataOrderStatus};
+use super::decimal::ExactDecimal;
+use crate::{
+    order_book::Side as OrderSide,
+    types::node_data::{NodeDataFill, NodeDataOrderStatus},
+};
 
 /// A fill of the block as the anchors read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,27 +85,60 @@ pub(crate) struct BlockStatuses {
     pub(crate) cancelled_cloids: FxHashMap<(Address, String), u64>,
     /// `triggered` statuses.
     pub(crate) triggered: FxHashSet<u64>,
+    /// The `triggered` statuses' orders: a possible cause of a self-trade cancel.
+    pub(crate) triggered_orders: Vec<StatusOrder>,
+    /// `selfTradeCanceled` statuses.
+    pub(crate) self_trade_cancelled: Vec<StatusOrder>,
+}
+
+/// An order as a status names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StatusOrder {
+    pub(crate) user: Address,
+    pub(crate) coin: Box<str>,
+    pub(crate) side: OrderSide,
+    pub(crate) limit_px: ExactDecimal,
+    pub(crate) oid: u64,
+}
+
+impl StatusOrder {
+    fn of(status: &NodeDataOrderStatus) -> Result<Self, String> {
+        let order = &status.order;
+        let limit_px = ExactDecimal::parse(&order.limit_px).map_err(|err| format!("{} status of oid {}: limit price {err}", status.status, order.oid))?;
+        Ok(Self { user: status.user, coin: order.coin.as_str().into(), side: order.side, limit_px, oid: order.oid })
+    }
+
+    /// Whether an order of the other side at `limit_px` reaches this resting order.
+    fn reached_by(&self, limit_px: ExactDecimal) -> bool {
+        match self.side {
+            OrderSide::Ask => limit_px >= self.limit_px,
+            OrderSide::Bid => limit_px <= self.limit_px,
+        }
+    }
 }
 
 impl BlockStatuses {
-    pub(crate) fn of(statuses: impl IntoIterator<Item = NodeDataOrderStatus>) -> Self {
+    /// A status whose limit price does not read breaks the contract.
+    pub(crate) fn of(statuses: impl IntoIterator<Item = NodeDataOrderStatus>) -> Result<Self, String> {
         let mut out = Self::default();
         for status in statuses {
-            match (status.status.as_str(), status.order.cloid) {
+            match (status.status.as_str(), &status.order.cloid) {
                 ("canceled", Some(cloid)) => {
-                    out.cancelled_cloids.entry((status.user, cloid)).or_insert(status.order.oid);
+                    out.cancelled_cloids.entry((status.user, cloid.clone())).or_insert(status.order.oid);
                 }
                 ("triggered", _) => {
                     out.triggered.insert(status.order.oid);
+                    out.triggered_orders.push(StatusOrder::of(&status)?);
                 }
+                ("selfTradeCanceled", _) => out.self_trade_cancelled.push(StatusOrder::of(&status)?),
                 _ => {}
             }
         }
-        out
+        Ok(out)
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.cancelled_cloids.len() + self.triggered.len()
+        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len()
     }
 }
 
@@ -112,12 +163,14 @@ pub(crate) struct PricePoint<'b> {
     pub(crate) cut: Cut,
 }
 
-/// The price actions of a block in execution order, each with its cut.
+/// The price actions of a block in execution order, each with its cut; `order_asset` gives a coin's asset id as an
+/// order names it (`None` for a market the marks cannot name).
 pub(crate) fn price_points<'b>(
     actions: &'b MarkActions,
     statuses: &BlockStatuses,
     diffs: &[BookDiff],
     fills: &[BlockFill],
+    order_asset: impl Fn(&str) -> Option<u32>,
 ) -> Result<Vec<PricePoint<'b>>, String> {
     let mut points: Vec<&RankedAction> = actions.actions.iter().filter(|action| !matches!(action.action, MarkAction::Book(_))).collect();
     if points.is_empty() {
@@ -126,7 +179,7 @@ pub(crate) fn price_points<'b>(
     points.sort_by_key(|action| action.rank);
     let set_globals: Vec<Rank> =
         points.iter().filter(|action| matches!(action.action, MarkAction::SetGlobal(_))).map(|action| action.rank).collect();
-    let cancelled = cancelled_by_action(actions, statuses);
+    let cancelled = cancelled_by_action(actions, statuses, order_asset);
     points
         .into_iter()
         .map(|action| {
@@ -144,8 +197,8 @@ struct Removing<'b> {
     cancelled: Vec<u64>,
 }
 
-/// Every book action's removed orders, by cloid as well, resolving the cloids in execution order.
-fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses) -> Vec<Removing<'b>> {
+/// Every book action's removed orders: by oid, by cloid (resolved in execution order) and by self-trade checks.
+fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses, order_asset: impl Fn(&str) -> Option<u32>) -> Vec<Removing<'b>> {
     let mut books: Vec<(&RankedAction, &super::actions::BookAnchors)> = actions
         .actions
         .iter()
@@ -157,7 +210,7 @@ fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses) -
     books.sort_by_key(|(action, _)| action.rank);
     let mut held: FxHashMap<(Address, &str), u64> = FxHashMap::default();
     let mut out = Vec::with_capacity(books.len());
-    for (action, book) in books {
+    for &(action, book) in &books {
         let mut cancelled = book.cancelled.clone();
         if let Some(user) = action.user {
             for cloid in &book.cancelled_cloids {
@@ -169,6 +222,32 @@ fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses) -
             }
         }
         out.push(Removing { rank: action.rank, created: &book.created, cancelled });
+    }
+    for cancel in &statuses.self_trade_cancelled {
+        let Some((creator, created_at)) = books.iter().find(|(_, book)| book.created.contains(&cancel.oid)).map(|(action, book)| (*book, action.rank))
+        else {
+            continue;
+        };
+        let Some(asset) = order_asset(&cancel.coin) else { continue };
+        let is_buy = cancel.side == OrderSide::Ask;
+        let reaches = |taker: &Taker| (taker.asset, taker.is_buy) == (asset, is_buy) && cancel.reached_by(taker.limit_px);
+        // an order of the creating batch itself may have removed its sibling (review 000452 r3)
+        if creator.takers.iter().any(reaches) {
+            continue;
+        }
+        let triggered_cause = statuses.triggered_orders.iter().any(|triggered| {
+            triggered.user == cancel.user && triggered.coin == cancel.coin && triggered.side != cancel.side && cancel.reached_by(triggered.limit_px)
+        });
+        if triggered_cause {
+            continue;
+        }
+        let mut causes = books
+            .iter()
+            .enumerate()
+            .filter(|(_, (action, book))| action.rank > created_at && action.user == Some(cancel.user) && book.takers.iter().any(reaches));
+        if let (Some((index, _)), None) = (causes.next(), causes.next()) {
+            out[index].cancelled.push(cancel.oid);
+        }
     }
     out
 }
@@ -398,6 +477,11 @@ mod tests {
         BlockFill { coin: "BTC".into(), px: "82850.0".into(), sz: "0.002".into(), crossed, oid, tid, twap: false }
     }
 
+    /// No coin named: the blocks of these tests carry no self-trade cancel.
+    fn no_asset(_: &str) -> Option<u32> {
+        None
+    }
+
     const NEW: &str = r#"{"new":{"sz":"0.001"}}"#;
     const REMOVE: &str = r#""remove""#;
 
@@ -421,7 +505,7 @@ mod tests {
             diff(13, NEW),
         ];
         let fills = [fill(1, 11, true), fill(1, 20, false)];
-        let points = price_points(&actions, &BlockStatuses::default(), &diffs, &fills).unwrap();
+        let points = price_points(&actions, &BlockStatuses::default(), &diffs, &fills, no_asset).unwrap();
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].cut, Cut { lo: 3, hi: 3, fills_lo: 2 }, "after the maker's remove, before the cancel");
     }
@@ -434,9 +518,9 @@ mod tests {
         let actions = MarkActions { height: 1, time_ns: 1, actions: vec![book((0, 3, 0), placed), set_global((1, 3, 0))] };
         let statuses = BlockStatuses { triggered: std::iter::once(30).collect(), ..BlockStatuses::default() };
         let diffs = [diff(31, NEW), diff(30, NEW)];
-        let points = price_points(&actions, &statuses, &diffs, &[]).unwrap();
+        let points = price_points(&actions, &statuses, &diffs, &[], no_asset).unwrap();
         assert_eq!((points[0].cut.lo, points[0].cut.hi), (0, 1));
-        let without = price_points(&actions, &BlockStatuses::default(), &diffs, &[]).unwrap();
+        let without = price_points(&actions, &BlockStatuses::default(), &diffs, &[], no_asset).unwrap();
         assert_eq!(without[0].cut.lo, 2, "as the placing action's");
     }
 
@@ -449,10 +533,118 @@ mod tests {
             cancelled_cloids: std::iter::once(((Address::repeat_byte(1), "0x0a".to_string()), 40)).collect(),
             ..BlockStatuses::default()
         };
-        let points = price_points(&actions, &statuses, &[diff(40, REMOVE), diff(41, NEW)], &[]).unwrap();
+        let points = price_points(&actions, &statuses, &[diff(40, REMOVE), diff(41, NEW)], &[], no_asset).unwrap();
         assert_eq!((points[0].cut.lo, points[0].cut.hi), (1, 1));
-        let error = price_points(&actions, &statuses, &[diff(41, NEW), diff(40, REMOVE)], &[]).unwrap_err();
+        let error = price_points(&actions, &statuses, &[diff(41, NEW), diff(40, REMOVE)], &[], no_asset).unwrap_err();
         assert!(error.contains("block 7 action at (1, 3, 0): diff anchors contradict the line order"), "{error}");
+    }
+
+    /// A self-trade cancel's remove runs inside the account's one order that could have taken it (that coin, the
+    /// opposite side, a limit reaching it); with none or several, or a triggered order of the block that could have taken
+    /// it too, it anchors nothing (research `rune_1191370000_1191380000`, review 000452 r1).
+    #[test]
+    fn a_self_trade_cancel_runs_inside_the_one_order_that_caused_it() {
+        let user = Address::repeat_byte(1);
+        let px = |text: &str| ExactDecimal::parse(text).unwrap();
+        let btc = |coin: &str| (coin == "BTC").then_some(0);
+        // the ALO batch also bought BTC: an ALO takes nothing, so it records no taker
+        let alo = || book((1, 1, 481), BookAnchors { created: vec![7], ..BookAnchors::default() });
+        let ioc = |rank, is_buy, limit: &str| {
+            book(rank, BookAnchors { takers: vec![Taker { asset: 0, is_buy, limit_px: px(limit) }], ..BookAnchors::default() })
+        };
+        let later = book((3, 1, 0), BookAnchors { created: vec![9], ..BookAnchors::default() });
+        let order = |oid, side, limit: &str| StatusOrder { user, coin: "BTC".into(), side, limit_px: px(limit), oid };
+        let removed = order(7, OrderSide::Ask, "82850.0");
+        let diffs = [diff(7, NEW), diff(7, REMOVE), diff(9, NEW)];
+        let cut = |actions: Vec<RankedAction>, triggered: Vec<StatusOrder>, asset: &dyn Fn(&str) -> Option<u32>| {
+            let statuses = BlockStatuses {
+                triggered: triggered.iter().map(|order| order.oid).collect(),
+                triggered_orders: triggered,
+                self_trade_cancelled: vec![removed.clone()],
+                ..BlockStatuses::default()
+            };
+            let actions = MarkActions { height: 1_191_373_718, time_ns: 1, actions };
+            let points = price_points(&actions, &statuses, &diffs, &[], asset).unwrap();
+            (points[0].cut.lo, points[0].cut.hi)
+        };
+        // bm block 1191373718: the IOC buy at 0.67331 (an order error, no fill) of bundle 1 removed the account's ALO
+        // sell at 0.67330; the SetGlobalAction of bundle 2 reads the book after it
+        let caused = vec![alo(), ioc((1, 3, 533), true, "82851"), set_global((2, 3, 0)), later.clone()];
+        assert_eq!(cut(caused.clone(), vec![], &btc), (2, 2), "after the remove");
+        assert_eq!(cut(caused.clone(), vec![], &no_asset), (1, 2), "a coin the marks cannot name: unplaced, as before");
+        let two = vec![alo(), ioc((1, 3, 533), true, "82851"), set_global((2, 3, 0)), ioc((2, 3, 5), true, "82850"), later.clone()];
+        assert_eq!(cut(two, vec![], &btc), (1, 2), "two orders could have caused it: unplaced");
+        let same_side = vec![alo(), ioc((1, 3, 533), false, "82851"), set_global((2, 3, 0)), later.clone()];
+        assert_eq!(cut(same_side, vec![], &btc), (1, 2), "a sell cannot trade with the account's own sell");
+        // review 000452 r1: an IOC buy that cannot reach the sell, and a buy the SetGlobalAction triggers that can
+        let short = vec![alo(), ioc((1, 3, 533), true, "80000"), set_global((2, 3, 0)), later];
+        let triggered_buy = order(30, OrderSide::Bid, "90000");
+        assert_eq!(cut(short, vec![triggered_buy.clone()], &btc), (1, 2), "the IOC could not have caused it");
+        assert_eq!(cut(caused.clone(), vec![triggered_buy], &btc), (1, 2), "a triggered buy could have caused it too");
+        assert_eq!(cut(caused, vec![order(30, OrderSide::Bid, "80000")], &btc), (2, 2), "a triggered buy that cannot reach it");
+        let early = book((0, 3, 0), BookAnchors { takers: vec![Taker { asset: 0, is_buy: true, limit_px: px("82851") }], ..BookAnchors::default() });
+        let before_creation = vec![early, alo(), set_global((2, 3, 0)), book((3, 1, 0), BookAnchors { created: vec![9], ..BookAnchors::default() })];
+        assert_eq!(cut(before_creation, vec![], &btc), (1, 2), "an IOC before the sell existed cannot have removed it");
+    }
+
+    /// Review 000452 r3: a batch creates the sell 7 and a buy 8 that reaches it; the account's later IOC reaching it too
+    /// is no proof against the batch's own buy, and the remove stays unanchored (the batch's new 8 places the price
+    /// action after the three lines).
+    #[test]
+    fn a_self_trade_cancel_the_creating_batch_could_have_caused_anchors_nothing() {
+        use crate::accounts::{
+            marks::actions::tests::{mark_actions, ok, replica_line},
+            test_support::status_line,
+        };
+        let user: Address = "0x00000000000000000000000000000000000000aa".parse().unwrap();
+        let batch = r#"{"type":"order","orders":[{"a":0,"b":false,"p":"82850","s":"0.001","r":false,"t":{"limit":{"tif":"Gtc"}}},{"a":0,"b":true,"p":"82851","s":"0.001","r":false,"t":{"limit":{"tif":"Gtc"}}}],"grouping":"na"}"#;
+        let placed = ok(r#"{"type":"order","data":{"statuses":[{"resting":{"oid":7}},{"resting":{"oid":8}}]}}"#);
+        let sga = r#"{"type":"SetGlobalAction","pxs":[["82800","82800"]]}"#;
+        let ioc = r#"{"type":"order","orders":[{"a":0,"b":true,"p":"82851","s":"0.001","r":false,"t":{"limit":{"tif":"Ioc"}}}],"grouping":"na"}"#;
+        let rejected = ok(r#"{"type":"order","data":{"statuses":[{"error":"Order could not immediately match against any resting orders. asset=0"}]}}"#);
+        let actions = mark_actions(&replica_line(9, &[&[(batch, &placed)], &[(sga, &ok(r#"{"type":"default"}"#))], &[(ioc, &rejected)]]));
+        let mut cancelled = status_line(9, "selfTradeCanceled", user, 7, None).events().remove(0);
+        cancelled.order.side = OrderSide::Ask;
+        let statuses = BlockStatuses::of([cancelled]).unwrap();
+        let line = |oid, side, px: &str, raw: &str| BookDiff::of(&diff_line(9, "BTC", oid, side, px, raw).events()[0]).unwrap();
+        let diffs = [line(7, "A", "82850", NEW), line(7, "A", "82850", REMOVE), line(8, "B", "82851", NEW)];
+        let btc = |coin: &str| (coin == "BTC").then_some(0);
+        let without = price_points(&actions, &BlockStatuses::default(), &diffs, &[], btc).unwrap();
+        assert_eq!((without[0].cut.lo, without[0].cut.hi), (3, 3));
+        let with = price_points(&actions, &statuses, &diffs, &[], btc).unwrap();
+        assert_eq!((with[0].cut.lo, with[0].cut.hi), (3, 3));
+    }
+
+    /// Review 000452 r2: an order resting before the block may have been removed by the block-start TWAP that then filled
+    /// the next sell (its fills anchor the price action after the three lines); a later IOC of the account that could
+    /// have taken it is no proof, and the remove stays unanchored instead of contradicting the fills.
+    #[test]
+    fn a_self_trade_cancel_of_an_order_resting_before_the_block_anchors_nothing() {
+        use crate::accounts::{
+            marks::actions::tests::{mark_actions, ok, replica_line},
+            test_support::status_line,
+        };
+        let user: Address = "0x00000000000000000000000000000000000000aa".parse().unwrap();
+        let ioc = r#"{"type":"order","orders":[{"a":0,"b":true,"p":"82851","s":"0.001","r":false,"t":{"limit":{"tif":"Ioc"}}}],"grouping":"na"}"#;
+        let rejected = ok(r#"{"type":"order","data":{"statuses":[{"error":"Order could not immediately match against any resting orders. asset=0"}]}}"#);
+        let sga = r#"{"type":"SetGlobalAction","pxs":[["82800","82800"]]}"#;
+        let actions = mark_actions(&replica_line(9, &[&[(sga, &ok(r#"{"type":"default"}"#))], &[(ioc, &rejected)]]));
+        let mut cancelled = status_line(9, "selfTradeCanceled", user, 7, None).events().remove(0);
+        cancelled.order.side = OrderSide::Ask;
+        let statuses = BlockStatuses::of([cancelled]).unwrap();
+        let line = |oid, px: &str, raw: &str| BookDiff::of(&diff_line(9, "BTC", oid, "A", px, raw).events()[0]).unwrap();
+        let diffs = [line(7, "82850", REMOVE), line(20, "82851", r#"{"update":{"origSz":"0.002","newSz":"0.0"}}"#), line(20, "82851", REMOVE)];
+        let mut taker = fill(777, 50, true);
+        taker.twap = true;
+        taker.px = "82851".into();
+        let mut maker = fill(777, 20, false);
+        maker.px = "82851".into();
+        let fills = [taker, maker];
+        let btc = |coin: &str| (coin == "BTC").then_some(0);
+        let without = price_points(&actions, &BlockStatuses::default(), &diffs, &fills, btc).unwrap();
+        assert_eq!((without[0].cut.lo, without[0].cut.hi), (3, 3));
+        let with = price_points(&actions, &statuses, &diffs, &fills, btc).unwrap();
+        assert_eq!((with[0].cut.lo, with[0].cut.hi), (3, 3));
     }
 
     /// bm block 1190808326: two modifies by one cloid, one before and one after the price action. Each names the order
@@ -474,7 +666,7 @@ mod tests {
         // the cancelled statuses in stream order: 1, then 2; the first held the cloid before the block
         statuses.cancelled_cloids.insert((user, "0xc1".to_string()), 1);
         let diffs = [diff(1, REMOVE), diff(2, NEW), diff(2, REMOVE), diff(3, NEW)];
-        let points = price_points(&actions, &statuses, &diffs, &[]).unwrap();
+        let points = price_points(&actions, &statuses, &diffs, &[], no_asset).unwrap();
         assert_eq!((points[0].cut.lo, points[0].cut.hi), (2, 2), "the second modify's remove of 2 runs after");
     }
 
@@ -486,7 +678,7 @@ mod tests {
         let actions = MarkActions { height: 1, time_ns: 1, actions: vec![set_global((0, 3, 0)), book((1, 3, 0), taker)] };
         let diffs = [diff(20, r#"{"update":{"origSz":"0.009","newSz":"0.004"}}"#), diff(20, r#"{"update":{"origSz":"0.004","newSz":"0.002"}}"#)];
         let fills = [fill(7, 50, true), fill(7, 20, false)];
-        let points = price_points(&actions, &BlockStatuses::default(), &diffs, &fills).unwrap();
+        let points = price_points(&actions, &BlockStatuses::default(), &diffs, &fills, no_asset).unwrap();
         assert_eq!((points[0].cut.lo, points[0].cut.hi), (0, 1), "the shrink by 0.005 anchors nothing, the fill of 0.002 is after");
     }
 
@@ -505,7 +697,7 @@ mod tests {
             diff(20, r#"{"update":{"origSz":"0.004","newSz":"0.002"}}"#),
         ];
         let fills = [fill(7, 50, true), fill(7, 20, false)];
-        let points = price_points(&actions, &BlockStatuses::default(), &diffs, &fills).unwrap();
+        let points = price_points(&actions, &BlockStatuses::default(), &diffs, &fills, no_asset).unwrap();
         assert_eq!((points[0].cut.lo, points[0].cut.hi), (2, 3), "after order 10's line, the rest open");
     }
 

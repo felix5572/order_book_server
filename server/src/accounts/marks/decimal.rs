@@ -2,7 +2,7 @@
 //! 10^-(6 - szDecimals) and sizes in 10^-szDecimals, so a written price or size with more decimals than its unit breaks
 //! the contract; nothing is rounded.
 
-use std::fmt;
+use std::{cmp::Ordering, fmt};
 
 /// `mantissa / 10^scale`, trailing fraction zeros dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +45,26 @@ impl ExactDecimal {
     }
 }
 
+/// By value: the trailing zeros are dropped at the parse, so equal values have equal fields.
+impl Ord for ExactDecimal {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let scale = self.scale.max(other.scale);
+        let scaled = |decimal: &Self| 10_u128.checked_pow(scale - decimal.scale).and_then(|factor| factor.checked_mul(u128::from(decimal.mantissa)));
+        match (scaled(self), scaled(other)) {
+            (Some(mine), Some(theirs)) => mine.cmp(&theirs),
+            // only the one of fewer decimals is scaled up: overflowing, it holds more than any u64 of the other
+            (None, _) => Ordering::Greater,
+            (_, None) => Ordering::Less,
+        }
+    }
+}
+
+impl PartialOrd for ExactDecimal {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl fmt::Display for ExactDecimal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let digits = self.mantissa.to_string();
@@ -79,6 +99,15 @@ mod tests {
             assert!(ExactDecimal::parse(text).is_err(), "{text:?}");
         }
         assert!(units("18446744073709551615", 1).is_err(), "overflows the unit");
+    }
+
+    #[test]
+    fn decimals_order_by_value() {
+        let parse = |text: &str| ExactDecimal::parse(text).unwrap();
+        assert!(parse("0.67331") > parse("0.6733"));
+        assert_eq!(parse("0.6733").cmp(&parse("0.67330")), Ordering::Equal);
+        assert!(parse("80000") < parse("82850.0"));
+        assert!(parse("18446744073709551615") > parse("0.00000000000000000001"), "an overflowing scale-up is the greater");
     }
 
     #[test]

@@ -339,10 +339,13 @@ fn book_diffs_input(line: String) -> Input {
     }))
 }
 
-/// A status the marks read: a cancel of an order with a cloid (it resolves a `cancelByCloid`) or a trigger. One status
-/// per line, ~21,000 a second, of which ~6,800 qualify (2026-10-20 12 UTC): the text decides before the parse.
+/// A status the marks read: a cancel of an order with a cloid (it resolves a `cancelByCloid`), a trigger, or a
+/// self-trade cancel (it places a remove inside the order that caused it). One status per line, ~21,000 a second, of
+/// which ~6,800 qualify (2026-10-20 12 UTC): the text decides before the parse.
 fn order_statuses_input(line: String) -> Input {
-    let wanted = line.contains(r#""status":"triggered""#) || (line.contains(r#""status":"canceled""#) && line.contains(r#""cloid":"0x"#));
+    let wanted = line.contains(r#""status":"triggered""#)
+        || line.contains(r#""status":"selfTradeCanceled""#)
+        || (line.contains(r#""status":"canceled""#) && line.contains(r#""cloid":"0x"#));
     if !wanted {
         return Input::OrderStatuses(Ok(None));
     }
@@ -1221,19 +1224,20 @@ mod tests {
         assert!(err.error.starts_with("no \"events\": text to take the line's identity from"), "{}", err.error);
     }
 
-    /// The marks read cancels of orders with a cloid and triggers; any other status reaches the owner as nothing.
+    /// The marks read cancels of orders with a cloid, triggers and self-trade cancels; any other status reaches the
+    /// owner as nothing.
     #[test]
-    fn an_order_statuses_line_is_kept_only_for_a_cloid_cancel_or_a_trigger() {
+    fn an_order_statuses_line_is_kept_only_for_a_cloid_cancel_a_trigger_or_a_self_trade_cancel() {
         let line = |status: &str, cloid: &str| {
             format!(
                 r#"{{"local_time":"2026-10-20T12:00:00.1","block_time":"2026-10-20T12:00:00.0","block_number":9,"events":[{{"time":"2026-10-20T12:00:00.0","user":"0x00000000000000000000000000000000000000aa","hash":null,"builder":null,"status":"{status}","order":{{"coin":"BTC","side":"B","limitPx":"82850.0","sz":"0.0","oid":7,"timestamp":1,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"0.001","tif":"Alo","cloid":{cloid}}}}}]}}"#
             )
         };
-        for (status, cloid) in [("canceled", r#""0x0a""#), ("triggered", "null")] {
+        for (status, cloid) in [("canceled", r#""0x0a""#), ("triggered", "null"), ("selfTradeCanceled", "null")] {
             let Input::OrderStatuses(Ok(Some((batch, _)))) = order_statuses_input(line(status, cloid)) else { panic!("{status} kept") };
             assert_eq!(batch.events_len(), 1);
         }
-        for (status, cloid) in [("canceled", "null"), ("open", r#""0x0a""#), ("filled", r#""0x0a""#)] {
+        for (status, cloid) in [("canceled", "null"), ("open", r#""0x0a""#), ("filled", r#""0x0a""#), ("iocCancelRejected", "null")] {
             assert!(matches!(order_statuses_input(line(status, cloid)), Input::OrderStatuses(Ok(None))), "{status} {cloid}");
         }
     }
