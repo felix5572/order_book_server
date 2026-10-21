@@ -974,12 +974,10 @@ fn log_marks_install(diagnostics: &mut AccountDiagnostics, height: u64, report: 
                 prices.fields.iter().map(|(field, equal, differ)| format!("{field} {equal}/{}", equal + differ)).collect();
             let unsupported: Vec<String> =
                 prices.unsupported.iter().map(|(reason, coins)| format!("{reason} {} ({})", coins.len(), coins.join(", "))).collect();
-            let limited: Vec<String> = prices.step_limited.iter().map(|(coin, times)| format!("{coin} {times}")).collect();
             info!(
-                "node marks: seed {height} main prices equal: {}; not replayed: {}; marks moved by the 1% limit since the last seed: {}",
+                "node marks: seed {height} main prices equal: {}; not replayed: {}",
                 fields.join(", "),
-                if unsupported.is_empty() { "none".to_string() } else { unsupported.join(", ") },
-                if limited.is_empty() { "none".to_string() } else { limited.join(", ") }
+                if unsupported.is_empty() { "none".to_string() } else { unsupported.join(", ") }
             );
             for (field, equal, differ) in &prices.fields {
                 NODE_MARKS_CHECKED_TOTAL.with_label_values(&[field, "equal"]).inc_by(*equal);

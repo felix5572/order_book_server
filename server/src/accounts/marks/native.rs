@@ -18,8 +18,11 @@
 //!    - a `SetGlobalAction` stores the oracle median(submitted, Spot cache, L with the basis undone) and the mark
 //!      median(submitted, Mark cache, L), then samples msoe with the new oracle and lmpe with L.
 //!
-//! A mark moving more than 1% from the previous one moves by 1% of it (`step_limited_mark`, after the archived node's
-//! branch; a checkpoint checks the end state and lists the coins it moved). A coin whose inputs take a path
+//! Main-dex marks are NOT step-limited. In binary 6911b792, 0x2965e0a tests clearinghouse.moh at +0x378:
+//! Main (0x8000000000000000) jumps straight to the selected-price write, bypassing the Hip3 1% limit.
+//! ALT liquidation fills at blocks 1192112978 and 1192114308 confirm the uncapped middle-of-three price.
+//! A checkpoint checks only the end state; later updates can hide a wrong intermediate mark.
+//! A coin whose inputs take a path
 //! never observed (an empty book side, an lmpe gap, a cold lmpe for the third candidate) is `unsupported` until a
 //! seed replaces it: its values are not claimed.
 
@@ -29,7 +32,7 @@ use rustc_hash::FxHashMap;
 use super::{
     actions::MarkAction,
     book::BestPrices,
-    rules::{internal_round, inverse_basis, local_price, median_units, spot_reference_units, step_limited_mark, wire_units},
+    rules::{internal_round, inverse_basis, local_price, median_units, spot_reference_units, wire_units},
     seed::{NativeAsset, NativeEmas, NativeSeed, ReferenceCache, StoredMark},
 };
 
@@ -118,8 +121,6 @@ struct CoinPrices {
     /// For a coin `psro` names: its spot book's price decimals (its Spot input is that book's midpoint).
     spot_reference_decimals: Option<u32>,
     unsupported: Option<&'static str>,
-    /// Marks the 1% limit moved since the seed.
-    step_limited: u64,
 }
 
 /// The book a price action reads for one coin, and the coin's last trade of the block before it.
@@ -147,7 +148,6 @@ impl CoinPrices {
             last_trade: asset.last_trade_px,
             spot_reference_decimals,
             unsupported: None,
-            step_limited: 0,
         }
     }
 
@@ -243,9 +243,7 @@ impl CoinPrices {
             return Ok(());
         };
         let stored = median_units(&[submitted_oracle, spot_median, inverse_basis(local, emas.basis.basis_ratio())?]).ok_or("no oracle candidates")?;
-        let candidate = median_units(&[submitted_mark, mark_median, local]).ok_or("no mark candidates")?;
-        let new_mark = step_limited_mark(candidate, self.mark.px)?;
-        self.step_limited += u64::from(new_mark != candidate);
+        let new_mark = median_units(&[submitted_mark, mark_median, local]).ok_or("no mark candidates")?;
         let Some(local_price_ema) = emas.local_price.local_price_advanced(self.px(local), time_ns) else {
             self.unsupported.get_or_insert("localPriceGap");
             return Ok(());
@@ -274,9 +272,6 @@ pub(crate) struct PricesCheck {
     pub(crate) fields: Vec<(&'static str, u64, u64)>,
     /// Coins whose replay is not claimed, by reason.
     pub(crate) unsupported: Vec<(&'static str, Vec<String>)>,
-    /// Coins whose mark the 1% limit moved since the seed, with how many times. Their fields check the end state
-    /// only: a later update overwrites a limited mark, so an equal check does not prove each limited value.
-    pub(crate) step_limited: Vec<(String, u64)>,
     pub(crate) samples: Vec<PriceMismatch>,
 }
 
@@ -459,10 +454,7 @@ impl NativePrices {
             coins.sort_unstable();
         }
         unsupported.sort_unstable();
-        let mut step_limited: Vec<(String, u64)> =
-            self.coins.iter().filter(|coin| coin.step_limited > 0).map(|coin| (coin.name.clone(), coin.step_limited)).collect();
-        step_limited.sort_unstable();
-        PricesCheck { fields, unsupported, step_limited, samples }
+        PricesCheck { fields, unsupported, samples }
     }
 }
 
@@ -636,15 +628,73 @@ mod tests {
         assert_eq!(prices.coins[0].unsupported, Some("emptyBookSide"));
     }
 
-    /// A `SetGlobalAction` pricing BTC 8.6% above its mark of 82,857.6 moves it by 1% (82,857.6 × 1.01 = 83,686.176,
-    /// rounded to the unit) and lists the coin at the check; the coin stays claimed.
+    /// The Main branch bypasses the Hip3 step limit in both directions.
     #[test]
-    fn a_mark_beyond_the_step_limit_moves_by_one_percent() {
-        let mut prices = NativePrices::seeded(&native_seed());
-        let set_global = MarkAction::SetGlobal(vec![Some(("82890.0".to_string(), "90000.0".to_string()))]);
-        prices.apply(&set_global, None, T1, |_| cut(900_000, 900_100, 900_050)).unwrap();
-        assert_eq!(prices.mark_of(0), (StoredMark { px: 836_862, time_ns: T1 }, None));
-        assert_eq!(prices.check_against(&native_seed()).step_limited, [("BTC".to_string(), 1)]);
+    fn a_native_mark_takes_the_median_even_more_than_one_percent_away() {
+        for (submitted, bid, ask, trade) in [("90000.0", 900_000, 900_100, 900_050), ("70000.0", 700_000, 700_100, 700_000)] {
+            let mut prices = NativePrices::seeded(&native_seed());
+            let set_global = MarkAction::SetGlobal(vec![Some(("82890.0".to_string(), submitted.to_string()))]);
+            prices.apply(&set_global, None, T1, |_| cut(bid, ask, trade)).unwrap();
+            assert_eq!(prices.mark_of(0), (StoredMark { px: bid, time_ns: T1 }, None));
+        }
+    }
+
+    /// Expected marks come from the node's liquidation fills, not a checkpoint or our replay's output.
+    /// Includes a cache-selected mark differing from the submitted mark (1192112978).
+    #[test]
+    fn alt_marks_at_liquidations_match_the_node_without_the_hip3_limit() {
+        use crate::accounts::marks::seed::Ema;
+        #[derive(serde::Deserialize)]
+        struct FixtureEma {
+            numerator: f64,
+            denominator_s: f64,
+            decay_parameter: f64,
+            samples: u64,
+            last_sample_ns: u64,
+        }
+        impl FixtureEma {
+            fn state(self) -> Ema {
+                Ema { numerator: self.numerator, denominator_s: self.denominator_s, decay_parameter: self.decay_parameter,
+                    samples: self.samples, last_sample_ns: Some(self.last_sample_ns) }
+            }
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            block: u64,
+            coin: String,
+            sz_decimals: u32,
+            time_ns: u64,
+            previous_mark_units: u64,
+            previous_oracle_units: u64,
+            submitted_oracle: String,
+            submitted_mark: String,
+            spot_cache_units: u64,
+            mark_cache_units: u64,
+            bid_units: u64,
+            ask_units: u64,
+            last_trade_units: u64,
+            basis: FixtureEma,
+            local_price_ema: FixtureEma,
+            expected_mark: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Golden { cases: Vec<Case> }
+        let golden: Golden = serde_json::from_str(include_str!("native_mark_liquidation_goldens.json")).unwrap();
+        assert_eq!(golden.cases.len(), 4);
+        for case in golden.cases {
+            let mut coin = NativePrices::seeded(&native_seed()).coins.remove(0);
+            coin.name = case.coin;
+            coin.size_decimals = case.sz_decimals;
+            coin.mark.px = case.previous_mark_units;
+            coin.stored_oracle = case.previous_oracle_units;
+            coin.emas = Some(NativeEmas { basis: case.basis.state(), local_price: case.local_price_ema.state() });
+            coin.spot.median = Some(case.spot_cache_units);
+            coin.marks.median = Some(case.mark_cache_units);
+            coin.set_global(&case.submitted_oracle, &case.submitted_mark, case.time_ns,
+                cut(case.bid_units, case.ask_units, case.last_trade_units)).unwrap();
+            assert_eq!(coin.unsupported, None, "block {}", case.block);
+            assert_eq!(coin.mark, StoredMark { px: wire_units(&case.expected_mark, case.sz_decimals).unwrap(), time_ns: case.time_ns }, "block {}", case.block);
+        }
     }
 
     /// A live key retains its median when members expire, but advances its bucket. The 56 coins whose buckets

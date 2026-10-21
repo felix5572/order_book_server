@@ -1,0 +1,159 @@
+{
+  "source": "BM run5 node_fills_streaming + isolated replay of archived interval 1192110000..1192120000; inputs from replay, expected marks from raw liquidation fills. The old replay incorrectly applied the Hip3 step limit to Main.",
+  "binary_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+  "cases": [
+    {
+      "block": 1192112978,
+      "coin": "ALT",
+      "sz_decimals": 0,
+      "time_ns": 1792598957247087299,
+      "previous_mark_units": 10713,
+      "previous_oracle_units": 10933,
+      "submitted_oracle": "0.010950",
+      "submitted_mark": "0.010935",
+      "spot_cache_units": 10945,
+      "mark_cache_units": 10917,
+      "bid_units": 10688,
+      "ask_units": 10879,
+      "last_trade_units": 10815,
+      "basis": {
+        "numerator": -0.5442159661283607,
+        "denominator_s": 366.44705038939827,
+        "decay_parameter": 120.0,
+        "samples": 2293798,
+        "last_sample_ns": 1792598953829482217
+      },
+      "local_price_ema": {
+        "numerator": 0.9531159972095565,
+        "denominator_s": 91.47734370224855,
+        "decay_parameter": 30.0,
+        "samples": 318440,
+        "last_sample_ns": 1792598953829482217
+      },
+      "expected_mark": "0.010917",
+      "node_fills": [
+        {
+          "tid": 773640930671257,
+          "hash": "0x1bd55fbbb30421191d4f04470e335202046e00a14e073febbf9e0b0e7207fb03",
+          "mark_px": "0.010917"
+        }
+      ]
+    },
+    {
+      "block": 1192114308,
+      "coin": "ALT",
+      "sz_decimals": 0,
+      "time_ns": 1792599053060187387,
+      "previous_mark_units": 10975,
+      "previous_oracle_units": 10998,
+      "submitted_oracle": "0.011160",
+      "submitted_mark": "0.011112",
+      "spot_cache_units": 11056,
+      "mark_cache_units": 11003,
+      "bid_units": 11119,
+      "ask_units": 11137,
+      "last_trade_units": 11111,
+      "basis": {
+        "numerator": -0.6308831979259483,
+        "denominator_s": 367.0438687748977,
+        "decay_parameter": 120.0,
+        "samples": 2293829,
+        "last_sample_ns": 1792599049204108124
+      },
+      "local_price_ema": {
+        "numerator": 0.9828490329096485,
+        "denominator_s": 91.93932916234291,
+        "decay_parameter": 30.0,
+        "samples": 318471,
+        "last_sample_ns": 1792599049204108124
+      },
+      "expected_mark": "0.011112",
+      "node_fills": [
+        {
+          "tid": 606693430488389,
+          "hash": "0xcfa5d81435cae418d11f04470e38840000e0eff9d0ce02ea736e8366f4cebe03",
+          "mark_px": "0.011112"
+        }
+      ]
+    },
+    {
+      "block": 1192114390,
+      "coin": "ALT",
+      "sz_decimals": 0,
+      "time_ns": 1792599058744699019,
+      "previous_mark_units": 11156,
+      "previous_oracle_units": 11187,
+      "submitted_oracle": "0.011260",
+      "submitted_mark": "0.011233",
+      "spot_cache_units": 11223,
+      "mark_cache_units": 11183,
+      "bid_units": 11218,
+      "ask_units": 11235,
+      "last_trade_units": 11208,
+      "basis": {
+        "numerator": -0.625485440663591,
+        "denominator_s": 366.81431236767827,
+        "decay_parameter": 120.0,
+        "samples": 2293831,
+        "last_sample_ns": 1792599055098594366
+      },
+      "local_price_ema": {
+        "numerator": 0.9826293014859417,
+        "denominator_s": 91.6781456282671,
+        "decay_parameter": 30.0,
+        "samples": 318473,
+        "last_sample_ns": 1792599055098594366
+      },
+      "expected_mark": "0.011218",
+      "node_fills": [
+        {
+          "tid": 702543324140056,
+          "hash": "0xc45c39245e6a7459c5d504470e38d60000975109f96d932b6824e4771d6e4e44",
+          "mark_px": "0.011218"
+        }
+      ]
+    },
+    {
+      "block": 1192114865,
+      "coin": "ALT",
+      "sz_decimals": 0,
+      "time_ns": 1792599092890852557,
+      "previous_mark_units": 11524,
+      "previous_oracle_units": 11544,
+      "submitted_oracle": "0.011670",
+      "submitted_mark": "0.011643",
+      "spot_cache_units": 11552,
+      "mark_cache_units": 11521,
+      "bid_units": 11610,
+      "ask_units": 11627,
+      "last_trade_units": 11640,
+      "basis": {
+        "numerator": -0.630959500279058,
+        "denominator_s": 367.6826355430452,
+        "decay_parameter": 120.0,
+        "samples": 2293842,
+        "last_sample_ns": 1792599089699939961
+      },
+      "local_price_ema": {
+        "numerator": 1.006994128703361,
+        "denominator_s": 92.26987660588388,
+        "decay_parameter": 30.0,
+        "samples": 318484,
+        "last_sample_ns": 1792599089699939961
+      },
+      "expected_mark": "0.011627",
+      "node_fills": [
+        {
+          "tid": 143602554530840,
+          "hash": "0xfcedc1ad2f3e10e9fe6704470e3ab102070e0092ca312fbca0b66cffee31ead4",
+          "mark_px": "0.011627"
+        },
+        {
+          "tid": 334880316598531,
+          "hash": "0xfcedc1ad2f3e10e9fe6704470e3ab102070e0092ca312fbca0b66cffee31ead4",
+          "mark_px": "0.011627"
+        }
+      ]
+    }
+  ]
+}

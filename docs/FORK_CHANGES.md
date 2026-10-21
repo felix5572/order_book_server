@@ -475,7 +475,7 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
 - **计算**(`local_marks/compute.rs`, 用 `accounts::marks::rules` 即重放的同一份实现): oracle = 现在有报价的现货所中间价加权中位数
   (币安 3、OKX 2、Bybit 2、其余 1, 至少一家; 同 `hl_mark_prices` 的 `weighted_median`), HALF_EVEN 换成价格单位;
   A = oracle × (1 + basis), basis 为 msoe 按现在时刻、盘口中间价、存储 oracle 预览; L = median(bid, ask, 最新成交); C = 永续加权中位数;
-  参考 mark = median(A, L, C); 预测 mark = 相对节点存储 mark 的 1% 限幅(median(参考, Mark 缓存, L)), 是有条件的估计, 不写回。
+  参考 mark = median(A, L, C); 预测 mark = median(参考, Mark 缓存, L)（主站不走 HIP-3 的 1% 限幅，见下方修正）, 是有条件的估计, 不写回。
 - **快照与撤价**(`snapshot.rs`, `owner.rs`): 每 50ms 全部币算一遍。两条进度时钟对全部币一起判: 节点块时间落后本地时钟超过 5 秒 →
   两条腿 `stale`(`nodeProgress`); 盘口超过 5 秒 → 本地腿 `stale`(`bookProgress`)(设计定 3 秒; bm 10-21 验收录制里已应用块的
   落后每分钟 P99 在 2.4–2.9 秒, 3 秒时 14 分钟闪撤 10 次、每次不到 1 秒, 改为 5 秒); 安静币不会因自己没变化被撤。节点不可用(`node`)、
@@ -609,3 +609,13 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
 - 自愈语义(§3)未在 README 声明。
 - 无单元测试覆盖 pending-line / pop_cache 对齐语义(重构时最该先补的两块)。
 - 上游 yawc 未合并(见 §三 #4)。
+
+## 2026-10-21 主站 mark 移除误用的 HIP-3 限幅
+
+- 根因：先前只追到 `kind == Mark` 的 1% 限幅，漏掉其外层 `MainOrHip3` 条件。6911b792 在
+  `0x2965e0a..0x2965e1b` 对 Main 直接跳到写价；`0x2967ee1` 将 +0x378 对应到 `moh`，
+  `0x2c3aa1f..0x2c3aa6e` 将判别值对应到 Main/Hip3。
+- 主站重建与 `predictedMarkPx` 一起移除限幅，删除无效限幅计数和日志；HIP-3 仍直接读节点最终价格流。
+- 金样本 `native_mark_liquidation_goldens.json`：ALT 四个块的清算 mark 来自节点成交，输入来自归档逐动作回放。
+  块 1192114308 的正确中位数 0.011112 被旧逻辑截为 0.011085；块 1192112978 的正确中位数
+  0.010917 被旧逻辑截为 0.010820。后续正常更新能覆盖这类中间错误，checkpoint 终点全等不等于逐步全等。

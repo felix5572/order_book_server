@@ -5,14 +5,14 @@
 //! - A = oracle × (1 + basis), the basis msoe previewed at now with the book's midpoint against the stored oracle, as a
 //!   validator's reference action previews it at its cut; L = median(bid, ask, last trade); C = the external price.
 //! - reference = median(A, L, C): what a validator submitting our venue prices now would store as its Mark member.
-//! - predicted = the 1% limit of median(reference, Mark cache, L) from the stored mark: a `SetGlobalAction` now whose
-//!   submission is the reference. A conditional estimate, not the next mark: the cache refreshes per bucket and later
-//!   submissions and books are unknown. Nothing is written back; the limit's base is always the node's stored mark.
+//! - predicted = median(reference, Mark cache, L): a Main-dex `SetGlobalAction` now whose submission is the reference.
+//!   Main bypasses the Hip3 1% limit (binary 6911b792, 0x2965e0a..0x2965e1b; `native.rs`). A conditional estimate,
+//!   not the next mark: the cache refreshes per bucket and later submissions and books are unknown. Nothing is written back.
 
 use super::price::VenuePrice;
 use crate::accounts::marks::{
     native::CoinPriceState,
-    rules::{internal_round, local_price, median_units, step_limited_mark},
+    rules::{internal_round, local_price, median_units},
 };
 
 /// The price where the cumulative weight, ascending, first passes half the total (the trading system's
@@ -67,8 +67,7 @@ pub(crate) fn local_mark(inputs: MarkInputs<'_>) -> Result<LocalMark, String> {
     let basis_adjusted_oracle = internal_round(oracle as f64 * (1.0 + basis_ratio))?;
     let local = local_price(bid, ask, node.last_trade);
     let reference = median_units(&[basis_adjusted_oracle, local, external]).ok_or("no reference candidates")?;
-    let candidate = median_units(&[reference, mark_cache, local]).ok_or("no mark candidates")?;
-    let predicted = step_limited_mark(candidate, node.stored_mark)?;
+    let predicted = median_units(&[reference, mark_cache, local]).ok_or("no mark candidates")?;
     Ok(LocalMark { reference, predicted, basis_adjusted_oracle, local, external, oracle, basis_ratio, basis_samples: basis.samples })
 }
 
@@ -134,16 +133,19 @@ pub(crate) mod tests {
         assert_eq!((mark.basis_adjusted_oracle, mark.basis_samples, mark.basis_ratio), (1_000_000, 0, 0.0));
     }
 
-    /// The prediction moves at most 1% of the stored mark, by the node's rule.
+    /// Main-dex preview uses the same uncapped median as the replay; changing the old mark cannot clip it.
     #[test]
-    fn the_prediction_is_step_limited_from_the_stored_mark() {
+    fn the_native_prediction_does_not_apply_the_hip3_step_limit() {
         let mut node = btc_state(0.0, NOW_NS - 1_000_000_000);
         node.mark_cache = Some(1_200_000);
         node.last_trade = 1_200_000;
         let mut far = inputs(&node, 1_200_000, 1_200_000);
         (far.bid, far.ask) = (1_199_900, 1_200_100);
         let mark = local_mark(far).unwrap();
-        assert_eq!((mark.reference, mark.predicted), (1_200_000, step_limited_mark(1_200_000, 1_000_200).unwrap()));
-        assert_eq!(mark.predicted, 1_010_202);
+        assert_eq!((mark.reference, mark.predicted), (1_200_000, 1_200_000));
+        node.stored_mark = 1_400_000;
+        let mut far = inputs(&node, 1_200_000, 1_200_000);
+        (far.bid, far.ask) = (1_199_900, 1_200_100);
+        assert_eq!(local_mark(far).unwrap().predicted, 1_200_000, "also no downward clipping");
     }
 }
