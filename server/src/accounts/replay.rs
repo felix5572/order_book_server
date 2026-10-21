@@ -506,11 +506,12 @@ fn apply_ledger(account: &mut AccountMargin, markets: &Markets, user: Address, d
             }
         }
         LedgerDelta::InternalTransfer { user: sender, destination, usdc_wei, fee_wei } => {
+            // This delta reports a gross transfer, unlike `send`: H1191755982 debits 50 and credits 49.
             if user == *sender {
-                add_main(account, markets, -(usdc_wei + fee_wei))?;
+                add_main(account, markets, -usdc_wei)?;
             }
             if user == *destination {
-                add_main(account, markets, *usdc_wei)?;
+                add_main(account, markets, usdc_wei - fee_wei)?;
             }
         }
         LedgerDelta::SubAccountTransfer { user: sender, destination, usdc_wei } => {
@@ -968,6 +969,46 @@ pub(crate) mod tests {
         assert!(replay.accounts[&holder].stop.is_none());
         let failed = line.replace("\"status\":\"ok\"", "\"status\":\"err\"");
         assert!(parse_block_actions(&failed).unwrap().actions.is_empty(), "failed withdrawals never debit");
+    }
+
+    /// Real H1191755982: sending 50 with fee 1 leaves the sender at 0 after a 50 deposit;
+    /// the unified receiver gains 49, matching both checkpoint endpoints after its other ledger events.
+    #[test]
+    fn internal_transfer_gross_amount_matches_both_checkpoint_balances() {
+        use crate::accounts::misc::MiscEvent;
+        let golden: serde_json::Value = serde_json::from_str(include_str!("internal_transfer_golden.json")).unwrap();
+        let receiver: Address = golden["receiver"].as_str().unwrap().parse().unwrap();
+        let sender: Address = golden["sender"].as_str().unwrap().parse().unwrap();
+        let mut replay = per_dex();
+        let mut receiving = states(|_| {}).accounts.remove(&user(HOLDER)).unwrap();
+        receiving.pools = Pools::Unified(golden["receiver_before_wei"].as_i64().unwrap());
+        replay.accounts.insert(receiver, receiving);
+        let mut sending = replay.accounts.remove(&user(HOLDER)).unwrap();
+        sending.pools = per_dex_pools(&[(0, golden["sender_deposit_wei"].as_i64().unwrap())]);
+        replay.accounts.insert(sender, sending);
+        for row in golden["rows"].as_array().unwrap() {
+            let MiscEvent::Ledger { users, delta } = serde_json::from_value(row["event"].clone()).unwrap() else { panic!("ledger expected") };
+            for affected in users {
+                replay.apply(row["height"].as_u64().unwrap(), affected, &AccountEvent::Ledger(delta.clone()));
+            }
+        }
+        assert_eq!(replay.accounts[&receiver].pools, Pools::Unified(golden["receiver_after_wei"].as_i64().unwrap()));
+        assert_eq!(replay.accounts[&sender].pools, per_dex_pools(&[(0, golden["sender_after_wei"].as_i64().unwrap())]));
+        assert!(replay.accounts[&receiver].stop.is_none());
+        assert!(replay.accounts[&sender].stop.is_none());
+    }
+
+    #[test]
+    fn internal_transfer_zero_fee_and_self_transfer_charge_once() {
+        for fee_wei in [0, 100] {
+            let mut replay = per_dex_with_main_cash(1_000);
+            let event = AccountEvent::Ledger(LedgerDelta::InternalTransfer {
+                user: user(HOLDER), destination: user(HOLDER), usdc_wei: 10_000, fee_wei,
+            });
+            replay.apply(5, user(HOLDER), &event);
+            assert_eq!(cross(&replay, HOLDER), per_dex_pools(&[(0, 100_000 - fee_wei), (1, 3_026_970_000)]));
+            assert_eq!(stop(&replay, HOLDER), None);
+        }
     }
 
     #[test]

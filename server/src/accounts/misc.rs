@@ -70,7 +70,7 @@ pub(crate) enum LedgerDelta {
     Send { user: Address, destination: Address, source: Balance, destination_balance: Balance, usdc_wei: Option<i64>, usdc_fee_wei: i64 },
     /// `spotTransfer`: spot to spot.
     SpotTransfer { user: Address, destination: Address, usdc_wei: Option<i64>, usdc_fee_wei: i64 },
-    /// `internalTransfer`: main dex to main dex, the fee on the sender.
+    /// `internalTransfer`: main dex to main dex. `usdc` is the gross debit; the destination receives `usdc - fee`.
     InternalTransfer { user: Address, destination: Address, usdc_wei: i64, fee_wei: i64 },
     /// `subAccountTransfer`: main dex to main dex.
     SubAccountTransfer { user: Address, destination: Address, usdc_wei: i64 },

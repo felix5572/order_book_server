@@ -1,0 +1,93 @@
+{
+  "note": "Selected real ledger projections and checkpoint cash. Full selected checkpoint slices and extraction hashes are outside Git under ob_hourly_watch_20261021/20261021T095506Z. Receiver funding went to isolated positions; no fills or system actions in this window. The sender was absent at the first checkpoint, deposited 50 USDC at H1191753792 and had zero cash at the next checkpoint.",
+  "seed_from": 1191750000,
+  "seed_to": 1191760000,
+  "receiver": "0xae5036ff53d6d24c3e019054b4ce430795ed9887",
+  "receiver_before_wei": 32374428798000,
+  "receiver_after_wei": 32290777798000,
+  "sender": "0x391ea4c9a1f1eac5db97fd26ff6b8533d522c4f3",
+  "sender_deposit_wei": 5000000000,
+  "sender_after_wei": 0,
+  "rows": [
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191752003,
+      "line_sha256": "e7cd30b1e91b9e4bd1249ac4c663a7a921e36a695993d2448fa92b7ce3444cb3",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:56:12.338092549",
+        "hash": "0xaf2b98f0d9c0fcf7b0a5044708b14302024500d674c41bc952f4444398c4d6e2",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xae5036ff53d6d24c3e019054b4ce430795ed9887",
+              "0xa6a34f0bf2ccea9a1ddf9e9a973f17c498dc5e40"
+            ],
+            "delta": {
+              "type": "vaultDeposit",
+              "vault": "0xa6a34f0bf2ccea9a1ddf9e9a973f17c498dc5e40",
+              "usdc": "885.3"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/9",
+      "height": 1191755982,
+      "line_sha256": "8c921176ed2354dcd2b67433433a1c017891aeac117cdb848fd10517d71d2654",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T09:00:59.386680310",
+        "hash": "0x6fd4867568880422714e044708c0ce02051a005b038b22f4139d31c8278bde0d",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0x391ea4c9a1f1eac5db97fd26ff6b8533d522c4f3",
+              "0xae5036ff53d6d24c3e019054b4ce430795ed9887"
+            ],
+            "delta": {
+              "type": "internalTransfer",
+              "usdc": "50.0",
+              "user": "0x391ea4c9a1f1eac5db97fd26ff6b8533d522c4f3",
+              "destination": "0xae5036ff53d6d24c3e019054b4ce430795ed9887",
+              "fee": "1.0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/9",
+      "height": 1191756015,
+      "line_sha256": "95eb2e1c5eef4dc56c8edf66632692ab1b576668c03567219a00cbfe00fbd135",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T09:01:02.140027357",
+        "hash": "0x020a8b5fde325ac50384044708c0ef0203c8004579357997a5d336b29d3634af",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xae5036ff53d6d24c3e019054b4ce430795ed9887",
+              "0x75ff92fab14c0e49c41d40fb7a1eb204214a5b90"
+            ],
+            "delta": {
+              "type": "send",
+              "user": "0xae5036ff53d6d24c3e019054b4ce430795ed9887",
+              "destination": "0x75ff92fab14c0e49c41d40fb7a1eb204214a5b90",
+              "sourceDex": "spot",
+              "destinationDex": "",
+              "token": "USDC",
+              "amount": "0.21",
+              "usdcValue": "0.21",
+              "fee": "0.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 1792573261434,
+              "feeToken": ""
+            }
+          }
+        }
+      }
+    }
+  ]
+}
