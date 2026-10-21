@@ -178,6 +178,15 @@ enum FileCheck {
     Switch(PathBuf),
 }
 
+/// Initial EOF is a byte offset, not necessarily a record boundary. Only the first adopted
+/// record may be skipped; after its newline all records belong to the live stream.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartupBoundary {
+    Unpositioned,
+    AwaitingNewline,
+    Aligned,
+}
+
 /// File reader state for a single source
 struct FileReader {
     current_path: Option<PathBuf>,
@@ -186,6 +195,7 @@ struct FileReader {
     // thousands of times per second per watcher thread.
     file: Option<File>,
     file_position: u64,
+    startup_boundary: StartupBoundary,
     // Unterminated tail of the last read, awaiting its newline. Raw bytes, not
     // String: a bounded read can split a multi-byte character at the chunk
     // boundary, which must not fail the whole read.
@@ -242,6 +252,7 @@ impl FileReader {
             current_path: None,
             file: None,
             file_position: 0,
+            startup_boundary: StartupBoundary::Aligned,
             partial_line: Vec::new(),
             base_dir,
             desynced: false,
@@ -366,6 +377,9 @@ impl FileReader {
         let count = MODIFY_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let mut lines = Vec::new();
+        if self.startup_boundary == StartupBoundary::Unpositioned && !self.position_at_end() {
+            return (lines, ReadStatus::NotRead);
+        }
         if let Some(ref path) = self.current_path {
             // Open once and reuse the handle; a fresh fstat on the cached handle
             // still observes appended data (the node only ever appends).
@@ -386,6 +400,7 @@ impl FileReader {
                                 self.desynced = true;
                                 self.file_position = 0;
                                 self.partial_line.clear();
+                                self.startup_boundary = StartupBoundary::Aligned;
                             }
                             self.open_file_id = Some(id);
                         }
@@ -418,9 +433,22 @@ impl FileReader {
             let bytes_read = buf.len();
             self.file_position += bytes_read as u64;
 
-            // Prepend any partial line from last read
+            // Discard the remainder of the record that was already in flight at adoption.
+            // Do not buffer it: it can span arbitrarily many bounded reads. Until its newline
+            // arrives, an EOF cannot prove a fully consumed record boundary.
+            let live_start = if self.startup_boundary == StartupBoundary::AwaitingNewline {
+                let Some(newline) = buf.iter().position(|&b| b == b'\n') else {
+                    return (lines, ReadStatus::Read);
+                };
+                self.startup_boundary = StartupBoundary::Aligned;
+                info!("node stream startup boundary reached path={} inode={:?} offset={}",
+                    path.display(), self.open_file_id, self.file_position - bytes_read as u64 + newline as u64 + 1);
+                newline + 1
+            } else { 0 };
+            let mut segment_offset = self.file_position - bytes_read as u64 + live_start as u64
+                - self.partial_line.len() as u64;
             let mut full_buf = std::mem::take(&mut self.partial_line);
-            full_buf.extend_from_slice(&buf);
+            full_buf.extend_from_slice(&buf[live_start..]);
 
             if count % 10_000 == 0 {
                 // The line count walks the whole buffer - only
@@ -442,11 +470,13 @@ impl FileReader {
             // line too. Discard it and flag the data loss so the
             // book re-syncs.
             for segment in full_buf.split_inclusive(|&b| b == b'\n') {
+                let start_offset = segment_offset;
+                segment_offset += segment.len() as u64;
                 if segment.last() == Some(&b'\n') {
                     let Ok(text) = std::str::from_utf8(segment) else {
                         error!(
-                            "discarding non-UTF-8 terminated line ({} bytes); flagging desync",
-                            segment.len()
+                            "discarding non-UTF-8 terminated line; flagging desync path={} inode={:?} bytes={} offsets={}..{}",
+                            path.display(), self.open_file_id, segment.len(), start_offset, segment_offset
                         );
                         self.desynced = true;
                         continue;
@@ -459,8 +489,8 @@ impl FileReader {
                         lines.push(line.to_string());
                     } else {
                         error!(
-                            "discarding malformed terminated line ({} bytes); flagging desync",
-                            line.len()
+                            "discarding malformed terminated line; flagging desync path={} inode={:?} bytes={} offsets={}..{}",
+                            path.display(), self.open_file_id, segment.len(), start_offset, segment_offset
                         );
                         self.desynced = true;
                     }
@@ -476,9 +506,9 @@ impl FileReader {
             // data loss so the book re-syncs, and resync on the next newline.
             if self.partial_line.len() > self.max_line_bytes {
                 error!(
-                    "partial_line exceeded {} bytes ({} bytes buffered); discarding and resyncing",
-                    self.max_line_bytes,
-                    self.partial_line.len()
+                    "partial_line exceeded limit; discarding and resyncing path={} inode={:?} limit={} bytes={} offsets={}..{}",
+                    path.display(), self.open_file_id, self.max_line_bytes, self.partial_line.len(),
+                    self.file_position - self.partial_line.len() as u64, self.file_position
                 );
                 self.partial_line.clear();
                 self.desynced = true;
@@ -559,12 +589,10 @@ impl FileReader {
                     }
                 }
             }
-            if !self.partial_line.is_empty() {
+            if !self.partial_line.is_empty() || self.startup_boundary != StartupBoundary::Aligned {
                 warn!(
-                    "{} ends in an unterminated line ({} bytes); switching to {} and flagging desync",
-                    old.display(),
-                    self.partial_line.len(),
-                    path.display()
+                    "{} has no complete record boundary (buffered={} startup_pending={}); switching to {} and flagging desync",
+                    old.display(), self.partial_line.len(), self.startup_boundary != StartupBoundary::Aligned, path.display()
                 );
                 self.desynced = true;
             }
@@ -574,6 +602,7 @@ impl FileReader {
         self.current_path = Some(path.clone());
         self.file = None;
         self.file_position = 0;
+        self.startup_boundary = StartupBoundary::Aligned;
         self.partial_line.clear();
         self.open_file_id = None; // position 0 is valid in any inode; id set on open
         true
@@ -597,24 +626,52 @@ impl FileReader {
         }
         match self.read_lines() {
             (lines, ReadStatus::Read) => ReadThrough::Lines(lines),
-            (_, ReadStatus::AtEnd) if self.partial_line.is_empty() && !self.desynced => ReadThrough::Proven(at),
+            (_, ReadStatus::AtEnd) if self.partial_line.is_empty() && !self.desynced
+                && self.startup_boundary == StartupBoundary::Aligned => ReadThrough::Proven(at),
             (_, ReadStatus::AtEnd | ReadStatus::NotRead) => ReadThrough::Unproven,
         }
     }
 
-    /// Track an existing file (first event we see for it)
+    /// Adopt the current byte EOF using one handle for identity, length and boundary inspection.
+    /// Failed positioning is retried by the normal reader; it never becomes a read-through proof.
     fn start_tracking(&mut self, path: &PathBuf) {
-        // Get current file size to start from end
-        if let Ok(metadata) = std::fs::metadata(path) {
-            self.file_position = metadata.len();
-            self.open_file_id = Some(file_id(&metadata));
-        } else {
-            self.file_position = 0;
-            self.open_file_id = None;
-        }
         self.current_path = Some(path.clone());
         self.file = None;
+        self.file_position = 0;
+        self.open_file_id = None;
         self.partial_line.clear();
+        self.startup_boundary = StartupBoundary::Unpositioned;
+        self.position_at_end();
+    }
+
+    fn position_at_end(&mut self) -> bool {
+        let Some(path) = self.current_path.as_ref() else { return false; };
+        let positioning = (|| -> std::io::Result<_> {
+            let mut file = File::open(path)?;
+            let metadata = file.metadata()?;
+            let position = metadata.len();
+            let mut last = [b'\n'];
+            if position > 0 {
+                file.seek(SeekFrom::Start(position - 1))?;
+                file.read_exact(&mut last)?;
+            }
+            Ok((position, file_id(&metadata), last[0] == b'\n'))
+        })();
+        match positioning {
+            Ok((position, id, aligned)) => {
+                self.file_position = position;
+                self.open_file_id = Some(id);
+                self.startup_boundary = if aligned { StartupBoundary::Aligned } else { StartupBoundary::AwaitingNewline };
+                self.io_failures.read_succeeded(path);
+                info!("node stream startup positioning path={} inode={id:?} offset={position} awaiting_newline={}",
+                    path.display(), !aligned);
+                true
+            }
+            Err(err) => {
+                self.io_failures.failed(path, "position", &err);
+                false
+            }
+        }
     }
 }
 
@@ -1211,6 +1268,71 @@ mod tests {
         append(&next, "{\"next\":2}\n");
         assert_eq!(reader.periodic_check(), Some(FileCheck::Switch(next)));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_startup_partial_record_waits_for_boundary_without_corruption() {
+        let dir = test_dir("startup_partial_boundary");
+        let path = hourly_file(&dir, "20261021", "16");
+        append(&path, "{\"in_progress\":\"");
+        let mut reader = FileReader::new(dir.clone(), 8, FileLayout::Hourly);
+        reader.start_tracking(&path);
+        assert_eq!(reader.read_through(), ReadThrough::Unproven);
+        for _ in 0..3 {
+            append(&path, "a long fragment beyond the buffer limit");
+            assert!(reader.on_modify().is_empty());
+            assert!(reader.partial_line.is_empty());
+            assert!(!reader.take_desynced());
+            assert_eq!(reader.read_through(), ReadThrough::Unproven);
+        }
+        // A duplicate create must not forget that the initial record is incomplete.
+        assert!(switch_collecting(&mut reader, &path).is_empty());
+        append(&path, "\"}\n{\"next\":1}\n");
+        assert_eq!(reader.on_modify(), vec!["{\"next\":1}".to_string()]);
+        assert!(!reader.take_desynced());
+        assert!(matches!(reader.read_through(), ReadThrough::Proven(_)));
+        append(&path, "truly corrupt\n{\"next\":2}\n");
+        assert_eq!(reader.on_modify(), vec!["{\"next\":2}".to_string()]);
+        assert!(reader.take_desynced(), "only the startup fragment may be skipped");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_startup_boundary_does_not_leak_across_rotation_or_replacement() {
+        for replace in [false, true] {
+            let dir = test_dir(if replace { "startup_replace" } else { "startup_rotate" });
+            let path = hourly_file(&dir, "20261021", "16");
+            append(&path, "{\"partial\":");
+            let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+            reader.start_tracking(&path);
+            if replace {
+                replace_file(&path, "{\"next\":1}\n");
+            } else {
+                let next = hourly_file(&dir, "20261021", "17");
+                append(&next, "{\"next\":1}\n");
+                assert!(switch_collecting(&mut reader, &next).is_empty());
+            }
+            assert_eq!(reader.on_modify(), vec!["{\"next\":1}".to_string()]);
+            assert!(reader.take_desynced(), "unfinished/lost old file must still be visible");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_startup_positioning_error_cannot_prove_eof_and_recovers() {
+        let dir = test_dir("startup_position_failure");
+        let path = hourly_file(&dir, "20261021", "16");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&path);
+        assert_eq!(reader.read_lines().1, ReadStatus::NotRead);
+        assert_eq!(reader.read_through(), ReadThrough::Unproven);
+        append(&path, "");
+        assert_eq!(reader.read_lines().1, ReadStatus::AtEnd);
+        assert!(matches!(reader.read_through(), ReadThrough::Proven(_)));
+        append(&path, "{\"first\":1}\n");
+        assert_eq!(reader.on_modify(), vec!["{\"first\":1}".to_string()]);
+        assert!(!reader.take_desynced());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
