@@ -33,7 +33,7 @@ use super::{
     checkpoint::parse_checkpoint_file,
     marks::{
         CheckpointGrid, MARK_STREAMS, MarkInputs, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild,
-        actions::MarkActions, execution::BlockFill, seed::MarkSeed,
+        actions::MarkActions, execution::BlockFill, pairing::PairingDiagnostics, seed::MarkSeed,
     },
     misc::MiscEvent,
     evidence::{
@@ -51,7 +51,7 @@ use crate::{
         utils::{checkpoint_grid, list_checkpoints},
     },
     metrics::{
-        ACCOUNTS_ANCHOR_HEIGHT, ACCOUNTS_ANCHOR_PARSE_SECONDS, ACCOUNTS_ANCHOR_SKIPPED_TOTAL, ACCOUNTS_EVIDENCE_TOTAL,
+        ACCOUNTS_ANCHOR_HEIGHT, ACCOUNTS_ANCHOR_PARSE_SECONDS, ACCOUNTS_ANCHOR_SKIPPED_TOTAL, ACCOUNTS_EVIDENCE_TOTAL, NODE_MARKS_IOC_PAIRINGS_TOTAL,
         ACCOUNTS_APPLIED_HEIGHT, ACCOUNTS_CHECKPOINT_FAILURES_TOTAL, ACCOUNTS_DATA_LOSS_TOTAL, ACCOUNTS_DUPLICATE_INPUTS_TOTAL,
         ACCOUNTS_HELD_FILLS, ACCOUNTS_OPEN_POSITIONS, ACCOUNTS_PENDING_BLOCKS, ACCOUNTS_REPLAY_CHECKED_TOTAL,
         ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL, ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL, ACCOUNTS_REPLAY_STOPPED_TOTAL, ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL,
@@ -94,10 +94,10 @@ enum Input {
     Hip3OracleUpdates(std::result::Result<(Batch<OracleUpdateEvent>, LineKey), LineError>),
     /// With the line's identity within its block.
     BookDiffs(std::result::Result<(Batch<NodeDataOrderDiff>, LineKey), LineError>),
-    /// A status the node marks read, with the line's identity; `None` for any other line.
-    OrderStatuses(std::result::Result<Option<(Batch<NodeDataOrderStatus>, LineKey)>, LineError>),
+    /// Every order-status line, with its identity; unused statuses still delimit cancellation runs.
+    OrderStatuses(std::result::Result<(Batch<NodeDataOrderStatus>, LineKey), LineError>),
     /// The account view's and the node marks' reading of the line (the latter fails apart), with the instant it was read.
-    BlockActions(std::result::Result<(BlockActions, std::result::Result<MarkActions, String>), LineError>, Instant),
+    BlockActions(std::result::Result<(BlockActions, std::result::Result<MarkActions, String>), LineError>, Instant, PairingDiagnostics),
     /// The stream's reader proved that every line written before the instant reached the owner (design 000433 r3).
     ReadThrough(Stream, Instant),
     /// The watcher did not deliver lines of unknown blocks: the skip while positioning at its start, or a discard.
@@ -339,19 +339,13 @@ fn book_diffs_input(line: String) -> Input {
     }))
 }
 
-/// A status the marks read: a cancel of an order with a cloid (it resolves a `cancelByCloid`), a trigger, or a
-/// self-trade cancel (it places a remove inside the order that caused it). One status per line, ~21,000 a second, of
-/// which ~6,800 qualify (2026-10-20 12 UTC): the text decides before the parse.
+/// Preserve status order, including statuses that close a rejected IOC's self-trade-cancel run. Filtering out an
+/// open/filled/canceled line here would join unrelated executions. `BlockStatuses` reduces these to the few facts
+/// retained in the mark replay log; ingress and block assembly remain bounded by their existing limits.
 fn order_statuses_input(line: String) -> Input {
-    let wanted = line.contains(r#""status":"triggered""#)
-        || line.contains(r#""status":"selfTradeCanceled""#)
-        || (line.contains(r#""status":"canceled""#) && line.contains(r#""cloid":"0x"#));
-    if !wanted {
-        return Input::OrderStatuses(Ok(None));
-    }
     Input::OrderStatuses(parse_line::<NodeDataOrderStatus>(&line).and_then(|batch| {
         let key = line_key(&line, batch.block_number())?;
-        Ok(Some((batch, key)))
+        Ok((batch, key))
     }))
 }
 
@@ -369,8 +363,17 @@ fn line_key(line: &str, block: u64) -> std::result::Result<LineKey, LineError> {
 
 fn block_actions_input(line: String) -> Input {
     let read_at = Instant::now();
-    let parsed = ReplicaLine::parse(&line).and_then(|replica| Ok((block_actions(&replica)?, MarkActions::of(&replica))));
-    Input::BlockActions(parsed.map_err(|err| line_error(&line, &err, line_height(&line))), read_at)
+    let mut diagnostics = PairingDiagnostics::default();
+    let parsed = ReplicaLine::parse(&line).and_then(|replica| {
+        let block = block_actions(&replica)?;
+        let marks = MarkActions::of(&replica);
+        if let Ok(marks) = &marks {
+            diagnostics = PairingDiagnostics::collect(marks, &replica, &line);
+        }
+        Ok((block, marks))
+    });
+    // Only bounded action-level samples cross the existing channel; the whole replica line is dropped here.
+    Input::BlockActions(parsed.map_err(|err| line_error(&line, &err, line_height(&line))), read_at, diagnostics)
 }
 
 fn parse_line<E: DeserializeOwned>(line: &str) -> std::result::Result<Batch<E>, LineError> {
@@ -523,16 +526,26 @@ fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut Bl
         }
         Input::Hip3OracleUpdates(Ok((batch, key))) => assembler.receive_hip3_oracle_updates(batch, key),
         Input::BookDiffs(Ok((batch, key))) => assembler.receive_book_diffs(batch, key),
-        Input::OrderStatuses(Ok(Some((batch, key)))) => assembler.receive_order_statuses(batch, key),
-        Input::OrderStatuses(Ok(None)) => return Touched::default(),
-        Input::BlockActions(Ok((block, mark_actions)), read_at) => assembler.receive_block_actions(block, mark_actions, read_at),
+        Input::OrderStatuses(Ok((batch, key))) => assembler.receive_order_statuses(batch, key),
+        Input::BlockActions(Ok((block, mark_actions)), read_at, mut diagnostics) => {
+            marks.sample_ioc_pairings(&mut diagnostics);
+            for (kind, count) in [("batchRejected", diagnostics.batch_rejected), ("unknown", diagnostics.unknown),
+                ("suppressed", diagnostics.unknown - diagnostics.samples.len())]
+            {
+                if count > 0 { NODE_MARKS_IOC_PAIRINGS_TOTAL.with_label_values(&[kind]).inc_by(count as u64); }
+            }
+            for evidence in diagnostics.samples {
+                record_evidence(&evidence.json(block.height));
+            }
+            assembler.receive_block_actions(block, mark_actions, read_at)
+        }
         Input::ReadThrough(stream, at) => assembler.receive_read_through(stream, at),
         Input::Fills(Err(err), _) => return lost(book, marks, Stream::Fills, "parse_error", &err),
         Input::MiscEvents(Err(err), _) => return lost(book, marks, Stream::MiscEvents, "parse_error", &err),
         Input::Hip3OracleUpdates(Err(err)) => return lost(book, marks, Stream::Hip3OracleUpdates, "parse_error", &err),
         Input::BookDiffs(Err(err)) => return lost(book, marks, Stream::BookDiffs, "parse_error", &err),
         Input::OrderStatuses(Err(err)) => return lost(book, marks, Stream::OrderStatuses, "parse_error", &err),
-        Input::BlockActions(Err(err), _) => return lost(book, marks, Stream::BlockActions, "parse_error", &err),
+        Input::BlockActions(Err(err), _, _) => return lost(book, marks, Stream::BlockActions, "parse_error", &err),
         Input::Loss(stream) => {
             let error = "the watcher skipped lines while positioning at its start, or discarded buffered data".to_string();
             return lost(book, marks, stream, "watcher_discard", &LineError { block: None, error });
@@ -1022,7 +1035,7 @@ impl TestOwner {
         }
         for block in [height, height + 1] {
             let line = Ok((BlockActions { height: block, time_ms: block * 1_000, actions: Vec::new() }, Err("an account test line".to_string())));
-            self.inputs.send(Input::BlockActions(line, Instant::now())).await.unwrap();
+            self.inputs.send(Input::BlockActions(line, Instant::now(), PairingDiagnostics::default())).await.unwrap();
         }
         let after = Instant::now() + Duration::from_micros(1);
         for stream in PROVING_STREAMS {
@@ -1110,7 +1123,7 @@ mod tests {
     ) {
         for height in blocks {
             let parsed = (BlockActions { height, time_ms: height * 1_000, actions: Vec::new() }, Err("an account test line".to_string()));
-            let line = Input::BlockActions(Ok(parsed), Instant::now());
+            let line = Input::BlockActions(Ok(parsed), Instant::now(), PairingDiagnostics::default());
             apply_input(book, marks, assembler, line);
         }
         let after = Instant::now() + Duration::from_micros(1);
@@ -1224,33 +1237,50 @@ mod tests {
         assert!(err.error.starts_with("no \"events\": text to take the line's identity from"), "{}", err.error);
     }
 
-    /// The marks read cancels of orders with a cloid, triggers and self-trade cancels; any other status reaches the
-    /// owner as nothing.
+    /// Even an unrelated status is a boundary in the ordered cancellation evidence.
     #[test]
-    fn an_order_statuses_line_is_kept_only_for_a_cloid_cancel_a_trigger_or_a_self_trade_cancel() {
+    fn every_order_status_reaches_the_marks_including_cancellation_run_boundaries() {
         let line = |status: &str, cloid: &str| {
             format!(
                 r#"{{"local_time":"2026-10-20T12:00:00.1","block_time":"2026-10-20T12:00:00.0","block_number":9,"events":[{{"time":"2026-10-20T12:00:00.0","user":"0x00000000000000000000000000000000000000aa","hash":null,"builder":null,"status":"{status}","order":{{"coin":"BTC","side":"B","limitPx":"82850.0","sz":"0.0","oid":7,"timestamp":1,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"0.001","tif":"Alo","cloid":{cloid}}}}}]}}"#
             )
         };
-        for (status, cloid) in [("canceled", r#""0x0a""#), ("triggered", "null"), ("selfTradeCanceled", "null")] {
-            let Input::OrderStatuses(Ok(Some((batch, _)))) = order_statuses_input(line(status, cloid)) else { panic!("{status} kept") };
+        for (status, cloid) in [
+            ("canceled", r#""0x0a""#), ("triggered", "null"), ("selfTradeCanceled", "null"),
+            ("canceled", "null"), ("open", r#""0x0a""#), ("filled", r#""0x0a""#), ("iocCancelRejected", "null"),
+        ] {
+            let Input::OrderStatuses(Ok((batch, _))) = order_statuses_input(line(status, cloid)) else { panic!("{status} kept") };
             assert_eq!(batch.events_len(), 1);
         }
-        for (status, cloid) in [("canceled", "null"), ("open", r#""0x0a""#), ("filled", r#""0x0a""#), ("iocCancelRejected", "null")] {
-            assert!(matches!(order_statuses_input(line(status, cloid)), Input::OrderStatuses(Ok(None))), "{status} {cloid}");
-        }
+        assert!(matches!(order_statuses_input("broken".to_string()), Input::OrderStatuses(Err(_))));
     }
 
     #[test]
     fn a_block_actions_line_breaking_the_contract_keeps_its_height() {
         let empty = r#"{"abci_block":{"time":"2026-10-19T06:00:00.0","signed_action_bundles":[]},"resps":{"Full":[]},"height":8}"#;
-        let Input::BlockActions(Ok((block, _)), _) = block_actions_input(empty.to_string()) else { panic!("an empty block reads") };
+        let Input::BlockActions(Ok((block, _)), _, _) = block_actions_input(empty.to_string()) else { panic!("an empty block reads") };
         assert_eq!(block, BlockActions { height: 8, time_ms: 1_792_389_600_000, actions: Vec::new() });
         let unpaired = r#"{"abci_block":{"time":"2026-10-19T06:00:00.0","signed_action_bundles":[["0x01",{"signed_actions":[]}]]},"resps":{"Full":[]},"height":7}"#;
-        let Input::BlockActions(Err(err), _) = block_actions_input(unpaired.to_string()) else { panic!("no responses") };
+        let Input::BlockActions(Err(err), _, _) = block_actions_input(unpaired.to_string()) else { panic!("no responses") };
         assert_eq!(err.block, Some(7));
         assert!(err.error.starts_with("block 7: 1 bundles but 0 response groups (line of "), "{}", err.error);
+    }
+
+    #[test]
+    fn pairing_diagnostics_reach_ingress_without_the_whole_block() {
+        use crate::accounts::marks::actions::tests::{ok, replica_line};
+        let order = r#"{"a":41,"b":true,"p":"0.67331","s":"34.9","r":false,"t":{"limit":{"tif":"Ioc"}}}"#;
+        let action = format!(r#"{{"type":"order","orders":[{order}]}}"#);
+        let response = ok(r#"{"type":"order","data":{"statuses":[{"error":"unknown"},{"resting":{"oid":99}}]}}"#);
+        let other = r#"{"type":"noop","marker":"unrelated block content"}"#;
+        let line = replica_line(55, &[&[(&action, &response), (other, &ok(r#"{"type":"default"}"#))]]);
+        let Input::BlockActions(Ok((_, Ok(_))), _, diagnostics) = block_actions_input(line) else { panic!("marks kept") };
+        assert_eq!((diagnostics.unknown, diagnostics.samples.len()), (1, 1));
+        assert!(!diagnostics.samples[0].json(55).to_string().contains("unrelated block content"));
+        let batch = format!(r#"{{"type":"order","orders":[{order},{order}]}}"#);
+        let line = replica_line(56, &[&[(&batch, &ok(r#"{"type":"order","data":{"statuses":[{"error":"known batch rejection"}]}}"#))]]);
+        let Input::BlockActions(Ok((_, Ok(_))), _, diagnostics) = block_actions_input(line) else { panic!("marks kept") };
+        assert_eq!((diagnostics.batch_rejected, diagnostics.unknown, diagnostics.samples.len()), (1, 0, 0));
     }
 
     /// Review 000423 P2: a real owner exit closes the push for every receiver (handles only hold a weak sender) and
@@ -1351,7 +1381,7 @@ mod tests {
         assert_eq!(query().await.anchor.height, 1_000, "the anchor waits for its blocks");
         for height in 1_002..=1_101 {
             let actions = MarkActions { height, time_ns: (SEED_TIME_MS + height) * 1_000_000, actions: Vec::new() };
-            input_tx.send(Input::BlockActions(Ok((block_actions(height, &[]), Ok(actions))), Instant::now())).await.unwrap();
+            input_tx.send(Input::BlockActions(Ok((block_actions(height, &[]), Ok(actions))), Instant::now(), PairingDiagnostics::default())).await.unwrap();
         }
         let read_through = Instant::now() + Duration::from_millis(1);
         for stream in [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses] {

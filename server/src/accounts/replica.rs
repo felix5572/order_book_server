@@ -129,6 +129,21 @@ impl<'a> ReplicaLine<'a> {
         self.abci_block.time
     }
 
+    /// The two original wire objects for an already parsed action. Used only for a bounded number of unknown
+    /// pairing samples, never for ordinary blocks or known batch rejections. Response groups can be reordered.
+    pub(crate) fn raw_action_pair(&self, line: &'a str, bundle: usize, position: usize)
+        -> Result<(&'a str, LazyValue<'a>, LazyValue<'a>), String>
+    {
+        let (hash, _) = self.abci_block.signed_action_bundles.get(bundle).ok_or("evidence bundle missing")?;
+        let response_bundle = self.resps.full.iter().position(|(candidate, _)| candidate == hash)
+            .ok_or("evidence response bundle missing")?;
+        let action = sonic_rs::get(line, sonic_rs::pointer!["abci_block", "signed_action_bundles", bundle, 1, "signed_actions", position, "action"])
+            .map_err(|err| format!("action evidence: {err}"))?;
+        let response = sonic_rs::get(line, sonic_rs::pointer!["resps", "Full", response_bundle, 1, position])
+            .map_err(|err| format!("response evidence: {err}"))?;
+        Ok((hash, action, response))
+    }
+
     /// Every action with its response, in block order; the response groups must pair with the bundles one to one.
     pub(crate) fn paired(&self) -> Result<Vec<PairedAction<'_, 'a>>, String> {
         let responses = self.responses_by_bundle()?;

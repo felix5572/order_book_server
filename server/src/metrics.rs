@@ -515,6 +515,15 @@ lazy_static! {
         "Checkpoint the node marks were last rebuilt from"
     ).expect("metric can be created");
 
+    /// Item pairing failures observed at ingestion, including known whole-batch rejections; not log lines.
+    pub static ref NODE_MARKS_IOC_PAIRINGS_TOTAL: IntCounterVec = {
+        #[expect(clippy::expect_used, reason = "the metric name and label descriptor are static valid Prometheus names")]
+        let counter = IntCounterVec::new(
+            Opts::new("orderbook_node_marks_ioc_pairings_total", "IOC pairing observations by kind (batchRejected, unknown, suppressed)"),
+            &["kind"]
+        ).expect("static IOC pairing metric descriptor is valid");
+        counter
+    };
 
     pub static ref NODE_MARKS_LOGGED_INPUTS: IntGauge = IntGauge::new(
         "orderbook_node_marks_logged_inputs",
@@ -678,6 +687,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(NODE_MARKS_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_SEED_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_LOGGED_INPUTS.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_IOC_PAIRINGS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_CHECKED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_CHECKS_SKIPPED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_REBUILDS_TOTAL.clone())).ok();

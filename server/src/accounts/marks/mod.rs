@@ -21,6 +21,7 @@ pub(crate) mod book;
 pub(crate) mod decimal;
 pub(crate) mod execution;
 pub(crate) mod native;
+pub(crate) mod pairing;
 pub(crate) mod rules;
 pub(crate) mod seed;
 
@@ -495,6 +496,8 @@ pub(crate) struct NodeMarks {
     stopped: Option<String>,
     /// Ambiguous cuts still listed before the next install.
     ambiguous_samples_left: usize,
+    /// Unknown IOC item-pairing evidence shares the seed lifetime, but has its own quota.
+    ioc_pairing_samples_left: usize,
 }
 
 impl NodeMarks {
@@ -510,7 +513,14 @@ impl NodeMarks {
             seed_failure: None,
             stopped: None,
             ambiguous_samples_left: MAX_CHECK_SAMPLES,
+            ioc_pairing_samples_left: pairing::MAX_PAIRING_SAMPLES,
         }
+    }
+
+    /// Called once at ingress, never during seed replay. A failed or unreachable seed does not renew the quota.
+    pub(crate) fn sample_ioc_pairings(&mut self, diagnostics: &mut pairing::PairingDiagnostics) {
+        diagnostics.samples.truncate(self.ioc_pairing_samples_left);
+        self.ioc_pairing_samples_left -= diagnostics.samples.len();
     }
 
     /// Height of the trusted marks.
@@ -662,6 +672,7 @@ impl NodeMarks {
         };
         self.log.stop();
         self.ambiguous_samples_left = MAX_CHECK_SAMPLES;
+        self.ioc_pairing_samples_left = pairing::MAX_PAIRING_SAMPLES;
         rebuild
     }
 }
@@ -961,6 +972,50 @@ pub(crate) mod tests {
         run(&mut marks, 997..=covering + 1, &[]);
         marks.install(seed(covering + 1));
         assert_eq!(marks.availability(), Ok(covering + 1));
+    }
+
+    #[test]
+    fn ioc_evidence_quota_only_renews_when_a_seed_actually_rebuilds() {
+        use self::actions::tests::{ok, replica_line};
+        use crate::accounts::replica::ReplicaLine;
+        let order = r#"{"a":41,"b":true,"p":"0.67331","s":"34.9","r":false,"t":{"limit":{"tif":"Ioc"}}}"#;
+        let action = format!(r#"{{"type":"order","orders":[{order}]}}"#);
+        let response = ok(r#"{"type":"order","data":{"statuses":[{"error":"unknown"},{"resting":{"oid":99}}]}}"#);
+        let diagnostics = |count| {
+            let pairs = vec![(action.as_str(), response.as_str()); count];
+            let line = replica_line(995, &[&pairs]);
+            let replica = ReplicaLine::parse(&line).unwrap();
+            pairing::PairingDiagnostics::collect(&MarkActions::of(&replica).unwrap(), &replica, &line)
+        };
+        let mut marks = NodeMarks::new(GRID, STARTED_MS);
+        let mut known = pairing::PairingDiagnostics { batch_rejected: 100, ..Default::default() };
+        marks.sample_ioc_pairings(&mut known);
+        assert_eq!(marks.ioc_pairing_samples_left, 20, "known rejections consume no quota");
+        let mut first = diagnostics(25);
+        marks.sample_ioc_pairings(&mut first);
+        assert_eq!((first.unknown, first.samples.len()), (25, 20), "bounded even before first seed");
+        let mut later = diagnostics(1);
+        marks.sample_ioc_pairings(&mut later);
+        assert_eq!((later.unknown, later.samples.len()), (1, 0), "counts continue across blocks");
+        run(&mut marks, 995..=995, &[]);
+        assert_eq!(marks.install(seed(995)).rebuild, Rebuild::Replayed { blocks: 0 });
+        let mut renewed = diagnostics(1);
+        marks.sample_ioc_pairings(&mut renewed);
+        assert_eq!(renewed.samples.len(), 1);
+        let mut remaining = diagnostics(25);
+        marks.sample_ioc_pairings(&mut remaining);
+        assert_eq!(remaining.samples.len(), 19, "one quota across multiple inputs");
+        marks.record_lost_block(Stream::BlockActions, 997);
+        marks.record_seed_failure(1_000, "seed failed".to_string());
+        run(&mut marks, 996..=1_201, &[]);
+        assert_eq!(marks.install(seed(1_100)).rebuild, Rebuild::LogDoesNotReach);
+        let mut exhausted = diagnostics(25);
+        marks.sample_ioc_pairings(&mut exhausted);
+        assert_eq!(exhausted.samples.len(), 0, "losses and unsuccessful seeds do not reset quota");
+        assert_eq!(marks.install(seed(1_200)).rebuild, Rebuild::Replayed { blocks: 1 });
+        let mut fresh = diagnostics(25);
+        marks.sample_ioc_pairings(&mut fresh);
+        assert_eq!(fresh.samples.len(), 20, "successful rebuild starts a new interval");
     }
 
     #[test]

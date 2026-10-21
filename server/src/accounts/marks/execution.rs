@@ -10,6 +10,11 @@
 //! An anchor of a later action before one of an earlier action contradicts the line order: the block breaks the
 //! contract.
 //!
+//! A no-fill IOC emits its `iocCancelRejected` status followed by its self-trade cancels. `self_trade` preserves that
+//! run and matches the taker one-to-one to the exact rejected request. This also places old resting orders and
+//! cross-vault cancels (bm ZETA 1191392472, APE 1191420380, PROVE 1191436351); it does not guess vault ownership.
+//!
+//! For cancellations without that evidence, the earlier conservative attribution remains:
 //! A self-trade cancel (`selfTradeCanceled`) removes a resting order inside the order that would have traded with it.
 //! Its remove anchors to a book action only when that action is the one possible cause:
 //! - the removed order was created in the block, by a book action: one resting before it could have met a block-start
@@ -37,6 +42,9 @@
 //! 000444 r1 P2-2), so an update is a fill's only when every order-preserving size match puts that fill on it; any other
 //! update anchors nothing.
 
+mod self_trade;
+
+use self::self_trade::IocRejections;
 use alloy::primitives::Address;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -89,6 +97,8 @@ pub(crate) struct BlockStatuses {
     pub(crate) triggered_orders: Vec<StatusOrder>,
     /// `selfTradeCanceled` statuses.
     pub(crate) self_trade_cancelled: Vec<StatusOrder>,
+    /// No-fill IOC statuses and their contiguous self-trade cancellations, in stream order.
+    rejected_iocs: IocRejections,
 }
 
 /// An order as a status names it.
@@ -122,6 +132,7 @@ impl BlockStatuses {
     pub(crate) fn of(statuses: impl IntoIterator<Item = NodeDataOrderStatus>) -> Result<Self, String> {
         let mut out = Self::default();
         for status in statuses {
+            out.rejected_iocs.observe(&status)?;
             match (status.status.as_str(), &status.order.cloid) {
                 ("canceled", Some(cloid)) => {
                     out.cancelled_cloids.entry((status.user, cloid.clone())).or_insert(status.order.oid);
@@ -138,7 +149,7 @@ impl BlockStatuses {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len()
+        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len()
     }
 }
 
@@ -179,11 +190,16 @@ pub(crate) fn price_points<'b>(
     points.sort_by_key(|action| action.rank);
     let set_globals: Vec<Rank> =
         points.iter().filter(|action| matches!(action.action, MarkAction::SetGlobal(_))).map(|action| action.rank).collect();
-    let cancelled = cancelled_by_action(actions, statuses, order_asset);
+    // A native SetGlobalAction cannot trigger a HIP-3 (or spot) order. HIP-3 setOracle can execute in an earlier
+    // bundle: treating its fills as native post-SGA fills manufactured a contradiction at bm block 1191473229.
+    let native_triggered = statuses.triggered_orders.iter()
+        .filter(|order| super::book::is_main_perp(&order.coin) && order_asset(&order.coin).is_some())
+        .map(|order| order.oid).collect();
+    let cancelled = cancelled_by_action(actions, statuses, &order_asset);
     points
         .into_iter()
         .map(|action| {
-            let anchors = Anchors::around(action.rank, &cancelled, statuses, &set_globals);
+            let anchors = Anchors::around(action.rank, &cancelled, &native_triggered, &set_globals);
             let cut = anchors.cut(diffs, fills).map_err(|err| format!("block {} action at {:?}: {err}", actions.height, action.rank))?;
             Ok(PricePoint { action, cut })
         })
@@ -223,7 +239,18 @@ fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses, o
         }
         out.push(Removing { rank: action.rank, created: &book.created, cancelled });
     }
+    let attributed = statuses.rejected_iocs.attributed(actions, &order_asset);
+    for (rank, oids) in &attributed {
+        if let Some(action) = out.iter_mut().find(|action| action.rank == *rank) {
+            action.cancelled.extend(oids);
+        }
+    }
     for cancel in &statuses.self_trade_cancelled {
+        // A witnessed IOC run that failed the one-to-one match stays unplaced; do not replace that ambiguity
+        // with the weaker same-account heuristic below.
+        if statuses.rejected_iocs.contains_cancel(cancel.oid) {
+            continue;
+        }
         let Some((creator, created_at)) = books.iter().find(|(_, book)| book.created.contains(&cancel.oid)).map(|(action, book)| (*book, action.rank))
         else {
             continue;
@@ -269,7 +296,7 @@ const fn index(side: Side) -> usize {
 }
 
 impl<'s> Anchors<'s> {
-    fn around(rank: Rank, books: &[Removing<'_>], statuses: &'s BlockStatuses, set_globals: &[Rank]) -> Self {
+    fn around(rank: Rank, books: &[Removing<'_>], triggered: &'s FxHashSet<u64>, set_globals: &[Rank]) -> Self {
         let mut anchors = Self::default();
         for other in books {
             let side = index(if other.rank < rank { Side::Before } else { Side::After });
@@ -279,7 +306,7 @@ impl<'s> Anchors<'s> {
         // the orders a lone SetGlobalAction triggers run inside it, after its selector, even when an earlier action of
         // the block placed them (bm block 1189996766)
         if let [set_global] = set_globals {
-            anchors.triggered = Some((&statuses.triggered, if *set_global < rank { Side::Before } else { Side::After }));
+            anchors.triggered = Some((triggered, if *set_global < rank { Side::Before } else { Side::After }));
         }
         anchors
     }
@@ -461,19 +488,19 @@ mod tests {
         book::tests::diff_line,
     };
 
-    fn diff(oid: u64, raw: &str) -> BookDiff {
+    pub(super) fn diff(oid: u64, raw: &str) -> BookDiff {
         BookDiff::of(&diff_line(1, "BTC", oid, "B", "82850.0", raw).events()[0]).unwrap()
     }
 
-    fn book(rank: Rank, anchors: BookAnchors) -> RankedAction {
+    pub(super) fn book(rank: Rank, anchors: BookAnchors) -> RankedAction {
         RankedAction { rank, user: Some(Address::repeat_byte(1)), action: MarkAction::Book(anchors) }
     }
 
-    fn set_global(rank: Rank) -> RankedAction {
+    pub(super) fn set_global(rank: Rank) -> RankedAction {
         RankedAction { rank, user: None, action: MarkAction::SetGlobal(Vec::new()) }
     }
 
-    fn fill(tid: u64, oid: u64, crossed: bool) -> BlockFill {
+    pub(super) fn fill(tid: u64, oid: u64, crossed: bool) -> BlockFill {
         BlockFill { coin: "BTC".into(), px: "82850.0".into(), sz: "0.002".into(), crossed, oid, tid, twap: false }
     }
 
@@ -482,7 +509,7 @@ mod tests {
         None
     }
 
-    const NEW: &str = r#"{"new":{"sz":"0.001"}}"#;
+    pub(super) const NEW: &str = r#"{"new":{"sz":"0.001"}}"#;
     const REMOVE: &str = r#""remove""#;
 
     /// An order created before the price action, one cancelled after, and a maker hit by an earlier taker: the cut
@@ -516,9 +543,10 @@ mod tests {
     fn a_triggered_order_runs_inside_the_lone_set_global_action() {
         let placed = BookAnchors { created: vec![30], ..BookAnchors::default() };
         let actions = MarkActions { height: 1, time_ns: 1, actions: vec![book((0, 3, 0), placed), set_global((1, 3, 0))] };
-        let statuses = BlockStatuses { triggered: std::iter::once(30).collect(), ..BlockStatuses::default() };
+        let statuses = BlockStatuses::of(crate::accounts::test_support::status_line(1, "triggered", Address::repeat_byte(1), 30, None).events()).unwrap();
         let diffs = [diff(31, NEW), diff(30, NEW)];
-        let points = price_points(&actions, &statuses, &diffs, &[], no_asset).unwrap();
+        let btc = |coin: &str| (coin == "BTC").then_some(0);
+        let points = price_points(&actions, &statuses, &diffs, &[], btc).unwrap();
         assert_eq!((points[0].cut.lo, points[0].cut.hi), (0, 1));
         let without = price_points(&actions, &BlockStatuses::default(), &diffs, &[], no_asset).unwrap();
         assert_eq!(without[0].cut.lo, 2, "as the placing action's");
@@ -721,3 +749,6 @@ mod tests {
         assert_eq!(cuts.at(4, 2, (Some(1), Some(2))), (Some(1), Some(2)), "no line of the block");
     }
 }
+
+#[cfg(test)]
+mod regression;

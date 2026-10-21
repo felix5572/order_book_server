@@ -1,0 +1,470 @@
+[
+  {
+    "height": 1191392472,
+    "coin": "ZETA",
+    "asset": 108,
+    "block_time": "2026-10-21T01:44:59.388034057",
+    "action": {
+      "type": "order",
+      "orders": [
+        {
+          "a": 108,
+          "b": false,
+          "p": "0.04208",
+          "s": "381.8",
+          "r": false,
+          "t": {
+            "limit": {
+              "tif": "Ioc"
+            }
+          }
+        }
+      ],
+      "grouping": "na"
+    },
+    "response": {
+      "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+      "res": {
+        "status": "ok",
+        "response": {
+          "type": "order",
+          "data": {
+            "statuses": [
+              {
+                "error": "Order could not immediately match against any resting orders. asset=108"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "original_rank": [
+      0,
+      3,
+      3
+    ],
+    "statuses": [
+      {
+        "time": "2026-10-21T01:44:59.388034057",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": null,
+        "builder": null,
+        "status": "iocCancelRejected",
+        "order": {
+          "coin": "ZETA",
+          "side": "A",
+          "limitPx": "0.04208",
+          "sz": "381.8",
+          "oid": 581021877947,
+          "timestamp": 1792547099388,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "381.8",
+          "tif": "Ioc",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T01:44:59.388034057",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": null,
+        "builder": null,
+        "status": "selfTradeCanceled",
+        "order": {
+          "coin": "ZETA",
+          "side": "B",
+          "limitPx": "0.04208",
+          "sz": "4011.7",
+          "oid": 581021871729,
+          "timestamp": 1792547098580,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "4011.7",
+          "tif": "Alo",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T01:44:59.388034057",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": null,
+        "builder": null,
+        "status": "selfTradeCanceled",
+        "order": {
+          "coin": "ZETA",
+          "side": "B",
+          "limitPx": "0.04208",
+          "sz": "3621.2",
+          "oid": 581021875270,
+          "timestamp": 1792547099125,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "3621.2",
+          "tif": "Alo",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T01:44:59.388034057",
+        "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+        "hash": null,
+        "builder": null,
+        "status": "selfTradeCanceled",
+        "order": {
+          "coin": "ZETA",
+          "side": "B",
+          "limitPx": "0.04208",
+          "sz": "3963.2",
+          "oid": 581021877210,
+          "timestamp": 1792547099261,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "3963.2",
+          "tif": "Alo",
+          "cloid": null
+        }
+      }
+    ],
+    "diffs": [
+      {
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "oid": 581021871729,
+        "coin": "ZETA",
+        "side": "B",
+        "px": "0.04208",
+        "raw_book_diff": "remove"
+      },
+      {
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "oid": 581021875270,
+        "coin": "ZETA",
+        "side": "B",
+        "px": "0.04208",
+        "raw_book_diff": "remove"
+      },
+      {
+        "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+        "oid": 581021877210,
+        "coin": "ZETA",
+        "side": "B",
+        "px": "0.04208",
+        "raw_book_diff": "remove"
+      }
+    ],
+    "sources": {
+      "1191392472_replica.json": "d3f019d14537a25817abd3d025539f9c8821478a6c6ccb71b7a8c8670c2ae8e5",
+      "1191392472_node_order_statuses_streaming.jsonl": "c590a38ab626304372331eef3b50fdc6808e9111d2ce1f8745586188744ac6c1",
+      "1191392472_node_raw_book_diffs_streaming.jsonl": "fb31514e387d0170006ef5006c3833f276d8ca9d6f583ef86303f10b34478d53"
+    }
+  },
+  {
+    "height": 1191420380,
+    "coin": "APE",
+    "asset": 8,
+    "block_time": "2026-10-21T02:18:28.752159322",
+    "action": {
+      "type": "order",
+      "orders": [
+        {
+          "a": 8,
+          "b": false,
+          "p": "0.1464",
+          "s": "143.3",
+          "r": false,
+          "t": {
+            "limit": {
+              "tif": "Ioc"
+            }
+          }
+        }
+      ],
+      "grouping": "na"
+    },
+    "response": {
+      "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+      "res": {
+        "status": "ok",
+        "response": {
+          "type": "order",
+          "data": {
+            "statuses": [
+              {
+                "error": "Order could not immediately match against any resting orders. asset=8"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "original_rank": [
+      0,
+      3,
+      5
+    ],
+    "statuses": [
+      {
+        "time": "2026-10-21T02:18:28.752159322",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": null,
+        "builder": null,
+        "status": "iocCancelRejected",
+        "order": {
+          "coin": "APE",
+          "side": "A",
+          "limitPx": "0.1464",
+          "sz": "143.3",
+          "oid": 581046274067,
+          "timestamp": 1792549108752,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "143.3",
+          "tif": "Ioc",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T02:18:28.752159322",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": null,
+        "builder": null,
+        "status": "selfTradeCanceled",
+        "order": {
+          "coin": "APE",
+          "side": "B",
+          "limitPx": "0.1464",
+          "sz": "1018.1",
+          "oid": 581046183266,
+          "timestamp": 1792549098871,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "1018.1",
+          "tif": "Alo",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T02:18:28.752159322",
+        "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+        "hash": null,
+        "builder": null,
+        "status": "selfTradeCanceled",
+        "order": {
+          "coin": "APE",
+          "side": "B",
+          "limitPx": "0.1464",
+          "sz": "1088.2",
+          "oid": 581046184503,
+          "timestamp": 1792549098972,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "1088.2",
+          "tif": "Alo",
+          "cloid": null
+        }
+      }
+    ],
+    "diffs": [
+      {
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "oid": 581046183266,
+        "coin": "APE",
+        "side": "B",
+        "px": "0.1464",
+        "raw_book_diff": "remove"
+      },
+      {
+        "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+        "oid": 581046184503,
+        "coin": "APE",
+        "side": "B",
+        "px": "0.1464",
+        "raw_book_diff": "remove"
+      }
+    ],
+    "sources": {
+      "1191420380_replica.json": "0d3b2bf0eeb4a924d92f0d30a9e3ba6be5aad06277d0b4b295db08c25cce8230",
+      "1191420380_node_order_statuses_streaming.jsonl": "cb067a7d74f027c9473735744194b4fe4409afd5e44efb76280916523be130b7",
+      "1191420380_node_raw_book_diffs_streaming.jsonl": "15fac0aab1c3e22382b972b7f9a2403ab7f00d2d542dc8533ed542af1a65242e"
+    }
+  },
+  {
+    "height": 1191436351,
+    "coin": "PROVE",
+    "asset": 201,
+    "block_time": "2026-10-21T02:37:46.382995431",
+    "action": {
+      "type": "order",
+      "orders": [
+        {
+          "a": 201,
+          "b": true,
+          "p": "0.18608",
+          "s": "97",
+          "r": false,
+          "t": {
+            "limit": {
+              "tif": "Ioc"
+            }
+          }
+        }
+      ],
+      "grouping": "na"
+    },
+    "response": {
+      "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+      "res": {
+        "status": "ok",
+        "response": {
+          "type": "order",
+          "data": {
+            "statuses": [
+              {
+                "error": "Order could not immediately match against any resting orders. asset=201"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "original_rank": [
+      0,
+      3,
+      4
+    ],
+    "statuses": [
+      {
+        "time": "2026-10-21T02:37:46.382995431",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": null,
+        "builder": null,
+        "status": "iocCancelRejected",
+        "order": {
+          "coin": "PROVE",
+          "side": "B",
+          "limitPx": "0.18608",
+          "sz": "97.0",
+          "oid": 581058955444,
+          "timestamp": 1792550266382,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "97.0",
+          "tif": "Ioc",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T02:37:46.382995431",
+        "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+        "hash": null,
+        "builder": null,
+        "status": "selfTradeCanceled",
+        "order": {
+          "coin": "PROVE",
+          "side": "A",
+          "limitPx": "0.18605",
+          "sz": "848.0",
+          "oid": 581058921354,
+          "timestamp": 1792550263397,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "848.0",
+          "tif": "Alo",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T02:37:46.382995431",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": null,
+        "builder": null,
+        "status": "selfTradeCanceled",
+        "order": {
+          "coin": "PROVE",
+          "side": "A",
+          "limitPx": "0.18605",
+          "sz": "837.0",
+          "oid": 581058948189,
+          "timestamp": 1792550265763,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "837.0",
+          "tif": "Alo",
+          "cloid": null
+        }
+      }
+    ],
+    "diffs": [
+      {
+        "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+        "oid": 581058921354,
+        "coin": "PROVE",
+        "side": "A",
+        "px": "0.18605",
+        "raw_book_diff": "remove"
+      },
+      {
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "oid": 581058948189,
+        "coin": "PROVE",
+        "side": "A",
+        "px": "0.18605",
+        "raw_book_diff": "remove"
+      }
+    ],
+    "sources": {
+      "1191436351_replica.json": "aac786cb8b64a02278a182a84cb8a0d628bbecaad443fce453da101e002a9010",
+      "1191436351_node_order_statuses_streaming.jsonl": "50fffc04722c82137bb69ce07e90b8855cdd8d9334cd2c2116e802a904995562",
+      "1191436351_node_raw_book_diffs_streaming.jsonl": "790b6339b0e71e7429283f113b35c4b53fdd1a00130159edb3f3ba6b67bce46a"
+    }
+  }
+]

@@ -9,7 +9,7 @@
 use alloy::primitives::Address;
 use serde::Deserialize;
 
-use super::decimal::ExactDecimal;
+use super::{decimal::ExactDecimal, pairing::IocPairingMismatch};
 use crate::accounts::{checkpoint::node_time_ns, replica::{PairedAction, ReplicaLine}};
 
 /// (bundle, category, position): actions run in this order.
@@ -58,6 +58,12 @@ pub(crate) struct BookAnchors {
     /// RUNE sell, while the account's ALO batch of the same bundle also bought RUNE; research
     /// `rune_1191370000_1191380000`).
     pub(crate) takers: Vec<Taker>,
+    /// IOC requests whose paired response is the no-immediate-match error. Unlike a placed order, that response
+    /// carries no oid; the ordered status stream can identify the rejected taker and its self-trade cancels.
+    pub(crate) rejected_iocs: Vec<RejectedIoc>,
+    /// A known whole-batch rejection or unknown item pairing. Both prevent IOC attribution; only unknown
+    /// shapes qualify for bounded action-level evidence. Placed oids still come from the response.
+    pub(crate) ioc_pairing_mismatch: Option<IocPairingMismatch>,
 }
 
 /// An order that may trade on entry.
@@ -66,6 +72,15 @@ pub(crate) struct Taker {
     pub(crate) asset: u32,
     pub(crate) is_buy: bool,
     pub(crate) limit_px: ExactDecimal,
+}
+
+/// Exact request fields used to identify a no-fill IOC status; no address-based self-trade domain is inferred.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RejectedIoc {
+    pub(crate) taker: Taker,
+    pub(crate) sz: ExactDecimal,
+    pub(crate) reduce_only: bool,
+    pub(crate) cloid: Option<String>,
 }
 
 impl MarkActions {
@@ -99,13 +114,16 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
     let (category, action) = match kind {
         "order" => {
             let orders: Vec<WireOrder> = action.field(action.orders.as_ref(), "orders")?;
-            let anchors = BookAnchors { takers: takers(&orders)?, ..created_by(&statuses()?) };
+            let statuses = statuses()?;
+            let anchors = order_anchors(&orders, &statuses)?;
             (category(orders.iter().all(WireOrder::is_alo)), MarkAction::Book(anchors))
         }
         "modify" => {
             let order: WireOrder = action.field(action.order.as_ref(), "order")?;
             let old: OrderRef = action.field(action.oid.as_ref(), "oid")?;
-            let mut anchors = BookAnchors { takers: takers(std::slice::from_ref(&order))?, ..created_by(&statuses()?) };
+            let orders = std::slice::from_ref(&order);
+            let statuses = statuses()?;
+            let mut anchors = order_anchors(orders, &statuses)?;
             old.add_to(&mut anchors);
             (category(order.is_alo()), MarkAction::Book(anchors))
         }
@@ -113,7 +131,7 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
             let modifies: Vec<WireModify> = action.field(action.modifies.as_ref(), "modifies")?;
             let statuses = statuses()?;
             let orders: Vec<&WireOrder> = modifies.iter().map(|modify| &modify.order).collect();
-            let mut anchors = BookAnchors { takers: takers(orders)?, ..created_by(&statuses) };
+            let mut anchors = order_anchors(orders, &statuses)?;
             // only a modify that placed its new order replaced the old one (research method 2)
             if statuses.len() != modifies.len() {
                 return Err(format!("batchModify of {} modifies with {} statuses", modifies.len(), statuses.len()));
@@ -155,6 +173,44 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
         }
     };
     Ok(Some(RankedAction { rank: (paired.bundle, category, paired.position), user, action }))
+}
+
+/// Request/response pairing is optional evidence for no-fill IOC attribution, not a protocol invariant for an
+/// order action. A count mismatch (including bm 1191390021's whole-batch error) keeps the placed oids, records
+/// the counts, and identifies no rejected IOC. The status run still blocks the weaker same-account heuristic.
+fn order_anchors<'o>(orders: impl IntoIterator<Item = &'o WireOrder>, statuses: &[WireStatus]) -> Result<BookAnchors, String> {
+    let orders: Vec<_> = orders.into_iter().collect();
+    let mut anchors = BookAnchors { takers: takers(orders.iter().copied())?, ..created_by(statuses) };
+    // A default modify response has no item statuses; it has never identified a rejected IOC.
+    if statuses.is_empty() {
+        return Ok(anchors);
+    }
+    if orders.len() != statuses.len() {
+        let batch_rejected = orders.len() > 1 && matches!(statuses, [WireStatus::Object(status)]
+            if status.error.is_some() && status.resting.is_none() && status.filled.is_none());
+        anchors.ioc_pairing_mismatch = Some(if batch_rejected {
+            IocPairingMismatch::BatchRejected
+        } else {
+            IocPairingMismatch::Unknown { requests: orders.len(), responses: statuses.len() }
+        });
+        return Ok(anchors);
+    }
+    for (order, status) in orders.into_iter().zip(statuses) {
+        let WireStatus::Object(status) = status else { continue };
+        if order.t.limit.as_ref().is_none_or(|limit| limit.tif != "Ioc")
+            || status.error.as_deref() != Some(format!("Order could not immediately match against any resting orders. asset={}", order.a).as_str())
+        {
+            continue;
+        }
+        let taker = order.taker().transpose()?.ok_or("rejected IOC without a limit")?;
+        anchors.rejected_iocs.push(RejectedIoc {
+            taker,
+            sz: ExactDecimal::parse(&order.s).map_err(|err| format!("rejected IOC size: {err}"))?,
+            reduce_only: order.r,
+            cloid: order.c.clone(),
+        });
+    }
+    Ok(anchors)
 }
 
 /// The orders that may trade on entry; a limit price that does not read breaks the contract.
@@ -211,6 +267,7 @@ enum WireStatus {
 
 #[derive(Deserialize)]
 struct WireStatusObject {
+    error: Option<String>,
     resting: Option<WireOid>,
     filled: Option<WireOid>,
 }
@@ -236,6 +293,9 @@ struct WireOrder {
     b: bool,
     /// The limit price.
     p: String,
+    s: String,
+    r: bool,
+    c: Option<String>,
     t: WireOrderType,
 }
 
@@ -365,6 +425,8 @@ pub(crate) mod tests {
             created_cloids: vec![("0xfe63".to_string(), 8)],
             cancelled: vec![],
             cancelled_cloids: vec!["0xfe63".to_string()],
+            rejected_iocs: vec![],
+            ioc_pairing_mismatch: None,
             takers: Vec::new(),
         };
         assert_eq!(book(3), modified, "the failed modify of 77 removed nothing");
@@ -382,6 +444,23 @@ pub(crate) mod tests {
         let MarkAction::Book(anchors) = &parsed.actions[0].action else { panic!("{:?}", parsed.actions) };
         let ioc_taker = Taker { asset: 41, is_buy: true, limit_px: ExactDecimal::parse("0.67331").unwrap() };
         assert_eq!((anchors.created.as_slice(), anchors.takers.as_slice()), (&[][..], &[ioc_taker][..]));
+    }
+
+    #[test]
+    fn batch_modify_keeps_its_required_pairing_and_default_modify_has_no_ioc_evidence() {
+        let order = r#"{"a":41,"b":true,"p":"0.67331","s":"34.9","r":false,"t":{"limit":{"tif":"Ioc"}}}"#;
+        let batch = format!(r#"{{"type":"batchModify","modifies":[{{"oid":1,"order":{order}}}]}}"#);
+        let response = ok(r#"{"type":"order","data":{"statuses":[{"resting":{"oid":2}},{"resting":{"oid":3}}]}}"#);
+        let line = replica_line(9, &[&[(&batch, &response)]]);
+        let err = MarkActions::of(&ReplicaLine::parse(&line).unwrap()).unwrap_err();
+        assert!(err.contains("batchModify of 1 modifies with 2 statuses"), "{err}");
+        let modify = format!(r#"{{"type":"modify","oid":1,"order":{order}}}"#);
+        let line = replica_line(9, &[&[(&modify, &ok(r#"{"type":"default"}"#))]]);
+        let parsed = mark_actions(&line);
+        let MarkAction::Book(book) = &parsed.actions[0].action else { panic!("book") };
+        assert_eq!(book.cancelled, [1]);
+        assert_eq!(book.ioc_pairing_mismatch, None);
+        assert_eq!(book.rejected_iocs, []);
     }
 
     #[test]

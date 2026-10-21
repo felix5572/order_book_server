@@ -53,7 +53,7 @@ pub(crate) struct CompletedBlock {
     pub(crate) book_diffs: Vec<Batch<NodeDataOrderDiff>>,
     /// The node marks' reading of the `replica_cmds` line; an error breaks only their contract.
     pub(crate) mark_actions: Result<MarkActions, String>,
-    /// The statuses the marks read: cancels of orders with a cloid, triggers.
+    /// Every status in stream order: even an unused one closes a rejected IOC cancellation run.
     pub(crate) order_statuses: Vec<Batch<NodeDataOrderStatus>>,
 }
 
