@@ -1058,4 +1058,26 @@ pub(crate) mod tests {
         moved.apply(5, user(HOLDER), &AccountEvent::Funding { coin: "BTC".to_string(), amount_wei: 100 });
         assert_eq!(moved.check_against(&moved_anchor, &per_dex()).compared["perDex"], compared(2, 1, 0), "HOLDER moved +1 micro");
     }
+    #[test]
+    fn multisig_margin_reaches_cash_replay_once_with_equal_opposite_pool_changes() {
+        use crate::accounts::actions::parse_block_actions;
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("actions_multisig_goldens.json")).unwrap();
+        let mut case = cases[0].clone();
+        // Keep the observed amount and wrapper, route to the fixture's isolated position.
+        case["action"]["payload"]["action"]["asset"] = json!(1);
+        case["receipt"]["user"] = json!(ISOLATED);
+        let line = json!({"height": case["height"], "abci_block": {"time":case["time"],
+            "signed_action_bundles":[[case["bundle"],{"signed_actions":[{"action":case["action"]}]}]]},
+            "resps":{"Full":[[case["bundle"],[case["receipt"]]]]}}).to_string();
+        let block = parse_block_actions(&line).unwrap();
+        assert_eq!(block.actions.len(), 1);
+        let mut states = per_dex();
+        for (action, user) in block.actions {
+            states.apply(block.height, user, &AccountEvent::Action(action));
+        }
+        assert_eq!(cross(&states, ISOLATED), per_dex_pools(&[(0, -6_729_717_000)]));
+        assert_eq!(states.accounts[&user(ISOLATED)].isolated[&(0, 1)], 1_200_000_000_000 + 6_729_717_000);
+        assert_eq!(stop(&states, ISOLATED), None);
+    }
+
 }

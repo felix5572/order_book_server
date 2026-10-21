@@ -5,6 +5,7 @@
 //! as `usdClassTransfer` and `send` are not: their ledger events already mark the account.
 
 use alloy::primitives::Address;
+use serde::Deserialize;
 
 use super::{
     checkpoint::node_time_ns,
@@ -103,19 +104,45 @@ pub(crate) fn block_actions(replica: &ReplicaLine<'_>) -> Result<BlockActions, S
     let time_ms = node_time_ns(time).map_err(|err| format!("block {height}: {err}"))? / 1_000_000;
     let mut kept = Vec::new();
     for paired in replica.paired().map_err(|err| format!("block {height}: {err}"))? {
-        let action_type = paired.action.action_type;
-        if BlockActionKind::of(action_type).is_none() {
-            continue;
-        }
         let read = || -> Result<Option<KeptAction>, String> {
-            let Some(user) = succeeded(action_type, paired.response)? else { return Ok(None) };
-            Ok(Some((BlockAction::read(paired.action)?, user)))
+            if paired.action.action_type != "multiSig" {
+                return kept_action(paired.action, paired.response);
+            }
+            // The outer receipt is the execution result, including failed authorization. Its user is the actual
+            // account (possibly a vault/subaccount), not necessarily payload.multiSigUser or outerSigner.
+            match paired.response.res.status {
+                "err" => return Ok(None),
+                "ok" => {}
+                status => return Err(format!("multiSig with status {status:?}")),
+            }
+            let raw = paired.action.payload.as_ref().ok_or("multiSig without payload")?;
+            let payload: MultiSigPayload<'_> = sonic_rs::from_str(raw.as_raw_str())
+                .map_err(|err| format!("multiSig payload: {err}"))?;
+            if payload.action.action_type == "multiSig" {
+                return Err("nested multiSig execution is not verified".to_string());
+            }
+            kept_action(&payload.action, paired.response)
         };
         if let Some(action) = read().map_err(|err| format!("block {height}: bundle {}: {err}", paired.bundle_hash))? {
             kept.push(action);
         }
     }
     Ok(BlockActions { height, time_ms, actions: kept })
+}
+
+/// Account-only unwrap. The shared replica/mark ordering retains the original outer action and position.
+#[derive(Deserialize)]
+struct MultiSigPayload<'a> {
+    #[serde(borrow)]
+    action: Action<'a>,
+}
+
+fn kept_action(action: &Action<'_>, response: &Response<'_>) -> Result<Option<KeptAction>, String> {
+    if BlockActionKind::of(action.action_type).is_none() {
+        return Ok(None);
+    }
+    let Some(user) = succeeded(action.action_type, response)? else { return Ok(None) };
+    Ok(Some((BlockAction::read(action)?, user)))
 }
 
 /// The account a kept action acted on; `None` when it failed.
@@ -259,4 +286,53 @@ pub(crate) mod tests {
         assert_eq!(line_height(&broken), Some(1_189_931_524));
         assert_eq!(line_height(&REAL_LINE[..REAL_LINE.len() - 30]), None);
     }
+    fn multisig_line(case: &serde_json::Value) -> String {
+        serde_json::json!({
+            "height": case["height"],
+            "abci_block": {"time": case["time"], "signed_action_bundles": [[case["bundle"], {
+                "signed_actions": [{"action": case["action"]}]
+            }]]},
+            "resps": {"Full": [[case["bundle"], [case["receipt"]]]]}
+        }).to_string()
+    }
+
+    #[test]
+    fn real_multisig_margin_is_kept_but_ledger_owned_transfers_are_not() {
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("actions_multisig_goldens.json")).unwrap();
+        for case in cases {
+            let block = parse_block_actions(&multisig_line(&case)).unwrap();
+            if case["height"] == 1_191_644_834_u64 {
+                assert_eq!(block.actions, [(BlockAction::IsolatedMargin { asset: 110_104, ntli_micro: 67_297_170 },
+                    address("0xa38f19c4ccbcfd64cff676d72c436f7e6239dccf"))]);
+            } else {
+                assert!(block.actions.is_empty(), "order/sendAsset has its own fill/ledger owner");
+            }
+            let replica = multisig_line(&case);
+            let replica = ReplicaLine::parse(&replica).unwrap();
+            assert_eq!(replica.paired().unwrap()[0].action.action_type, "multiSig", "no global unwrap");
+        }
+    }
+
+    #[test]
+    fn multisig_uses_outer_status_and_effective_user_and_validates_kept_payloads() {
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("actions_multisig_goldens.json")).unwrap();
+        let original = &cases[0];
+        let mut case = original.clone();
+        case["receipt"]["user"] = serde_json::json!(LEVERAGE_VAULT);
+        assert_eq!(parse_block_actions(&multisig_line(&case)).unwrap().actions[0].1, address(LEVERAGE_VAULT));
+        case["receipt"]["res"]["status"] = serde_json::json!("err");
+        case["action"]["payload"] = serde_json::json!(null);
+        assert!(parse_block_actions(&multisig_line(&case)).unwrap().actions.is_empty(), "failed payload need not parse");
+        for (value, expected) in [(serde_json::json!(null), "without payload"),
+            (serde_json::json!({"action":{"type":"updateIsolatedMargin","asset":110104}}), "without ntli"),
+            (serde_json::json!({"action":{"type":"multiSig"}}), "nested multiSig")] {
+            let mut case = original.clone();
+            case["action"]["payload"] = value;
+            assert!(parse_block_actions(&multisig_line(&case)).unwrap_err().contains(expected));
+        }
+        let mut case = original.clone();
+        case["receipt"]["user"] = serde_json::json!(null);
+        assert!(parse_block_actions(&multisig_line(&case)).unwrap_err().contains("without a user"));
+    }
+
 }

@@ -53,6 +53,9 @@ pub(crate) struct Action<'a> {
     pub(crate) is_cross: Option<LazyValue<'a>>,
     #[serde(borrow)]
     pub(crate) amount: Option<LazyValue<'a>>,
+    /// Kept raw: only the account action adapter unwraps successful `multiSig` actions.
+    #[serde(borrow)]
+    pub(crate) payload: Option<LazyValue<'a>>,
     #[serde(borrow)]
     pub(crate) orders: Option<LazyValue<'a>>,
     #[serde(borrow)]
