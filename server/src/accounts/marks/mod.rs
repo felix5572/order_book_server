@@ -21,6 +21,7 @@ pub(crate) mod book;
 pub(crate) mod decimal;
 pub(crate) mod execution;
 pub(crate) mod native;
+mod orders;
 pub(crate) mod pairing;
 pub(crate) mod rules;
 pub(crate) mod seed;

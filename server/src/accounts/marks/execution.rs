@@ -48,6 +48,7 @@
 
 mod self_trade;
 mod vault;
+mod replacement;
 
 use self::self_trade::IocRejections;
 use alloy::primitives::Address;
@@ -106,6 +107,7 @@ pub(crate) struct BlockStatuses {
     rejected_iocs: IocRejections,
     /// Automatic close orders produced by vault withdrawals, not ordinary order receipts.
     vault_closes: vault::VaultCloses,
+    replacements: replacement::Replacements,
 }
 
 /// An order as a status names it.
@@ -141,6 +143,7 @@ impl BlockStatuses {
         for status in statuses {
             out.rejected_iocs.observe(&status)?;
             out.vault_closes.observe(&status);
+            out.replacements.observe(&status)?;
             match (status.status.as_str(), &status.order.cloid) {
                 ("canceled", Some(cloid)) => {
                     out.cancelled_cloids.entry((status.user, cloid.clone())).or_insert(status.order.oid);
@@ -161,7 +164,7 @@ impl BlockStatuses {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len() + self.vault_closes.len()
+        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len() + self.vault_closes.len() + self.replacements.len()
     }
 }
 
@@ -221,11 +224,12 @@ pub(crate) fn price_points_with_system<'b>(
         .map(|order| order.oid).collect();
     let cancelled = cancelled_by_action(actions, statuses, &order_asset, &system.competing_ioc_cancels);
     let vault_closes = statuses.vault_closes.attributed(actions, &system.unplaced_vault_withdrawals);
+    let replacements = statuses.replacements.attributed(actions, &order_asset, system);
     points
         .into_iter()
         .map(|action| {
             let mut anchors = Anchors::around(action.rank, &cancelled, &native_triggered, &statuses.triggered, &set_globals);
-            for (rank, oid) in &vault_closes {
+            for (rank, oid) in vault_closes.iter().chain(&replacements) {
                 let side = usize::from(*rank > action.rank);
                 anchors.created[side].insert(*oid);
             }

@@ -1,0 +1,204 @@
+{
+  "source": {
+    "height": 1191964185,
+    "block_time": "2026-10-21T13:10:26.518424241",
+    "modify_rank": [
+      0,
+      3,
+      1264
+    ],
+    "sga_rank": [
+      1,
+      3,
+      4
+    ],
+    "original_diff_range": [
+      1107,
+      1109
+    ],
+    "original_fill_range": [
+      2,
+      4
+    ],
+    "original_status_range": [
+      1571,
+      1574
+    ],
+    "raw_sha256": {
+      "node_order_statuses_streaming.jsonl.gz": "53143289c2495ba5bbc15b64a75e44dc7eecb7a091a8f71890d608fbc7508798",
+      "node_raw_book_diffs_streaming.jsonl.gz": "336ba9a9a2ff4d4bf7257cdcac6998385dff1f42880f3dfdf06dc758e7fa1020",
+      "node_fills_streaming.jsonl.gz": "d930ad60d6370cc6b21619db796d5217584203c16c11351bd004280de65dc40f",
+      "system_and_core_writer_actions_streaming.jsonl.gz": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "replica_cmds_1191960000.jsonl.gz": "4db2c23abac2bbc4933ddb07e55b56686f6745a6e9ca0a8fdfa39bf40df71b9f"
+    }
+  },
+  "action": {
+    "type": "modify",
+    "oid": 581448430564,
+    "order": {
+      "a": 214,
+      "b": false,
+      "p": "1312",
+      "s": "15.22",
+      "r": false,
+      "t": {
+        "limit": {
+          "tif": "Gtc"
+        }
+      }
+    },
+    "a": true
+  },
+  "response": {
+    "user": "0x0f34bb504725285a865402792c849409d9e2406b",
+    "res": {
+      "status": "ok",
+      "response": {
+        "type": "default"
+      }
+    }
+  },
+  "statuses": [
+    {
+      "time": "2026-10-21T13:10:26.518424241",
+      "user": "0x0f34bb504725285a865402792c849409d9e2406b",
+      "hash": "0x7e949c29cc134c17800e04470bee19020504000f67166ae9225d477c8b172602",
+      "builder": null,
+      "status": "open",
+      "order": {
+        "coin": "ZEC",
+        "side": "A",
+        "limitPx": "1312.0",
+        "sz": "15.22",
+        "oid": 581448633695,
+        "timestamp": 1792588226518,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Limit",
+        "origSz": "15.22",
+        "tif": "Gtc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:10:26.518424241",
+      "user": "0x0f34bb504725285a865402792c849409d9e2406b",
+      "hash": null,
+      "builder": null,
+      "status": "canceled",
+      "order": {
+        "coin": "ZEC",
+        "side": "A",
+        "limitPx": "1314.0",
+        "sz": "15.22",
+        "oid": 581448430564,
+        "timestamp": 1792588212452,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Limit",
+        "origSz": "15.22",
+        "tif": "Gtc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:10:26.518424241",
+      "user": "0x0f34bb504725285a865402792c849409d9e2406b",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "ZEC",
+        "side": "A",
+        "limitPx": "1312.0",
+        "sz": "0.0",
+        "oid": 581448633695,
+        "timestamp": 1792588226518,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Limit",
+        "origSz": "15.22",
+        "tif": "Gtc",
+        "cloid": null
+      }
+    }
+  ],
+  "diffs": [
+    {
+      "user": "0x0f34bb504725285a865402792c849409d9e2406b",
+      "oid": 581448430564,
+      "coin": "ZEC",
+      "side": "A",
+      "px": "1314.0",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0xa880d6cc607a05ea617307ab3b0d335e8d8424ee",
+      "oid": 581448619245,
+      "coin": "ZEC",
+      "side": "B",
+      "px": "1313.1",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "17.26",
+          "newSz": "2.04"
+        }
+      }
+    }
+  ],
+  "fills": [
+    [
+      "0xa880d6cc607a05ea617307ab3b0d335e8d8424ee",
+      {
+        "coin": "ZEC",
+        "px": "1313.1",
+        "sz": "15.22",
+        "side": "B",
+        "time": 1792588226518,
+        "startPosition": "-28.16",
+        "dir": "Close Short",
+        "closedPnl": "40.223416",
+        "hash": "0x7e949c29cc134c17800e04470bee19020504000f67166ae9225d477c8b172602",
+        "oid": 581448619245,
+        "crossed": false,
+        "fee": "-0.599561",
+        "tid": 357942248117061,
+        "cloid": "0x0000000000000000000001a1592ee531",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x0f34bb504725285a865402792c849409d9e2406b",
+      {
+        "coin": "ZEC",
+        "px": "1313.1",
+        "sz": "15.22",
+        "side": "A",
+        "time": 1792588226518,
+        "startPosition": "0.0",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x7e949c29cc134c17800e04470bee19020504000f67166ae9225d477c8b172602",
+        "oid": 581448633695,
+        "crossed": true,
+        "fee": "7.994152",
+        "tid": 357942248117061,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ]
+  ]
+}

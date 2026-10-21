@@ -9,7 +9,7 @@
 use alloy::primitives::Address;
 use serde::Deserialize;
 
-use super::{decimal::ExactDecimal, pairing::IocPairingMismatch};
+use super::{decimal::ExactDecimal, orders::OrderKey, pairing::IocPairingMismatch};
 use crate::accounts::{checkpoint::node_time_ns, replica::{PairedAction, ReplicaLine}};
 
 /// (bundle, category, position): actions run in this order.
@@ -72,6 +72,15 @@ pub(crate) struct BookAnchors {
     /// A known whole-batch rejection or unknown item pairing. Both prevent IOC attribution; only unknown
     /// shapes qualify for bounded action-level evidence. Placed oids still come from the response.
     pub(crate) ioc_pairing_mismatch: Option<IocPairingMismatch>,
+    /// Successful single modify with a default receipt: old order known, replacement oid only in statuses.
+    pub(crate) unreceipted_modify: Option<Box<ReplacementRequest>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReplacementRequest {
+    pub(crate) old: OrderRef,
+    pub(crate) asset: u32,
+    pub(crate) key: OrderKey,
 }
 
 /// An order that may trade on entry.
@@ -142,8 +151,13 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
             let order: WireOrder = action.field(action.order.as_ref(), "order")?;
             let old: OrderRef = action.field(action.oid.as_ref(), "oid")?;
             let orders = std::slice::from_ref(&order);
-            let statuses = statuses()?;
+            let body = response_body(paired)?;
+            let default_receipt = body.response_type == Some(WireResponseType::Default) && body.data.is_none();
+            let statuses = body.data.map(|data| data.statuses).unwrap_or_default();
             let mut anchors = order_anchors(orders, &statuses)?;
+            if default_receipt && let Some(key) = user.map(|user| OrderKey::requested(user, &order)).transpose()?.flatten() {
+                anchors.unreceipted_modify = Some(Box::new(ReplacementRequest { old: old.clone(), asset: order.a, key }));
+            }
             old.add_to(&mut anchors);
             (category(order.is_alo()), MarkAction::Book(anchors))
         }
@@ -268,13 +282,26 @@ fn succeeded<T>(items: impl ExactSizeIterator<Item = T>, statuses: &[WireStatus]
 
 /// `response.data.statuses`; a response without data (`{"type": "default"}`, a modify's) has none.
 fn response_statuses(paired: &PairedAction<'_, '_>) -> Result<Vec<WireStatus>, String> {
+    Ok(response_body(paired)?.data.map(|data| data.statuses).unwrap_or_default())
+}
+
+fn response_body(paired: &PairedAction<'_, '_>) -> Result<WireResponseBody, String> {
     let raw = paired.response.res.response.as_ref().ok_or("an ok response without a body")?;
-    let body: WireResponseBody = sonic_rs::from_str(raw.as_raw_str()).map_err(|err| format!("response {}: {err}", raw.as_raw_str()))?;
-    Ok(body.data.map(|data| data.statuses).unwrap_or_default())
+    sonic_rs::from_str(raw.as_raw_str()).map_err(|err| format!("response {}: {err}", raw.as_raw_str()))
+}
+
+#[derive(Deserialize, PartialEq, Eq)]
+enum WireResponseType {
+    #[serde(rename = "default")]
+    Default,
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Deserialize)]
 struct WireResponseBody {
+    #[serde(rename = "type")]
+    response_type: Option<WireResponseType>,
     data: Option<WireResponseData>,
 }
 
@@ -356,9 +383,9 @@ struct WireModify {
 }
 
 /// A modify names the old order by oid or by cloid.
-#[derive(Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
-enum OrderRef {
+pub(crate) enum OrderRef {
     Oid(u64),
     Cloid(String),
 }
@@ -453,6 +480,7 @@ pub(crate) mod tests {
             cancelled_cloids: vec!["0xfe63".to_string()],
             rejected_iocs: vec![],
             ioc_pairing_mismatch: None,
+            unreceipted_modify: None,
             takers: Vec::new(),
         };
         assert_eq!(book(3), modified, "the failed modify of 77 removed nothing");

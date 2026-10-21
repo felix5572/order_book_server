@@ -9,8 +9,8 @@ use alloy::primitives::{Address, B256};
 use rustc_hash::FxHashSet;
 use serde::Deserialize;
 
-use super::{actions::{BookAnchors, MarkAction, MarkActions, WireOrder}, decimal::ExactDecimal, execution::BlockStatuses};
-use crate::{order_book::Side, types::node_data::NodeDataOrderStatus};
+use super::{actions::{BookAnchors, MarkAction, MarkActions, WireOrder}, orders::OrderKey, execution::BlockStatuses};
+use crate::types::node_data::NodeDataOrderStatus;
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SystemAction {
@@ -46,17 +46,6 @@ pub(crate) struct WireDelayParams { #[serde(rename = "D")] pub(crate) order_dela
 #[derive(Debug, Deserialize)]
 pub(crate) struct WireDelayer { pub(crate) delay_scale: f64 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OrderKey {
-    user: Address,
-    is_buy: bool,
-    limit_px: ExactDecimal,
-    sz: ExactDecimal,
-    reduce_only: bool,
-    cloid: Option<String>,
-    tif: String,
-}
-
 #[derive(Debug, Clone)]
 struct Request { asset: u32, key: OrderKey, delayed: Option<bool> }
 
@@ -83,6 +72,8 @@ pub(crate) struct SystemAnchors {
     /// A system request may own these runs even when its unique attribution is unresolved.
     pub(crate) competing_ioc_cancels: FxHashSet<u64>,
     pub(crate) unplaced_vault_withdrawals: FxHashSet<Address>,
+    /// Matching system attempts may own these opens even when their attribution is unresolved.
+    pub(crate) competing_orders: FxHashSet<u64>,
 }
 
 impl SystemBlock {
@@ -98,13 +89,8 @@ impl SystemBlock {
                 Action::Order { orders, grouping } => {
                     let delayed = (grouping == "na").then(|| !orders.iter().all(WireOrder::is_alo));
                     for order in orders {
-                        let Some(limit) = order.t.limit else { continue };
-                        if !matches!(limit.tif.as_str(), "Alo" | "Ioc" | "Gtc") { continue; }
-                        out.requests.push(Request { asset: order.a, delayed, key: OrderKey {
-                            user: event.user, is_buy: order.b,
-                            limit_px: ExactDecimal::parse(&order.p)?, sz: ExactDecimal::parse(&order.s)?,
-                            reduce_only: order.r, cloid: order.c, tif: limit.tif,
-                        }});
+                        let Some(key) = OrderKey::requested(event.user, &order)? else { continue };
+                        out.requests.push(Request { asset: order.a, delayed, key });
                     }
                 }
                 Action::Cancel { cancels, f } => out.cancels.extend(cancels.into_iter().map(|c| CancelRequest { user: event.user, asset: c.a, oid: Some(c.o), cloid: None, delayed: f.map(|flag| !flag) })),
@@ -121,13 +107,9 @@ impl SystemBlock {
             }
             if !matches!(status.status.as_str(), "open" | "iocCancelRejected") || order.is_trigger
                 || !out.requests.iter().any(|r| r.key.user == status.user && r.key.cloid == order.cloid) { continue; }
-            let Some(tif) = &order.tif else { continue };
+            let Some(key) = OrderKey::observed(status)? else { continue };
             out.observed.push(ObservedOrder { coin: order.coin.clone(), oid: order.oid, timestamp_ms: order.timestamp,
-                rejected: status.status == "iocCancelRejected", key: OrderKey {
-                    user: status.user, is_buy: order.side == Side::Bid,
-                    limit_px: ExactDecimal::parse(&order.limit_px)?, sz: ExactDecimal::parse(&order.orig_sz)?,
-                    reduce_only: order.reduce_only, cloid: order.cloid.clone(), tif: tif.clone(),
-                }});
+                rejected: status.status == "iocCancelRejected", key });
         }
         Ok(out)
     }
@@ -143,6 +125,8 @@ impl SystemBlock {
         }).collect();
         let claimed: FxHashSet<_> = books.iter().flat_map(|(_, b)| b.created.iter().copied()).collect();
         for request in &self.requests {
+            out.competing_orders.extend(self.observed.iter().filter(|o| !o.rejected && Self::matches(request, o, &asset)
+                && o.timestamp_ms == actions.time_ns / 1_000_000).map(|o| o.oid));
             for observed in self.observed.iter().filter(|o| o.rejected && Self::matches(request, o, &asset)
                 && o.timestamp_ms == actions.time_ns / 1_000_000) {
                 out.competing_ioc_cancels.extend(statuses.system_ioc_cancels(observed.oid));
@@ -154,7 +138,8 @@ impl SystemBlock {
             if claimed.contains(&observed.oid) { continue; }
             // A request without an item receipt may compete for the same status. Do not steal that evidence.
             if books.iter().any(|(user, b)| *user == Some(request.key.user) && (
-                b.ioc_pairing_mismatch.is_some() && b.takers.iter().any(|t|
+                b.unreceipted_modify.as_ref().is_some_and(|m| m.asset == request.asset && m.key == request.key)
+                || b.ioc_pairing_mismatch.is_some() && b.takers.iter().any(|t|
                     (t.asset, t.is_buy, t.limit_px) == (request.asset, request.key.is_buy, request.key.limit_px))
                 || b.rejected_iocs.iter().any(|ioc| (ioc.taker.asset, ioc.taker.is_buy, ioc.taker.limit_px, ioc.sz, ioc.reduce_only, &ioc.cloid)
                     == (request.asset, request.key.is_buy, request.key.limit_px, request.key.sz, request.key.reduce_only, &request.key.cloid)))) { continue; }
