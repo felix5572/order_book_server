@@ -1,7 +1,10 @@
 use crate::{
     order_book::{Coin, InnerOrder, Oid, OrderBook, Px, PxBand, Side, Snapshot, Sz, TakerBook},
     prelude::*,
+    types::L4Order,
 };
+use alloy::primitives::Address;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -163,6 +166,23 @@ enum CliMarket<R> {
     WithTriggers { book_orders: [Vec<R>; 2], untriggered_orders: Option<Vec<R>> },
 }
 
+/// Child oid -> parent oid: the trigger orders placed with an order the dump still holds live (on the book, or itself
+/// untriggered), which the node does not trigger before that order leaves.
+pub(crate) type ParentLinks = FxHashMap<u64, u64>;
+
+/// A dump's order that may carry the orders placed with it.
+pub(crate) trait WithChildren {
+    /// (child oid, this order's oid) of each of its children.
+    fn child_links(&self) -> Result<Vec<(u64, u64)>>;
+}
+
+impl WithChildren for (Address, L4Order) {
+    fn child_links(&self) -> Result<Vec<(u64, u64)>> {
+        let parent = &self.1;
+        Ok(parent.children_orders()?.into_iter().map(|child| (child.oid, parent.oid)).collect())
+    }
+}
+
 /// A dump's trigger section, as the trigger table needs it (design 000451 r3).
 #[derive(Debug)]
 pub(crate) enum TriggerSection<O> {
@@ -239,17 +259,19 @@ impl<'de, R: Deserialize<'de>> Deserialize<'de> for CliMarket<R> {
     }
 }
 
-/// Convert the CLI's parsed per-coin list into typed snapshots plus the trigger section. Book conversion stays strict
-/// (a corrupt book order poisons the install); trigger conversion is lenient - a bad entry is skipped and counted, and
-/// the section is then `Partial`, since it only degrades the side table, and failing the whole snapshot for it would
-/// wedge every re-sync.
+/// Convert the CLI's parsed per-coin list into typed snapshots plus the trigger section and the children of the live
+/// orders. Book conversion stays strict (a corrupt book order, its children included, poisons the install); trigger
+/// conversion is lenient - a bad entry, its children included, is skipped and counted, and the section is then
+/// `Partial`, since it only degrades the side table, and failing the whole snapshot for it would wedge every re-sync.
 #[allow(clippy::type_complexity)]
-fn convert_cli_snapshot<O, R>(snapshot: Vec<(String, CliMarket<R>)>, height: u64) -> Result<(u64, Snapshots<O>, TriggerSection<O>)>
+fn convert_cli_snapshot<O, R>(snapshot: Vec<(String, CliMarket<R>)>, height: u64) -> Result<(u64, Snapshots<O>, TriggerSection<O>, ParentLinks)>
 where
     O: TryFrom<R, Error = Error>,
+    R: WithChildren,
 {
     let mut untriggered: Vec<O> = Vec::new();
     let mut untriggered_skipped = 0usize;
+    let mut parents = ParentLinks::default();
     let (mut markets_with, mut markets_without) = (0usize, 0usize);
     let books = snapshot
         .into_iter()
@@ -263,10 +285,16 @@ where
                 None => markets_without += 1,
             }
             for raw in pending.into_iter().flatten() {
-                match O::try_from(raw) {
-                    Ok(order) => untriggered.push(order),
+                match raw.child_links().and_then(|links| Ok((links, O::try_from(raw)?))) {
+                    Ok((links, order)) => {
+                        parents.extend(links);
+                        untriggered.push(order);
+                    }
                     Err(_) => untriggered_skipped += 1,
                 }
+            }
+            for raw in bids.iter().chain(&asks) {
+                parents.extend(raw.child_links()?);
             }
             let bids: Vec<O> = bids.into_iter().map(O::try_from).collect::<Result<Vec<O>>>()?;
             let asks: Vec<O> = asks.into_iter().map(O::try_from).collect::<Result<Vec<O>>>()?;
@@ -282,21 +310,22 @@ where
         (_, 0, 0) => TriggerSection::Complete(untriggered),
         (_, markets_without, skipped) => TriggerSection::Partial { orders: untriggered, skipped, markets_without },
     };
-    Ok((height, Snapshots::new(books), section))
+    Ok((height, Snapshots::new(books), section, parents))
 }
 
 /// Load snapshots from a CLI-generated JSON file. The dump carries no height
 /// of its own: `height` must be the exact height of the checkpoint that was
 /// dumped (taken from its file name), and becomes the replay cutoff.
 /// Returns the typed books plus the flat untriggered trigger-order list
-/// (empty for dumps made without `--include-trigger-orders`).
+/// (empty for dumps made without `--include-trigger-orders`) and the
+/// children of the dump's live orders.
 pub(crate) async fn load_snapshots_from_cli_json<O, R>(
     snapshot_path: &Path,
     height: u64,
-) -> Result<(u64, Snapshots<O>, TriggerSection<O>)>
+) -> Result<(u64, Snapshots<O>, TriggerSection<O>, ParentLinks)>
 where
     O: TryFrom<R, Error = Error> + Send + 'static,
-    R: Serialize + for<'a> Deserialize<'a> + Send + 'static,
+    R: Serialize + for<'a> Deserialize<'a> + WithChildren + Send + 'static,
 {
     // The snapshot file is hundreds of MB; deserialize + convert is seconds of
     // pure CPU, so it runs on a blocking thread instead of pinning a runtime
@@ -305,7 +334,7 @@ where
     // while both the old and new books are alive during the install.
     let snapshot_path = snapshot_path.to_path_buf();
     let parse_start = std::time::Instant::now();
-    let parsed = tokio::task::spawn_blocking(move || -> Result<(u64, Snapshots<O>, TriggerSection<O>)> {
+    let parsed = tokio::task::spawn_blocking(move || -> Result<(u64, Snapshots<O>, TriggerSection<O>, ParentLinks)> {
         let file = fs::File::open(&snapshot_path)?;
         let reader = std::io::BufReader::with_capacity(1 << 20, file);
         let snapshot: Vec<(String, CliMarket<R>)> = serde_json::from_reader(reader)?;
@@ -556,7 +585,7 @@ mod tests {
                 "origSz": "1.0", "tif": null, "cloid": null
             }])
         };
-        let convert = |json: serde_json::Value| -> Result<(u64, Snapshots<InnerL4Order>, TriggerSection<InnerL4Order>)> {
+        let convert = |json: serde_json::Value| -> Result<(u64, Snapshots<InnerL4Order>, TriggerSection<InnerL4Order>, super::ParentLinks)> {
             let parsed: Vec<(String, super::CliMarket<(Address, L4Order)>)> = serde_json::from_value(json)?;
             super::convert_cli_snapshot::<InnerL4Order, _>(parsed, 42)
         };
@@ -564,7 +593,8 @@ mod tests {
             ["BTC", { "book_orders": [[order(1, false, "100.0")], []], "untriggered_orders": [order(100, true, "100.0"), order(101, true, "100.0")] }],
             ["ETH", { "book_orders": [[order(2, false, "100.0")], []], "untriggered_orders": [] }]
         ]);
-        let (height, snapshots, section) = convert(with_section)?;
+        let (height, snapshots, section, parents) = convert(with_section)?;
+        assert!(parents.is_empty());
         assert_eq!(height, 42);
         assert_eq!(snapshots.value().len(), 2);
         let TriggerSection::Complete(untriggered) = section else { panic!("every market carried the section: {section:?}") };
@@ -575,7 +605,7 @@ mod tests {
             ["BTC", { "book_orders": [[order(1, false, "100.0")], []], "untriggered_orders": [order(100, true, "100.0")] }],
             ["ETH", [[order(2, false, "100.0")], []]]
         ]);
-        let (_, snapshots, section) = convert(mixed)?;
+        let (_, snapshots, section, _) = convert(mixed)?;
         assert_eq!(snapshots.value().len(), 2, "both formats must yield books");
         let TriggerSection::Partial { orders, skipped: 0, markets_without: 1 } = section else {
             panic!("a market without the section: {section:?}")
@@ -592,6 +622,28 @@ mod tests {
 
         let legacy = serde_json::json!([["BTC", [[order(1, false, "100.0")], []]]]);
         assert!(matches!(convert(legacy)?.2, TriggerSection::Absent));
+
+        // a limit order resting with its TP and SL: the dump lists them under their own oids, in its children and in
+        // the trigger section; a trigger order's children too
+        let with_children = |mut parent: serde_json::Value, children: Vec<serde_json::Value>| {
+            parent[1]["children"] = serde_json::Value::Array(children.into_iter().map(|child| child[1].clone()).collect());
+            parent
+        };
+        let families = serde_json::json!([
+            ["BTC", { "book_orders": [[with_children(order(1, false, "100.0"), vec![order(2, true, "100.0"), order(3, true, "100.0")])], []],
+                      "untriggered_orders": [order(2, true, "100.0"), order(3, true, "100.0"),
+                                             with_children(order(4, true, "100.0"), vec![order(5, true, "100.0")]), order(5, true, "100.0")] }]
+        ]);
+        let (_, _, section, parents) = convert(families)?;
+        assert_eq!(parents, super::ParentLinks::from_iter([(2, 1), (3, 1), (5, 4)]));
+        let TriggerSection::Complete(untriggered) = section else { panic!("{section:?}") };
+        assert_eq!(untriggered.len(), 4, "the children stay in the section");
+        // a child that does not parse: with a book order the install fails, with a trigger order that order is skipped
+        let broken = serde_json::json!({"oid": "x"});
+        let book_child = serde_json::json!([["BTC", [[with_children(order(1, false, "100.0"), vec![serde_json::json!([0, broken])])], []]]]);
+        assert!(convert(book_child).is_err());
+        let trigger_child = serde_json::json!([["BTC", { "book_orders": [[], []], "untriggered_orders": [with_children(order(4, true, "100.0"), vec![serde_json::json!([0, broken])])] }]]);
+        assert!(matches!(convert(trigger_child)?.2, TriggerSection::Partial { skipped: 1, .. }));
         Ok(())
     }
 

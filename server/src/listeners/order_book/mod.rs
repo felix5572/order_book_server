@@ -16,7 +16,7 @@ use crate::{
     },
     order_book::{
         Coin, Px, PxBand, Side, Snapshot, Sz,
-        multi_book::{BidAsk, Snapshots, TriggerSection, load_snapshots_from_cli_json},
+        multi_book::{BidAsk, ParentLinks, Snapshots, TriggerSection, load_snapshots_from_cli_json},
     },
     prelude::*,
     types::{
@@ -119,13 +119,13 @@ async fn fetch_and_install_at_checkpoint(
     info!("Checkpoint {} ready: {}", checkpoint.height, checkpoint.path.display());
 
     let output_path = process_rmp_file(snapshot_config, &checkpoint).await?;
-    let (height, snapshot, untriggered) =
+    let (height, snapshot, untriggered, parents) =
         load_snapshots_from_cli_json::<InnerL4Order, (Address, L4Order)>(&output_path, checkpoint.height).await?;
-    info!("Snapshot loaded at checkpoint height {height} ({})", untriggered.describe());
+    info!("Snapshot loaded at checkpoint height {height} ({}, {} waiting for a live parent)", untriggered.describe(), parents.len());
     // Phased install: build the replacement book and chase the replay cache
     // down off-lock, then commit in one short lock hold - ingest keeps serving
     // the current book for the whole install.
-    install_snapshot_phased(listener, snapshot, untriggered, height).await?;
+    install_snapshot_phased(listener, snapshot, untriggered, parents, height).await?;
     SNAPSHOT_CHECKPOINT_HEIGHT.set(i64::try_from(height).map_err(|_| format!("checkpoint height {height} overflows i64"))?);
     Ok(())
 }
@@ -247,12 +247,14 @@ async fn install_snapshot_phased(
     listener: &Arc<Mutex<OrderBookListener>>,
     snapshot: Snapshots<InnerL4Order>,
     untriggered: TriggerSection<InnerL4Order>,
+    parents: ParentLinks,
     height: u64,
 ) -> Result<()> {
     install_snapshot_phased_impl(
         listener,
         snapshot,
         untriggered,
+        parents,
         height,
         INSTALL_RESIDUAL_EVENTS_MAX,
         INSTALL_MAX_CHASE_ROUNDS,
@@ -268,6 +270,7 @@ async fn install_snapshot_phased_impl(
     listener: &Arc<Mutex<OrderBookListener>>,
     snapshot: Snapshots<InnerL4Order>,
     untriggered: TriggerSection<InnerL4Order>,
+    parents: ParentLinks,
     height: u64,
     residual_events_max: usize,
     max_chase_rounds: usize,
@@ -282,7 +285,7 @@ async fn install_snapshot_phased_impl(
     // runtime worker that connection tasks need.
     let build_start = Instant::now();
     let mut new_state = tokio::task::spawn_blocking(move || {
-        OrderBookState::from_snapshot(snapshot, untriggered, height, 0, true, ignore_spot, track_untriggered)
+        OrderBookState::from_snapshot(snapshot, untriggered, &parents, height, 0, true, ignore_spot, track_untriggered)
     })
     .await?;
     let build_elapsed = build_start.elapsed();
@@ -774,6 +777,7 @@ impl OrderBookListener {
         let mut new_state = OrderBookState::from_snapshot(
             snapshot,
             TriggerSection::Absent,
+            &ParentLinks::default(),
             height,
             0,
             true,
@@ -2456,6 +2460,7 @@ mod tests {
         let mut order = make_l4_order_json(coin, oid);
         order["isTrigger"] = serde_json::json!(true);
         order["triggerPx"] = serde_json::json!("110.0");
+        order["triggerCondition"] = serde_json::json!("Price below 110");
         order["orderType"] = serde_json::json!("Stop Market");
         serde_json::from_value(serde_json::json!({
             "local_time": "2024-01-15T10:30:00.000000000",
@@ -2586,7 +2591,7 @@ mod tests {
         };
         let listener = Arc::new(Mutex::new(listener));
         listener.lock().await.open_cache_window_for_test();
-        install_snapshot_phased(&listener, Snapshots::new(HashMap::new()), TriggerSection::Complete(vec![trigger]), 20)
+        install_snapshot_phased(&listener, Snapshots::new(HashMap::new()), TriggerSection::Complete(vec![trigger]), ParentLinks::default(), 20)
             .await
             .expect("install");
         let mut guard = listener.lock().await;
@@ -2787,6 +2792,7 @@ mod tests {
             &listener,
             Snapshots::new(HashMap::new()),
             TriggerSection::Absent,
+            ParentLinks::default(),
             150,
             0,
             INSTALL_MAX_CHASE_ROUNDS,
@@ -2819,6 +2825,7 @@ mod tests {
             &listener,
             Snapshots::new(HashMap::new()),
             TriggerSection::Absent,
+            ParentLinks::default(),
             15,
             0,
             INSTALL_MAX_CHASE_ROUNDS,
@@ -2843,7 +2850,7 @@ mod tests {
         listener.lock().await.open_cache_window_for_test();
         feed_order(&mut *listener.lock().await, "NEW", 1, 200);
 
-        install_snapshot_phased(&listener, Snapshots::new(HashMap::new()), TriggerSection::Absent, 150).await.expect("install");
+        install_snapshot_phased(&listener, Snapshots::new(HashMap::new()), TriggerSection::Absent, ParentLinks::default(), 150).await.expect("install");
 
         let guard = listener.lock().await;
         assert!(guard.is_ready());
@@ -2873,6 +2880,7 @@ mod tests {
             &listener,
             Snapshots::new(HashMap::new()),
             TriggerSection::Absent,
+            ParentLinks::default(),
             5,
             0,
             INSTALL_MAX_CHASE_ROUNDS,
@@ -2899,7 +2907,7 @@ mod tests {
         feed_order(&mut guard, "NEW", 2, 200);
         let listener = Arc::new(Mutex::new(guard));
 
-        install_snapshot_phased_impl(&listener, Snapshots::new(HashMap::new()), TriggerSection::Absent, 150, 0, 0)
+        install_snapshot_phased_impl(&listener, Snapshots::new(HashMap::new()), TriggerSection::Absent, ParentLinks::default(), 150, 0, 0)
             .await
             .expect("install");
 
@@ -2924,7 +2932,7 @@ mod tests {
             feed_order(&mut guard, "NEW", 1, 200);
         }
 
-        install_snapshot_phased_impl(&listener, Snapshots::new(HashMap::new()), TriggerSection::Absent, 150, 0, 0)
+        install_snapshot_phased_impl(&listener, Snapshots::new(HashMap::new()), TriggerSection::Absent, ParentLinks::default(), 150, 0, 0)
             .await
             .expect("install");
 

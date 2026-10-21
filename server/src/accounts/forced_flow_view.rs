@@ -9,12 +9,12 @@ use serde::Serialize;
 use super::{
     candidates_view::{ExpectedOrderDto, WalkPartDto},
     checkpoint::MAX_PERP_DECIMALS,
-    forced_flow::{Band, Calibre, Direction, Entry, SizeReason, Source, SourceKind, Tier, Totals, Unplaced, bands},
+    forced_flow::{Band, Calibre, Entry, SizeReason, Source, SourceKind, Tier, Totals, Unplaced, bands},
     forced_flow_owner::{FlowContent, FlowFrame, FlowHeights, LocalCalibre, ReadyFlow, TriggerStatus, WalkStatus},
     size::format_size_raw,
     view::user_text,
 };
-use crate::{order_book::Side, types::subscription::EXT_FORCED_FLOW};
+use crate::{listeners::order_book::triggers::Direction, order_book::Side, types::subscription::EXT_FORCED_FLOW};
 
 /// A subscription's view (r4 revision 9): `coin` one coin or every coin.
 #[derive(Debug, Clone, PartialEq, Eq)]

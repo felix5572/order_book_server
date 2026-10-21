@@ -165,6 +165,17 @@ pub(crate) struct L4Order {
     pub cloid: Option<String>,
 }
 
+impl L4Order {
+    /// The orders placed with this one (its TP/SL), as the node lists them: under their own oid in a dump and in a
+    /// parent's terminal status, under the parent's oid in its live `open`.
+    pub(crate) fn children_orders(&self) -> crate::prelude::Result<Vec<Self>> {
+        self.children
+            .iter()
+            .map(|child| serde_json::from_value(child.clone()).map_err(|err| format!("a child of oid {}: {err}: {child}", self.oid).into()))
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum OrderDiff {

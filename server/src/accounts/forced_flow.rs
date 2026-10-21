@@ -12,6 +12,7 @@ use alloy::primitives::Address;
 
 use super::{candidates::ExpectedOrder, checkpoint::mark_px};
 use crate::{
+    listeners::order_book::triggers::{Direction, TriggerRule, stop_direction},
     order_book::{Px, Side},
     types::inner::InnerL4Order,
 };
@@ -55,38 +56,6 @@ impl Tier {
             Self::Mid => 1_000,
             Self::Far => 5_000,
         })
-    }
-}
-
-/// Which way the mark moves to reach an entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum Direction {
-    Down,
-    Up,
-}
-
-/// How a trigger order fires, from its `triggerCondition`. bm 10-21 (137,123 untriggered orders): every
-/// `Price above|below X` has X equal to `triggerPx`; the trailing stops read `Activation …`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TriggerRule {
-    /// Fires when the mark reaches the trigger price from this direction.
-    At(Direction),
-    /// A trailing stop: its trigger price follows the best price since activation.
-    Trailing,
-    Unknown,
-}
-
-impl TriggerRule {
-    pub(crate) fn of(condition: &str) -> Self {
-        if condition.starts_with("Price below ") {
-            Self::At(Direction::Down)
-        } else if condition.starts_with("Price above ") {
-            Self::At(Direction::Up)
-        } else if condition.starts_with("Activation ") {
-            Self::Trailing
-        } else {
-            Self::Unknown
-        }
     }
 }
 
@@ -300,13 +269,6 @@ fn trigger_entry(trigger: &TriggerInput, size_decimals: u32, marks: Marks, posit
         limit_px: Some(order.limit_px),
         trailing,
     }))
-}
-
-const fn stop_direction(side: Side) -> Direction {
-    match side {
-        Side::Ask => Direction::Down,
-        Side::Bid => Direction::Up,
-    }
 }
 
 /// What a trigger order of `size_raw` takes of `position_raw`: a reduce-only order at most what it reduces, a position

@@ -6,18 +6,38 @@
 //! its oid removes it (canceled / triggered / filled / rejected / ...). Orders are `Arc`'d so a read under the listener
 //! lock is a refcount bump per order, not a deep clone.
 //!
+//! A trigger order placed with another order (a TP/SL attached to a limit order: the parent's `children`) waits while
+//! its parent is live: the node does not trigger it before the parent leaves the book. A waiting child stays out of
+//! the trigger price index - no band read, so no forced flow, sees it - and is still served with the table. bm 10-21
+//! hours 08-09, every child of a parent leaving:
+//! - `filled`: the children take part (48 triggered after it, 21 `siblingFilledCanceled`, 16 `reduceOnlyCanceled`);
+//! - `marginCanceled`: they take part too (one of 12 triggered later);
+//! - `canceled`: 226 children got their own `canceled` in the block, 78 a modify moved to the parent's successor
+//!   (listed in its later statuses under their own oids; its `open` lists none), none triggered later;
+//! - a rejected parent's children never opened.
+//!
+//! Hyperliquid's TP/SL documentation says the same: a parent's full fill activates its children, a partial fill keeps
+//! them waiting, canceling the parent cancels them, a cancel for insufficient margin after a partial fill activates
+//! them. So `filled` and `marginCanceled` release - the children the table linked to the parent and those its line
+//! lists under their own oids (a modify's successor) -, and every other status of the parent leaves them waiting until
+//! their own statuses end them (review 000463 r1 P2-1: a parent's `canceled` activated them until their own came).
+//!
 //! Complete means: the last install's dump carried the section for every market and every order of it converted
 //! (an empty section is a complete empty table), and every live trigger order since parsed. Anything else is a gap,
 //! kept until the next complete install; the orders the table does hold are still served (`/untriggeredOrders`).
 
 use std::{borrow::Borrow, collections::BTreeMap, ops::Bound, sync::Arc};
 
+use alloy::primitives::Address;
 use rustc_hash::FxHashMap;
 
 use crate::{
-    order_book::{Coin, InnerOrder, Oid, Px, multi_book::TriggerSection},
+    order_book::{
+        Coin, InnerOrder, Oid, Px, Side,
+        multi_book::{ParentLinks, TriggerSection},
+    },
     prelude::Result,
-    types::inner::InnerL4Order,
+    types::{L4Order, inner::InnerL4Order},
 };
 
 /// Why the table may miss orders.
@@ -32,6 +52,9 @@ pub(crate) enum TriggerGap {
     SnapshotParseFailed,
     /// A live trigger order did not parse.
     LiveParseFailed,
+    /// A child a live parent announced did not open in its block: it may be held as a trigger order the node does not
+    /// trigger yet, or its status was missed.
+    ChildUnmatched,
 }
 
 impl TriggerGap {
@@ -41,6 +64,7 @@ impl TriggerGap {
             Self::SnapshotWithoutTriggers => "snapshotWithoutTriggers",
             Self::SnapshotParseFailed => "snapshotParseFailed",
             Self::LiveParseFailed => "liveParseFailed",
+            Self::ChildUnmatched => "childUnmatched",
         }
     }
 }
@@ -52,7 +76,66 @@ pub(crate) enum TriggerAvailability {
     Gap(TriggerGap),
 }
 
-/// One coin's trigger orders with a trigger price in a band.
+/// Which way the mark moves to reach a trigger order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum Direction {
+    Down,
+    Up,
+}
+
+/// How a trigger order fires, from its `triggerCondition`. bm 10-21 (137,123 untriggered orders): every
+/// `Price above|below X` has X equal to `triggerPx`; the trailing stops read `Activation …`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerRule {
+    /// Fires when the mark reaches the trigger price from this direction.
+    At(Direction),
+    /// A trailing stop: its trigger price follows the best price since activation.
+    Trailing,
+    Unknown,
+}
+
+impl TriggerRule {
+    pub(crate) fn of(condition: &str) -> Self {
+        if condition.starts_with("Price below ") {
+            Self::At(Direction::Down)
+        } else if condition.starts_with("Price above ") {
+            Self::At(Direction::Up)
+        } else if condition.starts_with("Activation ") {
+            Self::Trailing
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+/// A stop's direction by its side: a sale fires on a fall, a buy on a rise.
+pub(crate) const fn stop_direction(side: Side) -> Direction {
+    match side {
+        Side::Ask => Direction::Down,
+        Side::Bid => Direction::Up,
+    }
+}
+
+/// Where a coin's index holds an order: by the direction the mark reaches its trigger price from, or nowhere (a
+/// trailing stop waiting for its activation - `triggerPx` 0 -, a condition of another form).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    At(Direction, Px),
+    Nowhere,
+}
+
+impl Place {
+    fn of(order: &InnerL4Order, trigger_px: Px) -> Self {
+        match TriggerRule::of(&order.trigger_condition) {
+            TriggerRule::At(direction) => Self::At(direction, trigger_px),
+            TriggerRule::Trailing if trigger_px.value() == 0 => Self::Nowhere,
+            TriggerRule::Trailing => Self::At(stop_direction(order.side), trigger_px),
+            TriggerRule::Unknown => Self::Nowhere,
+        }
+    }
+}
+
+/// The orders a mark in a range reaches or is past already, of one coin.
 #[derive(Debug, Clone)]
 pub(crate) struct TriggerBand {
     pub(crate) availability: TriggerAvailability,
@@ -60,33 +143,139 @@ pub(crate) struct TriggerBand {
     pub(crate) generation: u64,
     /// Changes of this coin's orders within the generation.
     pub(crate) version: u64,
-    /// By trigger price, then oid, with the trigger price as indexed; at most the requested count.
+    /// By trigger price, then oid, with the trigger price as indexed: those a fall reaches at or above the range's
+    /// low end, those a rise reaches at or below its high end (an order the mark is past is in: it fires at the next
+    /// price action); at most the requested count.
     pub(crate) orders: Vec<(Px, Arc<InnerL4Order>)>,
-    /// The coin's orders without a trigger price yet (`triggerPx` 0: trailing stops waiting for their activation), by
-    /// oid, when the band does not hold them; at most the requested count.
-    pub(crate) unpriced: Vec<Arc<InnerL4Order>>,
-    /// More orders were in the band, or unpriced, than the requested count.
+    /// The coin's orders placed nowhere (a trailing stop waiting for its activation, a condition of another form), by
+    /// oid; at most the requested count.
+    pub(crate) placed_nowhere: Vec<Arc<InnerL4Order>>,
+    /// More orders were in the range, or placed nowhere, than the requested count.
     pub(crate) truncated: bool,
 }
 
-/// One coin's orders: held once, in trigger-price order, and found by oid through their trigger price.
+/// One coin's orders: held once, by direction in trigger-price order, and found by oid through their place.
 #[derive(Debug, Clone, Default)]
 struct CoinTriggers {
-    by_trigger_px: BTreeMap<(Px, u64), Arc<InnerL4Order>>,
-    trigger_px_of: FxHashMap<Oid, Px>,
+    down: BTreeMap<(Px, u64), Arc<InnerL4Order>>,
+    up: BTreeMap<(Px, u64), Arc<InnerL4Order>>,
+    nowhere: BTreeMap<u64, Arc<InnerL4Order>>,
+    place_of: FxHashMap<Oid, Place>,
 }
 
 impl CoinTriggers {
     fn get(&self, oid: &Oid) -> Option<&Arc<InnerL4Order>> {
-        let trigger_px = *self.trigger_px_of.get(oid)?;
-        self.by_trigger_px.get(&(trigger_px, oid.clone().value()))
+        match *self.place_of.get(oid)? {
+            Place::At(Direction::Down, trigger_px) => self.down.get(&(trigger_px, oid.clone().value())),
+            Place::At(Direction::Up, trigger_px) => self.up.get(&(trigger_px, oid.clone().value())),
+            Place::Nowhere => self.nowhere.get(&oid.clone().value()),
+        }
+    }
+
+    fn insert(&mut self, trigger_px: Px, order: Arc<InnerL4Order>) {
+        let place = Place::of(&order, trigger_px);
+        let oid = order.oid;
+        match place {
+            Place::At(Direction::Down, _) => self.down.insert((trigger_px, oid), order),
+            Place::At(Direction::Up, _) => self.up.insert((trigger_px, oid), order),
+            Place::Nowhere => self.nowhere.insert(oid, order),
+        };
+        self.place_of.insert(Oid::new(oid), place);
     }
 
     fn remove(&mut self, oid: &Oid) -> bool {
-        let Some(trigger_px) = self.trigger_px_of.remove(oid) else { return false };
-        self.by_trigger_px.remove(&(trigger_px, oid.clone().value()));
+        let Some(place) = self.place_of.remove(oid) else { return false };
+        match place {
+            Place::At(Direction::Down, trigger_px) => self.down.remove(&(trigger_px, oid.clone().value())),
+            Place::At(Direction::Up, trigger_px) => self.up.remove(&(trigger_px, oid.clone().value())),
+            Place::Nowhere => self.nowhere.remove(&oid.clone().value()),
+        };
         true
     }
+
+    fn orders(&self) -> impl Iterator<Item = &Arc<InnerL4Order>> {
+        self.down.values().chain(self.up.values()).chain(self.nowhere.values())
+    }
+}
+
+/// The trigger orders waiting for their parent, and who is whose (child and parent oids).
+#[derive(Debug, Clone, Default)]
+struct Families {
+    parent_of: FxHashMap<u64, u64>,
+    children_of: FxHashMap<u64, Vec<u64>>,
+    /// The waiting children the table holds, with their trigger price as parsed.
+    waiting: FxHashMap<u64, (Px, Arc<InnerL4Order>)>,
+}
+
+impl Families {
+    fn link(&mut self, child: u64, parent: u64) {
+        self.parent_of.insert(child, parent);
+        self.children_of.entry(parent).or_default().push(child);
+    }
+
+    /// The parent left: its children and `listed` (those its status lists under their own oids), unlinked, and those
+    /// the table held waiting.
+    fn release(&mut self, parent: u64, listed: impl IntoIterator<Item = u64>) -> Vec<(Px, Arc<InnerL4Order>)> {
+        let linked = self.children_of.remove(&parent).unwrap_or_default();
+        linked
+            .into_iter()
+            .chain(listed)
+            .filter_map(|child| {
+                self.parent_of.remove(&child);
+                self.waiting.remove(&child)
+            })
+            .collect()
+    }
+
+    /// The parent left without releasing its children: they stay waiting, for their own statuses or a successor's.
+    fn leave_waiting(&mut self, parent: u64) {
+        self.children_of.remove(&parent);
+    }
+
+    /// A child's own terminal status: unlinked (its parent's list keeps the oid until the parent leaves). Whether it
+    /// was held waiting.
+    fn forget(&mut self, child: u64) -> bool {
+        self.parent_of.remove(&child);
+        self.waiting.remove(&child).is_some()
+    }
+}
+
+/// A child as its parent's live `open` lists it - under the parent's oid -, to be told by its own `open` line, which
+/// follows in the same block (bm 10-21 hour 09: 1,745 children, each after its parent, each matched by these fields).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ChildKey {
+    user: Address,
+    coin: String,
+    timestamp: u64,
+    side: Side,
+    trigger_px: String,
+    trigger_condition: String,
+    order_type: String,
+    sz: String,
+    reduce_only: bool,
+}
+
+impl ChildKey {
+    fn of(user: Address, order: &L4Order) -> Self {
+        Self {
+            user,
+            coin: order.coin.clone(),
+            timestamp: order.timestamp,
+            side: order.side,
+            trigger_px: order.trigger_px.clone(),
+            trigger_condition: order.trigger_condition.clone(),
+            order_type: order.order_type.clone(),
+            sz: order.sz.clone(),
+            reduce_only: order.reduce_only,
+        }
+    }
+}
+
+/// The children announced by the parents placed in one block, each key with its parents' oids.
+#[derive(Debug, Clone, Default)]
+struct ExpectedChildren {
+    height: u64,
+    parents: FxHashMap<ChildKey, Vec<u64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +283,8 @@ pub(crate) struct TriggerTable {
     track: bool,
     ignore_spot: bool,
     coins: FxHashMap<Coin, CoinTriggers>,
+    families: Families,
+    expected: ExpectedChildren,
     /// Kept when a coin's orders are all gone, so a coin that gets orders again does not reuse a version.
     versions: FxHashMap<Coin, u64>,
     generation: u64,
@@ -103,10 +294,12 @@ pub(crate) struct TriggerTable {
 }
 
 impl TriggerTable {
-    /// The table of an install: `section` from the dump, then `legacy` trigger orders taken off the book's sides (old
-    /// dumps appended them to both sides; the copies are expected equal).
+    /// The table of an install: `section` from the dump, its children waiting for the parents `parents` names, then
+    /// `legacy` trigger orders taken off the book's sides (old dumps appended them to both sides; the copies are
+    /// expected equal).
     pub(crate) fn seeded(
         section: TriggerSection<InnerL4Order>,
+        parents: &ParentLinks,
         legacy: impl IntoIterator<Item = InnerL4Order>,
         track: bool,
         ignore_spot: bool,
@@ -123,6 +316,8 @@ impl TriggerTable {
             track,
             ignore_spot,
             coins: FxHashMap::default(),
+            families: Families::default(),
+            expected: ExpectedChildren::default(),
             versions: FxHashMap::default(),
             generation: 0,
             availability,
@@ -130,6 +325,9 @@ impl TriggerTable {
         };
         if !track {
             return table;
+        }
+        for (&child, &parent) in parents {
+            table.families.link(child, parent);
         }
         let orders = match section {
             TriggerSection::Complete(orders) | TriggerSection::Partial { orders, .. } => orders,
@@ -140,8 +338,8 @@ impl TriggerTable {
         }
         for order in legacy {
             let oid = order.oid();
-            if let Some(previous) = table.coins.get(&order.coin).and_then(|coin| coin.get(&oid))
-                && **previous != order
+            if let Some(previous) = table.held(order.coin.borrow(), &oid)
+                && *previous != order
             {
                 // a mismatch means the dedupe picked one of two different views - surface it
                 log::warn!("Trigger order snapshot copies differ across sides: oid={oid:?}");
@@ -167,16 +365,31 @@ impl TriggerTable {
         }
     }
 
-    /// Adds or replaces an order; its trigger price must parse (the index needs it).
+    /// Adds or replaces an order, waiting while it has a live parent; its trigger price must parse (the index needs
+    /// it).
     fn insert(&mut self, order: InnerL4Order) -> Result<()> {
         let trigger_px = Px::parse_from_str(&order.trigger_px)?;
+        if self.families.parent_of.contains_key(&order.oid) {
+            self.unindex(order.coin.borrow(), &order.oid());
+            self.families.waiting.insert(order.oid, (trigger_px, Arc::new(order)));
+            return Ok(());
+        }
+        self.index(trigger_px, Arc::new(order));
+        Ok(())
+    }
+
+    fn index(&mut self, trigger_px: Px, order: Arc<InnerL4Order>) {
         let oid = order.oid();
         self.bump(order.coin.borrow());
         let coin = self.coins.entry(order.coin.clone()).or_default();
         coin.remove(&oid);
-        coin.trigger_px_of.insert(oid, trigger_px);
-        coin.by_trigger_px.insert((trigger_px, order.oid), Arc::new(order));
-        Ok(())
+        coin.insert(trigger_px, order);
+    }
+
+    /// The held order of an oid, indexed or waiting.
+    fn held(&self, coin: &str, oid: &Oid) -> Option<&InnerL4Order> {
+        let indexed = self.coins.get(coin).and_then(|coin| coin.get(oid));
+        indexed.or_else(|| self.families.waiting.get(&oid.clone().value()).map(|(_, order)| order)).map(Arc::as_ref)
     }
 
     fn bump(&mut self, coin: &str) {
@@ -209,14 +422,115 @@ impl TriggerTable {
         }
     }
 
+    /// One status of the order statuses stream, `height` its block's: an `open` adds a trigger order and announces a
+    /// parent's children; any other status of an oid ends its order, a parent's `filled` or `marginCanceled` releasing
+    /// the children waiting for it. Whether a held order left (the order statuses hot path: allocation-free for an order
+    /// without children or announced siblings).
+    pub(crate) fn on_status(&mut self, height: u64, user: Address, status: &str, order: &L4Order) -> bool {
+        self.expire_expected(height);
+        let oid = Oid::new(order.oid);
+        if status == "open" {
+            if !order.children.is_empty() && self.tracks(&order.coin) {
+                self.announce_children(height, user, order);
+            }
+            if order.is_trigger && self.tracks(&order.coin) {
+                self.claim_parent(user, order);
+                self.open(InnerL4Order::try_from((user, order.clone())), &order.coin, &oid);
+            }
+            return false;
+        }
+        match status {
+            "filled" | "marginCanceled" => self.release_children(order),
+            "triggered" => {}
+            // a cancel, a rejection, any other status: the children wait for their own statuses or a successor's
+            _ => self.families.leave_waiting(order.oid),
+        }
+        self.close(&order.coin, &oid)
+    }
+
+    /// The parent left the book: its children take part.
+    fn release_children(&mut self, parent: &L4Order) {
+        let listed = match parent.children_orders() {
+            Ok(children) => children.into_iter().map(|child| child.oid).filter(|&oid| oid != parent.oid).collect(),
+            Err(err) => {
+                crate::metrics::PARSE_ERRORS_TOTAL.with_label_values(&["untriggered"]).inc();
+                log::warn!("Unparseable children of oid={}: {err}", parent.oid);
+                self.mark_gap(TriggerGap::LiveParseFailed);
+                Vec::new()
+            }
+        };
+        for (trigger_px, child) in self.families.release(parent.oid, listed) {
+            self.index(trigger_px, child);
+        }
+    }
+
+    /// A live parent's children: those listed under their own oid are linked at once, those under the parent's are
+    /// expected in this block.
+    fn announce_children(&mut self, height: u64, user: Address, parent: &L4Order) {
+        let children = match parent.children_orders() {
+            Ok(children) => children,
+            Err(err) => {
+                // its children may be served as active until a complete install: counted and marked
+                crate::metrics::PARSE_ERRORS_TOTAL.with_label_values(&["untriggered"]).inc();
+                log::warn!("Unparseable children of oid={}: {err}", parent.oid);
+                self.mark_gap(TriggerGap::LiveParseFailed);
+                return;
+            }
+        };
+        self.expected.height = height;
+        for child in children {
+            if child.oid == parent.oid {
+                self.expected.parents.entry(ChildKey::of(user, &child)).or_default().push(parent.oid);
+            } else {
+                self.families.link(child.oid, parent.oid);
+            }
+        }
+    }
+
+    /// A trigger order's own `open`: linked to the parent that announced it in this block, if one did.
+    fn claim_parent(&mut self, user: Address, order: &L4Order) {
+        if self.expected.parents.is_empty() || self.families.parent_of.contains_key(&order.oid) {
+            return;
+        }
+        let key = ChildKey::of(user, order);
+        let Some(parents) = self.expected.parents.get_mut(&key) else { return };
+        let parent = parents.remove(0);
+        if parents.is_empty() {
+            self.expected.parents.remove(&key);
+        }
+        self.families.link(order.oid, parent);
+    }
+
+    /// A status of another block: the announcements of the previous one end; a child never seen is counted, and the
+    /// table is a gap until a complete install.
+    fn expire_expected(&mut self, height: u64) {
+        if self.expected.height == height || self.expected.parents.is_empty() {
+            return;
+        }
+        let unmatched: usize = self.expected.parents.values().map(Vec::len).sum();
+        crate::metrics::UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.inc_by(unmatched as u64);
+        log::warn!("{unmatched} children announced in block {} never opened: {:?}", self.expected.height, self.expected.parents);
+        self.expected.parents.clear();
+        // review 000463 r1 P2-2: the table no longer knows its active set
+        self.mark_gap(TriggerGap::ChildUnmatched);
+    }
+
     /// Any other status of an oid: the order leaves the table. Whether it was held. Allocation-free unless it was (the
     /// order statuses hot path).
     pub(crate) fn close(&mut self, coin: &str, oid: &Oid) -> bool {
+        if self.families.forget(oid.clone().value()) {
+            return true;
+        }
+        self.unindex(coin, oid)
+    }
+
+    /// The order leaves the price index. Whether it was there.
+    fn unindex(&mut self, coin: &str, oid: &Oid) -> bool {
         let Some(coin_triggers) = self.coins.get_mut(coin) else { return false };
         if !coin_triggers.remove(oid) {
             return false;
         }
-        if coin_triggers.trigger_px_of.is_empty() {
+        if coin_triggers.place_of.is_empty() {
             // drop the coin once empty so delisted coins don't accumulate empty buckets
             self.coins.remove(coin);
         }
@@ -225,7 +539,7 @@ impl TriggerTable {
     }
 
     pub(crate) fn count(&self) -> usize {
-        self.coins.values().map(|coin| coin.trigger_px_of.len()).sum()
+        self.coins.values().map(|coin| coin.place_of.len()).sum::<usize>() + self.families.waiting.len()
     }
 
     /// This install's table replaces `previous`: the next generation; when the dump carried no trigger section at all
@@ -234,8 +548,10 @@ impl TriggerTable {
     /// orders. Arc bumps only.
     pub(crate) fn succeed(&mut self, previous: &Self) {
         self.generation = previous.generation + 1;
-        if self.track && self.section_absent && self.coins.is_empty() && !previous.coins.is_empty() {
+        // the held orders, waiting children included (review 000463 r1 P2-3)
+        if self.track && self.section_absent && self.count() == 0 && previous.count() > 0 {
             self.coins.clone_from(&previous.coins);
+            self.families.clone_from(&previous.families);
             log::info!("Snapshot carried no trigger section; kept {} untriggered trigger orders from the previous state", self.count());
         }
     }
@@ -249,30 +565,34 @@ impl TriggerTable {
         }
     }
 
-    /// All coins' orders, or one coin's.
+    /// All coins' orders, or one coin's, the waiting children with them.
     pub(crate) fn snapshot(&self, coin: Option<&Coin>) -> Vec<Arc<InnerL4Order>> {
+        let waiting = self.families.waiting.values().filter(|(_, order)| coin.is_none_or(|coin| order.coin == *coin)).map(|(_, order)| order.clone());
         match coin {
-            Some(coin) => self.coins.get(coin).map(|coin| coin.by_trigger_px.values().cloned().collect()).unwrap_or_default(),
-            None => self.coins.values().flat_map(|coin| coin.by_trigger_px.values().cloned()).collect(),
+            Some(coin) => self.coins.get(coin).map(|coin| coin.orders().cloned().collect::<Vec<_>>()).unwrap_or_default().into_iter().chain(waiting).collect(),
+            None => self.coins.values().flat_map(|coin| coin.orders().cloned()).chain(waiting).collect(),
         }
     }
 
-    /// The coin's orders with a trigger price in `[lo, hi]`, at most `max` of them, and those without a trigger price
-    /// (a band above 0 does not hold them).
+    /// The coin's orders a mark in `[lo, hi]` reaches or is past already - those a fall reaches at or above `lo`, those
+    /// a rise reaches at or below `hi` -, at most `max` of them, and those placed nowhere (forced flow acceptance, bm
+    /// 10-21: an order placed past its level fires at the next price action, so a band around the mark alone missed it).
     pub(crate) fn in_band(&self, coin: &Coin, lo: Px, hi: Px, max: usize) -> TriggerBand {
         let availability = self.availability(Some(coin));
         let version = self.versions.get(coin).copied().unwrap_or_default();
         let Some(coin_triggers) = self.coins.get(coin) else {
-            return TriggerBand { availability, generation: self.generation, version, orders: Vec::new(), unpriced: Vec::new(), truncated: false };
+            return TriggerBand { availability, generation: self.generation, version, orders: Vec::new(), placed_nowhere: Vec::new(), truncated: false };
         };
-        let mut in_band = coin_triggers.by_trigger_px.range((Bound::Included((lo, 0)), Bound::Included((hi, u64::MAX))));
-        let orders: Vec<(Px, Arc<InnerL4Order>)> =
-            in_band.by_ref().take(max).map(|((trigger_px, _), order)| (*trigger_px, order.clone())).collect();
-        let zero = Px::new(0);
-        let mut unpriced = coin_triggers.by_trigger_px.range((Bound::Included((zero, 0)), Bound::Included((zero, u64::MAX)))).filter(|_| lo > zero);
-        let unpriced_orders: Vec<Arc<InnerL4Order>> = unpriced.by_ref().take(max).map(|(_, order)| order.clone()).collect();
-        let truncated = in_band.next().is_some() || unpriced.next().is_some();
-        TriggerBand { availability, generation: self.generation, version, orders, unpriced: unpriced_orders, truncated }
+        let mut fallen_to = coin_triggers.down.range((Bound::Included((lo, 0)), Bound::Unbounded));
+        let mut risen_to = coin_triggers.up.range((Bound::Unbounded, Bound::Included((hi, u64::MAX))));
+        let mut orders: Vec<(Px, Arc<InnerL4Order>)> =
+            fallen_to.by_ref().take(max).chain(risen_to.by_ref().take(max)).map(|((trigger_px, _), order)| (*trigger_px, order.clone())).collect();
+        orders.sort_unstable_by_key(|(trigger_px, order)| (*trigger_px, order.oid));
+        let mut nowhere = coin_triggers.nowhere.values();
+        let placed_nowhere: Vec<Arc<InnerL4Order>> = nowhere.by_ref().take(max).cloned().collect();
+        let truncated = fallen_to.next().is_some() || risen_to.next().is_some() || orders.len() > max || nowhere.next().is_some();
+        orders.truncate(max);
+        TriggerBand { availability, generation: self.generation, version, orders, placed_nowhere, truncated }
     }
 }
 
@@ -308,7 +628,7 @@ mod tests {
     }
 
     fn table(section: TriggerSection<InnerL4Order>) -> TriggerTable {
-        TriggerTable::seeded(section, Vec::new(), true, true)
+        TriggerTable::seeded(section, &ParentLinks::default(), Vec::new(), true, true)
     }
 
     fn oids(band: &TriggerBand) -> Vec<u64> {
@@ -319,35 +639,60 @@ mod tests {
         table.in_band(&Coin::new(coin), px(lo), px(hi), max)
     }
 
+    /// A rise's order (`Price above`): `stop` with the condition flipped.
+    fn take_profit(coin: &str, oid: u64, trigger_px: &str) -> InnerL4Order {
+        InnerL4Order { trigger_condition: format!("Price above {trigger_px}"), order_type: "Take Profit Market".to_string(), ..stop(coin, oid, trigger_px) }
+    }
+
+    /// A band is the mark's range: a fall's orders from its low end up - those above the mark are past their level
+    /// and fire at the next price action (forced flow acceptance, bm 10-21) -, a rise's orders up to its high end;
+    /// by trigger price, then oid, cut at the count.
     #[test]
     fn a_band_reads_by_trigger_price_then_oid_and_says_when_it_was_cut() {
-        let section =
-            vec![stop("BTC", 3, "110"), stop("BTC", 1, "105"), stop("BTC", 2, "110"), stop("BTC", 4, "120"), stop("ETH", 5, "110")];
+        let section = vec![
+            stop("BTC", 3, "110"),
+            stop("BTC", 1, "105"),
+            stop("BTC", 2, "110"),
+            stop("BTC", 4, "120"),
+            stop("BTC", 6, "95"),
+            take_profit("BTC", 7, "112"),
+            take_profit("BTC", 8, "90"),
+            take_profit("BTC", 9, "130"),
+            stop("ETH", 5, "110"),
+        ];
         let table = table(TriggerSection::Complete(section));
         let all = band(&table, "BTC", "100", "120", 10);
         assert_eq!(all.availability, TriggerAvailability::Complete);
-        assert_eq!((oids(&all), all.truncated), (vec![1, 2, 3, 4], false));
-        assert_eq!(all.orders.iter().map(|(trigger_px, _)| *trigger_px).collect::<Vec<_>>(), [px("105"), px("110"), px("110"), px("120")]);
-        let inner = band(&table, "BTC", "106", "115", 10);
-        assert_eq!(oids(&inner), vec![2, 3], "both ends inclusive, same trigger price by oid");
+        assert_eq!((oids(&all), all.truncated), (vec![8, 1, 2, 3, 7, 4], false), "a fall's above 100 (95 is not), a rise's below 120 (130 is not)");
+        assert_eq!(all.orders.iter().map(|(trigger_px, _)| *trigger_px).collect::<Vec<_>>(), [px("90"), px("105"), px("110"), px("110"), px("112"), px("120")]);
+        let inner = band(&table, "BTC", "106", "111", 10);
+        assert_eq!(oids(&inner), vec![8, 2, 3, 4], "both ends inclusive, same trigger price by oid; 105 below the low end, 112 above the high");
         let cut = band(&table, "BTC", "100", "120", 2);
-        assert_eq!((oids(&cut), cut.truncated), (vec![1, 2], true));
-        let exact = band(&table, "BTC", "100", "120", 4);
+        assert_eq!((oids(&cut), cut.truncated), (vec![8, 1], true));
+        let exact = band(&table, "BTC", "100", "120", 6);
         assert!(!exact.truncated, "the requested count reached exactly is not a cut");
         assert_eq!(oids(&band(&table, "SOL", "0", "1000", 10)), Vec::<u64>::new());
-        assert_eq!(table.count(), 5);
+        assert_eq!(table.count(), 9);
     }
 
-    /// Review 000460 r1 P2-3: the orders without a trigger price yet (trailing stops waiting for their activation) come
-    /// with every band above 0, which never holds them; a band from 0 holds them itself.
+    /// Review 000460 r1 P2-3: the orders placed nowhere - a trailing stop waiting for its activation (`triggerPx` 0),
+    /// a condition of another form - come with every band; an activated trailing stop is a fall's (a sale) or a
+    /// rise's (a buy).
     #[test]
-    fn a_band_brings_the_unpriced_orders_along() {
-        let table = table(TriggerSection::Complete(vec![stop("BTC", 1, "110"), stop("BTC", 7, "0"), stop("BTC", 8, "0")]));
-        let above = band(&table, "BTC", "100", "120", 10);
-        assert_eq!((oids(&above), above.unpriced.iter().map(|order| order.oid).collect::<Vec<_>>(), above.truncated), (vec![1], vec![7, 8], false));
-        let from_zero = band(&table, "BTC", "0", "120", 10);
-        assert_eq!((oids(&from_zero), from_zero.unpriced.len()), (vec![7, 8, 1], 0));
-        assert!(band(&table, "BTC", "100", "120", 1).truncated, "more unpriced than the count");
+    fn a_band_brings_the_orders_placed_nowhere_along() {
+        let trailing = |oid: u64, trigger_px: &str, side: Side| InnerL4Order {
+            trigger_condition: "Activation above 0.02, retracement 5%, best waiting".to_string(),
+            order_type: "Trailing Stop Market".to_string(),
+            side,
+            ..stop("BTC", oid, trigger_px)
+        };
+        let odd = InnerL4Order { trigger_condition: "Price crosses 110".to_string(), ..stop("BTC", 9, "110") };
+        let table = table(TriggerSection::Complete(vec![stop("BTC", 1, "110"), trailing(7, "0", Side::Ask), trailing(8, "0", Side::Bid), odd, trailing(10, "125", Side::Ask), trailing(11, "125", Side::Bid)]));
+        let band_of = band(&table, "BTC", "100", "120", 10);
+        let nowhere: Vec<u64> = band_of.placed_nowhere.iter().map(|order| order.oid).collect();
+        assert_eq!((oids(&band_of), nowhere, band_of.truncated), (vec![1, 10], vec![7, 8, 9], false), "the activated sale at 125 is past");
+        assert_eq!(oids(&band(&table, "BTC", "130", "140", 10)), vec![11], "the activated buy, reached by a rise");
+        assert!(band(&table, "BTC", "100", "120", 2).truncated, "more placed nowhere than the count");
     }
 
     #[test]
@@ -356,10 +701,10 @@ mod tests {
         let version = |table: &TriggerTable| band(table, "BTC", "0", "1000", 10).version;
         table.open(Ok(stop("BTC", 1, "110")), "BTC", &Oid::new(1));
         assert_eq!((oids(&band(&table, "BTC", "100", "115", 10)), version(&table)), (vec![1], 1));
-        // a modified trigger price moves the order in the index
-        table.open(Ok(stop("BTC", 1, "130")), "BTC", &Oid::new(1));
+        // a modified trigger price moves the order in the index: below the low end, a fall to 100 does not reach it
+        table.open(Ok(stop("BTC", 1, "95")), "BTC", &Oid::new(1));
         assert_eq!(oids(&band(&table, "BTC", "100", "115", 10)), Vec::<u64>::new());
-        assert_eq!((oids(&band(&table, "BTC", "125", "135", 10)), version(&table)), (vec![1], 2));
+        assert_eq!((oids(&band(&table, "BTC", "90", "100", 10)), version(&table)), (vec![1], 2));
         assert_eq!(table.count(), 1);
         assert!(table.close("BTC", &Oid::new(1)));
         assert_eq!((table.count(), version(&table)), (0, 3));
@@ -427,7 +772,7 @@ mod tests {
 
     #[test]
     fn a_table_that_is_not_kept_says_so() {
-        let mut off = TriggerTable::seeded(TriggerSection::Complete(vec![stop("BTC", 1, "110")]), Vec::new(), false, false);
+        let mut off = TriggerTable::seeded(TriggerSection::Complete(vec![stop("BTC", 1, "110")]), &ParentLinks::default(), Vec::new(), false, false);
         off.open(Ok(stop("BTC", 2, "110")), "BTC", &Oid::new(2));
         assert_eq!(off.count(), 0);
         assert_eq!(band(&off, "BTC", "0", "1000", 10).availability, TriggerAvailability::Gap(TriggerGap::TrackingDisabled));
@@ -442,5 +787,180 @@ mod tests {
         assert_eq!(spot_filtered.availability(Some(&Coin::new("@107"))), TriggerAvailability::Gap(TriggerGap::TrackingDisabled));
         assert_eq!(spot_filtered.availability(Some(&Coin::new("BTC"))), TriggerAvailability::Complete);
         assert_eq!(spot_filtered.availability(None), TriggerAvailability::Complete);
+    }
+
+    const USER: Address = Address::new([2; 20]);
+
+    /// The wire order of `stop`, or of a limit buy with `children` (each listed under `listed_oid`, `None`: its own).
+    fn wire(order: &InnerL4Order) -> L4Order {
+        L4Order {
+            user: None,
+            coin: order.coin.value(),
+            side: order.side,
+            limit_px: "90.0".to_string(),
+            sz: "1.0".to_string(),
+            oid: order.oid,
+            timestamp: order.timestamp,
+            trigger_condition: order.trigger_condition.clone(),
+            is_trigger: order.is_trigger,
+            trigger_px: order.trigger_px.clone(),
+            children: Vec::new(),
+            is_position_tpsl: order.is_position_tpsl,
+            reduce_only: order.reduce_only,
+            order_type: order.order_type.clone(),
+            orig_sz: "1.0".to_string(),
+            tif: None,
+            cloid: None,
+        }
+    }
+
+    fn parent(oid: u64, children: &[&InnerL4Order], listed_oid: Option<u64>) -> L4Order {
+        let mut limit = wire(&stop("BTC", oid, "0"));
+        (limit.trigger_condition, limit.is_trigger, limit.order_type, limit.side) = ("N/A".to_string(), false, "Limit".to_string(), Side::Bid);
+        limit.children = children
+            .iter()
+            .map(|child| {
+                let mut listed = wire(child);
+                listed.oid = listed_oid.unwrap_or(child.oid);
+                serde_json::to_value(listed).unwrap()
+            })
+            .collect();
+        limit
+    }
+
+    fn held(table: &TriggerTable) -> Vec<u64> {
+        let mut oids: Vec<u64> = table.snapshot(None).iter().map(|order| order.oid).collect();
+        oids.sort_unstable();
+        oids
+    }
+
+    /// bm 10-21: a dump lists a resting limit order's TP and SL under their own oids, in its children and in the
+    /// trigger section; the node triggers neither before the parent fills. They wait out of the band - still held -,
+    /// and the parent's `filled` brings them in.
+    #[test]
+    fn a_dumps_children_wait_for_their_parent_to_fill() {
+        let (take_profit, stop_loss, alone) = (stop("BTC", 2, "110"), stop("BTC", 3, "105"), stop("BTC", 9, "108"));
+        let parents = ParentLinks::from_iter([(2, 1), (3, 1)]);
+        let mut table =
+            TriggerTable::seeded(TriggerSection::Complete(vec![take_profit.clone(), stop_loss.clone(), alone]), &parents, Vec::new(), true, true);
+        let before = band(&table, "BTC", "100", "120", 10);
+        assert_eq!((oids(&before), held(&table), table.count()), (vec![9], vec![2, 3, 9], 3));
+        // the parent's partial fills say nothing; its `filled` lists the children under their own oids
+        assert!(!table.on_status(5, USER, "filled", &parent(1, &[&take_profit, &stop_loss], None)), "the parent is not a trigger order");
+        let after = band(&table, "BTC", "100", "120", 10);
+        assert_eq!(oids(&after), vec![3, 9, 2]);
+        assert!(after.version > before.version, "the band changed");
+        assert!(table.families.parent_of.is_empty() && table.families.children_of.is_empty());
+    }
+
+    /// bm 10-21 hour 09: a parent's live `open` lists its children under its own oid; their own `open` lines follow in
+    /// the block. A child canceled with its parent gets its own `canceled`; one the parent's `marginCanceled` leaves
+    /// behind takes part (the node triggered it later).
+    #[test]
+    fn live_children_wait_from_their_open_and_leave_or_take_part_with_their_parent() {
+        let (take_profit, stop_loss) = (stop("BTC", 11, "110"), stop("BTC", 12, "105"));
+        let mut table = table(TriggerSection::Complete(Vec::new()));
+        table.on_status(7, USER, "open", &parent(10, &[&take_profit, &stop_loss], Some(10)));
+        table.on_status(7, USER, "open", &wire(&take_profit));
+        table.on_status(7, USER, "open", &wire(&stop_loss));
+        assert_eq!((oids(&band(&table, "BTC", "100", "120", 10)), held(&table)), (Vec::<u64>::new(), vec![11, 12]));
+        // a waiting child modified stays waiting
+        table.on_status(8, USER, "open", &wire(&stop("BTC", 12, "104")));
+        assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), Vec::<u64>::new());
+        // canceled with its parent: the parent's line releases nothing, the children's own remove them
+        table.on_status(9, USER, "canceled", &parent(10, &[&take_profit, &stop_loss], None));
+        assert_eq!((oids(&band(&table, "BTC", "100", "120", 10)), held(&table)), (Vec::<u64>::new(), vec![11, 12]));
+        assert!(table.on_status(9, USER, "canceled", &wire(&take_profit)));
+        assert!(table.on_status(9, USER, "canceled", &wire(&stop_loss)));
+        assert_eq!(held(&table), Vec::<u64>::new());
+
+        // a parent rejected or ended otherwise releases nothing either
+        let (rejected_child, other_child) = (stop("BTC", 16, "110"), stop("BTC", 18, "110"));
+        table.on_status(10, USER, "open", &parent(15, &[&rejected_child], Some(15)));
+        table.on_status(10, USER, "open", &wire(&rejected_child));
+        table.on_status(10, USER, "open", &parent(17, &[&other_child], Some(17)));
+        table.on_status(10, USER, "open", &wire(&other_child));
+        table.on_status(10, USER, "perpMarginRejected", &parent(15, &[&rejected_child], None));
+        table.on_status(10, USER, "reduceOnlyCanceled", &parent(17, &[&other_child], None));
+        assert_eq!((oids(&band(&table, "BTC", "100", "120", 10)), held(&table)), (Vec::<u64>::new(), vec![16, 18]));
+        assert!(table.on_status(10, USER, "canceled", &wire(&rejected_child)));
+        assert!(table.on_status(10, USER, "canceled", &wire(&other_child)));
+
+        let survivor = stop("BTC", 21, "110");
+        table.on_status(10, USER, "open", &parent(20, &[&survivor], Some(20)));
+        table.on_status(10, USER, "open", &wire(&survivor));
+        assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), Vec::<u64>::new());
+        table.on_status(11, USER, "marginCanceled", &parent(20, &[&survivor], None));
+        assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![21]);
+        assert!(table.on_status(12, USER, "triggered", &wire(&survivor)));
+        assert_eq!(table.count(), 0);
+    }
+
+    /// Review 000463 r1 P2-3: a dump without a trigger section keeps the previous table, a table holding waiting
+    /// children only included, with their links.
+    #[test]
+    fn a_dump_without_a_section_keeps_a_table_of_waiting_children() {
+        let child = stop("BTC", 2, "110");
+        let first = TriggerTable::seeded(TriggerSection::Complete(vec![child.clone()]), &ParentLinks::from_iter([(2, 1)]), Vec::new(), true, true);
+        assert_eq!((first.count(), oids(&band(&first, "BTC", "100", "120", 10))), (1, Vec::<u64>::new()));
+        let mut next = table(TriggerSection::Absent);
+        next.succeed(&first);
+        assert_eq!(held(&next), vec![2]);
+        next.on_status(5, USER, "filled", &parent(1, &[&child], None));
+        assert_eq!(oids(&band(&next, "BTC", "100", "120", 10)), vec![2]);
+    }
+
+    /// bm 10-21 block 1191742333: a modify of a parent cancels its oid - the line lists the children under their own
+    /// oids, which get no status - and opens its successor, whose `open` lists none; the children wait on, and the
+    /// successor's `filled`, listing them, releases them.
+    #[test]
+    fn a_modified_parents_children_wait_for_its_successor() {
+        let (stop_loss, take_profit) = (stop("BTC", 792, "105"), stop("BTC", 793, "110"));
+        let mut table = table(TriggerSection::Complete(Vec::new()));
+        table.on_status(7, USER, "open", &parent(791, &[&stop_loss, &take_profit], Some(791)));
+        table.on_status(7, USER, "open", &wire(&stop_loss));
+        table.on_status(7, USER, "open", &wire(&take_profit));
+        table.on_status(8, USER, "canceled", &parent(791, &[&stop_loss, &take_profit], None));
+        table.on_status(8, USER, "open", &parent(78, &[], None));
+        assert_eq!((oids(&band(&table, "BTC", "100", "120", 10)), held(&table)), (Vec::<u64>::new(), vec![792, 793]));
+        table.on_status(9, USER, "filled", &parent(78, &[&stop_loss, &take_profit], None));
+        assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![792, 793]);
+        assert!(table.families.parent_of.is_empty() && table.families.children_of.is_empty());
+    }
+
+    /// A trigger order with children keeps them waiting through its `triggered`; a child the block announced but whose
+    /// own `open` never came is counted when the next block's status arrives; a child canceled alone is gone for good.
+    #[test]
+    fn a_triggered_parent_keeps_its_children_and_an_unmatched_announcement_is_counted() {
+        let child = stop("BTC", 31, "110");
+        let mut trigger_parent = wire(&stop("BTC", 30, "100"));
+        trigger_parent.children = vec![serde_json::to_value(wire(&child)).unwrap()];
+        let mut table = table(TriggerSection::Complete(Vec::new()));
+        table.on_status(7, USER, "open", &trigger_parent);
+        table.on_status(7, USER, "open", &wire(&child));
+        assert_eq!(oids(&band(&table, "BTC", "90", "120", 10)), vec![30]);
+        assert!(table.on_status(8, USER, "triggered", &trigger_parent));
+        assert_eq!((oids(&band(&table, "BTC", "90", "120", 10)), held(&table)), (Vec::<u64>::new(), vec![31]));
+        assert!(table.on_status(8, USER, "canceled", &wire(&child)));
+        table.on_status(9, USER, "filled", &trigger_parent);
+        assert_eq!(table.count(), 0, "the parent's fill brings back no canceled child");
+
+        let unmatched = crate::metrics::UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.get();
+        table.on_status(20, USER, "open", &parent(40, &[&stop("BTC", 41, "110")], Some(40)));
+        // its own `open` differs (another trigger price): not the announced child
+        table.on_status(20, USER, "open", &wire(&stop("BTC", 41, "111")));
+        assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![41]);
+        assert_eq!(table.availability(None), TriggerAvailability::Complete);
+        table.on_status(21, USER, "open", &wire(&stop("BTC", 50, "110")));
+        assert_eq!(crate::metrics::UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.get(), unmatched + 1);
+        assert!(table.expected.parents.is_empty());
+        // review 000463 r1 P2-2: the active set is no longer known
+        assert_eq!(band(&table, "BTC", "100", "120", 10).availability, TriggerAvailability::Gap(TriggerGap::ChildUnmatched));
+        // a market the table does not keep announces nothing
+        let spot_child = stop("@107", 61, "110");
+        let mut spot_parent = parent(60, &[&spot_child], Some(60));
+        spot_parent.coin = "@107".to_string();
+        table.on_status(30, USER, "open", &spot_parent);
+        assert!(table.expected.parents.is_empty());
     }
 }

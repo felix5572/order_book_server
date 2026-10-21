@@ -500,8 +500,9 @@ impl ForcedFlow {
             Ok(liquidations) => liquidations,
             Err(reason) => return self.finish(&key, heights, FlowContent::Unavailable(reason), output),
         };
-        // the unpriced orders (trailing stops waiting for activation) are placed nowhere: their count is in `unplaced`
-        let unpriced = read.band.unpriced.iter().map(|order| TriggerInput { trigger_px: Px::new(0), order: Arc::clone(order) });
+        // the orders placed nowhere (a trailing stop waiting for its activation, a condition of another form): their
+        // count is in `unplaced`
+        let unpriced = read.band.placed_nowhere.iter().map(|order| TriggerInput { trigger_px: Px::new(0), order: Arc::clone(order) });
         let triggers: Vec<TriggerInput> =
             read.band.orders.iter().map(|(trigger_px, order)| TriggerInput { trigger_px: *trigger_px, order: Arc::clone(order) }).chain(unpriced).collect();
         let inputs = CoinInputs { size_decimals, node_mark_raw, local_mark_raw: local_raw, triggers: &triggers, liquidations: &liquidations };
@@ -740,7 +741,7 @@ mod tests {
     }
 
     fn band_at(orders: Vec<(Px, Arc<InnerL4Order>)>, availability: TriggerAvailability, trusted: bool) -> TriggerBandAt {
-        let band = TriggerBand { availability, generation: 1, version: 3, orders, unpriced: Vec::new(), truncated: false };
+        let band = TriggerBand { availability, generation: 1, version: 3, orders, placed_nowhere: Vec::new(), truncated: false };
         TriggerBandAt { time: 5, height: 7, trusted, withheld_periods: 0, band }
     }
 
@@ -1044,7 +1045,7 @@ mod tests {
         let now = Instant::now();
         owner.tick(now);
         let mut read = band_at(Vec::new(), TriggerAvailability::Complete, true);
-        read.band.unpriced = vec![waiting_trailing_stop(9)];
+        read.band.placed_nowhere = vec![waiting_trailing_stop(9)];
         let frame = owner.answer(PUMP, Tier::Near, read, now).frames.remove(0);
         assert_eq!(ready(&frame).unplaced, [(9, Unplaced::TrailingStopWaiting)]);
     }

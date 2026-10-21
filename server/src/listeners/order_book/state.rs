@@ -5,7 +5,7 @@ use crate::{
     },
     order_book::{
         Coin, InnerOrder, Oid, Px, PxBand, Snapshot,
-        multi_book::{BidAsk, OrderBooks, Snapshots, TriggerSection},
+        multi_book::{BidAsk, OrderBooks, ParentLinks, Snapshots, TriggerSection},
     },
     prelude::*,
     types::{
@@ -114,6 +114,7 @@ impl OrderBookState {
     pub(super) fn from_snapshot(
         mut snapshot: Snapshots<InnerL4Order>,
         untriggered: TriggerSection<InnerL4Order>,
+        parents: &ParentLinks,
         height: u64,
         time: u64,
         ignore_triggers: bool,
@@ -123,7 +124,7 @@ impl OrderBookState {
         // The dump's trigger section (--include-trigger-orders) is the full standing stop book; old-format dumps
         // appended the triggers to both sides of the book instead, taken off here.
         let legacy = if ignore_triggers && track_untriggered { snapshot.extract_triggers() } else { Vec::new() };
-        let triggers = TriggerTable::seeded(untriggered, legacy, track_untriggered, ignore_spot);
+        let triggers = TriggerTable::seeded(untriggered, parents, legacy, track_untriggered, ignore_spot);
         let installed = StreamProgress { height, time };
         Self {
             ignore_spot,
@@ -424,13 +425,8 @@ impl OrderBookState {
 
             // Maintain the untriggered-orders side table. "open" + is_trigger is a pending trigger order (never rests on
             // the book); any other status is terminal for the untriggered phase (canceled / triggered / filled /
-            // rejected / ...) and evicts the oid.
-            if order_status.status == "open" {
-                if order_status.order.is_trigger && self.triggers.tracks(&order_status.order.coin) {
-                    let order = InnerL4Order::try_from((order_status.user, order_status.order.clone()));
-                    self.triggers.open(order, &order_status.order.coin, &oid);
-                }
-            } else if self.triggers.close(&order_status.order.coin, &oid) {
+            // rejected / ...) and evicts the oid; a parent's statuses also announce and release its children.
+            if self.triggers.on_status(height, order_status.user, &order_status.status, &order_status.order) {
                 // Labeled by status so a future non-terminal status string that starts wrongly evicting live triggers
                 // shows up in Prometheus immediately (today's vocabulary is all terminal-for-the-oid).
                 crate::metrics::UNTRIGGERED_EVICTIONS_TOTAL.with_label_values(&[&order_status.status]).inc();
@@ -641,7 +637,7 @@ mod tests {
 
     fn empty_state() -> OrderBookState {
         let snapshots = Snapshots::new(HashMap::new());
-        OrderBookState::from_snapshot(snapshots, TriggerSection::Absent, 0, 0, true, false, true)
+        OrderBookState::from_snapshot(snapshots, TriggerSection::Absent, &ParentLinks::default(), 0, 0, true, false, true)
     }
 
     fn make_l4_order(coin: &str, oid: u64) -> L4Order {
@@ -883,7 +879,7 @@ mod tests {
     #[test]
     fn test_from_snapshot_extracts_untriggered_triggers() {
         let snapshots = snapshot_with_triggers("BTC", &[1, 2], &[100, 101]);
-        let state = OrderBookState::from_snapshot(snapshots, TriggerSection::Absent, 0, 0, true, false, true);
+        let state = OrderBookState::from_snapshot(snapshots, TriggerSection::Absent, &ParentLinks::default(), 0, 0, true, false, true);
         // Triggers are kept in the side table (deduped from the two per-side
         // copies), not dropped - and never enter the book.
         assert_eq!(state.untriggered_count(), 2);
@@ -899,7 +895,7 @@ mod tests {
     fn test_from_snapshot_ignore_triggers_false_keeps_old_semantics() {
         // Tests that opt out of trigger extraction must not populate the table.
         let snapshots = snapshot_with_triggers("BTC", &[1], &[]);
-        let state = OrderBookState::from_snapshot(snapshots, TriggerSection::Absent, 0, 0, false, false, true);
+        let state = OrderBookState::from_snapshot(snapshots, TriggerSection::Absent, &ParentLinks::default(), 0, 0, false, false, true);
         assert_eq!(state.untriggered_count(), 0);
     }
 
@@ -968,7 +964,7 @@ mod tests {
         // Live path: spot trigger opens are not tracked under ignore_spot,
         // matching the diff path's spot filtering.
         let mut state =
-            OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Absent, 0, 0, true, true, true);
+            OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Absent, &ParentLinks::default(), 0, 0, true, true, true);
         state
             .apply_order_statuses_hft(make_status_batch(vec![
                 make_trigger_status("@1", 1, "open", "1.0"),
@@ -984,6 +980,7 @@ mod tests {
         let spot_state = OrderBookState::from_snapshot(
             snapshot_with_triggers("@1", &[1], &[100]),
             TriggerSection::Absent,
+            &ParentLinks::default(),
             0,
             0,
             true,
@@ -998,7 +995,7 @@ mod tests {
     #[test]
     fn test_untriggered_snapshot_of_a_filtered_spot_coin_is_not_complete() {
         let section = TriggerSection::Complete(vec![make_inner_order("BTC", 100, true), make_inner_order("@107", 101, true)]);
-        let state = OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), section, 0, 0, true, true, true);
+        let state = OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), section, &ParentLinks::default(), 0, 0, true, true, true);
         let (_, _, spot, availability) = state.untriggered_snapshot(Some(&Coin::new("@107")));
         assert_eq!((spot.len(), availability), (0, TriggerAvailability::Gap(TriggerGap::TrackingDisabled)));
         let (_, _, btc, availability) = state.untriggered_snapshot(Some(&Coin::new("BTC")));
@@ -1012,6 +1009,7 @@ mod tests {
         let old = OrderBookState::from_snapshot(
             Snapshots::new(HashMap::new()),
             TriggerSection::Complete(vec![make_inner_order("BTC", 1, true)]),
+            &ParentLinks::default(),
             0,
             0,
             true,
@@ -1019,11 +1017,11 @@ mod tests {
             true,
         );
         let partial = TriggerSection::Partial { orders: Vec::new(), skipped: 0, markets_without: 1 };
-        let mut new = OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), partial, 10, 0, true, false, true);
+        let mut new = OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), partial, &ParentLinks::default(), 10, 0, true, false, true);
         new.succeed_triggers(&old);
         let (_, _, orders, availability) = new.untriggered_snapshot(None);
         assert_eq!((orders.len(), availability), (0, TriggerAvailability::Gap(TriggerGap::SnapshotWithoutTriggers)));
-        let mut absent = OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Absent, 10, 0, true, false, true);
+        let mut absent = OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Absent, &ParentLinks::default(), 10, 0, true, false, true);
         absent.succeed_triggers(&old);
         assert_eq!(absent.untriggered_count(), 1, "no section at all keeps the previous orders");
     }
@@ -1033,12 +1031,34 @@ mod tests {
         // The --include-trigger-orders dump path: untriggered orders arrive as a
         // flat list, not embedded in the book sides.
         let seed = vec![make_inner_order("BTC", 100, true), make_inner_order("ETH", 101, true)];
-        let state = OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Complete(seed), 0, 0, true, false, true);
+        let state = OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Complete(seed), &ParentLinks::default(), 0, 0, true, false, true);
         assert_eq!(state.untriggered_count(), 2);
         assert_eq!(state.order_count(), 0);
         let (_, _, btc, _) = state.untriggered_snapshot(Some(&Coin::new("BTC")));
         assert_eq!(btc.len(), 1);
         assert_eq!(btc[0].oid, 100);
+    }
+
+    /// bm 10-21 block 1191710832: a limit buy placed with its stop; the parent's `open` lists the stop under the
+    /// parent's oid, the stop's own `open` follows; the stop waits out of the band until the parent's `filled`
+    /// (block 1191755252) - the node triggered none of such children before.
+    #[test]
+    fn a_stop_placed_with_its_limit_order_waits_for_the_fill() {
+        let mut state =
+            OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Complete(Vec::new()), &ParentLinks::default(), 0, 0, true, false, true);
+        let line = |text: &str| -> Batch<NodeDataOrderStatus> { serde_json::from_str(text).unwrap() };
+        let parent_open = r#"{"local_time":"2026-10-21T08:06:45.400659915","block_time":"2026-10-21T08:06:44.977137955","block_number":1191710832,"events":[{"time":"2026-10-21T08:06:44.977137955","user":"0x27cd09a37030afa2a2ff9c0125dbb3eaf3bacaa2","hash":"0x8cd3565aaaecc17f8e4d0447081070020486004045efe051309c01ad69e09b6a","builder":{"b":"0xcd254d2a328f7f67c7c6fef930a4757516f7b601","f":0},"status":"open","order":{"coin":"HYPE","side":"B","limitPx":"81.2","sz":"12.28","oid":581250704214,"timestamp":1792570004977,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[{"coin":"HYPE","side":"A","limitPx":"69.3","sz":"12.28","oid":581250704214,"timestamp":1792570004977,"triggerCondition":"Price below 77","isTrigger":true,"triggerPx":"77.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"12.28","tif":null,"cloid":"0xe2c7dfc57470a3dc7004b5aeee155980"}],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"12.28","tif":"Gtc","cloid":"0xe2c7dfc5920b6e226bb0048f92fdeb85"}}]}"#;
+        let child_open = r#"{"local_time":"2026-10-21T08:06:45.400670335","block_time":"2026-10-21T08:06:44.977137955","block_number":1191710832,"events":[{"time":"2026-10-21T08:06:44.977137955","user":"0x27cd09a37030afa2a2ff9c0125dbb3eaf3bacaa2","hash":"0x8cd3565aaaecc17f8e4d0447081070020486004045efe051309c01ad69e09b6a","builder":{"b":"0xcd254d2a328f7f67c7c6fef930a4757516f7b601","f":0},"status":"open","order":{"coin":"HYPE","side":"A","limitPx":"69.3","sz":"12.28","oid":581250704215,"timestamp":1792570004977,"triggerCondition":"Price below 77","isTrigger":true,"triggerPx":"77.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"12.28","tif":null,"cloid":"0xe2c7dfc57470a3dc7004b5aeee155980"}}]}"#;
+        let parent_filled = r#"{"local_time":"2026-10-21T09:00:08.823387424","block_time":"2026-10-21T09:00:06.260628857","block_number":1191755252,"events":[{"time":"2026-10-21T09:00:06.260628857","user":"0x27cd09a37030afa2a2ff9c0125dbb3eaf3bacaa2","hash":null,"builder":{"b":"0xcd254d2a328f7f67c7c6fef930a4757516f7b601","f":0},"status":"filled","order":{"coin":"HYPE","side":"B","limitPx":"81.2","sz":"0.0","oid":581250704214,"timestamp":1792570004977,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[{"coin":"HYPE","side":"A","limitPx":"69.3","sz":"12.28","oid":581250704215,"timestamp":1792570004977,"triggerCondition":"Price below 77","isTrigger":true,"triggerPx":"77.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"12.28","tif":null,"cloid":"0xe2c7dfc57470a3dc7004b5aeee155980"}],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"12.28","tif":"Gtc","cloid":"0xe2c7dfc5920b6e226bb0048f92fdeb85"}}]}"#;
+        let hype = Coin::new("HYPE");
+        let in_band = |state: &OrderBookState| -> Vec<u64> {
+            state.untriggered_in_band(&hype, Px::parse_from_str("70").unwrap(), Px::parse_from_str("80").unwrap(), 10).2.orders.iter().map(|(_, order)| order.oid).collect()
+        };
+        state.apply_order_statuses_hft(line(parent_open)).unwrap();
+        state.apply_order_statuses_hft(line(child_open)).unwrap();
+        assert_eq!((in_band(&state), state.untriggered_count()), (Vec::<u64>::new(), 1), "held, waiting");
+        state.apply_order_statuses_hft(line(parent_filled)).unwrap();
+        assert_eq!(in_band(&state), vec![581_250_704_215]);
     }
 
     #[test]
@@ -1049,6 +1069,7 @@ mod tests {
         let mut state = OrderBookState::from_snapshot(
             snapshot_with_triggers("BTC", &[1], &[100]),
             TriggerSection::Absent,
+            &ParentLinks::default(),
             0,
             0,
             true,
@@ -1374,7 +1395,7 @@ mod tests {
     #[test]
     fn test_spot_filtered_when_ignore_spot() {
         let snapshots = Snapshots::new(HashMap::new());
-        let mut state = OrderBookState::from_snapshot(snapshots, TriggerSection::Absent, 0, 0, true, true, true); // ignore_spot=true
+        let mut state = OrderBookState::from_snapshot(snapshots, TriggerSection::Absent, &ParentLinks::default(), 0, 0, true, true, true); // ignore_spot=true
 
         let diff = make_order_diff("@1", 1, OrderDiff::New { sz: "1.0".to_string(), insert_before: None });
         let changed = state.apply_order_diffs_hft(make_diff_batch(vec![diff])).unwrap();
@@ -1609,7 +1630,7 @@ mod tests {
     fn test_snapshot_install_starts_both_streams_at_its_height() {
         let snapshots = Snapshots::new(HashMap::new());
         let time = block_time_ms(500);
-        let state = OrderBookState::from_snapshot(snapshots, TriggerSection::Absent, 500, time, true, false, true);
+        let state = OrderBookState::from_snapshot(snapshots, TriggerSection::Absent, &ParentLinks::default(), 500, time, true, false, true);
         assert_eq!((state.status_height(), state.diff_height(), state.height()), (500, 500, 500));
         assert_eq!(state.book_time(), time);
     }

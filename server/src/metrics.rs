@@ -301,6 +301,13 @@ lazy_static! {
         &["status"]
     ).expect("metric can be created");
 
+    /// Children a parent's `open` announced whose own `open` did not follow in the block: such a child, if it came
+    /// otherwise, is held as a trigger order the node does not trigger yet.
+    pub static ref UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_untriggered_unmatched_children_total",
+        "Children announced by a parent's open whose own open did not follow in the block"
+    ).expect("metric can be created");
+
     /// BBO changes per coin (top 5 tracked individually)
     pub static ref BBO_CHANGES_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("bbo_changes_total", "BBO changes by coin"),
@@ -743,6 +750,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ORDERBOOK_COINS_COUNT.clone())).ok();
     REGISTRY.register(Box::new(ORDERBOOK_UNTRIGGERED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(UNTRIGGERED_EVICTIONS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(BBO_CHANGES_TOTAL.clone())).ok();
 
     // Resync & lock metrics
