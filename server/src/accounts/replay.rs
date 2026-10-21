@@ -585,6 +585,7 @@ fn apply_action(account: &mut AccountMargin, markets: &Markets, block: u64, acti
         BlockAction::TopUpIsolatedOnlyMargin => return Err(StopReason::TopUpIsolatedOnlyMargin),
         BlockAction::SetAbstraction => return Err(StopReason::AccountModeSwitch),
         BlockAction::Withdraw { amount_wei } => add_main(account, markets, -amount_wei)?,
+        BlockAction::ReserveRequestWeight { cost_wei } => add_main(account, markets, -cost_wei)?,
     }
     Ok(())
 }
@@ -1009,6 +1010,46 @@ pub(crate) mod tests {
             assert_eq!(cross(&replay, HOLDER), per_dex_pools(&[(0, 100_000 - fee_wei), (1, 3_026_970_000)]));
             assert_eq!(stop(&replay, HOLDER), None);
         }
+    }
+
+    #[test]
+    fn request_weight_purchase_debits_unified_cash_without_touching_isolated_margin() {
+        let mut replay = states(|_| {});
+        let before = replay.accounts[&user(HOLDER)].clone();
+        replay.apply(5, user(HOLDER), &AccountEvent::Action(BlockAction::ReserveRequestWeight { cost_wei: 50_000 }));
+        let Pools::Unified(cash) = before.pools else { panic!("unified fixture") };
+        assert_eq!(cross(&replay, HOLDER), Pools::Unified(cash - 50_000));
+        assert_eq!(replay.accounts[&user(HOLDER)].isolated, before.isolated);
+        assert_eq!(stop(&replay, HOLDER), None);
+    }
+
+    #[test]
+    fn request_weight_purchase_matches_payer_and_recipient_checkpoint_cash() {
+        use crate::accounts::actions::{parse_block_actions, tests::action_line};
+        let golden: serde_json::Value = serde_json::from_str(include_str!("request_weight_golden.json")).unwrap();
+        let block = parse_block_actions(&action_line(&golden)).unwrap();
+        let payer = golden["receipt"]["user"].as_str().unwrap();
+        let recipient = golden["action"]["destination"].as_str().unwrap();
+        let wei = |key: &str| golden[key].as_i64().unwrap() * 100;
+        let mut replay = per_dex();
+        let mut paying = replay.accounts.remove(&user(HOLDER)).unwrap();
+        paying.pools = per_dex_pools(&[(0, wei("payer_before_main_micro")), (1, wei("payer_before_xyz_micro"))]);
+        let mut receiving = paying.clone();
+        receiving.pools = per_dex_pools(&[(0, wei("destination_before_main_micro"))]);
+        replay.accounts.insert(user(payer), paying);
+        replay.accounts.insert(user(recipient), receiving);
+        replay.apply(1_191_755_163, user(payer), &AccountEvent::Funding { coin:"BTC".to_string(), amount_wei:wei("payer_funding_micro") });
+        replay.apply(1_191_755_163, user(recipient), &AccountEvent::Funding { coin:"BTC".to_string(), amount_wei:wei("destination_funding_micro") });
+        // The fixture uses BTC for these real ETH cross-funding payments; only the main cash pool is under test.
+        replay.apply(1_191_758_371, user(payer), &send(payer, Balance::Dex("xyz".to_string()), payer,
+            Balance::Dex(String::new()), Some(5_000_000_000), 0));
+        for (action, affected) in block.actions {
+            replay.apply(block.height, affected, &AccountEvent::Action(action));
+        }
+        assert_eq!(cross(&replay, payer), per_dex_pools(&[(0, wei("payer_after_main_micro")), (1, wei("payer_after_xyz_micro"))]));
+        assert_eq!(cross(&replay, recipient), per_dex_pools(&[(0, wei("destination_after_main_micro"))]));
+        assert_eq!(stop(&replay, payer), None);
+        assert_eq!(stop(&replay, recipient), None);
     }
 
     #[test]

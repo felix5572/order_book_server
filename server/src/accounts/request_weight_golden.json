@@ -1,0 +1,36 @@
+{
+  "note": "Projection of one real accepted action/receipt, with original line hash and position. The envelope in tests is reconstructed, not a complete raw block. Selected checkpoints and full-window ledger projections are archived outside Git under ob_hourly_watch_20261021/20261021T095506Z.",
+  "source": "/home/ubuntu/hl/data/replica_cmds/2026-10-21T00:04:41Z/20261021/1191750000",
+  "line_sha256": "0e62fb8b3a8a9d65beb875ea1cdb7daa53389da91bcb17b400a64ac983ef1607",
+  "bundle_index": 0,
+  "position": 1413,
+  "height": 1191758386,
+  "time": "2026-10-21T09:03:49.247706054",
+  "bundle": "0x3f92bd04d166892cb02ffe41492efe92963ea32b685a34f55a31ccf225b6862c",
+  "action": {
+    "type": "reserveRequestWeight",
+    "weight": 100000,
+    "destination": "0x5e87907b76a1a39fbc0a366b0654f60b823d6206"
+  },
+  "receipt": {
+    "user": "0x92785cec414a173d265476d0eb92987cce0d033c",
+    "res": {
+      "status": "ok",
+      "response": {
+        "type": "default"
+      }
+    }
+  },
+  "seed_from": 1191750000,
+  "seed_to": 1191760000,
+  "payer_before_main_micro": -10449839,
+  "payer_before_xyz_micro": 207721725,
+  "payer_funding_micro": -156,
+  "self_transfer_usdc": "50.0",
+  "payer_after_main_micro": -10449995,
+  "payer_after_xyz_micro": 157721725,
+  "destination_before_main_micro": 22733371,
+  "destination_funding_micro": 156,
+  "destination_after_main_micro": 22733527,
+  "doc_url": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#reserve-additional-actions"
+}

@@ -10,7 +10,7 @@
 //! - **Anchor rows** (margin mode, pool size, liquidation price) and account modes are the anchor's own and are never
 //!   re-derived between anchors.
 //! - **Change marks**: per account, the first block after the anchor of each observed source (fill, ledger, funding,
-//!   and the block actions margin, account mode, withdrawal): from there on the anchor's liquidation price may be
+//!   and the block actions margin, account mode, withdrawal, request weight): from there on the anchor's liquidation price may be
 //!   stale. A mark is set once per anchor interval, so an account trading every block changes its rows once, not per
 //!   block (review of the push volume, 10-19). The account events since the anchor are logged so the next anchor can
 //!   rebuild the first marks after itself, and check and rebuild the cash replay (`replay.rs`, design 000433). A block-action mark means a successful action that may invalidate the
@@ -171,6 +171,7 @@ pub(crate) struct ChangeMarks {
     pub(crate) margin: Option<u64>,
     pub(crate) account_mode: Option<u64>,
     pub(crate) withdrawal: Option<u64>,
+    pub(crate) request_weight: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +211,7 @@ impl ChangeMarks {
             MarkKind::Action(BlockActionKind::Margin) => &mut self.margin,
             MarkKind::Action(BlockActionKind::AccountMode) => &mut self.account_mode,
             MarkKind::Action(BlockActionKind::Withdrawal) => &mut self.withdrawal,
+            MarkKind::Action(BlockActionKind::RequestWeight) => &mut self.request_weight,
         };
         if let Some(first) = *slot
             && first <= block
@@ -221,13 +223,14 @@ impl ChangeMarks {
     }
 
     const fn is_empty(self) -> bool {
-        let Self { fill, ledger, funding, margin, account_mode, withdrawal } = self;
+        let Self { fill, ledger, funding, margin, account_mode, withdrawal, request_weight } = self;
         fill.is_none()
             && ledger.is_none()
             && funding.is_none()
             && margin.is_none()
             && account_mode.is_none()
             && withdrawal.is_none()
+            && request_weight.is_none()
     }
 }
 
@@ -2096,6 +2099,23 @@ mod tests {
         assert_eq!(marks, ChangeMarks { margin: Some(1_003), withdrawal: Some(1_003), ..ChangeMarks::default() });
         assert_eq!(book.coin_positions(PUMP, None).unwrap().block_actions_height, 1_003);
         assert_eq!(book.apply_block_actions(block_actions(1_004, &[])).touched, Touched::default());
+    }
+
+    #[test]
+    fn request_weight_marks_survive_reanchor_and_duplicate_blocks() {
+        let mut book = trusted_book(&[(user(1), 5)]);
+        let purchase = BlockAction::ReserveRequestWeight { cost_wei: 50_000 };
+        book.apply_block_actions(block_actions(1_001, &[]));
+        book.apply_block_actions(block_actions(1_002, &[(purchase.clone(), user(1))]));
+        let duplicate = book.apply_block_actions(block_actions(1_002, &[(purchase, user(1))]));
+        assert_eq!(duplicate.touched, Touched::default());
+        let marks = book.coin_positions(PUMP, None).unwrap().positions[0].changes;
+        assert_eq!(marks, ChangeMarks { request_weight: Some(1_002), ..ChangeMarks::default() });
+        assert!(!marks.is_empty());
+        book.install_anchor(anchor(1_001, &[(PUMP, 0, &[(user(1), 5)])]));
+        assert_eq!(book.coin_positions(PUMP, None).unwrap().positions[0].changes, marks);
+        book.install_anchor(anchor(1_002, &[(PUMP, 0, &[(user(1), 5)])]));
+        assert!(book.coin_positions(PUMP, None).unwrap().positions[0].changes.is_empty());
     }
 
     /// Every block has a `replica_cmds` line: a skipped height is a loss up to the last missing block; a replay is not.

@@ -23,6 +23,8 @@ pub(crate) enum BlockActionKind {
     AccountMode,
     /// `withdraw3`: debited when requested; its ledger event comes minutes later.
     Withdrawal,
+    /// `reserveRequestWeight`: purchase request quota from the payer's main perp balance.
+    RequestWeight,
 }
 
 impl BlockActionKind {
@@ -31,6 +33,7 @@ impl BlockActionKind {
             "updateIsolatedMargin" | "updateLeverage" | "topUpIsolatedOnlyMargin" => Some(Self::Margin),
             "userSetAbstraction" | "agentSetAbstraction" => Some(Self::AccountMode),
             "withdraw3" => Some(Self::Withdrawal),
+            "reserveRequestWeight" => Some(Self::RequestWeight),
             _ => None,
         }
     }
@@ -52,6 +55,8 @@ pub(crate) enum BlockAction {
     /// `withdraw3`: the amount rounded to micro USDC (fee included), stored in 10^-8 USDC, leaves the main
     /// pool when the request is accepted.
     Withdraw { amount_wei: i64 },
+    /// Cost is charged to the receipt user, even when another account receives the quota.
+    ReserveRequestWeight { cost_wei: i64 },
 }
 
 impl BlockAction {
@@ -60,6 +65,7 @@ impl BlockAction {
             Self::IsolatedMargin { .. } | Self::Leverage { .. } | Self::TopUpIsolatedOnlyMargin => BlockActionKind::Margin,
             Self::SetAbstraction => BlockActionKind::AccountMode,
             Self::Withdraw { .. } => BlockActionKind::Withdrawal,
+            Self::ReserveRequestWeight { .. } => BlockActionKind::RequestWeight,
         }
     }
 
@@ -73,6 +79,14 @@ impl BlockAction {
             "withdraw3" => {
                 let amount: String = action.field(action.amount.as_ref(), "amount")?;
                 Self::Withdraw { amount_wei: withdrawal_wei(&amount).map_err(|err| format!("withdraw3 amount: {err}"))? }
+            }
+            "reserveRequestWeight" => {
+                let weight: u64 = action.field(action.weight.as_ref(), "weight")?;
+                // Exchange API: 0.0005 USDC/request, paid from Perps. H1191758386 confirms
+                // 100000 requests cost the receipt user 50 USDC, with no separate ledger delta.
+                let cost_wei = weight.checked_mul(50_000).and_then(|value| i64::try_from(value).ok())
+                    .ok_or_else(|| format!("reserveRequestWeight cost overflows 10^-8 USDC for weight {weight}"))?;
+                Self::ReserveRequestWeight { cost_wei }
             }
             other => return Err(format!("{other} is not a kept action type")),
         })
@@ -287,7 +301,7 @@ pub(crate) mod tests {
         assert_eq!(line_height(&broken), Some(1_189_931_524));
         assert_eq!(line_height(&REAL_LINE[..REAL_LINE.len() - 30]), None);
     }
-    fn multisig_line(case: &serde_json::Value) -> String {
+    pub(crate) fn action_line(case: &serde_json::Value) -> String {
         serde_json::json!({
             "height": case["height"],
             "abci_block": {"time": case["time"], "signed_action_bundles": [[case["bundle"], {
@@ -298,17 +312,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn request_weight_uses_receipt_payer_and_checks_successful_weight_only() {
+        let mut case: serde_json::Value = serde_json::from_str(include_str!("request_weight_golden.json")).unwrap();
+        let payer = address(case["receipt"]["user"].as_str().unwrap());
+        assert_ne!(payer, address(case["action"]["destination"].as_str().unwrap()));
+        let expected = [(BlockAction::ReserveRequestWeight { cost_wei: 5_000_000_000 }, payer)];
+        assert_eq!(parse_block_actions(&action_line(&case)).unwrap().actions, expected);
+        case["action"].as_object_mut().unwrap().remove("destination");
+        assert_eq!(parse_block_actions(&action_line(&case)).unwrap().actions, expected);
+        let inner = case["action"].clone();
+        case["action"] = serde_json::json!({"type":"multiSig", "payload":{"action":inner}});
+        assert_eq!(parse_block_actions(&action_line(&case)).unwrap().actions, expected);
+        for weight in [serde_json::Value::Null, serde_json::json!(-1), serde_json::json!(1.5),
+            serde_json::json!("100000"), serde_json::json!(u64::MAX)] {
+            case["action"] = serde_json::json!({"type":"reserveRequestWeight", "weight":weight});
+            case["receipt"]["res"]["status"] = serde_json::json!("ok");
+            assert!(parse_block_actions(&action_line(&case)).unwrap_err().contains("reserveRequestWeight"));
+            case["receipt"]["res"]["status"] = serde_json::json!("err");
+            assert_eq!(parse_block_actions(&action_line(&case)).unwrap().actions, []);
+        }
+    }
+
+    #[test]
     fn real_multisig_margin_is_kept_but_ledger_owned_transfers_are_not() {
         let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("actions_multisig_goldens.json")).unwrap();
         for case in cases {
-            let block = parse_block_actions(&multisig_line(&case)).unwrap();
+            let block = parse_block_actions(&action_line(&case)).unwrap();
             if case["height"] == 1_191_644_834_u64 {
                 assert_eq!(block.actions, [(BlockAction::IsolatedMargin { asset: 110_104, ntli_micro: 67_297_170 },
                     address("0xa38f19c4ccbcfd64cff676d72c436f7e6239dccf"))]);
             } else {
                 assert!(block.actions.is_empty(), "order/sendAsset has its own fill/ledger owner");
             }
-            let replica = multisig_line(&case);
+            let replica = action_line(&case);
             let replica = ReplicaLine::parse(&replica).unwrap();
             assert_eq!(replica.paired().unwrap()[0].action.action_type, "multiSig", "no global unwrap");
         }
@@ -320,20 +356,20 @@ pub(crate) mod tests {
         let original = &cases[0];
         let mut case = original.clone();
         case["receipt"]["user"] = serde_json::json!(LEVERAGE_VAULT);
-        assert_eq!(parse_block_actions(&multisig_line(&case)).unwrap().actions[0].1, address(LEVERAGE_VAULT));
+        assert_eq!(parse_block_actions(&action_line(&case)).unwrap().actions[0].1, address(LEVERAGE_VAULT));
         case["receipt"]["res"]["status"] = serde_json::json!("err");
         case["action"]["payload"] = serde_json::json!(null);
-        assert!(parse_block_actions(&multisig_line(&case)).unwrap().actions.is_empty(), "failed payload need not parse");
+        assert!(parse_block_actions(&action_line(&case)).unwrap().actions.is_empty(), "failed payload need not parse");
         for (value, expected) in [(serde_json::json!(null), "without payload"),
             (serde_json::json!({"action":{"type":"updateIsolatedMargin","asset":110_104}}), "without ntli"),
             (serde_json::json!({"action":{"type":"multiSig"}}), "nested multiSig")] {
             let mut case = original.clone();
             case["action"]["payload"] = value;
-            assert!(parse_block_actions(&multisig_line(&case)).unwrap_err().contains(expected));
+            assert!(parse_block_actions(&action_line(&case)).unwrap_err().contains(expected));
         }
         let mut case = original.clone();
         case["receipt"]["user"] = serde_json::json!(null);
-        assert!(parse_block_actions(&multisig_line(&case)).unwrap_err().contains("without a user"));
+        assert!(parse_block_actions(&action_line(&case)).unwrap_err().contains("without a user"));
     }
 
 }

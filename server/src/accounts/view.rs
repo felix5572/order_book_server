@@ -247,7 +247,7 @@ fn format_mark_raw(raw: u64, size_decimals: u32) -> String {
 }
 
 fn changes(marks: ChangeMarks) -> Vec<ChangeDto> {
-    let ChangeMarks { fill, ledger, funding, margin, account_mode, withdrawal } = marks;
+    let ChangeMarks { fill, ledger, funding, margin, account_mode, withdrawal, request_weight } = marks;
     let kinds = [
         ("fill", fill),
         ("ledger", ledger),
@@ -255,6 +255,7 @@ fn changes(marks: ChangeMarks) -> Vec<ChangeDto> {
         ("margin", margin),
         ("accountMode", account_mode),
         ("withdrawal", withdrawal),
+        ("requestWeight", request_weight),
     ];
     kinds
         .into_iter()
@@ -368,6 +369,7 @@ mod tests {
                 margin: Some(1_002),
                 account_mode: Some(1_004),
                 withdrawal: Some(1_001),
+                request_weight: Some(1_003),
                 ..ChangeMarks::default()
             },
             replayed: None,
@@ -411,7 +413,8 @@ mod tests {
                      "changedSinceLiquidationPx": [
                          {"kind": "ledger", "height": 1_005}, {"kind": "funding", "height": 1_003},
                          {"kind": "margin", "height": 1_002}, {"kind": "accountMode", "height": 1_004},
-                         {"kind": "withdrawal", "height": 1_001}
+                         {"kind": "withdrawal", "height": 1_001},
+                         {"kind": "requestWeight", "height": 1_003}
                      ],
                      "replayStoppedReason": "portfolioMargin", "replayStoppedHeight": null,
                      "portfolioMargin": {"status": "computed", "ratio": "0.25"}},
