@@ -442,6 +442,21 @@ impl FileReader {
     /// read at a time, so the drain holds one read plus one line however much is left (review 000429 r1 P2).
     /// `deliver` returns false once the consumer is gone: the switch is then abandoned and false returned.
     fn on_create(&mut self, path: &PathBuf, mut deliver: impl FnMut(Vec<String>) -> bool) -> bool {
+        // Polling can discover a file before its queued create notification is handled. A second notice for the
+        // same inode must preserve the cursor and any partial line, including after a read-through proof. A
+        // same-path replacement still takes the drain/loss path below: path equality alone is not file identity.
+        if self.current_path.as_ref() == Some(path) {
+            let same_inode = self.open_file_id.is_some_and(|open_id| {
+                path.metadata().is_ok_and(|meta| file_id(&meta) == open_id)
+            });
+            // on_create selected this path but no read/open has happened yet; there is no consumed position to reset.
+            let unopened = self.open_file_id.is_none() && self.file.is_none()
+                && self.file_position == 0 && self.partial_line.is_empty();
+            if same_inode || unopened {
+                return true;
+            }
+        }
+
         // A handle-less tracked file that vanished OR was recreated in place
         // (same path, new inode) is unrecoverable: everything past our last
         // read is gone, and a drain would open the NEW inode at a stale
@@ -1258,6 +1273,71 @@ mod tests {
 
     fn bn_line(height: u64) -> String {
         format!("{{\"block_number\":{height},\"events\":[]}}")
+    }
+
+    /// BM 2026-10-21 13:00 UTC: polling switched AccountOrderStatuses to hour 13 before its queued create
+    /// notification arrived. Resetting the same inode replayed 5,952 lines from blocks 1191955447..1191955451
+    /// after their release, withdrawing marks and the following funding settlement's cash replay.
+    #[test]
+    fn test_delayed_create_after_poll_switch_preserves_position_and_partial_line() {
+        let dir = test_dir("rotation_delayed_create");
+        let old = hourly_file(&dir, "20261021", "12");
+        append(&old, "");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&old);
+        assert!(reader.on_modify().is_empty());
+        thread::sleep(Duration::from_millis(20));
+        let new = hourly_file(&dir, "20261021", "13");
+        let lines: Vec<_> = (1_191_955_447..=1_191_955_451).map(bn_line).collect();
+        append(&new, &(lines.join("\n") + "\n"));
+        assert_eq!(reader.periodic_check(), Some(FileCheck::Switch(new.clone())));
+        assert!(switch_collecting(&mut reader, &new).is_empty());
+        assert_eq!(reader.on_modify(), lines);
+        assert!(matches!(reader.read_through(), ReadThrough::Proven(_)));
+        let position = reader.file_position;
+
+        assert!(switch_collecting(&mut reader, &new).is_empty(), "a delayed notification delivers no old lines");
+        assert_eq!(reader.file_position, position, "the same inode must not rewind after a read-through proof");
+        assert!(reader.on_modify().is_empty());
+        append(&new, "{\"block_number\":1191955452,\"events\":[");
+        assert!(reader.on_modify().is_empty());
+        assert_eq!(reader.read_through(), ReadThrough::Unproven);
+        let partial = reader.partial_line.clone();
+        assert!(switch_collecting(&mut reader, &new).is_empty());
+        assert_eq!(reader.partial_line, partial, "another duplicate must retain the unfinished line");
+        assert!(!reader.take_desynced());
+        append(&new, "]}\n");
+        assert_eq!(reader.on_modify(), vec![bn_line(1_191_955_452)]);
+        assert!(matches!(reader.read_through(), ReadThrough::Proven(_)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_duplicate_create_before_first_read_does_not_drain_then_replay() {
+        let dir = test_dir("duplicate_create_unopened");
+        let path = hourly_file(&dir, "20261021", "13");
+        append(&path, &(bn_line(1_191_955_447) + "\n"));
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        assert!(switch_collecting(&mut reader, &path).is_empty());
+        assert!(switch_collecting(&mut reader, &path).is_empty(), "the first read is still pending");
+        assert_eq!(reader.on_modify(), vec![bn_line(1_191_955_447)]);
+        assert!(reader.on_modify().is_empty());
+        assert!(!reader.take_desynced());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_delayed_create_after_adoption_keeps_start_skip_and_reads_only_new_tail() {
+        let dir = test_dir("duplicate_create_adopted");
+        let path = hourly_file(&dir, "20261021", "13");
+        append(&path, &(bn_line(1_191_955_447) + "\n"));
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&path);
+        append(&path, &(bn_line(1_191_955_448) + "\n"));
+        assert!(switch_collecting(&mut reader, &path).is_empty(), "the pending read keeps its startup cursor");
+        assert_eq!(reader.on_modify(), vec![bn_line(1_191_955_448)]);
+        assert!(!reader.take_desynced());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
