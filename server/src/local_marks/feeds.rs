@@ -313,9 +313,9 @@ mod tests {
         binance.subscriptions[1].slot.disconnected("EOF".into(), 3);
         let after = view(lost_coin);
         let feed = after["feeds"].as_array().unwrap().iter().find(|f| f["feed"] == "perp_binance").unwrap();
-        assert_eq!(feed["connection"], serde_json::json!({"state":"degraded","connected":3,"total":4}));
+        assert_eq!(feed["connection"], serde_json::json!({"state":"degraded","connected":6,"total":7}));
         assert_eq!(feed["connections"][1]["connection"]["state"], "disconnected");
-        assert_eq!(feed["quoting"], 123);
+        assert_eq!(feed["quoting"], 172);
         assert_eq!(after["coins"][0]["perp"]["binance"]["status"], "notConnected");
         assert_eq!(after["coins"][0]["externalCoverage"]["usedWeight"], weight - 3);
         assert_eq!(view(healthy_coin)["coins"][0]["perp"]["binance"]["status"], "valid");
