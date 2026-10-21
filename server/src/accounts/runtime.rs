@@ -815,8 +815,8 @@ fn log_marks_install(height: u64, report: &MarksInstallReport) {
             for (reason, coins) in &prices.unsupported {
                 NODE_MARKS_CHECKED_TOTAL.with_label_values(&["nativeUnsupported", reason]).inc_by(coins.len() as u64);
             }
-            for (coin, field) in &prices.samples {
-                record_evidence(&price_mismatch_json(coin, field, *previous_seed, height));
+            for mismatch in &prices.samples {
+                record_evidence(&price_mismatch_json(mismatch, *previous_seed, height));
             }
         }
     }

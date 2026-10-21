@@ -15,6 +15,7 @@ use super::{
     marks::{
         AmbiguousCut, Hip3Mismatch,
         book::BookMismatch,
+        native::PriceMismatch,
         seed::{RestingOrder, StoredMark},
     },
     misc::MiscEvent,
@@ -170,9 +171,18 @@ pub(crate) fn hip3_mark_mismatch_json(mismatch: &Hip3Mismatch, seed_from: Option
     })
 }
 
-/// A main-dex price field where the marks' snapshot and the checkpoint differ (design 000439 r2 batch 2).
-pub(crate) fn price_mismatch_json(coin: &str, field: &str, seed_from: Option<u64>, seed_to: u64) -> serde_json::Value {
-    json!({"kind": "nodePriceMismatch", "seedFrom": seed_from, "seedTo": seed_to, "coin": coin, "field": field})
+/// A main-dex price field where the marks' snapshot and the checkpoint differ (design 000439 r2 batch 2), with both
+/// values.
+pub(crate) fn price_mismatch_json(mismatch: &PriceMismatch, seed_from: Option<u64>, seed_to: u64) -> serde_json::Value {
+    json!({
+        "kind": "nodePriceMismatch",
+        "seedFrom": seed_from,
+        "seedTo": seed_to,
+        "coin": mismatch.coin,
+        "field": mismatch.field,
+        "replayed": mismatch.replayed,
+        "checkpoint": mismatch.checkpoint,
+    })
 }
 
 /// A main-dex resting order where the marks' snapshot and the checkpoint differ (design 000439 r2 batch 2).

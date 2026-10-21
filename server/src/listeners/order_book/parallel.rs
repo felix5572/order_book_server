@@ -147,6 +147,15 @@ fn latest_replica_file(base_dir: &Path) -> Option<PathBuf> {
         .map(|(_, path)| path)
 }
 
+/// What the periodic file check found.
+#[derive(Debug, PartialEq, Eq)]
+enum FileCheck {
+    /// Nothing is tracked yet: follow this file from its end.
+    Adopt(PathBuf),
+    /// A newer file than the tracked one: drain the tracked one, then read this one from its start.
+    Switch(PathBuf),
+}
+
 /// File reader state for a single source
 struct FileReader {
     current_path: Option<PathBuf>,
@@ -237,12 +246,20 @@ impl FileReader {
         latest_file
     }
 
-    /// Check if there's a newer file than what we're currently tracking
+    /// The periodic file check: with nothing tracked yet the newest file is adopted at its end, like at a first modify
+    /// event (bm 2026-10-21: misc events, quiet for the check's first 10 s, re-read a whole hour file as if created);
+    /// else a newer file to switch to.
+    fn periodic_check(&mut self) -> Option<FileCheck> {
+        if self.current_path.is_none() {
+            return self.find_latest_file().map(FileCheck::Adopt);
+        }
+        self.check_for_newer_file().map(FileCheck::Switch)
+    }
+
+    /// A newer file than the tracked one; `None` while nothing is tracked.
     fn check_for_newer_file(&mut self) -> Option<PathBuf> {
+        let current = self.current_path.clone()?;
         let latest = self.find_latest_file()?;
-        let Some(current) = self.current_path.clone() else {
-            return Some(latest); // no current file, use the latest
-        };
         if latest == current {
             // Same path is NOT the same file after a long stop: node catch-up
             // writes by block time and recreates the very hour file retention
@@ -641,6 +658,13 @@ where
             }
             true
         };
+        // A file already on disk is followed from its end: nothing written before the watcher started is read, and the
+        // skip is a loss where the stream says so. False once the consumer is gone.
+        let adopt_at_end = |reader: &mut FileReader, path: &PathBuf| {
+            info!("{} tracking: {:?}", name, path.file_name());
+            reader.start_tracking(path);
+            !(start_skip_is_loss && tx.blocking_send(desync()).is_err())
+        };
 
         // Create watcher with callback
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -688,14 +712,9 @@ where
                             if !reader.on_create(path, &send) {
                                 return;
                             }
-                        } else if reader.current_path.is_none() {
-                            // First time seeing this file
-                            info!("{} tracking: {:?}", name, path.file_name());
-                            reader.start_tracking(path);
-                            if start_skip_is_loss && tx.blocking_send(desync()).is_err() {
-                                error!("{name} channel closed, exiting");
-                                return;
-                            }
+                        } else if reader.current_path.is_none() && !adopt_at_end(&mut reader, path) {
+                            error!("{name} channel closed, exiting");
+                            return;
                         }
 
                         // EVENT-DRIVEN: Read data when inotify fires modify event
@@ -753,14 +772,23 @@ where
                 }
             }
 
-            // Every 10000 polls (~10 seconds), check for newer files (handles day rotation)
+            // Every 10000 polls (~10 seconds): adopt the newest file if no modify event came yet, else check for a
+            // newer file (handles day rotation)
             if poll_count % 10_000 == 0 {
-                if let Some(newer_file) = reader.check_for_newer_file() {
-                    info!("{} detected newer file (day rotation?): {:?}", name, newer_file.file_name());
-                    // Switch to the new file
-                    if !reader.on_create(&newer_file, &send) {
-                        return;
+                match reader.periodic_check() {
+                    Some(FileCheck::Adopt(path)) => {
+                        if !adopt_at_end(&mut reader, &path) {
+                            error!("{name} channel closed, exiting");
+                            return;
+                        }
                     }
+                    Some(FileCheck::Switch(newer_file)) => {
+                        info!("{} detected newer file (day rotation?): {:?}", name, newer_file.file_name());
+                        if !reader.on_create(&newer_file, &send) {
+                            return;
+                        }
+                    }
+                    None => {}
                 }
             }
         }
@@ -1092,6 +1120,27 @@ mod tests {
         let lines = reader.on_modify();
         assert_eq!(lines, vec!["{\"c\":3}".to_string()]);
         assert!(!reader.take_desynced());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// bm 2026-10-21 00:54Z: the misc events watcher saw no modify event before its first periodic check, which treated
+    /// the newest hour file as created and re-read it (61 MB, 4,413 already released blocks). Untracked, the check adopts
+    /// the newest file at its end; once tracking, a newer file is a switch.
+    #[test]
+    fn test_periodic_check_adopts_an_untracked_file_at_its_end() {
+        let dir = test_dir("periodic_adopt");
+        let current = hourly_file(&dir, "20261021", "0");
+        append(&current, "{\"old\":0}\n");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        assert_eq!(reader.periodic_check(), Some(FileCheck::Adopt(current.clone())));
+        reader.start_tracking(&current);
+        append(&current, "{\"new\":1}\n");
+        assert_eq!(reader.on_modify(), vec!["{\"new\":1}".to_string()], "the content before adoption is not read");
+        assert_eq!(reader.periodic_check(), None);
+        thread::sleep(Duration::from_millis(20));
+        let next = hourly_file(&dir, "20261021", "1");
+        append(&next, "{\"next\":2}\n");
+        assert_eq!(reader.periodic_check(), Some(FileCheck::Switch(next)));
         std::fs::remove_dir_all(&dir).ok();
     }
 

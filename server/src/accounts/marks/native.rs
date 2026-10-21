@@ -83,6 +83,30 @@ impl MemberCache {
             stored.members.iter().map(|(user, value, time_ns)| (*user, (*value, *time_ns))).collect();
         (self.median, self.last_bucket) == (stored.median, stored.last_bucket) && self.members == stored_members
     }
+
+    fn text(&self) -> String {
+        let members = self.members.iter().map(|(user, (value, time_ns))| (*user, *value, *time_ns)).collect();
+        cache_text(self.median, self.last_bucket, members)
+    }
+}
+
+/// A reference cache as evidence text: median, bucket and the members (validator, value, block time ns) by validator.
+fn cache_text(median: Option<u64>, last_bucket: u64, mut members: Vec<(Address, u64, u64)>) -> String {
+    members.sort_unstable();
+    format!("median {median:?} bucket {last_bucket} members {members:?}")
+}
+
+fn stored_cache_text(stored: &ReferenceCache) -> String {
+    cache_text(stored.median, stored.last_bucket, stored.members.clone())
+}
+
+/// A checked price field: its name, whether the two sides are equal, and both values for the evidence (computed only
+/// for a mismatch).
+type CheckedField<'a> = (&'static str, bool, &'a dyn Fn() -> (String, String));
+
+/// Both sides of a field as `Debug` text (floats print exactly: they read back to the same value).
+fn debug_pair(replayed: &impl std::fmt::Debug, checkpoint: &impl std::fmt::Debug) -> (String, String) {
+    (format!("{replayed:?}"), format!("{checkpoint:?}"))
 }
 
 /// One main-dex coin's prices.
@@ -257,7 +281,16 @@ pub(crate) struct PricesCheck {
     /// Coins whose mark the 1% limit moved since the seed, with how many times. Their fields check the end state
     /// only: a later update overwrites a limited mark, so an equal check does not prove each limited value.
     pub(crate) step_limited: Vec<(String, u64)>,
-    pub(crate) samples: Vec<(String, &'static str)>,
+    pub(crate) samples: Vec<PriceMismatch>,
+}
+
+/// A main-dex price field where the replay and the checkpoint differ, both values as evidence text.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PriceMismatch {
+    pub(crate) coin: String,
+    pub(crate) field: &'static str,
+    pub(crate) replayed: String,
+    pub(crate) checkpoint: String,
 }
 
 impl NativePrices {
@@ -361,16 +394,22 @@ impl NativePrices {
                 unsupported.entry(reason).or_default().push(stored.name.clone());
                 continue;
             }
-            let fields = [
-                ("storedOracle", coin.stored_oracle == stored.stored_oracle),
-                ("mark", coin.mark == stored.mark),
-                ("msoe", coin.emas.as_ref().map(|emas| &emas.basis) == stored.emas.as_ref().map(|emas| &emas.basis)),
-                ("lmpe", coin.emas.as_ref().map(|emas| &emas.local_price) == stored.emas.as_ref().map(|emas| &emas.local_price)),
-                ("spotCache", coin.spot.equals(&stored.references.spot)),
-                ("externalPerpCache", coin.external_perp.equals(&stored.references.external_perp)),
-                ("markCache", coin.marks.equals(&stored.references.mark)),
+            let (basis, local_price) = (coin.emas.as_ref().map(|emas| &emas.basis), coin.emas.as_ref().map(|emas| &emas.local_price));
+            let (stored_basis, stored_local_price) =
+                (stored.emas.as_ref().map(|emas| &emas.basis), stored.emas.as_ref().map(|emas| &emas.local_price));
+            let caches = &stored.references;
+            let fields: [CheckedField<'_>; 7] = [
+                ("storedOracle", coin.stored_oracle == stored.stored_oracle, &|| debug_pair(&coin.stored_oracle, &stored.stored_oracle)),
+                ("mark", coin.mark == stored.mark, &|| debug_pair(&coin.mark, &stored.mark)),
+                ("msoe", basis == stored_basis, &|| debug_pair(&basis, &stored_basis)),
+                ("lmpe", local_price == stored_local_price, &|| debug_pair(&local_price, &stored_local_price)),
+                ("spotCache", coin.spot.equals(&caches.spot), &|| (coin.spot.text(), stored_cache_text(&caches.spot))),
+                ("externalPerpCache", coin.external_perp.equals(&caches.external_perp), &|| {
+                    (coin.external_perp.text(), stored_cache_text(&caches.external_perp))
+                }),
+                ("markCache", coin.marks.equals(&caches.mark), &|| (coin.marks.text(), stored_cache_text(&caches.mark))),
             ];
-            for (field, equal) in fields {
+            for (field, equal, values) in fields {
                 let entry = counts.entry(field).or_default();
                 if equal {
                     entry.0 += 1;
@@ -378,7 +417,8 @@ impl NativePrices {
                 }
                 entry.1 += 1;
                 if samples.len() < MAX_SAMPLES {
-                    samples.push((stored.name.clone(), field));
+                    let (replayed, checkpoint) = values();
+                    samples.push(PriceMismatch { coin: stored.name.clone(), field, replayed, checkpoint });
                 }
             }
         }
@@ -575,6 +615,15 @@ mod tests {
         moved.assets[0].stored_oracle += 1;
         let check = prices.check_against(&moved);
         assert!(check.fields.contains(&("storedOracle", 1, 1)), "{:?}", check.fields);
-        assert_eq!(check.samples, [("BTC".to_string(), "storedOracle")]);
+        let sample = PriceMismatch { coin: "BTC".to_string(), field: "storedOracle", replayed: "828908".to_string(), checkpoint: "828909".to_string() };
+        assert_eq!(check.samples, [sample]);
+        moved.assets[0].references.mark.median = Some(1);
+        let check = prices.check_against(&moved);
+        let validator = moved.assets[0].references.mark.members[0].0;
+        assert_eq!((check.samples[1].field, check.samples[1].replayed.as_str(), check.samples[1].checkpoint.as_str()), (
+            "markCache",
+            format!("median Some(828590) bucket 597463947 members [({validator:?}, 828590, 1792391842000000000)]").as_str(),
+            format!("median Some(1) bucket 597463947 members [({validator:?}, 828590, 1792391842000000000)]").as_str(),
+        ));
     }
 }
