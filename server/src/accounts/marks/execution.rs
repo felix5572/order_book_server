@@ -10,6 +10,10 @@
 //! An anchor of a later action before one of an earlier action contradicts the line order: the block breaks the
 //! contract.
 //!
+//! A trigger order's placement is not its activation. Only a main-dex trigger with exactly one `SetGlobalAction`
+//! is placed by the rule above. HIP-3 triggers, and native triggers with zero/multiple `SetGlobalAction`s, stay
+//! unplaced instead of falling back to their initial order's rank (bm xyz:SP500 1191957330).
+//!
 //! A no-fill IOC emits its `iocCancelRejected` status followed by its self-trade cancels. `self_trade` preserves that
 //! run and matches the taker one-to-one to the exact rejected request. This also places old resting orders and
 //! cross-vault cancels (bm ZETA 1191392472, APE 1191420380, PROVE 1191436351); it does not guess vault ownership.
@@ -215,7 +219,7 @@ pub(crate) fn price_points_with_system<'b>(
     points
         .into_iter()
         .map(|action| {
-            let mut anchors = Anchors::around(action.rank, &cancelled, &native_triggered, &set_globals);
+            let mut anchors = Anchors::around(action.rank, &cancelled, &native_triggered, &statuses.triggered, &set_globals);
             anchors.created[0].extend(&system.before.created);
             anchors.created[1].extend(&system.after.created);
             anchors.cancelled[0].extend(&system.before.cancelled);
@@ -306,6 +310,8 @@ struct Anchors<'s> {
     cancelled: [FxHashSet<u64>; 2],
     /// The orders the block's one `SetGlobalAction` triggered, and their side.
     triggered: Option<(&'s FxHashSet<u64>, Side)>,
+    /// Activation is observed, but the triggering action has not been located. Initial placement anchors nothing.
+    unplaced_triggered: FxHashSet<u64>,
 }
 
 const fn index(side: Side) -> usize {
@@ -316,7 +322,7 @@ const fn index(side: Side) -> usize {
 }
 
 impl<'s> Anchors<'s> {
-    fn around(rank: Rank, books: &[Removing<'_>], triggered: &'s FxHashSet<u64>, set_globals: &[Rank]) -> Self {
+    fn around(rank: Rank, books: &[Removing<'_>], triggered: &'s FxHashSet<u64>, all_triggered: &FxHashSet<u64>, set_globals: &[Rank]) -> Self {
         let mut anchors = Self::default();
         for other in books {
             let side = index(if other.rank < rank { Side::Before } else { Side::After });
@@ -327,6 +333,9 @@ impl<'s> Anchors<'s> {
         // the block placed them (bm block 1189996766)
         if let [set_global] = set_globals {
             anchors.triggered = Some((triggered, if *set_global < rank { Side::Before } else { Side::After }));
+            anchors.unplaced_triggered.extend(all_triggered.difference(triggered));
+        } else {
+            anchors.unplaced_triggered.clone_from(all_triggered);
         }
         anchors
     }
@@ -346,6 +355,9 @@ impl<'s> Anchors<'s> {
         }
         if let Some(side) = self.triggered_side(taker.oid) {
             return vec![side];
+        }
+        if self.unplaced_triggered.contains(&taker.oid) {
+            return Vec::new();
         }
         Self::sides_of(&self.created, taker.oid)
     }
@@ -375,6 +387,9 @@ impl<'s> Anchors<'s> {
                 let oid = diff.oid();
                 if let Some(side) = self.triggered_side(oid) {
                     return Some(side);
+                }
+                if self.unplaced_triggered.contains(&oid) {
+                    return None;
                 }
                 match diff.kind() {
                     DiffKind::New => single(Self::sides_of(&self.created, oid)),
@@ -570,6 +585,89 @@ mod tests {
         assert_eq!((points[0].cut.lo, points[0].cut.hi), (0, 1));
         let without = price_points(&actions, &BlockStatuses::default(), &diffs, &[], no_asset).unwrap();
         assert_eq!(without[0].cut.lo, 2, "as the placing action's");
+    }
+
+    /// BM 1191957330: xyz:SP500 trigger 581440698483 was placed at (0,3,1513), before the reference at
+    /// (0,3,1529), but filled after bundle 1's ordinary orders. Its placement is not its execution anchor.
+    #[test]
+    fn an_unplaced_trigger_does_not_inherit_its_placing_action_for_fills_or_resting_lines() {
+        let trigger = 581_440_698_483;
+        let earlier = 581_440_698_481;
+        let later = 581_440_698_488;
+        let maker = 581_440_591_248;
+        let coin = "xyz:SP500";
+        let actions = MarkActions { height: 1_191_957_330, time_ns: 1, actions: vec![
+            book((0, 3, 1511), BookAnchors { created: vec![earlier], ..BookAnchors::default() }),
+            book((0, 3, 1513), BookAnchors { created: vec![trigger], ..BookAnchors::default() }),
+            RankedAction { rank: (0, 3, 1529), user: None, action: MarkAction::Reference { oracle: vec![], external: vec![] } },
+            book((1, 1, 620), BookAnchors { created: vec![later], ..BookAnchors::default() }),
+        ] };
+        let statuses = BlockStatuses { triggered: [trigger].into_iter().collect(), triggered_orders: vec![StatusOrder {
+            user: Address::repeat_byte(1), coin: coin.into(), side: OrderSide::Bid,
+            limit_px: ExactDecimal::parse("7850").unwrap(), oid: trigger,
+        }], ..BlockStatuses::default() };
+        let maker_diff = BookDiff::of(&diff_line(1, coin, maker, "A", "7737.3",
+            r#"{"update":{"origSz":"0.635","newSz":"0.624"}}"#).events()[0]).unwrap();
+        let fills = [true, false].map(|crossed| BlockFill { coin: coin.into(), px: "7737.3".into(), sz: "0.011".into(),
+            crossed, oid: if crossed { trigger } else { maker }, tid: 948_392_423_242_106, twap: false });
+        let diffs = [diff(earlier, NEW), diff(later, NEW), maker_diff];
+        let points = price_points(&actions, &statuses, &diffs, &fills, no_asset).unwrap();
+        assert_eq!(points[0].cut, Cut { lo: 1, hi: 1, fills_lo: 0 }, "ordinary orders fix the reference cut; the triggered fill is unplaced");
+        let resting = [diff(earlier, NEW), diff(later, NEW), diff(trigger, NEW)];
+        let points = price_points(&actions, &statuses, &resting, &[], no_asset).unwrap();
+        assert_eq!((points[0].cut.lo, points[0].cut.hi), (1, 1), "resting after activation is not initial placement either");
+    }
+
+    /// Full raw block kept outside Git in `ob_hourly_watch_20261021/20261021T130935Z`. Set
+    /// `HL_MARK_BLOCK_1191957330` to that directory; the small regression above runs without external data.
+    #[test]
+    #[ignore = "requires the archived raw block via HL_MARK_BLOCK_1191957330"]
+    fn archived_hip3_trigger_block_has_consistent_reference_cuts() {
+        use std::io::Read;
+        use crate::{accounts::replica::ReplicaLine, types::node_data::{Batch, NodeDataOrderDiff}};
+        let root = std::path::PathBuf::from(std::env::var("HL_MARK_BLOCK_1191957330").unwrap());
+        let read = |name: &str| {
+            let file = std::fs::File::open(root.join(format!("{name}_1191957330.jsonl.gz"))).unwrap();
+            let mut text = String::new();
+            flate2::read::GzDecoder::new(file).read_to_string(&mut text).unwrap();
+            text
+        };
+        let raw = read("replica_cmds");
+        let actions = MarkActions::of(&ReplicaLine::parse(raw.trim()).unwrap()).unwrap();
+        let wire_statuses: Vec<_> = read("node_order_statuses_streaming").lines()
+            .flat_map(|line| sonic_rs::from_str::<Batch<NodeDataOrderStatus>>(line).unwrap().events()).collect();
+        assert_eq!(wire_statuses.len(), 3102);
+        let statuses = BlockStatuses::of(wire_statuses).unwrap();
+        assert!(statuses.self_trade_cancelled.is_empty(), "this fixture needs no asset mapping for self-trade attribution");
+        assert_eq!(statuses.triggered_orders.len(), 1);
+        assert_eq!(statuses.triggered_orders[0].coin.as_ref(), "xyz:SP500");
+        assert!(read("system_and_core_writer_actions_streaming").trim().is_empty());
+        let diffs: Vec<_> = read("node_raw_book_diffs_streaming").lines()
+            .flat_map(|line| sonic_rs::from_str::<Batch<NodeDataOrderDiff>>(line).unwrap().events())
+            .map(|diff| BookDiff::of(&diff).unwrap()).collect();
+        let fills: Vec<_> = read("node_fills_streaming").lines()
+            .flat_map(|line| sonic_rs::from_str::<Batch<NodeDataFill>>(line).unwrap().events())
+            .map(|fill| BlockFill::of(&fill)).collect();
+        assert_eq!((diffs.len(), fills.len()), (2365, 20));
+        let points = price_points(&actions, &statuses, &diffs, &fills, no_asset).unwrap();
+        assert_eq!(points.len(), 2);
+        let point = points.iter().find(|point| point.action.rank == (0, 3, 1529)).unwrap();
+        assert_eq!((point.cut.lo, point.cut.hi), (1365, 1365));
+        println!("1191957330 reference cuts: {:?}", points.iter().map(|p| (p.action.rank, p.cut)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn multiple_set_globals_leave_trigger_timing_unplaced_instead_of_using_order_placement() {
+        let trigger = 30;
+        let actions = MarkActions { height: 7, time_ns: 1, actions: vec![
+            book((0, 3, 0), BookAnchors { created: vec![trigger], ..BookAnchors::default() }),
+            set_global((0, 3, 1)), set_global((1, 3, 0)),
+        ] };
+        let statuses = BlockStatuses::of(crate::accounts::test_support::status_line(7, "triggered", Address::repeat_byte(1), trigger, None).events()).unwrap();
+        let btc = |coin: &str| (coin == "BTC").then_some(0);
+        let diffs = [diff(trigger, NEW)];
+        let points = price_points(&actions, &statuses, &diffs, &[], btc).unwrap();
+        for point in points { assert_eq!((point.cut.lo, point.cut.hi), (0, 1), "the triggering SGA has not been identified"); }
     }
 
     #[test]
