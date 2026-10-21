@@ -1,0 +1,455 @@
+{
+  "note": "All 14 real vaultDistribution legs, checkpoint main cash plus unified spot USDC projections, and other cash events in H1191750000->1191760000. Other dex cash is unchanged and excluded from this focused regression. Funding is aggregated by account into main cash (all four real funding positions are cross); no fills or system actions in the window. Full selected states and action/receipt hashes live outside Git in ob_hourly_watch_20261021/20261021T095506Z.",
+  "rows": [
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "2f9d38d20305cdc8d64b2cc4010d728d7d582f4f6fe2f59a2831a72f115cad89",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0x1c480f31e1a4b1d6edc5351c728bbef61e812258"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "0.0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "b9a1edc273585ec65ddac9a01f61ff1a51d7a210b978813a7ff4496cb445e34e",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0x1de5c89977f40983820b143b86f523e33c3b4de7"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "0.0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "95a90598677a403e7b1a035ee752f295690a3062a7f380e8d43a93f30cc77fc2",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0x27d33e77c8e6335089f56e399bf706ae9ad402b9"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "195999.419995"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "1e93aa5f006bdbd34f77b557a9cb667825c7388bd6813ab43325aa57c4fc685b",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0x2b9515d9483fc2ba4515dbdb95fdc49d1861346d"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "0.000001"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "86e97f5b4465df184d22ad27b445eb52037aadc7f57e53fcf6e0ec9ca5cd8f9e",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0x500eee3729ddd6d0d1aac3fc42479d60aeda6db7"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "0.0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "ebab551928de5f63ef872685c10a9b540e32bcc93e28b1bcb394fa0a94622299",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0x754e671bdacd26d01191907904a7face77edffd4"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "166224.532328"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "8444a49a447bf550668218c1fa0591b71d3aa4709a21e4a6b898882c770c631b",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0x7cb112779cc6199d90e3351d00d899494b8d55b5"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "0.0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "05a6474671df30d1f33d78ed6137d27fabb703414b0b481e3ef7e3ab8deec4af",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0x97ee7d16c1aebdfbfa7a9f983ac5a0ec56e63b2e"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "29752.342047"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "2b22840def2d7d820da1c468dbefde8be86471d3f1ada3a8e0346aa17647cc29",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0x9a498229cbd80f6502a94bdd77901231ee7f6bc9"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "0.0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "37ea4991be7dc50f784b19c0fb94bef9d272341c9087a6052d181b167db85434",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xa9ff08af55b24bb5d064d776a078e8a292b8dfe2"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "0.0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "440c5b60410e1be09e3504de7c82282fb9f49052b3aae8118ed0da9651b863a7",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xd79c5525a6cb040a6589cadc23b5372b3889003b"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "22.545619"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "700d04fc8ab9306374ab7d813bd4cf0a7d5e6eb1ddc2bcf170f82116848a0067",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xe9b0f5794b008b927beb62e3ce1679f81aa80477"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "0.0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "e1314f07dacb39efd1f305541e21e53032780d5becb27c93e97a265a1ca9d0eb",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xefbfbcfef395e786a4a4d6967029f0e5916193d9"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "0.0"
+            }
+          }
+        }
+      }
+    },
+    {
+      "source": "/home/ubuntu/hl/data/misc_events_streaming/hourly/20261021/8",
+      "height": 1191750497,
+      "line_sha256": "5a73d069e622032564920b3400be33d14b409479eaec11b4a9dbf6fbc4745253",
+      "kind": "misc_events_streaming",
+      "event": {
+        "time": "2026-10-21T08:54:22.061794574",
+        "hash": "0x1d3c393a4b2727c61eb5044708ab610204b5001fe62a4698c104e48d0a2b01b0",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xfe93a4c427dbaa02bfe90179e5b8cb8d530219cd"
+            ],
+            "delta": {
+              "type": "vaultDistribution",
+              "vault": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+              "usdc": "0.0"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "accounts": [
+    {
+      "user": "0x1c480f31e1a4b1d6edc5351c728bbef61e812258",
+      "unified": true,
+      "main_and_unified_spot_before_wei": 0,
+      "main_and_unified_spot_after_wei": 0,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0x1de5c89977f40983820b143b86f523e33c3b4de7",
+      "unified": true,
+      "main_and_unified_spot_before_wei": 0,
+      "main_and_unified_spot_after_wei": 0,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+      "unified": false,
+      "main_and_unified_spot_before_wei": 19665819930800,
+      "main_and_unified_spot_after_wei": 65877931300,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0x2b9515d9483fc2ba4515dbdb95fdc49d1861346d",
+      "unified": true,
+      "main_and_unified_spot_before_wei": 0,
+      "main_and_unified_spot_after_wei": 100,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0x500eee3729ddd6d0d1aac3fc42479d60aeda6db7",
+      "unified": true,
+      "main_and_unified_spot_before_wei": 244900,
+      "main_and_unified_spot_after_wei": 244900,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0x754e671bdacd26d01191907904a7face77edffd4",
+      "unified": false,
+      "main_and_unified_spot_before_wei": 0,
+      "main_and_unified_spot_after_wei": 16622453232800,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0x7cb112779cc6199d90e3351d00d899494b8d55b5",
+      "unified": false,
+      "main_and_unified_spot_before_wei": 0,
+      "main_and_unified_spot_after_wei": 0,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0x97ee7d16c1aebdfbfa7a9f983ac5a0ec56e63b2e",
+      "unified": true,
+      "main_and_unified_spot_before_wei": 113611359156,
+      "main_and_unified_spot_after_wei": 56,
+      "funding_wei": 0,
+      "withdrawal_wei": 3088845563800
+    },
+    {
+      "user": "0x9a498229cbd80f6502a94bdd77901231ee7f6bc9",
+      "unified": true,
+      "main_and_unified_spot_before_wei": 33,
+      "main_and_unified_spot_after_wei": 33,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0xa9ff08af55b24bb5d064d776a078e8a292b8dfe2",
+      "unified": true,
+      "main_and_unified_spot_before_wei": 78,
+      "main_and_unified_spot_after_wei": 78,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0xd79c5525a6cb040a6589cadc23b5372b3889003b",
+      "unified": true,
+      "main_and_unified_spot_before_wei": 34020900,
+      "main_and_unified_spot_after_wei": 2288582800,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0xe9b0f5794b008b927beb62e3ce1679f81aa80477",
+      "unified": true,
+      "main_and_unified_spot_before_wei": 7128309433219,
+      "main_and_unified_spot_after_wei": 7127930967319,
+      "funding_wei": -378465900,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0xefbfbcfef395e786a4a4d6967029f0e5916193d9",
+      "unified": true,
+      "main_and_unified_spot_before_wei": 116900,
+      "main_and_unified_spot_after_wei": 116900,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    },
+    {
+      "user": "0xfe93a4c427dbaa02bfe90179e5b8cb8d530219cd",
+      "unified": true,
+      "main_and_unified_spot_before_wei": 6500,
+      "main_and_unified_spot_after_wei": 6500,
+      "funding_wei": 0,
+      "withdrawal_wei": 0
+    }
+  ],
+  "action": {
+    "type": "vaultDistribute",
+    "vaultAddress": "0x27d33e77c8e6335089f56e399bf706ae9ad402b9",
+    "usd": 195999420000
+  },
+  "receipt": {
+    "user": "0x97ee7d16c1aebdfbfa7a9f983ac5a0ec56e63b2e",
+    "res": {
+      "status": "ok",
+      "response": {
+        "type": "default"
+      }
+    }
+  },
+  "action_line_sha256": "24f00030f7660f21e4f912abc0a56f8868612cc766d27f1c66572a80a7072135",
+  "bundle": "0x789e3b168a9727a1530325bf3176427171b2c22d8bb3ca08c89f20d48186e33c",
+  "height": 1191750497,
+  "time": "2026-10-21T08:54:22.061794574",
+  "checkpoint_slices": [
+    {
+      "file": "1191750000_vault_distribution_states.json",
+      "sha256": "a166bab8bccbd275dcb418bb99f96b768cbf11764392ec6a5c08353cc9b7ded6"
+    },
+    {
+      "file": "1191760000_vault_distribution_states.json",
+      "sha256": "b2450c493f2fc76df5aca6dea86d721dde9695076248a28c849447239f824236"
+    }
+  ]
+}

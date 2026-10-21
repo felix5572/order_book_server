@@ -529,6 +529,7 @@ fn apply_ledger(account: &mut AccountMargin, markets: &Markets, user: Address, d
         }
         LedgerDelta::Deposit { usdc_wei } => add_main(account, markets, *usdc_wei)?,
         LedgerDelta::VaultDeposit { vault, usdc_wei } => add_main(account, markets, if user == *vault { *usdc_wei } else { -usdc_wei })?,
+        LedgerDelta::VaultDistribution { vault, usdc_wei } => add_main(account, markets, if user == *vault { -usdc_wei } else { *usdc_wei })?,
         LedgerDelta::VaultWithdraw { user: withdrawer, vault, commission_wei, net_withdrawn_wei } => {
             if user == *vault {
                 add_main(account, markets, -(net_withdrawn_wei + commission_wei))?;
@@ -1050,6 +1051,40 @@ pub(crate) mod tests {
         assert_eq!(cross(&replay, recipient), per_dex_pools(&[(0, wei("destination_after_main_micro"))]));
         assert_eq!(stop(&replay, payer), None);
         assert_eq!(stop(&replay, recipient), None);
+    }
+
+    #[test]
+    fn vault_distribution_ledger_legs_match_fourteen_checkpoint_cash_balances() {
+        use crate::accounts::{actions::{parse_block_actions, tests::action_line}, misc::MiscEvent};
+        let golden: serde_json::Value = serde_json::from_str(include_str!("vault_distribution_golden.json")).unwrap();
+        assert_eq!(parse_block_actions(&action_line(&golden)).unwrap().actions, [], "ledger owns vaultDistribute cash");
+        let mut replay = per_dex();
+        let template = replay.accounts.remove(&user(HOLDER)).unwrap();
+        for row in golden["accounts"].as_array().unwrap() {
+            let mut account = template.clone();
+            let cash = row["main_and_unified_spot_before_wei"].as_i64().unwrap();
+            account.pools = if row["unified"].as_bool().unwrap() { Pools::Unified(cash) } else { per_dex_pools(&[(0, cash)]) };
+            replay.accounts.insert(user(row["user"].as_str().unwrap()), account);
+        }
+        for row in golden["rows"].as_array().unwrap() {
+            let MiscEvent::Ledger { users, delta } = serde_json::from_value(row["event"].clone()).unwrap() else { panic!("ledger expected") };
+            assert_eq!(delta.delta_type(), "vaultDistribution");
+            for affected in users { replay.apply(1_191_750_497, affected, &AccountEvent::Ledger(delta.clone())); }
+        }
+        // Apply the other observed cash events; BTC stands for the four cross-funded main-dex positions.
+        for row in golden["accounts"].as_array().unwrap() {
+            let holder = row["user"].as_str().unwrap();
+            replay.apply(1_191_751_582, user(holder), &AccountEvent::Action(BlockAction::Withdraw {
+                amount_wei: row["withdrawal_wei"].as_i64().unwrap(),
+            }));
+            replay.apply(1_191_755_163, user(holder), &AccountEvent::Funding {
+                coin: "BTC".to_string(), amount_wei: row["funding_wei"].as_i64().unwrap(),
+            });
+            let cash = row["main_and_unified_spot_after_wei"].as_i64().unwrap();
+            let expected = if row["unified"].as_bool().unwrap() { Pools::Unified(cash) } else { per_dex_pools(&[(0, cash)]) };
+            assert_eq!(cross(&replay, holder), expected, "{holder}");
+            assert_eq!(stop(&replay, holder), None, "{holder}");
+        }
     }
 
     #[test]

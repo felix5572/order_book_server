@@ -82,6 +82,9 @@ pub(crate) enum LedgerDelta {
     Withdraw,
     /// `vaultDeposit`: the depositor's main dex to the vault's.
     VaultDeposit { vault: Address, usdc_wei: i64 },
+    /// `vaultDistribution`: separate ledger legs; the vault's own leg debits the aggregate amount,
+    /// each recipient's leg credits its allocation. Do not debit the vault once per recipient.
+    VaultDistribution { vault: Address, usdc_wei: i64 },
     /// `vaultWithdraw`: the user receives `netWithdrawnUsd`; the vault pays it plus `commission` (the leader's, credited by
     /// its own `vaultLeaderCommission`), not `closingCost`, which its closing fills of the block already carry
     /// (`requestedUsd` = net + commission + closingCost; bm: vault `0xa1b6d8ef…` 2026-10-20, closing cost; vault
@@ -114,6 +117,7 @@ impl LedgerDelta {
             Self::Deposit { .. } => "deposit",
             Self::Withdraw => "withdraw",
             Self::VaultDeposit { .. } => "vaultDeposit",
+            Self::VaultDistribution { .. } => "vaultDistribution",
             Self::VaultWithdraw { .. } => "vaultWithdraw",
             Self::VaultLeaderCommission { .. } => "vaultLeaderCommission",
             Self::RewardsClaim { .. } => "rewardsClaim",
@@ -228,6 +232,7 @@ impl TryFrom<WireDelta> for LedgerDelta {
             "deposit" => Self::Deposit { usdc_wei: usdc()? },
             "withdraw" => Self::Withdraw,
             "vaultDeposit" => Self::VaultDeposit { vault: wire.need(wire.vault, "vault")?, usdc_wei: usdc()? },
+            "vaultDistribution" => Self::VaultDistribution { vault: wire.need(wire.vault, "vault")?, usdc_wei: usdc()? },
             "vaultWithdraw" => Self::VaultWithdraw {
                 user: user()?,
                 vault: wire.need(wire.vault, "vault")?,
@@ -430,6 +435,8 @@ mod tests {
             (r#"{"type":"send","user":"0x5b51db9432bc4dd2c30cadc4ab6ab44565419c9a","destination":"0x5b51db9432bc4dd2c30cadc4ab6ab44565419c9a","destinationDex":"","token":"USDC","amount":"1.0","fee":"0.0","feeToken":""}"#, "sourceDex"),
             (r#"{"type":"internalTransfer","usdc":"9.1","user":"0x1e9e9f0ca0052509b79fcb14f06014baa2bedf36","destination":"0x27d5ae66a3ade10e42c5fcb3075b33e878bf0f49"}"#, "fee"),
             (r#"{"type":"accountClassTransfer","usdc":"1.0"}"#, "toPerp"),
+            (r#"{"type":"vaultDistribution","usdc":"1.0"}"#, "vault"),
+            (r#"{"type":"vaultDistribution","vault":"0x27d33e77c8e6335089f56e399bf706ae9ad402b9"}"#, "usdc"),
             (r#"{"type":"rewardsClaim","amount":"1.0"}"#, "token"),
         ] {
             let err = delta(&[USER_A], wire).unwrap_err();
