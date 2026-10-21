@@ -34,6 +34,17 @@ pub(crate) enum TriggerGap {
     LiveParseFailed,
 }
 
+impl TriggerGap {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::TrackingDisabled => "trackingDisabled",
+            Self::SnapshotWithoutTriggers => "snapshotWithoutTriggers",
+            Self::SnapshotParseFailed => "snapshotParseFailed",
+            Self::LiveParseFailed => "liveParseFailed",
+        }
+    }
+}
+
 /// Whether the orders the table holds are all the standing ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TriggerAvailability {
@@ -42,7 +53,6 @@ pub(crate) enum TriggerAvailability {
 }
 
 /// One coin's trigger orders with a trigger price in a band.
-#[cfg_attr(not(test), expect(dead_code, reason = "read by the forced-flow owner, design 000451 batch 2"))]
 #[derive(Debug, Clone)]
 pub(crate) struct TriggerBand {
     pub(crate) availability: TriggerAvailability,
@@ -52,7 +62,10 @@ pub(crate) struct TriggerBand {
     pub(crate) version: u64,
     /// By trigger price, then oid, with the trigger price as indexed; at most the requested count.
     pub(crate) orders: Vec<(Px, Arc<InnerL4Order>)>,
-    /// More orders were in the band than the requested count.
+    /// The coin's orders without a trigger price yet (`triggerPx` 0: trailing stops waiting for their activation), by
+    /// oid, when the band does not hold them; at most the requested count.
+    pub(crate) unpriced: Vec<Arc<InnerL4Order>>,
+    /// More orders were in the band, or unpriced, than the requested count.
     pub(crate) truncated: bool,
 }
 
@@ -244,19 +257,22 @@ impl TriggerTable {
         }
     }
 
-    /// The coin's orders with a trigger price in `[lo, hi]`, at most `max` of them.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the forced-flow owner, design 000451 batch 2"))]
+    /// The coin's orders with a trigger price in `[lo, hi]`, at most `max` of them, and those without a trigger price
+    /// (a band above 0 does not hold them).
     pub(crate) fn in_band(&self, coin: &Coin, lo: Px, hi: Px, max: usize) -> TriggerBand {
         let availability = self.availability(Some(coin));
         let version = self.versions.get(coin).copied().unwrap_or_default();
         let Some(coin_triggers) = self.coins.get(coin) else {
-            return TriggerBand { availability, generation: self.generation, version, orders: Vec::new(), truncated: false };
+            return TriggerBand { availability, generation: self.generation, version, orders: Vec::new(), unpriced: Vec::new(), truncated: false };
         };
         let mut in_band = coin_triggers.by_trigger_px.range((Bound::Included((lo, 0)), Bound::Included((hi, u64::MAX))));
         let orders: Vec<(Px, Arc<InnerL4Order>)> =
             in_band.by_ref().take(max).map(|((trigger_px, _), order)| (*trigger_px, order.clone())).collect();
-        let truncated = in_band.next().is_some();
-        TriggerBand { availability, generation: self.generation, version, orders, truncated }
+        let zero = Px::new(0);
+        let mut unpriced = coin_triggers.by_trigger_px.range((Bound::Included((zero, 0)), Bound::Included((zero, u64::MAX)))).filter(|_| lo > zero);
+        let unpriced_orders: Vec<Arc<InnerL4Order>> = unpriced.by_ref().take(max).map(|(_, order)| order.clone()).collect();
+        let truncated = in_band.next().is_some() || unpriced.next().is_some();
+        TriggerBand { availability, generation: self.generation, version, orders, unpriced: unpriced_orders, truncated }
     }
 }
 
@@ -320,6 +336,18 @@ mod tests {
         assert!(!exact.truncated, "the requested count reached exactly is not a cut");
         assert_eq!(oids(&band(&table, "SOL", "0", "1000", 10)), Vec::<u64>::new());
         assert_eq!(table.count(), 5);
+    }
+
+    /// Review 000460 r1 P2-3: the orders without a trigger price yet (trailing stops waiting for their activation) come
+    /// with every band above 0, which never holds them; a band from 0 holds them itself.
+    #[test]
+    fn a_band_brings_the_unpriced_orders_along() {
+        let table = table(TriggerSection::Complete(vec![stop("BTC", 1, "110"), stop("BTC", 7, "0"), stop("BTC", 8, "0")]));
+        let above = band(&table, "BTC", "100", "120", 10);
+        assert_eq!((oids(&above), above.unpriced.iter().map(|order| order.oid).collect::<Vec<_>>(), above.truncated), (vec![1], vec![7, 8], false));
+        let from_zero = band(&table, "BTC", "0", "120", 10);
+        assert_eq!((oids(&from_zero), from_zero.unpriced.len()), (vec![7, 8, 1], 0));
+        assert!(band(&table, "BTC", "100", "120", 1).truncated, "more unpriced than the count");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod coin_positions;
+mod forced_flow;
 mod liquidation_candidates;
 mod mark_inputs;
 mod mark_prices;
@@ -24,7 +25,7 @@ use crate::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
         subscription::{
-            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_MARK_INPUTS_PATH, EXT_MARK_PRICES, EXT_MARK_PRICES_PATH, EXT_LIQUIDATION_CANDIDATES,
+            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_FORCED_FLOW, EXT_FORCED_FLOW_PATH, EXT_MARK_INPUTS_PATH, EXT_MARK_PRICES, EXT_MARK_PRICES_PATH, EXT_LIQUIDATION_CANDIDATES,
             OrderUpdate, ServerResponse, Subscription, SubscriptionManager, UserFills,
         },
     },
@@ -155,6 +156,10 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     let listener = Arc::new(Mutex::new(listener));
     let accounts = start_account_view(&config, BookSource { trust: book_trust.clone(), listener: listener.clone() })?;
     let local_marks = start_local_marks(&config, accounts.as_ref(), &listener)?;
+    // the forced flow's local calibre (design 000451 r4 revision 8)
+    if let (Some(accounts), Some(marks)) = (&accounts, &local_marks) {
+        accounts.attach_local_marks(marks.subscribe()).await?;
+    }
     let listener_task = {
         let listener = listener.clone();
         let config = config.clone();
@@ -278,13 +283,21 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
             }),
         );
     let app = match &accounts {
-        Some(accounts) => app.route(
-            EXT_COIN_POSITIONS_PATH,
-            get({
-                let accounts = accounts.clone();
-                move |query, headers| coin_positions_handler(query, headers, accounts.clone())
-            }),
-        ),
+        Some(accounts) => app
+            .route(
+                EXT_COIN_POSITIONS_PATH,
+                get({
+                    let accounts = accounts.clone();
+                    move |query, headers| coin_positions_handler(query, headers, accounts.clone())
+                }),
+            )
+            .route(
+                EXT_FORCED_FLOW_PATH,
+                get({
+                    let accounts = accounts.clone();
+                    move |query| forced_flow::forced_flow_handler(query, accounts.clone())
+                }),
+            ),
         None => app,
     };
     let app = match local_marks {
@@ -931,6 +944,13 @@ async fn receive_client_message(
                 .await;
         };
         return session.on_client_message(outbound, manager, client_message, coin).await;
+    }
+    if matches!(subscription, Subscription::ForcedFlow(_)) {
+        let Some(session) = coin_positions.as_mut() else {
+            let refused = format!("{EXT_FORCED_FLOW} needs the server started with --accounts");
+            return outbound.send_message(ServerResponse::Error(refused)).await;
+        };
+        return session.on_forced_flow_message(outbound, manager, client_message, subscription).await;
     }
     if let Subscription::MarkPrices { coin } = &subscription {
         let Some(session) = mark_prices.as_mut() else {

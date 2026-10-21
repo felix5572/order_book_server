@@ -1301,6 +1301,16 @@ impl AccountBook {
         self.holdings.of(&user).collect()
     }
 
+    /// The coins of the anchor's universe.
+    pub(crate) fn coins(&self) -> impl Iterator<Item = &str> {
+        self.coins.keys().map(String::as_str)
+    }
+
+    /// `user`'s signed position in `coin`, raw (10^-szDecimals); 0 without one.
+    pub(crate) fn position_raw(&self, user: Address, coin: &str) -> i64 {
+        self.coins.get(coin).and_then(|book| book.records.get(&user)).map_or(0, |record| record.size_raw)
+    }
+
     /// The coin's `szDecimals`; `None` outside the anchor's universe.
     pub(crate) fn size_decimals(&self, coin: &str) -> Option<u32> {
         self.coins.get(coin).map(|coin| coin.size_decimals)

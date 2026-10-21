@@ -143,7 +143,11 @@ fn record_candidates(frame: &AccountsFrame, out: &mut (dyn Write + Send)) -> std
     let line = match frame {
         AccountsFrame::Candidates(changes) => changes_json(changes),
         AccountsFrame::CandidatesWithdrawn { reason } => json!({"withdrawn": reason}),
-        AccountsFrame::Coin { .. } | AccountsFrame::WithdrawAll { .. } | AccountsFrame::WithdrawCoin { .. } => return Ok(()),
+        AccountsFrame::Coin { .. }
+        | AccountsFrame::WithdrawAll { .. }
+        | AccountsFrame::WithdrawCoin { .. }
+        | AccountsFrame::ForcedFlow(_)
+        | AccountsFrame::ForcedFlowWithdrawn { .. } => return Ok(()),
     };
     writeln!(out, "{line}")?;
     out.flush()
@@ -178,6 +182,11 @@ fn observe(frame: &AccountsFrame, versions: &mut HashMap<String, u64>, stats: &m
         AccountsFrame::CandidatesWithdrawn { reason } => {
             info!("push: liquidation candidates withdrawn ({reason})");
             *stats.frames.entry("candidatesWithdrawn").or_default() += 1;
+        }
+        AccountsFrame::ForcedFlow(_) => *stats.frames.entry("forcedFlow").or_default() += 1,
+        AccountsFrame::ForcedFlowWithdrawn { reason } => {
+            info!("push: forced flow withdrawn ({reason})");
+            *stats.frames.entry("forcedFlowWithdrawn").or_default() += 1;
         }
     }
 }

@@ -29,6 +29,9 @@ pub(crate) const EXT_MARK_PRICES: &str = "extMarkPrices";
 pub(crate) const EXT_MARK_PRICES_PATH: &str = "/extMarkPrices";
 /// The subscription type and channel of the liquidation candidates.
 pub(crate) const EXT_LIQUIDATION_CANDIDATES: &str = "extLiquidationCandidates";
+/// The subscription type and channel of the forced flow, and the `GET` path of the same (design 000451).
+pub(crate) const EXT_FORCED_FLOW: &str = "extForcedFlow";
+pub(crate) const EXT_FORCED_FLOW_PATH: &str = "/extForcedFlow";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "method")]
@@ -70,9 +73,27 @@ pub(crate) enum Subscription {
     /// all (design 000443): a snapshot, then enter / update / exit; needs `--accounts`.
     #[serde(rename = "extLiquidationCandidates", rename_all = "camelCase")]
     LiquidationCandidates { coin: Option<String>, max_distance_bps: u32 },
+    /// `extForcedFlow`: of one coin or every coin, the trigger orders and liquidations a mark move would force out within
+    /// `max_distance_bps` of the node or the local mark, as full frames by tier (design 000451); needs `--accounts`.
+    #[serde(rename = "extForcedFlow")]
+    ForcedFlow(ForcedFlowParams),
     /// `extMarkPrices`: one coin's node and local marks every 50 ms (design 000454); needs `--local-marks`.
     #[serde(rename = "extMarkPrices", rename_all = "camelCase")]
     MarkPrices { coin: String },
+}
+
+/// `extForcedFlow`'s parameters: an unknown one refuses the subscription (design 000451 r4 revision 9), so a misspelt
+/// filter never runs as its default.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ForcedFlowParams {
+    pub(crate) coin: Option<String>,
+    pub(crate) max_distance_bps: u32,
+    /// `trigger` and `liquidation`; both when absent.
+    pub(crate) sources: Option<Vec<String>>,
+    pub(crate) exclude_coins: Option<Vec<String>>,
+    /// USD; 10,000 when absent.
+    pub(crate) min_notional_usd: Option<u64>,
 }
 
 impl Subscription {
@@ -146,6 +167,8 @@ impl Subscription {
             // Coins of the account anchor's universe, or of the local marks' sources, which the book universe does not
             // bound (it is market-filtered): an unknown coin is refused when the subscription takes its first frame.
             Self::CoinPositions { coin } | Self::MarkPrices { coin } => !coin.is_empty(),
+            // checked against the forced flow's rules when the subscription takes its first frames
+            Self::ForcedFlow(_) => true,
             Self::LiquidationCandidates { coin, max_distance_bps } => {
                 coin.as_ref().is_none_or(|coin| !coin.is_empty()) && *max_distance_bps <= MAX_CANDIDATE_DISTANCE_BPS
             }
@@ -180,6 +203,7 @@ impl Subscription {
             Self::CoinPositions { .. } => EXT_COIN_POSITIONS,
             Self::LiquidationCandidates { .. } => EXT_LIQUIDATION_CANDIDATES,
             Self::MarkPrices { .. } => EXT_MARK_PRICES,
+            Self::ForcedFlow(_) => EXT_FORCED_FLOW,
         }
     }
 }
@@ -536,6 +560,11 @@ mod test {
         let candidates = parse(r#"{"type":"extLiquidationCandidates","coin":null,"maxDistanceBps":50}"#);
         assert_eq!(candidates.type_label(), super::EXT_LIQUIDATION_CANDIDATES);
         assert_eq!(parse(r#"{"type":"extMarkPrices","coin":"BTC"}"#).type_label(), super::EXT_MARK_PRICES);
+        let flow = parse(r#"{"type":"extForcedFlow","coin":"BTC","maxDistanceBps":100,"excludeCoins":["ETH"]}"#);
+        assert_eq!(flow.type_label(), super::EXT_FORCED_FLOW);
+        // review 000460 r1 P2-4: a misspelt filter refuses the subscription
+        let misspelt = r#"{"method":"subscribe","subscription":{"type":"extForcedFlow","coin":"BTC","maxDistanceBps":100,"excludeCoin":["BTC"]}}"#;
+        assert!(serde_json::from_str::<ClientMessage>(misspelt).unwrap_err().to_string().contains("excludeCoin"));
         for old in [r#"{"type":"coinPositions","coin":"BTC"}"#, r#"{"type":"liquidationCandidates","coin":null,"maxDistanceBps":50}"#] {
             assert!(serde_json::from_str::<Subscription>(old).is_err(), "{old}");
         }

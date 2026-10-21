@@ -967,7 +967,6 @@ impl OrderBookListener {
     /// and trust: a loss of the order statuses stream withholds the book and may have dropped trigger statuses too, so
     /// a consumer needs both a complete table and a trusted book of the same withheld period (design 000451 r3).
     /// `None` before the first install.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the forced-flow owner, design 000451 batch 2"))]
     pub(crate) fn untriggered_in_band(&self, coin: &Coin, lo: Px, hi: Px, max: usize) -> Option<TriggerBandAt> {
         let (time, height, band) = self.order_book_state.as_ref()?.untriggered_in_band(coin, lo, hi, max);
         Some(TriggerBandAt { time, height, trusted: self.book_trusted(), withheld_periods: self.book_trust.withheld_periods(), band })
@@ -986,7 +985,6 @@ pub(crate) struct BestPricesAt {
 }
 
 /// `OrderBookListener::untriggered_in_band`.
-#[cfg_attr(not(test), expect(dead_code, reason = "read by the forced-flow owner, design 000451 batch 2"))]
 #[derive(Debug, Clone)]
 pub(crate) struct TriggerBandAt {
     /// The book's progress: the block time both book streams applied, and the latest height.
@@ -1980,7 +1978,10 @@ impl ActiveSubs {
             // exists (it never touches the book), so it registers no gated family.
             Subscription::Oracle { .. } => Vec::new(),
             // Pushed by the account view's own broadcast, or the local marks', never through the book.
-            Subscription::CoinPositions { .. } | Subscription::LiquidationCandidates { .. } | Subscription::MarkPrices { .. } => Vec::new(),
+            Subscription::CoinPositions { .. }
+            | Subscription::LiquidationCandidates { .. }
+            | Subscription::MarkPrices { .. }
+            | Subscription::ForcedFlow(_) => Vec::new(),
         }
     }
 

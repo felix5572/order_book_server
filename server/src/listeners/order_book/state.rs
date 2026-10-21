@@ -271,7 +271,6 @@ impl OrderBookState {
     }
 
     /// One coin's trigger orders with a trigger price in `[lo, hi]`, at most `max`, with (time, height).
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the forced-flow owner, design 000451 batch 2"))]
     pub(super) fn untriggered_in_band(&self, coin: &Coin, lo: Px, hi: Px, max: usize) -> (u64, u64, TriggerBand) {
         (self.latest.time, self.latest.height, self.triggers.in_band(coin, lo, hi, max))
     }

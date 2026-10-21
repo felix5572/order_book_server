@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast::{self, error::RecvError};
 
-use super::{Outbound, gzip_body, liquidation_candidates::CandidateSubscriptions};
+use super::{Outbound, forced_flow::ForcedFlowSubscriptions, gzip_body, liquidation_candidates::CandidateSubscriptions};
 use crate::{
     listeners::order_book::BookTrust,
     accounts::{
@@ -38,6 +38,7 @@ pub(super) struct AccountsSession {
     /// `extCoinPositions`, by coin.
     subscribed: HashMap<String, Subscribed>,
     candidates: CandidateSubscriptions,
+    forced_flow: ForcedFlowSubscriptions,
 }
 
 impl AccountsSession {
@@ -45,7 +46,18 @@ impl AccountsSession {
     pub(super) fn new(accounts: AccountsHandle, book: BookTrust) -> Self {
         // `None` when the owner is already gone: every subscription is then refused by the snapshot query
         let frames = accounts.frames();
-        Self { accounts, frames, subscribed: HashMap::new(), candidates: CandidateSubscriptions::new(book) }
+        Self { accounts, frames, subscribed: HashMap::new(), candidates: CandidateSubscriptions::new(book), forced_flow: ForcedFlowSubscriptions::new() }
+    }
+
+    /// Subscribe / unsubscribe of `extForcedFlow`. Returns false when the connection must be dropped.
+    pub(super) async fn on_forced_flow_message(
+        &mut self,
+        outbound: &Outbound,
+        manager: &mut SubscriptionManager,
+        client_message: ClientMessage,
+        subscription: Subscription,
+    ) -> bool {
+        self.forced_flow.on_client_message(&self.accounts, outbound, manager, client_message, subscription).await
     }
 
     /// Subscribe / unsubscribe of `extLiquidationCandidates`. Returns false when the connection must be dropped.
@@ -110,12 +122,16 @@ impl AccountsSession {
             AccountsFrame::WithdrawCoin { coin, reason } => self.withdraw(outbound, manager, coin, reason).await,
             AccountsFrame::Candidates(changes) => self.candidates.on_changes(outbound, manager, changes).await,
             AccountsFrame::CandidatesWithdrawn { reason } => self.candidates.withdraw_all(outbound, manager, reason).await,
+            AccountsFrame::ForcedFlow(frame) => self.forced_flow.on_frame(outbound, frame).await,
+            AccountsFrame::ForcedFlowWithdrawn { reason } => self.forced_flow.withdraw_all(outbound, manager, reason).await,
         }
     }
 
-    /// Ends every subscription of both feeds.
+    /// Ends every subscription of the three feeds.
     async fn withdraw_everything(&mut self, outbound: &Outbound, manager: &mut SubscriptionManager, reason: &str) -> bool {
-        self.withdraw_all(outbound, manager, reason).await && self.candidates.withdraw_all(outbound, manager, reason).await
+        self.withdraw_all(outbound, manager, reason).await
+            && self.candidates.withdraw_all(outbound, manager, reason).await
+            && self.forced_flow.withdraw_all(outbound, manager, reason).await
     }
 
     /// Subscribe / unsubscribe of `extCoinPositions` for `coin`. Returns false when the connection must be dropped.

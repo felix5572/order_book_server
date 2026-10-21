@@ -15,6 +15,7 @@ use tokio::sync::{broadcast, watch};
 use super::{
     book::{AccountBook, QueryError, Touched, Unavailable},
     candidates::{CandidateChanges, Refresh},
+    forced_flow_owner::{FlowFrame, FlowOutput},
     marks::{MarksAt, NativePriceSnapshot, NodeMarks},
     view::CoinPositionsFrame,
 };
@@ -36,6 +37,10 @@ pub(crate) enum AccountsFrame {
     Candidates(CandidateChanges),
     /// The liquidation candidates stopped being available: every candidate subscription ends.
     CandidatesWithdrawn { reason: String },
+    /// A coin's new forced-flow content of one tier (design 000451): each subscription admitting it sends its view.
+    ForcedFlow(Arc<FlowFrame>),
+    /// The forced flow ended until restart: every forced-flow subscription ends.
+    ForcedFlowWithdrawn { reason: String },
 }
 
 /// The node price state the local marks read (design 000454 r2 revision 1): the trusted state after the latest applied
@@ -203,6 +208,18 @@ impl Publisher {
         }
     }
 
+    /// The forced-flow frames of one step.
+    pub(crate) fn publish_forced_flow(&self, output: FlowOutput) {
+        for frame in output.frames {
+            self.send(AccountsFrame::ForcedFlow(frame), "forcedFlow");
+        }
+    }
+
+    /// The forced flow ended until restart.
+    pub(crate) fn withdraw_forced_flow(&self, reason: String) {
+        self.send(AccountsFrame::ForcedFlowWithdrawn { reason }, "forcedFlowWithdrawn");
+    }
+
     fn send(&self, frame: AccountsFrame, kind: &str) {
         ACCOUNTS_FRAMES_TOTAL.with_label_values(&[kind]).inc();
         // an error only means no connection is listening right now
@@ -271,6 +288,7 @@ mod tests {
                 AccountsFrame::WithdrawCoin { coin, .. } => format!("{coin} withdrawn"),
                 AccountsFrame::WithdrawAll { .. } => "all withdrawn".to_string(),
                 AccountsFrame::Candidates(_) | AccountsFrame::CandidatesWithdrawn { .. } => "candidates".to_string(),
+                AccountsFrame::ForcedFlow(_) | AccountsFrame::ForcedFlowWithdrawn { .. } => "forcedFlow".to_string(),
             });
         }
         kinds.sort_unstable();
@@ -296,6 +314,7 @@ mod tests {
                     AccountsFrame::WithdrawAll { .. } => "withdrawn".to_string(),
                     AccountsFrame::WithdrawCoin { .. } => "coin withdrawn".to_string(),
                     AccountsFrame::Candidates(_) | AccountsFrame::CandidatesWithdrawn { .. } => "candidates".to_string(),
+                AccountsFrame::ForcedFlow(_) | AccountsFrame::ForcedFlowWithdrawn { .. } => "forcedFlow".to_string(),
                 });
             }
             kinds

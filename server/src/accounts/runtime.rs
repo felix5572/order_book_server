@@ -42,9 +42,13 @@ use super::{
     },
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, NodePrices, Publisher},
     candidates::{BookLink, Candidates, CandidatesSnapshot},
+    forced_flow::Tier,
+    forced_flow_owner::{DemandKey, FlowDemand, FlowDemandGuard, FlowFrame, FlowLink, ForcedFlow, OwnerView},
+    forced_flow_reader::{FlowMailbox, FlowRead, run_flow_reader},
     walk::{WalkMailbox, WalkResult, run_walker},
 };
 use crate::{
+    local_marks::snapshot::LocalMarksSnapshot,
     listeners::order_book::{
         BookTrust, OrderBookListener,
         parallel::{FileLayout, LineStream, spawn_line_watcher},
@@ -136,6 +140,10 @@ enum Query {
     CoinPositions { coin: String, reply: oneshot::Sender<std::result::Result<CoinPositions, QueryError>> },
     Status { reply: oneshot::Sender<BookStatus> },
     Candidates { reply: oneshot::Sender<std::result::Result<CandidatesSnapshot, String>> },
+    /// The coin's, or every coin's, latest forced-flow frames of the tier, computed first when stale (design 000451 r5).
+    ForcedFlow { coin: Option<String>, tier: Tier, reply: oneshot::Sender<std::result::Result<Vec<Arc<FlowFrame>>, String>> },
+    /// The local marks' snapshots, for the forced flow's local calibre.
+    AttachLocalMarks(watch::Receiver<Arc<LocalMarksSnapshot>>),
 }
 
 /// Queries the owner task and joins its `extCoinPositions` push.
@@ -147,6 +155,7 @@ pub(crate) struct AccountsHandle {
     frames: broadcast::WeakSender<Arc<AccountsFrame>>,
     /// The publisher holds the sender: its exit closes the channel.
     node_prices: watch::Receiver<NodePrices>,
+    flow_demand: FlowDemand,
 }
 
 impl AccountsHandle {
@@ -158,6 +167,23 @@ impl AccountsHandle {
     /// The main-dex node prices after every applied block (design 000454 r2 revision 1).
     pub(crate) fn node_prices(&self) -> watch::Receiver<NodePrices> {
         self.node_prices.clone()
+    }
+
+    /// Counts a forced-flow subscriber of (coin or every coin, tier), so the owner computes its frames.
+    pub(crate) fn acquire_flow(&self, key: DemandKey) -> FlowDemandGuard {
+        self.flow_demand.acquire(key)
+    }
+
+    /// The latest forced-flow frames of the coin, or of every coin, at the tier; a stale one is computed first.
+    pub(crate) async fn forced_flow(&self, coin: Option<String>, tier: Tier) -> std::result::Result<Vec<Arc<FlowFrame>>, String> {
+        let (reply, answer) = oneshot::channel();
+        self.queries.send(Query::ForcedFlow { coin, tier, reply }).await.map_err(|_| OWNER_GONE.to_string())?;
+        answer.await.map_err(|_| OWNER_GONE.to_string())?
+    }
+
+    /// Hands the local marks' snapshots to the owner (the forced flow's local calibre).
+    pub(crate) async fn attach_local_marks(&self, snapshots: watch::Receiver<Arc<LocalMarksSnapshot>>) -> std::result::Result<(), String> {
+        self.queries.send(Query::AttachLocalMarks(snapshots)).await.map_err(|_| OWNER_GONE.to_string())
     }
 
     /// Counts a subscriber of `coin`, so the owner builds its frames; take it before asking for the snapshot.
@@ -212,14 +238,53 @@ pub(crate) struct CandidateFeed {
 
 impl CandidateFeed {
     /// With `book`, the walk task starts here.
-    fn start(book: Option<BookSource>) -> Self {
+    fn start(book: Option<&BookSource>) -> Self {
         let Some(BookSource { trust, listener }) = book else {
             return Self { candidates: Candidates::new(None), walks: None };
         };
         let mailbox = Arc::new(WalkMailbox::default());
         let (results, walks) = mpsc::channel(WALK_RESULTS_CAPACITY);
-        tokio::spawn(run_walker(listener, Arc::clone(&mailbox), results));
-        Self { candidates: Candidates::new(Some(BookLink { trust, mailbox })), walks: Some(walks) }
+        tokio::spawn(run_walker(Arc::clone(listener), Arc::clone(&mailbox), results));
+        Self { candidates: Candidates::new(Some(BookLink { trust: trust.clone(), mailbox })), walks: Some(walks) }
+    }
+}
+
+/// Reads in flight back to the owner: at most one per (coin, tier, kind) pending.
+const FLOW_READS_CAPACITY: usize = 1_024;
+
+/// The forced flow and its reads coming back to the owner (design 000451); `reads` is `None` without a book.
+pub(crate) struct FlowFeed {
+    flow: ForcedFlow,
+    reads: Option<mpsc::Receiver<FlowRead>>,
+}
+
+impl FlowFeed {
+    /// With `book`, the flow reader task starts here.
+    fn start(book: Option<&BookSource>, demand: FlowDemand) -> Self {
+        let Some(BookSource { trust, listener }) = book else {
+            return Self { flow: ForcedFlow::new(demand, None), reads: None };
+        };
+        let mailbox = Arc::new(FlowMailbox::default());
+        let (results, reads) = mpsc::channel(FLOW_READS_CAPACITY);
+        tokio::spawn(run_flow_reader(Arc::clone(listener), Arc::clone(&mailbox), results));
+        Self { flow: ForcedFlow::new(demand, Some(FlowLink { trust: trust.clone(), mailbox })), reads: Some(reads) }
+    }
+}
+
+/// The next forced-flow read; pending forever without a book. Cancel-safe.
+async fn next_flow_read(reads: &mut Option<mpsc::Receiver<FlowRead>>) -> Option<FlowRead> {
+    match reads {
+        Some(reads) => reads.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Whether the local marks' next snapshot came (`false`) or their channel closed (`true`); pending forever while they
+/// are not attached. Cancel-safe.
+async fn next_local_snapshot(flow: &mut ForcedFlow) -> bool {
+    match flow.local_snapshots() {
+        Some(snapshots) => snapshots.changed().await.is_err(),
+        None => std::future::pending().await,
     }
 }
 
@@ -297,11 +362,19 @@ pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Resul
     info!("accounts started; first anchor is the first checkpoint above {start_height}");
     let frames_handle = frames.downgrade();
     let publisher = Publisher::new(subscriptions.clone(), frames);
-    let handle = AccountsHandle { queries: queries_tx, subscriptions, frames: frames_handle, node_prices: publisher.subscribe_prices() };
+    let flow_demand = FlowDemand::default();
+    let handle = AccountsHandle {
+        queries: queries_tx,
+        subscriptions,
+        frames: frames_handle,
+        node_prices: publisher.subscribe_prices(),
+        flow_demand: flow_demand.clone(),
+    };
     let started_ms = now_ms();
     let marks = NodeMarks::new(CheckpointGrid { anchor, interval }, started_ms);
-    let feed = CandidateFeed::start(book);
-    let owner = tokio::spawn(run_owner(AccountBook::new(started_ms), marks, publisher, inputs, anchors, queries, threads, feed));
+    let feed = CandidateFeed::start(book.as_ref());
+    let flow = FlowFeed::start(book.as_ref(), flow_demand);
+    let owner = tokio::spawn(run_owner(AccountBook::new(started_ms), marks, publisher, inputs, anchors, queries, threads, feed, flow));
     Ok((handle, owner))
 }
 
@@ -470,8 +543,12 @@ async fn run_owner(
     mut queries: mpsc::Receiver<Query>,
     threads: Vec<Supervised>,
     feed: CandidateFeed,
+    flow: FlowFeed,
 ) {
     let CandidateFeed { mut candidates, mut walks } = feed;
+    let FlowFeed { mut flow, reads: mut flow_reads } = flow;
+    let mut flow_tick = tokio::time::interval(Tier::Near.period());
+    flow_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut supervision = tokio::time::interval(SUPERVISION_INTERVAL);
     let mut assembler = BlockAssembler::default();
     // a parsed anchor whose blocks are not applied yet (design 000433 r2 3.4), and a seed the marks are not ready for
@@ -516,7 +593,34 @@ async fn run_owner(
                     info!("accounts: every handle dropped, owner exits");
                     return;
                 };
-                answer(&book, &marks, &candidates, query);
+                match query {
+                    Query::ForcedFlow { coin, tier, reply } => {
+                        let view = OwnerView { book: &book, marks: marks.at(), candidates: &candidates };
+                        publisher.publish_forced_flow(flow.query(coin, tier, reply, Instant::now(), &view));
+                    }
+                    Query::AttachLocalMarks(snapshots) => flow.attach_local(snapshots),
+                    query => answer(&book, &marks, &candidates, query),
+                }
+            }
+            read = next_flow_read(&mut flow_reads) => {
+                let Some(read) = read else {
+                    error!("forced flow: the read task ended; the forced flow stays unavailable until restart");
+                    flow_reads = None;
+                    let reason = "the forced flow read task ended".to_string();
+                    flow.stop(reason.clone());
+                    publisher.withdraw_forced_flow(reason);
+                    continue;
+                };
+                let view = OwnerView { book: &book, marks: marks.at(), candidates: &candidates };
+                publisher.publish_forced_flow(flow.on_read(read, Instant::now(), &view));
+            }
+            _ = flow_tick.tick() => {
+                let view = OwnerView { book: &book, marks: marks.at(), candidates: &candidates };
+                publisher.publish_forced_flow(flow.tick(Instant::now(), &view));
+            }
+            closed = next_local_snapshot(&mut flow) => {
+                let view = OwnerView { book: &book, marks: marks.at(), candidates: &candidates };
+                publisher.publish_forced_flow(flow.on_local(closed, Instant::now(), &view));
             }
             _ = supervision.tick() => {
                 supervise(&mut book, &mut marks, &threads);
@@ -962,6 +1066,7 @@ fn answer(book: &AccountBook, marks: &NodeMarks, candidates: &Candidates, query:
         Query::CoinPositions { coin, reply } => drop(reply.send(book.coin_positions(&coin, marks.at()))),
         Query::Status { reply } => drop(reply.send(book.status())),
         Query::Candidates { reply } => drop(reply.send(candidates.snapshot())),
+        Query::ForcedFlow { .. } | Query::AttachLocalMarks(_) => unreachable!("the owner answers the forced flow itself"),
     }
 }
 
@@ -1037,9 +1142,9 @@ impl TestOwner {
         let (frames, _) = broadcast::channel(FRAME_CHANNEL_CAPACITY);
         let frames_handle = frames.downgrade();
         let publisher = Publisher::new(subscriptions.clone(), frames);
-        let handle = AccountsHandle { queries, subscriptions, frames: frames_handle, node_prices: publisher.subscribe_prices() };
+        let handle = AccountsHandle { queries, subscriptions, frames: frames_handle, node_prices: publisher.subscribe_prices(), flow_demand: FlowDemand::default() };
         let marks = NodeMarks::new(tests::TEST_GRID, 0);
-        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None)));
+        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None), FlowFeed::start(None, FlowDemand::default())));
         Self { handle, inputs, anchors, owner }
     }
 
@@ -1392,7 +1497,7 @@ mod tests {
         publisher.track(&book);
         publisher.track_marks(&mut book, &marks);
         let _guard = subscriptions.acquire(PUMP);
-        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None)));
+        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None), FlowFeed::start(None, FlowDemand::default())));
         let query = || async {
             let (reply, answer) = oneshot::channel();
             query_tx.send(Query::CoinPositions { coin: PUMP.to_string(), reply }).await.unwrap();

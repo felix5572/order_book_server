@@ -2,7 +2,8 @@
 //! 4). The candidates of one coin and side walk the public book together: ordered by when the mark reaches them (a
 //! long's sale first at the highest liquidation price, a short's buy at the lowest; equal prices by address), each
 //! takes its walk size from where the ones before it stopped. Each also walks its size alone from the best level (the
-//! book as if no other candidate sold first). Static: no cascade, no refill.
+//! book as if no other candidate sold first). Static: no cascade, no refill. The forced flow (design 000451 r4
+//! revision 7) walks each entry alone only, up to its limit price (`alone_walks`).
 //!
 //! The account owner sends a request per (coin, side) whose ordered sizes changed; a mailbox keeps only the newest of
 //! each. The walk task copies the side's levels under the listener lock (`PriceLevel::total_sz`, at most
@@ -46,10 +47,39 @@ pub(crate) struct WalkRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WalkEnd {
     Filled,
+    /// The next level is beyond the order's limit price.
+    LimitReached,
     /// The book had no more levels.
     BookExhausted,
     /// The copied levels ran out at `MAX_WALK_LEVELS`: the book may hold more.
     TruncatedAtLevels,
+}
+
+impl WalkEnd {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Filled => "filled",
+            Self::LimitReached => "limitReached",
+            Self::BookExhausted => "bookExhausted",
+            Self::TruncatedAtLevels => "truncatedAtLevels",
+        }
+    }
+}
+
+/// The worst price a taker order takes: a sale takes the bids down to it, a buy the asks up to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Limit {
+    pub(crate) taker: Side,
+    pub(crate) px: Px,
+}
+
+impl Limit {
+    fn admits(self, px: Px) -> bool {
+        match self.taker {
+            Side::Ask => px >= self.px,
+            Side::Bid => px <= self.px,
+        }
+    }
 }
 
 /// One walk of a size over the levels; sizes in 1e-8 units.
@@ -100,13 +130,19 @@ pub(crate) fn allocate(levels: &[(Px, Sz)], sizes: &[u64], truncated: bool) -> V
     for &size in sizes {
         let share = WalkShare {
             ahead,
-            together: together.take(levels, size, truncated),
-            alone: LevelCursor::default().take(levels, size, truncated),
+            together: together.take(levels, size, None, truncated),
+            alone: LevelCursor::default().take(levels, size, None, truncated),
         };
         shares.push(share);
         ahead += size;
     }
     shares
+}
+
+/// Each item's size walked alone from the best level, up to its limit when it has one (a trigger order's; a liquidation
+/// takes any price); `truncated` when the levels stop at the copy limit.
+pub(crate) fn alone_walks(levels: &[(Px, Sz)], items: &[(u64, Option<Limit>)], truncated: bool) -> Vec<WalkPart> {
+    items.iter().map(|&(size, limit)| LevelCursor::default().take(levels, size, limit, truncated)).collect()
 }
 
 /// Where a walk stands in the levels: the level and what of it is already taken.
@@ -117,11 +153,16 @@ struct LevelCursor {
 }
 
 impl LevelCursor {
-    /// Takes `size` from here on.
-    fn take(&mut self, levels: &[(Px, Sz)], size: u64, truncated: bool) -> WalkPart {
+    /// Takes `size` from here on, no level beyond `limit`.
+    fn take(&mut self, levels: &[(Px, Sz)], size: u64, limit: Option<Limit>, truncated: bool) -> WalkPart {
         let (mut filled, mut notional, mut touched, mut deepest) = (0_u64, 0.0_f64, 0, None);
+        let mut limit_reached = false;
         while filled < size && self.level < levels.len() {
             let (px, level_sz) = levels[self.level];
+            if limit.is_some_and(|limit| !limit.admits(px)) {
+                limit_reached = true;
+                break;
+            }
             let take = (level_sz.value() - self.used_in_level).min(size - filled);
             filled += take;
             notional = (px.value() as f64).mul_add(take as f64, notional);
@@ -135,6 +176,8 @@ impl LevelCursor {
         }
         let end = if filled == size {
             WalkEnd::Filled
+        } else if limit_reached {
+            WalkEnd::LimitReached
         } else if truncated {
             WalkEnd::TruncatedAtLevels
         } else {
@@ -157,32 +200,41 @@ pub(crate) const fn walk_units(raw: u64, size_decimals: u32) -> u64 {
     units
 }
 
-/// The newest pending request of each key; the walk task drains it.
-#[derive(Debug, Default)]
-pub(crate) struct WalkMailbox {
-    pending: Mutex<HashMap<WalkKey, WalkRequest>>,
+/// The newest pending request of each key; one task drains it.
+#[derive(Debug)]
+pub(crate) struct Mailbox<K, V> {
+    pending: Mutex<HashMap<K, V>>,
     notify: Notify,
 }
 
-impl WalkMailbox {
+/// The walk task's mailbox.
+pub(crate) type WalkMailbox = Mailbox<WalkKey, WalkRequest>;
+
+impl<K, V> Default for Mailbox<K, V> {
+    fn default() -> Self {
+        Self { pending: Mutex::new(HashMap::new()), notify: Notify::new() }
+    }
+}
+
+impl<K: Eq + std::hash::Hash, V> Mailbox<K, V> {
     /// Replaces the key's pending request.
-    pub(crate) fn post(&self, key: WalkKey, request: WalkRequest) {
+    pub(crate) fn post(&self, key: K, request: V) {
         self.lock().insert(key, request);
         self.notify.notify_one();
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<WalkKey, WalkRequest>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<K, V>> {
         // the map is replaced or drained in one statement: a panic elsewhere cannot leave it half-written
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The pending requests, taken (a test's view of what the walk task would get).
+    /// The pending requests, taken (a test's view of what the task would get).
     #[cfg(test)]
-    pub(crate) fn drain(&self) -> HashMap<WalkKey, WalkRequest> {
+    pub(crate) fn drain(&self) -> HashMap<K, V> {
         std::mem::take(&mut *self.lock())
     }
 
-    async fn take(&self) -> HashMap<WalkKey, WalkRequest> {
+    pub(crate) async fn take(&self) -> HashMap<K, V> {
         loop {
             let pending = std::mem::take(&mut *self.lock());
             if !pending.is_empty() {
@@ -226,22 +278,28 @@ pub(crate) async fn run_walker(source: impl LevelSource, mailbox: Arc<WalkMailbo
     }
 }
 
+/// The copied levels stop at the copy limit before holding `needed`: the book may hold more.
+pub(crate) fn levels_truncated(levels: &TakerLevels, needed: Sz) -> bool {
+    let held: u64 = levels.levels.iter().map(|(_, sz)| sz.value()).sum();
+    levels.levels.len() == MAX_WALK_LEVELS && held < needed.value()
+}
+
+/// The book's mid at the copy (the walked side's best and the taker side's own best); `None` with an empty side.
+pub(crate) fn mid_px(levels: &TakerLevels) -> Option<f64> {
+    #[expect(clippy::cast_precision_loss, reason = "prices are below 2^53 in 1e-8 units")]
+    let mid = levels.levels.first().zip(levels.own_side_best).map(|((best, _), own)| f64::midpoint(best.value() as f64, own.value() as f64) / fixed_point_scale());
+    mid
+}
+
 /// One request; `None` when the coin has no book (outside the market filter, or before the first snapshot).
 async fn walk(source: &impl LevelSource, key: WalkKey, request: WalkRequest) -> Option<WalkResult> {
     let sizes: Vec<u64> = request.sequence.iter().map(|(_, size, _)| *size).collect();
     let needed = Sz::new(sizes.iter().sum());
     let levels = source.taker_levels(&key.0, key.1, needed, MAX_WALK_LEVELS).await?;
-    let held: u64 = levels.levels.iter().map(|(_, sz)| sz.value()).sum();
-    let truncated = levels.levels.len() == MAX_WALK_LEVELS && held < needed.value();
-    #[expect(clippy::cast_precision_loss, reason = "prices are below 2^53 in 1e-8 units")]
-    let mid_px = levels
-        .levels
-        .first()
-        .zip(levels.own_side_best)
-        .map(|((best, _), own)| f64::midpoint(best.value() as f64, own.value() as f64) / fixed_point_scale());
+    let truncated = levels_truncated(&levels, needed);
     Some(WalkResult {
         shares: allocate(&levels.levels, &sizes, truncated),
-        mid_px,
+        mid_px: mid_px(&levels),
         key,
         version: request.version,
         book_height: levels.height,
@@ -257,6 +315,26 @@ mod tests {
 
     fn level(px: u64, sz: u64) -> (Px, Sz) {
         (Px::new(px * 100_000_000), Sz::new(sz * 100_000_000))
+    }
+
+    /// Design 000451 r4 revision 7: a stop's sale takes no bid below its limit, a stop's buy no ask above it; a
+    /// liquidation takes any; a limit before the best level fills nothing.
+    #[test]
+    fn an_alone_walk_stops_at_its_limit() {
+        let unit = 100_000_000;
+        let bids = [level(99, 1), level(98, 1), level(97, 1)];
+        let at_98 = Some(Limit { taker: Side::Ask, px: Px::new(98 * unit) });
+        let sales = alone_walks(&bids, &[(3 * unit, at_98), (3 * unit, None), (unit, at_98)], false);
+        assert_eq!((sales[0].filled, sales[0].end, sales[0].deepest_px), (2 * unit, WalkEnd::LimitReached, Some(Px::new(98 * unit))));
+        assert_eq!((sales[1].filled, sales[1].end), (3 * unit, WalkEnd::Filled));
+        assert_eq!((sales[2].filled, sales[2].end, sales[2].vwap_px), (unit, WalkEnd::Filled, Some(99.0)), "each walks from the best");
+        let asks = [level(101, 1), level(102, 1)];
+        let buy = alone_walks(&asks, &[(2 * unit, Some(Limit { taker: Side::Bid, px: Px::new(101 * unit) }))], false);
+        assert_eq!((buy[0].filled, buy[0].end), (unit, WalkEnd::LimitReached));
+        let none = alone_walks(&asks, &[(unit, Some(Limit { taker: Side::Bid, px: Px::new(100 * unit) }))], false);
+        assert_eq!((none[0].filled, none[0].end, none[0].vwap_px), (0, WalkEnd::LimitReached, None));
+        let thin = alone_walks(&asks, &[(5 * unit, None)], true);
+        assert_eq!(thin[0].end, WalkEnd::TruncatedAtLevels);
     }
 
     /// Codex's 000443 r1 counterexample: bids 99×1, 98×1, 97×1; A then B each sell 1, then A sells 2. Alone, each

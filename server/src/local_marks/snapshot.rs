@@ -365,8 +365,8 @@ pub(crate) mod tests {
         pub(crate) sources: MarkSources,
         table: Arc<CoinTable>,
         readings: Vec<FeedReading>,
-        node: NodePrices,
-        book: Option<BestPricesAt>,
+        pub(crate) node: NodePrices,
+        pub(crate) book: Option<BestPricesAt>,
     }
 
     impl World {

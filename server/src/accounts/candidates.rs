@@ -15,6 +15,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
     book::{AccountBook, Replayed},
+    forced_flow::LiquidationInput,
     cooldown::Cooldown,
     liquidation::{LiquidationPx, RowMark},
     marks::MarksAt,
@@ -46,7 +47,7 @@ pub(crate) struct ExpectedOrder {
 }
 
 impl ExpectedOrder {
-    fn of(size_raw: i64, mark_raw: u64, cooldown: Cooldown) -> Self {
+    pub(crate) fn of(size_raw: i64, mark_raw: u64, cooldown: Cooldown) -> Self {
         let whole = size_raw.unsigned_abs();
         let notional_micro = u128::from(whole) * u128::from(mark_raw);
         let first_order_raw = if notional_micro <= WHOLE_ORDER_MAX_NOTIONAL_MICRO { whole } else { whole / 5 };
@@ -195,14 +196,20 @@ impl CoinIndex {
         }
     }
 
-    /// The rows whose price is within the cap of `mark` (USD), and some just outside it.
-    fn near(&self, mark: f64) -> impl Iterator<Item = (Address, IndexedRow)> + '_ {
-        let cap = f64::from(MAX_CANDIDATE_DISTANCE_BPS) / 1e4;
-        let low = (mark * (1.0 - cap - RANGE_MARGIN)).max(0.0).to_bits();
-        let high = (mark * (1.0 + cap + RANGE_MARGIN)).to_bits();
+    /// The rows whose price is within `max_bps` of either mark (USD), and some just outside it: a long's sale below the
+    /// higher mark, a short's buy above the lower one, both past it included.
+    fn within(&self, marks: (f64, f64), max_bps: u32) -> impl Iterator<Item = (Address, IndexedRow)> + '_ {
+        let cap = f64::from(max_bps) / 1e4;
+        let low = (marks.0.min(marks.1) * (1.0 - cap - RANGE_MARGIN)).max(0.0).to_bits();
+        let high = (marks.0.max(marks.1) * (1.0 + cap + RANGE_MARGIN)).to_bits();
         let longs = self.longs.range((low, Address::ZERO)..);
         let shorts = self.shorts.range(..=(high, Address::repeat_byte(0xff)));
         longs.chain(shorts).map(|(_, user)| (*user, self.rows[user]))
+    }
+
+    /// The rows whose price is within the cap of `mark` (USD), and some just outside it.
+    fn near(&self, mark: f64) -> impl Iterator<Item = (Address, IndexedRow)> + '_ {
+        self.within((mark, mark), MAX_CANDIDATE_DISTANCE_BPS)
     }
 }
 
@@ -451,6 +458,35 @@ impl Candidates {
         }
         self.version = changes.version;
         Refresh::Changes(changes)
+    }
+
+    /// The coin's indexed rows within `max_bps` of the node mark or of the local mark (both 10^-(6 - szDecimals) USD),
+    /// each with its next market liquidation order (design 000451 r5 revision 15: the index, not the published list cut
+    /// at the node distance); `Err` while the candidates are not trusted.
+    pub(crate) fn liquidation_inputs(
+        &self,
+        book: &AccountBook,
+        coin: &str,
+        node_mark_raw: u64,
+        local_mark_raw: Option<u64>,
+        max_bps: u32,
+    ) -> Result<Vec<LiquidationInput>, String> {
+        if let Some(reason) = &self.stopped {
+            return Err(reason.clone());
+        }
+        self.trusted.ok_or("the liquidation candidates are not available")?;
+        let Some(index) = self.index.get(coin) else { return Ok(Vec::new()) };
+        let mark = |raw: u64| super::checkpoint::mark_px(raw, index.size_decimals);
+        let marks = (mark(node_mark_raw), mark(local_mark_raw.unwrap_or(node_mark_raw)));
+        Ok(index
+            .within(marks, max_bps)
+            .map(|(user, row)| LiquidationInput {
+                user,
+                size_raw: row.size_raw,
+                liquidation_px: row.liquidation_px,
+                order: ExpectedOrder::of(row.size_raw, node_mark_raw, book.cooldown(&user)),
+            })
+            .collect())
     }
 
     pub(crate) fn count(&self) -> usize {

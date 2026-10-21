@@ -7,12 +7,12 @@ use rustc_hash::FxHashSet;
 use serde::Serialize;
 
 use super::{
-    candidates::{BookWalk, Candidate, CandidateChanges, CandidatesSnapshot, walk_as_of},
+    candidates::{BookWalk, Candidate, CandidateChanges, CandidatesSnapshot, ExpectedOrder, walk_as_of},
     checkpoint::MAX_PERP_DECIMALS,
     cooldown::Cooldown,
     size::format_size_raw,
     view::user_text,
-    walk::{WalkEnd, WalkPart},
+    walk::WalkPart,
 };
 use crate::{order_book::Sz, types::subscription::EXT_LIQUIDATION_CANDIDATES};
 
@@ -66,7 +66,7 @@ enum BookWalkDto {
 /// One walk: sizes in the coin's units, prices in USD; `null` prices when nothing filled.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WalkPartDto {
+pub(crate) struct WalkPartDto {
     vwap_px: Option<String>,
     deepest_px: Option<String>,
     /// How far the deepest level is from the mid, bp; `null` without a mid or a fill.
@@ -78,7 +78,7 @@ struct WalkPartDto {
 }
 
 impl WalkPartDto {
-    fn new(part: &WalkPart, mid_px: Option<f64>) -> Self {
+    pub(crate) fn new(part: &WalkPart, mid_px: Option<f64>) -> Self {
         let deepest = part.deepest_px.map(|px| px.value() as f64 / 1e8);
         Self {
             vwap_px: part.vwap_px.map(|px| px.to_string()),
@@ -86,11 +86,7 @@ impl WalkPartDto {
             deepest_bps_from_mid: deepest.zip(mid_px).map(|(deepest, mid)| (deepest - mid).abs() / mid * 10_000.0),
             filled_size: Sz::new(part.filled).to_str(),
             levels: part.levels,
-            end: match part.end {
-                WalkEnd::Filled => "filled",
-                WalkEnd::BookExhausted => "bookExhausted",
-                WalkEnd::TruncatedAtLevels => "truncatedAtLevels",
-            },
+            end: part.end.label(),
         }
     }
 }
@@ -118,7 +114,7 @@ impl BookWalkDto {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ExpectedOrderDto {
+pub(crate) struct ExpectedOrderDto {
     /// `A` sells a long, `B` buys back a short.
     side: &'static str,
     cooldown: &'static str,
@@ -131,10 +127,6 @@ struct ExpectedOrderDto {
 impl CandidateDto {
     /// `walk` is the candidate's walk as it may be published now (`walk_as_of`).
     fn new(coin: &str, user: Address, candidate: &Candidate, walk: &BookWalk) -> Self {
-        let size = |raw: u64| format_size_raw(raw.cast_signed(), candidate.size_decimals);
-        let order = &candidate.order;
-        #[expect(clippy::expect_used, reason = "a notional above 9.2e12 USD is not a position")]
-        let notional_micro = i64::try_from(order.notional_micro).expect("a notional in i64 micro-USD");
         Self {
             user: user_text(user),
             coin: coin.to_string(),
@@ -146,19 +138,29 @@ impl CandidateDto {
             margin_mode: if candidate.isolated { "isolated" } else { "cross" },
             pool_positions: candidate.pool_positions,
             cross_pool_coins: candidate.cross_pool_coins.clone(),
-            expected_order: ExpectedOrderDto {
-                side: if candidate.size_raw > 0 { "A" } else { "B" },
-                cooldown: match order.cooldown {
-                    Cooldown::Active => "inCooldown",
-                    Cooldown::None => "none",
-                    Cooldown::Unknown => "unknown",
-                },
-                first_order_size: size(order.first_order_raw),
-                cooldown_order_size: size(order.cooldown_order_raw),
-                walk_size: size(order.walk_raw),
-                notional: format_size_raw(notional_micro, MICRO_DECIMALS),
-            },
+            expected_order: ExpectedOrderDto::new(&candidate.order, candidate.size_raw, candidate.size_decimals),
             book_walk: BookWalkDto::new(walk),
+        }
+    }
+}
+
+impl ExpectedOrderDto {
+    /// The next market liquidation order of a position of `size_raw`.
+    pub(crate) fn new(order: &ExpectedOrder, size_raw: i64, size_decimals: u32) -> Self {
+        let size = |raw: u64| format_size_raw(raw.cast_signed(), size_decimals);
+        #[expect(clippy::expect_used, reason = "a notional above 9.2e12 USD is not a position")]
+        let notional_micro = i64::try_from(order.notional_micro).expect("a notional in i64 micro-USD");
+        Self {
+            side: if size_raw > 0 { "A" } else { "B" },
+            cooldown: match order.cooldown {
+                Cooldown::Active => "inCooldown",
+                Cooldown::None => "none",
+                Cooldown::Unknown => "unknown",
+            },
+            first_order_size: size(order.first_order_raw),
+            cooldown_order_size: size(order.cooldown_order_raw),
+            walk_size: size(order.walk_raw),
+            notional: format_size_raw(notional_micro, MICRO_DECIMALS),
         }
     }
 }
@@ -311,7 +313,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::accounts::candidates::ExpectedOrder;
+    use crate::accounts::walk::WalkEnd;
 
     const A: Address = Address::repeat_byte(0xa1);
     const B: Address = Address::repeat_byte(0xb2);

@@ -393,6 +393,25 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
   `local_marks_probe` 可在不重启 OB 的情况下单独跑行情。指标 `orderbook_local_marks_feed_{frames,disconnects,unknown_frames}_total`、
   `orderbook_local_marks_feed_stopped`。
 
+## 2026-10-21 被迫成交阶梯第 2 批: `extForcedFlow`(设计 000451 r1–r5)
+
+- **只报事实**: 条件单(监听器条件单表的区间读, 第 1 批 `b4faa4b`)和清算(清算候选的底层清算价索引, 按双口径范围取, 同一个
+  `ExpectedOrder`)逐条给出: 按节点规则对当前仓位的单独数量(整仓 TP/SL 取整仓、只减仓取 min(数量, 可减仓位)、非只减仓取订单数量、
+  清算取下一张市价清算单), 以及按自身限价的单独扫盘(`walk.rs` 的 `alone_walks`, 结束方式多一种 `limitReached`)。不算 together、
+  不做连锁情景。
+- **两个口径的距离**: 节点 mark(账户 owner 的重放)和本地预测 mark(本地 mark 快照, 经查询通道接给账户 owner); 本地可为负。
+  任一口径在订阅距离内即收录。
+- **分档整帧**(`forced_flow_owner.rs`): 订阅按距离归入 10/100/1000 bp 三档, 有需求的(币, 档)分别每 100ms / 1s / 5s 跑一次两段流水线
+  (读取任务锁内复制区间条件单 → owner 按仓位算数量 → 读取任务锁内复制对手盘、锁外逐条扫), 内容变了才发新 `seq` 的整帧(扫盘盘口的
+  高度时间不算内容)。本地腿失效(含通道已关、owner 还没收到通知)时先立即发撤回帧: 去掉本地口径, 条目的本地距离置空, 只靠本地口径
+  收录的条目退出; 有效性一变, 无论流水线在哪一步都立即重算, 旧读取作废; 扫盘期间盘口失信 → 扫盘作废、条件单部分 incomplete
+  (审查 000460 r1/r2)。HTTP 和新订阅都要启动时间不早于请求的计算结果: 进行中的计算不作废, 先服务它启动前到的请求, 再接一轮服务后到的
+  (审查 000460 r2); owner 不等待自己。条件单表的区间读顺带给出未激活(`triggerPx` 0)的追踪止损, 计入 `unplaced`; WS 订阅的未知字段
+  拒订。
+- **过滤与汇总**(`forced_flow_view.rs`): `sources`、`excludeCoins`、`minNotionalUsd`(默认 1 万 USD, 只过滤条目); 汇总按 (方向, 买卖)
+  分 1–1000 bp 九档, 两个口径各一套。条件单表不完整(缺口、截断、盘口失信)时条件单部分标 `incomplete`, 清算部分照常。
+- **接口**: WS `extForcedFlow`, `GET /extForcedFlow`; `extLiquidationCandidates` 不变。
+
 ## 2026-10-21 本地 mark 第 2 批: 节点状态导出 + 计算 + `extMarkPrices`(设计 000454 r2)
 
 - **节点状态**: 账户 owner 在每个已应用块之后(以及种子重建状态时)经 `watch` 发布主站节点价格快照 `NativePriceSnapshot`
