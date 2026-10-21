@@ -1286,8 +1286,9 @@ mod tests {
     fn lines_skipped_while_positioning_withhold_the_view() {
         let dir = std::env::temp_dir().join(format!("accounts_start_skip_test_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("10");
+        let day_dir = dir.join("hourly/20261021");
+        std::fs::create_dir_all(&day_dir).unwrap();
+        let file = day_dir.join("10");
         std::fs::write(&file, ledger_line(1_100)).unwrap();
         let (tx, mut inputs) = mpsc::channel(16);
         let stream = LineStream {

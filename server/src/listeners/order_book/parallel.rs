@@ -11,7 +11,7 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
@@ -131,6 +131,27 @@ pub(crate) enum FileLayout {
     ReplicaSessions,
 }
 
+impl FileLayout {
+    /// Notification paths must name a data leaf, even when a short-lived path has vanished before delivery.
+    /// A metadata `is_dir()` check alone treats a vanished directory as a file. At the 2026-10-21 node restart,
+    /// `<stream>/20261021` stole the live hourly cursor; falling back to the hour then replayed its entire prefix.
+    fn contains_file(self, base: &Path, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(base) else { return false; };
+        let mut parts = relative.components();
+        let (Some(Component::Normal(first)), Some(Component::Normal(day)),
+            Some(Component::Normal(leaf)), None) = (parts.next(), parts.next(), parts.next(), parts.next())
+        else { return false; };
+        let Some(day) = day.to_str() else { return false; };
+        if day.len() != 8 || !day.bytes().all(|byte| byte.is_ascii_digit()) { return false; }
+        let Some(leaf) = leaf.to_str() else { return false; };
+        if leaf.is_empty() || !leaf.bytes().all(|byte| byte.is_ascii_digit()) { return false; }
+        match self {
+            Self::Hourly => first == "hourly" && leaf.parse::<u8>().is_ok_and(|hour| hour < 24),
+            Self::ReplicaSessions => leaf.parse::<u64>().is_ok(),
+        }
+    }
+}
+
 /// The child directory with the greatest name.
 fn newest_child_dir(dir: &Path) -> Option<PathBuf> {
     std::fs::read_dir(dir).ok()?.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).max()
@@ -143,6 +164,7 @@ fn latest_replica_file(base_dir: &Path) -> Option<PathBuf> {
         .ok()?
         .flatten()
         .filter_map(|entry| Some((entry.file_name().to_str()?.parse::<u64>().ok()?, entry.path())))
+        .filter(|(_, path)| FileLayout::ReplicaSessions.contains_file(base_dir, path) && path.is_file())
         .max_by_key(|(first_height, _)| *first_height)
         .map(|(_, path)| path)
 }
@@ -230,7 +252,7 @@ impl FileReader {
         if let Ok(entries) = std::fs::read_dir(&day_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() {
+                if self.layout.contains_file(&self.base_dir, &path) && path.is_file() {
                     if let Ok(metadata) = path.metadata() {
                         if let Ok(mtime) = metadata.modified() {
                             if latest_mtime.is_none() || mtime > latest_mtime.unwrap() {
@@ -296,6 +318,16 @@ impl FileReader {
         let latest_mtime = latest.metadata().and_then(|m| m.modified()).ok()?;
         let current_mtime = current_meta.modified().ok()?;
         (latest_mtime > current_mtime).then_some(latest)
+    }
+
+    /// Filter inotify hints before they can replace a live cursor. Missing paths that do name a data file still
+    /// reach the normal open/drain error handling, so a genuine lost file is not silently treated as harmless.
+    fn notified_file<'a>(&self, event: &'a Event) -> Option<&'a PathBuf> {
+        if !(event.kind.is_create() || event.kind.is_modify())
+            || matches!(event.kind, notify::EventKind::Create(notify::event::CreateKind::Folder))
+        { return None; }
+        let path = event.paths.first()?;
+        (self.layout.contains_file(&self.base_dir, path) && !path.is_dir()).then_some(path)
     }
 
     /// Process file modification - read new data and return lines
@@ -716,12 +748,7 @@ where
             // Wait for inotify events (with fallback timeout)
             match event_rx.recv_timeout(poll_interval) {
                 Ok(Ok(event)) => {
-                    if event.kind.is_create() || event.kind.is_modify() {
-                        let path = &event.paths[0];
-                        if path.is_dir() {
-                            continue;
-                        }
-
+                    if let Some(path) = reader.notified_file(&event) {
                         if event.kind.is_create() {
                             info!("{} new file: {:?}", name, path.file_name());
                             if !reader.on_create(path, &send) {
@@ -924,7 +951,7 @@ mod tests {
     fn test_line_watcher_reports_the_positioning_skip_only_when_asked() {
         for start_skip_is_loss in [true, false] {
             let dir = test_dir(&format!("start_skip_{start_skip_is_loss}"));
-            let path = dir.join("10");
+            let path = hourly_file(&dir, "20261021", "10");
             append(&path, "{\"old\":0}\n");
             let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
             let stream = test_stream(dir, start_skip_is_loss);
@@ -1528,7 +1555,7 @@ mod tests {
     #[test]
     fn test_line_watcher_hands_a_rotation_backlog_to_a_slow_consumer() {
         let dir = test_dir("slow_consumer");
-        let old = dir.join("0");
+        let old = hourly_file(&dir, "20261021", "0");
         append(&old, "");
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
         let handle = spawn_line_watcher(test_stream(dir.clone(), false), tx, None, |line| line, || "DESYNC".to_string(), None);
@@ -1537,7 +1564,7 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         let backlog: Vec<String> = (0..40).map(|n| format!("{{\"n\":{n},\"x\":\"{}\"}}", "b".repeat(1 << 19))).collect();
         append(&old, &(backlog.join("\n") + "\n"));
-        append(&dir.join("1"), "{\"new\":1}\n");
+        append(&hourly_file(&dir, "20261021", "1"), "{\"new\":1}\n");
         let expected: Vec<String> = backlog.into_iter().chain(["{\"new\":1}".to_string()]).collect();
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut received = Vec::new();
@@ -1559,6 +1586,68 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Live restart sample: the ephemeral date path must not steal the hour cursor or discard a partial row.
+    #[test]
+    fn test_vanished_non_stream_notification_preserves_hourly_cursor() {
+        let dir = test_dir("vanished_notification");
+        let path = hourly_file(&dir, "20261021", "14");
+        append(&path, "{\"old\":0}\n");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&path);
+        assert!(reader.on_modify().is_empty());
+        append(&path, "{\"next\":");
+        assert!(reader.on_modify().is_empty());
+        let position = reader.file_position;
+        for temporary in [dir.join("20261021"), dir.join("hourly/20261022")] {
+            std::fs::create_dir_all(&temporary).unwrap();
+            std::fs::remove_dir(&temporary).unwrap();
+            assert!(!temporary.is_dir(), "reproduces the old metadata-only filter's false result");
+            for kind in [notify::EventKind::Create(notify::event::CreateKind::Any),
+                notify::EventKind::Modify(notify::event::ModifyKind::Any)]
+            {
+                let event = Event::new(kind).add_path(temporary.clone());
+                if let Some(path) = reader.notified_file(&event) { switch_collecting(&mut reader, path); }
+            }
+        }
+        assert_eq!(reader.current_path.as_ref(), Some(&path));
+        assert_eq!(reader.file_position, position);
+        assert_eq!(reader.partial_line, b"{\"next\":");
+        assert!(!reader.take_desynced());
+        assert_eq!(reader.periodic_check(), None, "no fallback that replays the hour from zero");
+        append(&path, "1}\n");
+        assert_eq!(reader.on_modify(), vec!["{\"next\":1}".to_string()]);
+        assert!(reader.on_modify().is_empty(), "each row is delivered once");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_stream_notifications_retain_real_rotation_replacement_and_loss_paths() {
+        let dir = test_dir("notification_layout");
+        for (layout, relative) in [(FileLayout::Hourly, "hourly/20261021/14"),
+            (FileLayout::ReplicaSessions, "2026-10-21T14:02:07Z/20261021/1192000000")]
+        {
+            let reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, layout);
+            let path = dir.join(relative);
+            for kind in [notify::EventKind::Create(notify::event::CreateKind::File),
+                notify::EventKind::Modify(notify::event::ModifyKind::Any)]
+            {
+                let event = Event::new(kind).add_path(path.clone());
+                assert_eq!(reader.notified_file(&event), Some(&path), "even a vanished real leaf must report loss");
+            }
+            let event = Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder)).add_path(path);
+            assert_eq!(reader.notified_file(&event), None, "a known directory is never a data leaf");
+        }
+        let reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        for relative in ["hourly/20261021/24", "hourly/20261021/14.tmp", "hourly/bad/14", "other/20261021/14",
+            "hourly/20261021/14/child", "../hourly/20261021/14"]
+        {
+            let event = Event::new(notify::EventKind::Create(notify::event::CreateKind::Any)).add_path(dir.join(relative));
+            assert_eq!(reader.notified_file(&event), None, "{relative}");
+        }
+        assert_eq!(reader.notified_file(&Event::new(notify::EventKind::Any)), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// `replica_cmds`: the newest session and day by name, then the greatest first height (not the greatest name).
     #[test]
     fn test_replica_layout_follows_files_and_sessions() {
@@ -1568,6 +1657,7 @@ mod tests {
         append(&day.join("999"), "");
         append(&day.join("1000"), "");
         append(&day.join("notes"), "");
+        std::fs::create_dir(day.join("2000")).unwrap();
         let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::ReplicaSessions);
         assert_eq!(reader.find_latest_file(), Some(day.join("1000")), "heights compare as numbers");
         reader.start_tracking(&day.join("1000"));
