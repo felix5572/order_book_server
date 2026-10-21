@@ -22,6 +22,11 @@
 //! lists under their own oids (a modify's successor) -, and every other status of the parent leaves them waiting until
 //! their own statuses end them (review 000463 r1 P2-1: a parent's `canceled` activated them until their own came).
 //!
+//! A modify of a waiting child keeps its successor waiting: the modify opens the new oid and cancels the old one right
+//! after it, hash-less, in the block (bm 10-21 hour 11: 129,306 of 129,342 such pairs were modifies by oid or cloid,
+//! all 111 of trigger orders; a bot's `batchModify` of a limit order with its TP and SL moves all three so, and the new
+//! parent's `open` lists no children).
+//!
 //! Complete means: the last install's dump carried the section for every market and every order of it converted
 //! (an empty section is a complete empty table), and every live trigger order since parsed. Anything else is a gap,
 //! kept until the next complete install; the orders the table does hold are still served (`/untriggeredOrders`).
@@ -36,7 +41,7 @@ use crate::{
         Coin, InnerOrder, Oid, Px, Side,
         multi_book::{ParentLinks, TriggerSection},
     },
-    prelude::Result,
+    prelude::{Error, Result},
     types::{L4Order, inner::InnerL4Order},
 };
 
@@ -55,6 +60,9 @@ pub(crate) enum TriggerGap {
     /// A child a live parent announced did not open in its block: it may be held as a trigger order the node does not
     /// trigger yet, or its status was missed.
     ChildUnmatched,
+    /// A trigger order is held for one status (a modify's successor of a waiting child, or not): out of the band until
+    /// that status comes (review 000464 r1). Not kept: it ends with the next status.
+    SuccessorPending,
 }
 
 impl TriggerGap {
@@ -65,6 +73,7 @@ impl TriggerGap {
             Self::SnapshotParseFailed => "snapshotParseFailed",
             Self::LiveParseFailed => "liveParseFailed",
             Self::ChildUnmatched => "childUnmatched",
+            Self::SuccessorPending => "successorPending",
         }
     }
 }
@@ -205,12 +214,52 @@ struct Families {
     children_of: FxHashMap<u64, Vec<u64>>,
     /// The waiting children the table holds, with their trigger price as parsed.
     waiting: FxHashMap<u64, (Px, Arc<InnerL4Order>)>,
+    /// How many of them each account holds per coin: whether its new trigger order may succeed one.
+    owners: FxHashMap<Address, FxHashMap<String, usize>>,
 }
 
 impl Families {
     fn link(&mut self, child: u64, parent: u64) {
         self.parent_of.insert(child, parent);
         self.children_of.entry(parent).or_default().push(child);
+    }
+
+    /// A modify's successor of a waiting child waits for the same parent (on its list while the parent is live).
+    fn inherit(&mut self, old: u64, new: u64) {
+        let Some(&parent) = self.parent_of.get(&old) else { return };
+        self.parent_of.insert(new, parent);
+        if let Some(children) = self.children_of.get_mut(&parent) {
+            children.push(new);
+        }
+    }
+
+    fn hold(&mut self, trigger_px: Px, order: Arc<InnerL4Order>) {
+        let (user, coin) = (order.user, order.coin.value());
+        if self.waiting.insert(order.oid, (trigger_px, order)).is_none() {
+            *self.owners.entry(user).or_default().entry(coin).or_default() += 1;
+        }
+    }
+
+    fn take(&mut self, oid: u64) -> Option<(Px, Arc<InnerL4Order>)> {
+        let taken = self.waiting.remove(&oid)?;
+        let user = taken.1.user;
+        if let Some(coins) = self.owners.get_mut(&user) {
+            let coin = taken.1.coin.value();
+            if let Some(count) = coins.get_mut(&coin) {
+                *count -= 1;
+                if *count == 0 {
+                    coins.remove(&coin);
+                }
+            }
+            if coins.is_empty() {
+                self.owners.remove(&user);
+            }
+        }
+        Some(taken)
+    }
+
+    fn holds_any(&self, user: Address, coin: &str) -> bool {
+        self.owners.get(&user).is_some_and(|coins| coins.contains_key(coin))
     }
 
     /// The parent left: its children and `listed` (those its status lists under their own oids), unlinked, and those
@@ -222,7 +271,7 @@ impl Families {
             .chain(listed)
             .filter_map(|child| {
                 self.parent_of.remove(&child);
-                self.waiting.remove(&child)
+                self.take(child)
             })
             .collect()
     }
@@ -236,8 +285,21 @@ impl Families {
     /// was held waiting.
     fn forget(&mut self, child: u64) -> bool {
         self.parent_of.remove(&child);
-        self.waiting.remove(&child).is_some()
+        self.take(child).is_some()
     }
+}
+
+/// A trigger order opened by an account holding a waiting child of its coin, held for one status: a modify's successor
+/// is told by the next line (the old child's hash-less `canceled`); out of the band meanwhile, so a read between the
+/// two lines (two receive batches) does not list it.
+#[derive(Debug, Clone)]
+struct Successor {
+    height: u64,
+    user: Address,
+    coin: String,
+    oid: u64,
+    /// As `open` takes it (an error kept as text: the table stays `Clone`).
+    order: std::result::Result<InnerL4Order, String>,
 }
 
 /// A child as its parent's live `open` lists it - under the parent's oid -, to be told by its own `open` line, which
@@ -285,6 +347,7 @@ pub(crate) struct TriggerTable {
     coins: FxHashMap<Coin, CoinTriggers>,
     families: Families,
     expected: ExpectedChildren,
+    successor: Option<Successor>,
     /// Kept when a coin's orders are all gone, so a coin that gets orders again does not reuse a version.
     versions: FxHashMap<Coin, u64>,
     generation: u64,
@@ -318,6 +381,7 @@ impl TriggerTable {
             coins: FxHashMap::default(),
             families: Families::default(),
             expected: ExpectedChildren::default(),
+            successor: None,
             versions: FxHashMap::default(),
             generation: 0,
             availability,
@@ -371,7 +435,7 @@ impl TriggerTable {
         let trigger_px = Px::parse_from_str(&order.trigger_px)?;
         if self.families.parent_of.contains_key(&order.oid) {
             self.unindex(order.coin.borrow(), &order.oid());
-            self.families.waiting.insert(order.oid, (trigger_px, Arc::new(order)));
+            self.families.hold(trigger_px, Arc::new(order));
             return Ok(());
         }
         self.index(trigger_px, Arc::new(order));
@@ -426,8 +490,9 @@ impl TriggerTable {
     /// parent's children; any other status of an oid ends its order, a parent's `filled` or `marginCanceled` releasing
     /// the children waiting for it. Whether a held order left (the order statuses hot path: allocation-free for an order
     /// without children or announced siblings).
-    pub(crate) fn on_status(&mut self, height: u64, user: Address, status: &str, order: &L4Order) -> bool {
+    pub(crate) fn on_status(&mut self, height: u64, user: Address, status: &str, hash: Option<&str>, order: &L4Order) -> bool {
         self.expire_expected(height);
+        self.settle_successor(height, user, status, hash, order);
         let oid = Oid::new(order.oid);
         if status == "open" {
             if !order.children.is_empty() && self.tracks(&order.coin) {
@@ -435,7 +500,13 @@ impl TriggerTable {
             }
             if order.is_trigger && self.tracks(&order.coin) {
                 self.claim_parent(user, order);
-                self.open(InnerL4Order::try_from((user, order.clone())), &order.coin, &oid);
+                let parsed = InnerL4Order::try_from((user, order.clone()));
+                if hash.is_some() && !self.families.parent_of.contains_key(&order.oid) && self.families.holds_any(user, &order.coin) {
+                    let order_text = parsed.map_err(|err| err.to_string());
+                    self.successor = Some(Successor { height, user, coin: order.coin.clone(), oid: order.oid, order: order_text });
+                    return false;
+                }
+                self.open(parsed, &order.coin, &oid);
             }
             return false;
         }
@@ -446,6 +517,17 @@ impl TriggerTable {
             _ => self.families.leave_waiting(order.oid),
         }
         self.close(&order.coin, &oid)
+    }
+
+    /// The order held for one status: the successor of the waiting child this status cancels hash-less right after it
+    /// (a modify) waits for the same parent; any other order opens as it came.
+    fn settle_successor(&mut self, height: u64, user: Address, status: &str, hash: Option<&str>, order: &L4Order) {
+        let Some(successor) = self.successor.take() else { return };
+        let modifies = status == "canceled" && hash.is_none() && height == successor.height && user == successor.user && order.coin == successor.coin;
+        if modifies {
+            self.families.inherit(order.oid, successor.oid);
+        }
+        self.open(successor.order.map_err(Error::from), &successor.coin, &Oid::new(successor.oid));
     }
 
     /// The parent left the book: its children take part.
@@ -539,7 +621,8 @@ impl TriggerTable {
     }
 
     pub(crate) fn count(&self) -> usize {
-        self.coins.values().map(|coin| coin.place_of.len()).sum::<usize>() + self.families.waiting.len()
+        let held_back = self.successor.as_ref().is_some_and(|successor| successor.order.is_ok());
+        self.coins.values().map(|coin| coin.place_of.len()).sum::<usize>() + self.families.waiting.len() + usize::from(held_back)
     }
 
     /// This install's table replaces `previous`: the next generation; when the dump carried no trigger section at all
@@ -552,6 +635,7 @@ impl TriggerTable {
         if self.track && self.section_absent && self.count() == 0 && previous.count() > 0 {
             self.coins.clone_from(&previous.coins);
             self.families.clone_from(&previous.families);
+            self.successor.clone_from(&previous.successor);
             log::info!("Snapshot carried no trigger section; kept {} untriggered trigger orders from the previous state", self.count());
         }
     }
@@ -559,15 +643,27 @@ impl TriggerTable {
     /// Whether the orders held for `coin` (all coins: `None`) are all its standing ones: a coin of a market the table
     /// does not keep is never complete; all coins means all of the kept markets.
     pub(crate) fn availability(&self, coin: Option<&Coin>) -> TriggerAvailability {
+        let held_back = |coin: &str| self.successor.as_ref().is_some_and(|successor| successor.coin == coin);
         match coin {
             Some(coin) if !self.tracks(coin.borrow()) => TriggerAvailability::Gap(TriggerGap::TrackingDisabled),
+            // a kept gap stands over a pending one
+            _ if self.availability != TriggerAvailability::Complete => self.availability,
+            Some(coin) if held_back(coin.borrow()) => TriggerAvailability::Gap(TriggerGap::SuccessorPending),
+            None if self.successor.is_some() => TriggerAvailability::Gap(TriggerGap::SuccessorPending),
             _ => self.availability,
         }
     }
 
     /// All coins' orders, or one coin's, the waiting children with them.
     pub(crate) fn snapshot(&self, coin: Option<&Coin>) -> Vec<Arc<InnerL4Order>> {
-        let waiting = self.families.waiting.values().filter(|(_, order)| coin.is_none_or(|coin| order.coin == *coin)).map(|(_, order)| order.clone());
+        let held_back = self.successor.as_ref().and_then(|successor| successor.order.as_ref().ok()).map(|order| Arc::new(order.clone()));
+        let waiting = self
+            .families
+            .waiting
+            .values()
+            .map(|(_, order)| order.clone())
+            .chain(held_back)
+            .filter(|order| coin.is_none_or(|coin| order.coin == *coin));
         match coin {
             Some(coin) => self.coins.get(coin).map(|coin| coin.orders().cloned().collect::<Vec<_>>()).unwrap_or_default().into_iter().chain(waiting).collect(),
             None => self.coins.values().flat_map(|coin| coin.orders().cloned()).chain(waiting).collect(),
@@ -790,6 +886,8 @@ mod tests {
     }
 
     const USER: Address = Address::new([2; 20]);
+    /// An `open` carries its action's hash; a cancel or a fill none.
+    const HASH: Option<&str> = Some("0x01");
 
     /// The wire order of `stop`, or of a limit buy with `children` (each listed under `listed_oid`, `None`: its own).
     fn wire(order: &InnerL4Order) -> L4Order {
@@ -846,7 +944,7 @@ mod tests {
         let before = band(&table, "BTC", "100", "120", 10);
         assert_eq!((oids(&before), held(&table), table.count()), (vec![9], vec![2, 3, 9], 3));
         // the parent's partial fills say nothing; its `filled` lists the children under their own oids
-        assert!(!table.on_status(5, USER, "filled", &parent(1, &[&take_profit, &stop_loss], None)), "the parent is not a trigger order");
+        assert!(!table.on_status(5, USER, "filled", None, &parent(1, &[&take_profit, &stop_loss], None)), "the parent is not a trigger order");
         let after = band(&table, "BTC", "100", "120", 10);
         assert_eq!(oids(&after), vec![3, 9, 2]);
         assert!(after.version > before.version, "the band changed");
@@ -860,39 +958,39 @@ mod tests {
     fn live_children_wait_from_their_open_and_leave_or_take_part_with_their_parent() {
         let (take_profit, stop_loss) = (stop("BTC", 11, "110"), stop("BTC", 12, "105"));
         let mut table = table(TriggerSection::Complete(Vec::new()));
-        table.on_status(7, USER, "open", &parent(10, &[&take_profit, &stop_loss], Some(10)));
-        table.on_status(7, USER, "open", &wire(&take_profit));
-        table.on_status(7, USER, "open", &wire(&stop_loss));
+        table.on_status(7, USER, "open", HASH, &parent(10, &[&take_profit, &stop_loss], Some(10)));
+        table.on_status(7, USER, "open", HASH, &wire(&take_profit));
+        table.on_status(7, USER, "open", HASH, &wire(&stop_loss));
         assert_eq!((oids(&band(&table, "BTC", "100", "120", 10)), held(&table)), (Vec::<u64>::new(), vec![11, 12]));
         // a waiting child modified stays waiting
-        table.on_status(8, USER, "open", &wire(&stop("BTC", 12, "104")));
+        table.on_status(8, USER, "open", HASH, &wire(&stop("BTC", 12, "104")));
         assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), Vec::<u64>::new());
         // canceled with its parent: the parent's line releases nothing, the children's own remove them
-        table.on_status(9, USER, "canceled", &parent(10, &[&take_profit, &stop_loss], None));
+        table.on_status(9, USER, "canceled", None, &parent(10, &[&take_profit, &stop_loss], None));
         assert_eq!((oids(&band(&table, "BTC", "100", "120", 10)), held(&table)), (Vec::<u64>::new(), vec![11, 12]));
-        assert!(table.on_status(9, USER, "canceled", &wire(&take_profit)));
-        assert!(table.on_status(9, USER, "canceled", &wire(&stop_loss)));
+        assert!(table.on_status(9, USER, "canceled", None, &wire(&take_profit)));
+        assert!(table.on_status(9, USER, "canceled", None, &wire(&stop_loss)));
         assert_eq!(held(&table), Vec::<u64>::new());
 
         // a parent rejected or ended otherwise releases nothing either
         let (rejected_child, other_child) = (stop("BTC", 16, "110"), stop("BTC", 18, "110"));
-        table.on_status(10, USER, "open", &parent(15, &[&rejected_child], Some(15)));
-        table.on_status(10, USER, "open", &wire(&rejected_child));
-        table.on_status(10, USER, "open", &parent(17, &[&other_child], Some(17)));
-        table.on_status(10, USER, "open", &wire(&other_child));
-        table.on_status(10, USER, "perpMarginRejected", &parent(15, &[&rejected_child], None));
-        table.on_status(10, USER, "reduceOnlyCanceled", &parent(17, &[&other_child], None));
+        table.on_status(10, USER, "open", HASH, &parent(15, &[&rejected_child], Some(15)));
+        table.on_status(10, USER, "open", HASH, &wire(&rejected_child));
+        table.on_status(10, USER, "open", HASH, &parent(17, &[&other_child], Some(17)));
+        table.on_status(10, USER, "open", HASH, &wire(&other_child));
+        table.on_status(10, USER, "perpMarginRejected", None, &parent(15, &[&rejected_child], None));
+        table.on_status(10, USER, "reduceOnlyCanceled", None, &parent(17, &[&other_child], None));
         assert_eq!((oids(&band(&table, "BTC", "100", "120", 10)), held(&table)), (Vec::<u64>::new(), vec![16, 18]));
-        assert!(table.on_status(10, USER, "canceled", &wire(&rejected_child)));
-        assert!(table.on_status(10, USER, "canceled", &wire(&other_child)));
+        assert!(table.on_status(10, USER, "canceled", None, &wire(&rejected_child)));
+        assert!(table.on_status(10, USER, "canceled", None, &wire(&other_child)));
 
         let survivor = stop("BTC", 21, "110");
-        table.on_status(10, USER, "open", &parent(20, &[&survivor], Some(20)));
-        table.on_status(10, USER, "open", &wire(&survivor));
+        table.on_status(10, USER, "open", HASH, &parent(20, &[&survivor], Some(20)));
+        table.on_status(10, USER, "open", HASH, &wire(&survivor));
         assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), Vec::<u64>::new());
-        table.on_status(11, USER, "marginCanceled", &parent(20, &[&survivor], None));
+        table.on_status(11, USER, "marginCanceled", None, &parent(20, &[&survivor], None));
         assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![21]);
-        assert!(table.on_status(12, USER, "triggered", &wire(&survivor)));
+        assert!(table.on_status(12, USER, "triggered", None, &wire(&survivor)));
         assert_eq!(table.count(), 0);
     }
 
@@ -906,8 +1004,53 @@ mod tests {
         let mut next = table(TriggerSection::Absent);
         next.succeed(&first);
         assert_eq!(held(&next), vec![2]);
-        next.on_status(5, USER, "filled", &parent(1, &[&child], None));
+        next.on_status(5, USER, "filled", None, &parent(1, &[&child], None));
         assert_eq!(oids(&band(&next, "BTC", "100", "120", 10)), vec![2]);
+    }
+
+    /// An account holding a waiting child opens another trigger order of the coin: held for one status - served, out
+    /// of the band -, then opened as it came unless that status is the child's hash-less `canceled` of the block (a
+    /// modify: the successor waits).
+    #[test]
+    fn a_new_trigger_order_beside_a_waiting_child_is_told_by_the_next_status() {
+        let (child, other, successor) = (stop("BTC", 2, "110"), stop("BTC", 3, "108"), stop("BTC", 4, "111"));
+        let mut table = TriggerTable::seeded(TriggerSection::Complete(vec![child.clone()]), &ParentLinks::from_iter([(2, 1)]), Vec::new(), true, true);
+        table.on_status(7, USER, "open", HASH, &wire(&other));
+        assert_eq!((oids(&band(&table, "BTC", "100", "120", 10)), held(&table)), (Vec::<u64>::new(), vec![2, 3]), "held for one status");
+        // review 000464 r1: meanwhile the coin's band is not complete, another coin's is
+        assert_eq!(band(&table, "BTC", "100", "120", 10).availability, TriggerAvailability::Gap(TriggerGap::SuccessorPending));
+        assert_eq!(band(&table, "ETH", "100", "120", 10).availability, TriggerAvailability::Complete);
+        assert_eq!(table.availability(None), TriggerAvailability::Gap(TriggerGap::SuccessorPending));
+        // the next status is no modify of the child: the order opens as it came, the band complete again
+        table.on_status(7, USER, "open", HASH, &parent(9, &[], None));
+        let settled = band(&table, "BTC", "100", "120", 10);
+        assert_eq!((oids(&settled), settled.availability), (vec![3], TriggerAvailability::Complete));
+        // a modify of the child in another block, or a hashed cancel, is not its successor
+        table.on_status(8, USER, "open", HASH, &wire(&successor));
+        table.on_status(9, USER, "canceled", None, &wire(&child));
+        assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![3, 4]);
+        let (child, successor) = (stop("BTC", 12, "110"), stop("BTC", 14, "111"));
+        let mut table = TriggerTable::seeded(TriggerSection::Complete(vec![child.clone()]), &ParentLinks::from_iter([(12, 1)]), Vec::new(), true, true);
+        table.on_status(8, USER, "open", HASH, &wire(&successor));
+        table.on_status(8, USER, "canceled", HASH, &wire(&child));
+        assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![14]);
+        // the modify: the successor's `open`, then the child's hash-less `canceled` in the block
+        let (child, successor) = (stop("BTC", 22, "110"), stop("BTC", 24, "111"));
+        let mut table = TriggerTable::seeded(TriggerSection::Complete(vec![child.clone()]), &ParentLinks::from_iter([(22, 1)]), Vec::new(), true, true);
+        table.on_status(8, USER, "open", HASH, &wire(&successor));
+        table.on_status(8, USER, "canceled", None, &wire(&child));
+        let modified = band(&table, "BTC", "100", "120", 10);
+        assert_eq!((oids(&modified), held(&table), modified.availability), (Vec::<u64>::new(), vec![24], TriggerAvailability::Complete));
+        table.on_status(9, USER, "filled", None, &parent(1, &[&successor], None));
+        assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![24]);
+        // a kept gap stands while an order is held, and after
+        table.mark_gap(TriggerGap::LiveParseFailed);
+        table.on_status(10, USER, "open", HASH, &parent(30, &[&stop("BTC", 31, "110")], Some(30)));
+        table.on_status(10, USER, "open", HASH, &wire(&stop("BTC", 31, "110")));
+        table.on_status(10, USER, "open", HASH, &wire(&stop("BTC", 32, "109")));
+        assert_eq!(table.availability(None), TriggerAvailability::Gap(TriggerGap::LiveParseFailed));
+        table.on_status(10, USER, "filled", None, &parent(40, &[], None));
+        assert_eq!(table.availability(None), TriggerAvailability::Gap(TriggerGap::LiveParseFailed));
     }
 
     /// bm 10-21 block 1191742333: a modify of a parent cancels its oid - the line lists the children under their own
@@ -917,13 +1060,13 @@ mod tests {
     fn a_modified_parents_children_wait_for_its_successor() {
         let (stop_loss, take_profit) = (stop("BTC", 792, "105"), stop("BTC", 793, "110"));
         let mut table = table(TriggerSection::Complete(Vec::new()));
-        table.on_status(7, USER, "open", &parent(791, &[&stop_loss, &take_profit], Some(791)));
-        table.on_status(7, USER, "open", &wire(&stop_loss));
-        table.on_status(7, USER, "open", &wire(&take_profit));
-        table.on_status(8, USER, "canceled", &parent(791, &[&stop_loss, &take_profit], None));
-        table.on_status(8, USER, "open", &parent(78, &[], None));
+        table.on_status(7, USER, "open", HASH, &parent(791, &[&stop_loss, &take_profit], Some(791)));
+        table.on_status(7, USER, "open", HASH, &wire(&stop_loss));
+        table.on_status(7, USER, "open", HASH, &wire(&take_profit));
+        table.on_status(8, USER, "canceled", None, &parent(791, &[&stop_loss, &take_profit], None));
+        table.on_status(8, USER, "open", HASH, &parent(78, &[], None));
         assert_eq!((oids(&band(&table, "BTC", "100", "120", 10)), held(&table)), (Vec::<u64>::new(), vec![792, 793]));
-        table.on_status(9, USER, "filled", &parent(78, &[&stop_loss, &take_profit], None));
+        table.on_status(9, USER, "filled", None, &parent(78, &[&stop_loss, &take_profit], None));
         assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![792, 793]);
         assert!(table.families.parent_of.is_empty() && table.families.children_of.is_empty());
     }
@@ -936,22 +1079,22 @@ mod tests {
         let mut trigger_parent = wire(&stop("BTC", 30, "100"));
         trigger_parent.children = vec![serde_json::to_value(wire(&child)).unwrap()];
         let mut table = table(TriggerSection::Complete(Vec::new()));
-        table.on_status(7, USER, "open", &trigger_parent);
-        table.on_status(7, USER, "open", &wire(&child));
+        table.on_status(7, USER, "open", HASH, &trigger_parent);
+        table.on_status(7, USER, "open", HASH, &wire(&child));
         assert_eq!(oids(&band(&table, "BTC", "90", "120", 10)), vec![30]);
-        assert!(table.on_status(8, USER, "triggered", &trigger_parent));
+        assert!(table.on_status(8, USER, "triggered", None, &trigger_parent));
         assert_eq!((oids(&band(&table, "BTC", "90", "120", 10)), held(&table)), (Vec::<u64>::new(), vec![31]));
-        assert!(table.on_status(8, USER, "canceled", &wire(&child)));
-        table.on_status(9, USER, "filled", &trigger_parent);
+        assert!(table.on_status(8, USER, "canceled", None, &wire(&child)));
+        table.on_status(9, USER, "filled", None, &trigger_parent);
         assert_eq!(table.count(), 0, "the parent's fill brings back no canceled child");
 
         let unmatched = crate::metrics::UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.get();
-        table.on_status(20, USER, "open", &parent(40, &[&stop("BTC", 41, "110")], Some(40)));
+        table.on_status(20, USER, "open", HASH, &parent(40, &[&stop("BTC", 41, "110")], Some(40)));
         // its own `open` differs (another trigger price): not the announced child
-        table.on_status(20, USER, "open", &wire(&stop("BTC", 41, "111")));
+        table.on_status(20, USER, "open", HASH, &wire(&stop("BTC", 41, "111")));
         assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![41]);
         assert_eq!(table.availability(None), TriggerAvailability::Complete);
-        table.on_status(21, USER, "open", &wire(&stop("BTC", 50, "110")));
+        table.on_status(21, USER, "open", HASH, &wire(&stop("BTC", 50, "110")));
         assert_eq!(crate::metrics::UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.get(), unmatched + 1);
         assert!(table.expected.parents.is_empty());
         // review 000463 r1 P2-2: the active set is no longer known
@@ -960,7 +1103,7 @@ mod tests {
         let spot_child = stop("@107", 61, "110");
         let mut spot_parent = parent(60, &[&spot_child], Some(60));
         spot_parent.coin = "@107".to_string();
-        table.on_status(30, USER, "open", &spot_parent);
+        table.on_status(30, USER, "open", HASH, &spot_parent);
         assert!(table.expected.parents.is_empty());
     }
 }

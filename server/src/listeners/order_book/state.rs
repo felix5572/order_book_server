@@ -426,7 +426,7 @@ impl OrderBookState {
             // Maintain the untriggered-orders side table. "open" + is_trigger is a pending trigger order (never rests on
             // the book); any other status is terminal for the untriggered phase (canceled / triggered / filled /
             // rejected / ...) and evicts the oid; a parent's statuses also announce and release its children.
-            if self.triggers.on_status(height, order_status.user, &order_status.status, &order_status.order) {
+            if self.triggers.on_status(height, order_status.user, &order_status.status, order_status.hash.as_deref(), &order_status.order) {
                 // Labeled by status so a future non-terminal status string that starts wrongly evicting live triggers
                 // shows up in Prometheus immediately (today's vocabulary is all terminal-for-the-oid).
                 crate::metrics::UNTRIGGERED_EVICTIONS_TOTAL.with_label_values(&[&order_status.status]).inc();
@@ -1059,6 +1059,61 @@ mod tests {
         assert_eq!((in_band(&state), state.untriggered_count()), (Vec::<u64>::new(), 1), "held, waiting");
         state.apply_order_statuses_hft(line(parent_filled)).unwrap();
         assert_eq!(in_band(&state), vec![581_250_704_215]);
+    }
+
+    /// bm 10-21 block 1191902954: a bot's `batchModify` of its PONS limit sale 039 with its take profit 040 and stop
+    /// 041, both waiting: each modify opens the new oid and cancels the old one right after it, the new parent's `open`
+    /// lists no children. The new take profit and stop wait on, and the new parent's `filled` (listing them) releases
+    /// them.
+    #[test]
+    fn a_batch_modify_of_a_parent_and_its_children_keeps_them_waiting() {
+        let lines: Vec<Batch<NodeDataOrderStatus>> = [
+            r#"{"local_time":"2026-10-21T11:57:03.342485591","block_time":"2026-10-21T11:57:02.971521710","block_number":1191902954,"events":[{"time":"2026-10-21T11:57:02.971521710","user":"0xb44d29c230212736a33a2534cb44f3443d9d9a2f","hash":"0x5011cdbb5abcd2ba518b04470afeea0201a900a0f5bff18cf3da790e19b0aca4","builder":null,"status":"open","order":{"coin":"PONS","side":"A","limitPx":"0.29881","sz":"2424.0","oid":581397851524,"timestamp":1792583822971,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"2424.0","tif":"Alo","cloid":null}}]}"#,
+            r#"{"local_time":"2026-10-21T11:57:03.342488627","block_time":"2026-10-21T11:57:02.971521710","block_number":1191902954,"events":[{"time":"2026-10-21T11:57:02.971521710","user":"0xb44d29c230212736a33a2534cb44f3443d9d9a2f","hash":null,"builder":null,"status":"canceled","order":{"coin":"PONS","side":"A","limitPx":"0.30014","sz":"2413.0","oid":581395972039,"timestamp":1792583642862,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[{"coin":"PONS","side":"B","limitPx":"0.29413","sz":"2413.0","oid":581395972040,"timestamp":1792583642862,"triggerCondition":"Price below 0.29413","isTrigger":true,"triggerPx":"0.29413","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Take Profit Market","origSz":"2413.0","tif":null,"cloid":null},{"coin":"PONS","side":"B","limitPx":"0.36016","sz":"2413.0","oid":581395972041,"timestamp":1792583642862,"triggerCondition":"Price above 0.36016","isTrigger":true,"triggerPx":"0.36016","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"2413.0","tif":null,"cloid":null}],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"2413.0","tif":"Alo","cloid":null}}]}"#,
+            r#"{"local_time":"2026-10-21T11:57:03.342499156","block_time":"2026-10-21T11:57:02.971521710","block_number":1191902954,"events":[{"time":"2026-10-21T11:57:02.971521710","user":"0xb44d29c230212736a33a2534cb44f3443d9d9a2f","hash":"0x5011cdbb5abcd2ba518b04470afeea0201a900a0f5bff18cf3da790e19b0aca4","builder":null,"status":"open","order":{"coin":"PONS","side":"B","limitPx":"0.29283","sz":"2424.0","oid":581397851525,"timestamp":1792583822971,"triggerCondition":"Price below 0.29283","isTrigger":true,"triggerPx":"0.29283","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Take Profit Market","origSz":"2424.0","tif":null,"cloid":null}}]}"#,
+            r#"{"local_time":"2026-10-21T11:57:03.342503595","block_time":"2026-10-21T11:57:02.971521710","block_number":1191902954,"events":[{"time":"2026-10-21T11:57:02.971521710","user":"0xb44d29c230212736a33a2534cb44f3443d9d9a2f","hash":null,"builder":null,"status":"canceled","order":{"coin":"PONS","side":"B","limitPx":"0.29413","sz":"2413.0","oid":581395972040,"timestamp":1792583642862,"triggerCondition":"Price below 0.29413","isTrigger":true,"triggerPx":"0.29413","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Take Profit Market","origSz":"2413.0","tif":null,"cloid":null}}]}"#,
+            r#"{"local_time":"2026-10-21T11:57:03.342508354","block_time":"2026-10-21T11:57:02.971521710","block_number":1191902954,"events":[{"time":"2026-10-21T11:57:02.971521710","user":"0xb44d29c230212736a33a2534cb44f3443d9d9a2f","hash":"0x5011cdbb5abcd2ba518b04470afeea0201a900a0f5bff18cf3da790e19b0aca4","builder":null,"status":"open","order":{"coin":"PONS","side":"B","limitPx":"0.35857","sz":"2424.0","oid":581397851526,"timestamp":1792583822971,"triggerCondition":"Price above 0.35857","isTrigger":true,"triggerPx":"0.35857","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"2424.0","tif":null,"cloid":null}}]}"#,
+            r#"{"local_time":"2026-10-21T11:57:03.342510928","block_time":"2026-10-21T11:57:02.971521710","block_number":1191902954,"events":[{"time":"2026-10-21T11:57:02.971521710","user":"0xb44d29c230212736a33a2534cb44f3443d9d9a2f","hash":null,"builder":null,"status":"canceled","order":{"coin":"PONS","side":"B","limitPx":"0.36016","sz":"2413.0","oid":581395972041,"timestamp":1792583642862,"triggerCondition":"Price above 0.36016","isTrigger":true,"triggerPx":"0.36016","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"2413.0","tif":null,"cloid":null}}]}"#
+        ]
+        .iter()
+        .map(|text| serde_json::from_str(text).unwrap())
+        .collect();
+        // the old take profit and stop, waiting for 039 as the dump says
+        let old_children: Vec<InnerL4Order> = lines
+            .iter()
+            .flat_map(Batch::events_ref)
+            .filter(|status| status.status == "canceled" && status.order.is_trigger)
+            .map(|status| InnerL4Order::try_from((status.user, status.order.clone())).unwrap())
+            .collect();
+        let parents = ParentLinks::from_iter(old_children.iter().map(|child| (child.oid, 581_395_972_039)));
+        let mut state =
+            OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Complete(old_children), &parents, 0, 0, true, false, true);
+        let pons = Coin::new("PONS");
+        let in_band = |state: &OrderBookState| -> Vec<u64> {
+            state.untriggered_in_band(&pons, Px::parse_from_str("0.2").unwrap(), Px::parse_from_str("0.4").unwrap(), 10).2.orders.iter().map(|(_, order)| order.oid).collect()
+        };
+        assert_eq!(in_band(&state), Vec::<u64>::new());
+        for line in lines.clone() {
+            state.apply_order_statuses_hft(line).unwrap();
+        }
+        let held = |state: &OrderBookState| -> Vec<u64> {
+            let mut oids: Vec<u64> = state.untriggered_snapshot(Some(&pons)).2.iter().map(|order| order.oid).collect();
+            oids.sort_unstable();
+            oids
+        };
+        assert_eq!((in_band(&state), held(&state)), (Vec::<u64>::new(), vec![581_397_851_525, 581_397_851_526]));
+        // the new parent fills: its line lists the children under their own oids
+        let mut filled = lines[0].events_ref()[0].clone();
+        filled.status = "filled".to_string();
+        filled.hash = None;
+        filled.order.children = lines
+            .iter()
+            .flat_map(Batch::events_ref)
+            .filter(|status| status.status == "open" && status.order.is_trigger)
+            .map(|status| serde_json::to_value(&status.order).unwrap())
+            .collect();
+        state.apply_order_statuses_hft(make_status_batch(vec![filled])).unwrap();
+        assert_eq!(in_band(&state), vec![581_397_851_525, 581_397_851_526]);
     }
 
     #[test]
