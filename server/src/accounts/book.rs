@@ -1806,7 +1806,7 @@ mod tests {
         let ReplayCheck::Checked { cash: check, .. } = book.install_anchor(anchor_with(1_004, -11_997_000_000)).replay_check else {
             panic!("a complete interval is checked")
         };
-        let compared = |exact, moved, mismatched| Compared { exact, moved, mismatched };
+        let compared = |exact, moved, mismatched| Compared { exact, moved, mismatched, estimated: 0 };
         let both_exact = (compared(2, 1, 0), 1);
         assert_eq!((check.compared["perDex"], check.stopped["portfolioMargin"]), both_exact, "HOLDER moved, ISOLATED did not");
         book.apply_block_actions(block_actions(1_005, &[]));
@@ -1831,7 +1831,7 @@ mod tests {
 
     /// A replayed row of a pool of one, read without marks.
     fn replayed(height: u64, isolated: bool, liquidation_px: LiquidationPx) -> Replayed {
-        let row = ReplayedRow { isolated, pool_positions: 1, liquidation_px };
+        let row = ReplayedRow { isolated, pool_positions: 1, liquidation_px, cash_estimated: false };
         Replayed { height, row, mark: RowMark { mark_raw: None, distance_bps: None } }
     }
 
@@ -1961,7 +1961,7 @@ mod tests {
         let btc_table = fixture_table(CURRENT_TABLE);
         let btc = HeldAtMark { size_raw: 100, size_decimals: 5, mark_raw: 828_576, table: &btc_table };
         let expected = solve_held(-12_000.001, &[btc], 1_000_000.0, &fixture_table(ANCHOR_TABLE));
-        assert_eq!(shared.row, ReplayedRow { isolated: false, pool_positions: 2, liquidation_px: expected.clone() });
+        assert_eq!(shared.row, ReplayedRow { isolated: false, pool_positions: 2, liquidation_px: expected.clone(), cash_estimated: false });
         assert_eq!(shared.mark, RowMark::of(1_000_000, 0, Some(4_000), &expected));
         assert!(shared.mark.distance_bps.is_some());
         let earlier = ListedMarks { height: 1_000, marks: both.marks.clone() };
@@ -2039,7 +2039,7 @@ mod tests {
         let mut first = anchor(1_000, &[(PUMP, 0, &[(isolated, -2_000_000)])]);
         first.margins = per_dex_with_main_cash(-12_000_000_000);
         book.install_anchor(first);
-        let to_cross = |asset| (BlockAction::Leverage { asset, is_cross: true }, isolated);
+        let to_cross = |asset| (BlockAction::Leverage { asset, is_cross: true, leverage: 3 }, isolated);
         // BTC (asset 0, set isolated without a position) back to cross, a BTC fill one block later: cross
         apply(&mut book, 1_001, &[to_cross(0)], &[]);
         apply(&mut book, 1_002, &[], &[(isolated, "BTC", "B", 1, "0.0", "0.001")]);
@@ -2080,7 +2080,7 @@ mod tests {
     /// Design 000429 r2: the first block of each block-action kind after the anchor, rebuilt by the next anchor.
     #[test]
     fn block_actions_mark_the_first_block_of_each_kind() {
-        const MARGIN: BlockAction = BlockAction::Leverage { asset: 0, is_cross: true };
+        const MARGIN: BlockAction = BlockAction::Leverage { asset: 0, is_cross: true, leverage: 3 };
         const MODE: BlockAction = BlockAction::SetAbstraction;
         const WITHDRAWAL: BlockAction = BlockAction::Withdraw { amount_wei: 100_000_000 };
         let mut book = trusted_book(&[(user(1), 5)]);
@@ -2123,7 +2123,7 @@ mod tests {
     fn a_gap_in_the_block_heights_is_a_loss_up_to_the_last_missing_block() {
         let mut book = trusted_book(&[(user(1), 5)]);
         assert_eq!(book.apply_block_actions(block_actions(1_001, &[])).missing, None);
-        let report = book.apply_block_actions(block_actions(1_005, &[(BlockAction::Leverage { asset: 0, is_cross: true }, user(1))]));
+        let report = book.apply_block_actions(block_actions(1_005, &[(BlockAction::Leverage { asset: 0, is_cross: true, leverage: 3 }, user(1))]));
         assert_eq!(report.missing, Some((1_002, 1_004)));
         let lost = Unavailable::DataLoss { stream: Stream::BlockActions, bound: LossBound::Block(1_004) };
         assert_eq!(book.availability(), Err(lost.clone()));

@@ -44,9 +44,10 @@ impl BlockActionKind {
 pub(crate) enum BlockAction {
     /// `updateIsolatedMargin`: `ntli` (micro USDC, signed) from the dex's cross cash into the asset's isolated cash.
     IsolatedMargin { asset: u32, ntli_micro: i64 },
-    /// `updateLeverage`: the asset's setting. The node refuses a switch between cross and isolated while a position is
-    /// open ("Cannot switch leverage type with open position."), so a switch moves no cash.
-    Leverage { asset: u32, is_cross: bool },
+    /// `updateLeverage`: the asset's setting and leverage. The node refuses a switch between cross and isolated while a
+    /// position is open ("Cannot switch leverage type with open position."), so a switch moves no cash; an isolated
+    /// position's later fills move margin at the leverage (research "逐仓成交的划转").
+    Leverage { asset: u32, is_cross: bool, leverage: u32 },
     /// `topUpIsolatedOnlyMargin`: never seen; its payload is not read.
     TopUpIsolatedOnlyMargin,
     /// `userSetAbstraction`, `agentSetAbstraction`.
@@ -72,7 +73,11 @@ impl BlockAction {
     fn read(action: &Action<'_>) -> Result<Self, String> {
         Ok(match action.action_type {
             "updateIsolatedMargin" => Self::IsolatedMargin { asset: action.field(action.asset.as_ref(), "asset")?, ntli_micro: action.field(action.ntli.as_ref(), "ntli")? },
-            "updateLeverage" => Self::Leverage { asset: action.field(action.asset.as_ref(), "asset")?, is_cross: action.field(action.is_cross.as_ref(), "isCross")? },
+            "updateLeverage" => Self::Leverage {
+                asset: action.field(action.asset.as_ref(), "asset")?,
+                is_cross: action.field(action.is_cross.as_ref(), "isCross")?,
+                leverage: action.field(action.leverage.as_ref(), "leverage")?,
+            },
             "topUpIsolatedOnlyMargin" => Self::TopUpIsolatedOnlyMargin,
             "userSetAbstraction" | "agentSetAbstraction" => Self::SetAbstraction,
             "withdraw3" => {
@@ -182,7 +187,7 @@ pub(crate) mod tests {
     #[test]
     fn keeps_the_successful_actions_with_the_responses_user() {
         let parsed = parse_block_actions(REAL_LINE).unwrap();
-        let leverage = (BlockAction::Leverage { asset: 99, is_cross: true }, address(LEVERAGE_VAULT));
+        let leverage = (BlockAction::Leverage { asset: 99, is_cross: true, leverage: 3 }, address(LEVERAGE_VAULT));
         assert_eq!(parsed, BlockActions { height: 1_189_931_524, time_ms: 1_792_442_115_736, actions: vec![leverage] });
     }
 
@@ -230,7 +235,7 @@ pub(crate) mod tests {
         );
         let kept = parse_block_actions(&line).unwrap().actions;
         let margin = (BlockAction::IsolatedMargin { asset: 110_015, ntli_micro: 17_556_885_255 }, address(MARGIN_VAULT));
-        let leverage = (BlockAction::Leverage { asset: 99, is_cross: true }, address(LEVERAGE_VAULT));
+        let leverage = (BlockAction::Leverage { asset: 99, is_cross: true, leverage: 3 }, address(LEVERAGE_VAULT));
         assert_eq!(kept, [margin, leverage], "block order");
     }
 

@@ -50,6 +50,8 @@ struct PositionDto {
     /// `replay`: computed from the replayed state of block `liquidationPxHeight` (designs 000437, 000442; the pool's
     /// other positions at the node marks of that block); `anchor`: the anchor's row; `null` while `pending`.
     liquidation_px_source: Option<&'static str>,
+    /// A replayed row whose account's cash is modelled: the account's replayed cash went through an isolated open, increase or flip since the anchor, whose margin transfer is modelled (research "逐仓成交的划转"): its isolated cash may be short and its cross pool long of the node's by the same amount, so the price may sit nearer the mark (isolated) or farther (cross) than the node's, until the next anchor. False on an anchor's or a pending row.
+    cash_estimated: bool,
     /// The block the row's state is of: the applied height for a replayed row, the anchor height for an anchor's row;
     /// `null` while `pending`.
     liquidation_px_height: Option<u64>,
@@ -187,6 +189,7 @@ struct Shown<'a> {
     source: &'static str,
     height: u64,
     isolated: bool,
+    cash_estimated: bool,
     pool_positions: Option<usize>,
     liquidation_px: &'a LiquidationPx,
     mark: RowMark,
@@ -199,6 +202,7 @@ fn position_dto(size_decimals: u32, anchor: AnchorInfo, position: &PositionView)
             source: "replay",
             height: replayed.height,
             isolated: replayed.row.isolated,
+            cash_estimated: replayed.row.cash_estimated,
             pool_positions: Some(replayed.row.pool_positions),
             liquidation_px: &replayed.row.liquidation_px,
             mark: replayed.mark,
@@ -207,6 +211,7 @@ fn position_dto(size_decimals: u32, anchor: AnchorInfo, position: &PositionView)
             source: "anchor",
             height: anchor.height,
             isolated: row.isolated,
+            cash_estimated: false,
             pool_positions: row.pool_positions,
             liquidation_px: &row.liquidation_px,
             mark: row.mark,
@@ -231,6 +236,7 @@ fn position_dto(size_decimals: u32, anchor: AnchorInfo, position: &PositionView)
         liquidation_px_status,
         unsupported_reason,
         liquidation_px_source: shown.as_ref().map(|shown| shown.source),
+        cash_estimated: shown.as_ref().is_some_and(|shown| shown.cash_estimated),
         liquidation_px_height: shown.as_ref().map(|shown| shown.height),
         mark_px: shown.as_ref().and_then(|shown| shown.mark.mark_raw).map(|raw| format_mark_raw(raw, size_decimals)),
         liquidation_distance_bps: shown.as_ref().and_then(|shown| shown.mark.distance_bps),
@@ -332,7 +338,7 @@ mod tests {
             changes: ChangeMarks::default(),
             replayed: Some(Replayed {
                 height: 1_012,
-                row: ReplayedRow { isolated: false, pool_positions: 3, liquidation_px: LiquidationPx::Computed(0.004_2) },
+                row: ReplayedRow { isolated: false, pool_positions: 3, liquidation_px: LiquidationPx::Computed(0.004_2), cash_estimated: true },
                 mark: RowMark { mark_raw: Some(380), distance_bps: Some(1_052.5) },
             }),
             replay_stop: None,
@@ -342,7 +348,7 @@ mod tests {
             value["positions"][0],
             json!({"user": "0xabababababababababababababababababababab", "szi": "-269620.0", "positionHeight": 1_000,
                    "marginMode": "cross", "accountMode": "unifiedAccount", "poolPositions": 3, "liquidationPx": "0.0042",
-                   "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxSource": "replay",
+                   "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxSource": "replay", "cashEstimated": true,
                    "liquidationPxHeight": 1_012, "markPx": "0.0038", "liquidationDistanceBps": 1_052.5,
                    "changedSinceLiquidationPx": [], "replayStoppedReason": null, "replayStoppedHeight": null,
                    "portfolioMargin": null})
@@ -408,7 +414,7 @@ mod tests {
                 "positions": [
                     {"user": ab, "szi": "-269620.0", "positionHeight": 1_000, "marginMode": "cross",
                      "accountMode": "portfolioMargin", "poolPositions": 2, "liquidationPx": "0.0039515",
-                     "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxSource": "anchor",
+                     "liquidationPxStatus": "computed", "unsupportedReason": null, "liquidationPxSource": "anchor", "cashEstimated": false,
                      "liquidationPxHeight": 1_000, "markPx": "0.0035", "liquidationDistanceBps": 1_290.0,
                      "changedSinceLiquidationPx": [
                          {"kind": "ledger", "height": 1_005}, {"kind": "funding", "height": 1_003},
@@ -420,14 +426,14 @@ mod tests {
                      "portfolioMargin": {"status": "computed", "ratio": "0.25"}},
                     {"user": "0x0101010101010101010101010101010101010101", "szi": "0.5", "positionHeight": 1_010,
                      "marginMode": null, "accountMode": null, "poolPositions": null, "liquidationPx": null,
-                     "liquidationPxStatus": "pending", "unsupportedReason": null, "liquidationPxSource": null,
+                     "liquidationPxStatus": "pending", "unsupportedReason": null, "liquidationPxSource": null, "cashEstimated": false,
                      "liquidationPxHeight": null, "markPx": null, "liquidationDistanceBps": null,
                      "changedSinceLiquidationPx": [{"kind": "fill", "height": 1_010}],
                      "replayStoppedReason": null, "replayStoppedHeight": null, "portfolioMargin": null},
                     {"user": ab, "szi": "-269620.0", "positionHeight": 1_000, "marginMode": "isolated",
                      "accountMode": "unknown:x", "poolPositions": null, "liquidationPx": null,
                      "liquidationPxStatus": "unsupported", "unsupportedReason": "unknownAccountMode:x",
-                     "liquidationPxSource": "anchor", "liquidationPxHeight": 1_000, "markPx": "0.0035",
+                     "liquidationPxSource": "anchor", "cashEstimated": false, "liquidationPxHeight": 1_000, "markPx": "0.0035",
                      "liquidationDistanceBps": null, "changedSinceLiquidationPx": [],
                      "replayStoppedReason": "unreadLedger:spotGenesis", "replayStoppedHeight": 1_007, "portfolioMargin": null}
                 ]

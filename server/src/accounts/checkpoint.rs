@@ -252,8 +252,9 @@ pub(crate) struct DexAccount {
     pub(crate) cash_micro: i64,
     pub(crate) positions: Vec<Position>,
     /// Assets (indices into the dex's `assets`) without a position whose leverage entry the account keeps isolated
-    /// (`l.I`): a position opened there is isolated. A cross entry (`l.C`) or none means cross.
-    pub(crate) isolated_settings: Vec<usize>,
+    /// (`l.I`), with that leverage (`l.I.l`): a position opened there is isolated at it. A cross entry (`l.C`) or none
+    /// means cross.
+    pub(crate) isolated_settings: Vec<(usize, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,8 +270,8 @@ pub(crate) struct Position {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PositionMargin {
     Cross,
-    /// Isolated cash `l.I.u`, micro units of the collateral token.
-    Isolated { cash_micro: i64 },
+    /// Isolated cash `l.I.u`, micro units of the collateral token, and the leverage `l.I.l` its fills move margin at.
+    Isolated { cash_micro: i64, leverage: u32 },
 }
 
 // ─── wire types (only the fields read) ──────────────────────────────────────
@@ -371,6 +372,7 @@ struct WireLeverage {
 #[derive(Deserialize)]
 struct WireIsolated {
     u: i64,
+    l: u32,
 }
 
 #[derive(Deserialize)]
@@ -474,11 +476,12 @@ struct WireShares {
 /// One dex's `user_to_state`, kept compact: users with non-zero cash, a non-zero position or an isolated setting.
 struct DexUsers(FxHashMap<Address, WireDexUser>);
 
-/// One user's state on a dex: cash, non-zero positions, and the asset ids of the zero-size entries set isolated.
+/// One user's state on a dex: cash, non-zero positions, and the asset ids of the zero-size entries set isolated, each
+/// with its leverage.
 struct WireDexUser {
     cash_micro: i64,
     positions: Vec<(u32, WirePosition)>,
-    isolated_settings: Vec<u32>,
+    isolated_settings: Vec<(u32, u32)>,
 }
 
 /// `exchange.locus`, read in its on-disk order (ctx, cls, scl, ..., ust): once `cls` is read, spot balances and modes
@@ -549,10 +552,9 @@ impl<'de> Deserialize<'de> for DexUsers {
         Pairs::new(|_: &Address, state: WireUserState| {
             let (positions, settings): (Vec<_>, Vec<_>) =
                 state.p.map(|p| p.p).unwrap_or_default().into_iter().partition(|(_, position)| position.s != 0);
-            let isolated_settings: Vec<u32> = settings
+            let isolated_settings: Vec<(u32, u32)> = settings
                 .into_iter()
-                .filter(|(_, entry)| entry.l.as_ref().is_some_and(|leverage| leverage.isolated.is_some()))
-                .map(|(asset_id, _)| asset_id)
+                .filter_map(|(asset_id, entry)| entry.l.and_then(|leverage| leverage.isolated).map(|isolated| (asset_id, isolated.l)))
                 .collect();
             let kept = state.u != 0 || !positions.is_empty() || !isolated_settings.is_empty();
             kept.then_some(WireDexUser { cash_micro: state.u, positions, isolated_settings })
@@ -930,17 +932,17 @@ fn build_dex(
     for (user, WireDexUser { cash_micro, positions: wire_positions, isolated_settings }) in user_states.user_to_state.0 {
         let isolated_settings = isolated_settings
             .into_iter()
-            .map(|asset_id| asset_index(asset_id, meta.pdi, assets.len()))
+            .map(|(asset_id, leverage)| Ok((asset_index(asset_id, meta.pdi, assets.len())?, isolated_leverage(leverage, &user, asset_id)?)))
             .collect::<std::result::Result<Vec<_>, String>>()?;
         let mut positions = Vec::with_capacity(wire_positions.len());
         for (asset_id, wire) in wire_positions {
             let asset = asset_index(asset_id, meta.pdi, assets.len())?;
             let table_id = wire.table.unwrap_or(OMITTED_POSITION_TABLE);
             resolve_table(&mut tables, table_id).map_err(|err| format!("{user}: asset {asset_id}: {err}"))?;
-            let margin = wire
-                .l
-                .and_then(|l| l.isolated)
-                .map_or(PositionMargin::Cross, |isolated| PositionMargin::Isolated { cash_micro: isolated.u });
+            let margin = match wire.l.and_then(|l| l.isolated) {
+                Some(isolated) => PositionMargin::Isolated { cash_micro: isolated.u, leverage: isolated_leverage(isolated.l, &user, asset_id)? },
+                None => PositionMargin::Cross,
+            };
             positions.push(Position { asset, size_raw: wire.s, margin, table_id });
         }
         users.insert(user, DexAccount { dex: 0, cash_micro, positions, isolated_settings });
@@ -968,6 +970,14 @@ fn dex_name(universe: &[WireAsset]) -> std::result::Result<String, String> {
         .iter()
         .find(|asset| prefix(asset) != name)
         .map_or(Ok(name), |other| Err(format!("mixed coin prefixes: {} and {}", first.name, other.name)))
+}
+
+/// An isolated entry's leverage `l.I.l`: a fill moves margin at it, so it must be positive.
+fn isolated_leverage(leverage: u32, user: &Address, asset_id: u32) -> std::result::Result<u32, String> {
+    if leverage == 0 {
+        return Err(format!("{user}: asset {asset_id}: isolated leverage 0"));
+    }
+    Ok(leverage)
 }
 
 fn asset_index(asset_id: u32, pdi: u32, assets: usize) -> std::result::Result<usize, String> {
@@ -1047,7 +1057,7 @@ pub(crate) mod tests {
                             "oracle": hip3_oracle_fixture(json!([[{"u": T22, "p": 357_970, "d": 1}, {"u": T22, "p": 358_320, "d": 1}, {"u": T22, "p": 357_970, "d": 1}]])),
                             "user_states": {"user_to_state": [
                                 [HOLDER, {"u": 30_269_700, "p": {"p": [[10_000, {"l": {"I": {"l": 3, "u": 0}}, "M": 10}]]}}],
-                                [PORTFOLIO, {"u": 1_000_000, "p": {"p": [[10_000, {"s": 1000, "l": {"I": {"u": -300_000_000_i64}}, "M": 10}]]}}]
+                                [PORTFOLIO, {"u": 1_000_000, "p": {"p": [[10_000, {"s": 1000, "l": {"I": {"l": 2, "u": -300_000_000_i64}}, "M": 10}]]}}]
                             ]}
                         },
                         {
@@ -1215,9 +1225,9 @@ pub(crate) mod tests {
             let account = &parsed.accounts[&user(holder)];
             account.dex_states.iter().find(|state| state.dex == dex).unwrap().isolated_settings.clone()
         };
-        assert_eq!(settings(ISOLATED, 0), [0], "BTC set isolated, no position");
-        assert_eq!(settings(HOLDER, 0), Vec::<usize>::new(), "a cross entry is no isolated setting");
-        assert_eq!(settings(HOLDER, 1), [0], "a cash-only state keeps its setting");
+        assert_eq!(settings(ISOLATED, 0), [(0, 5)], "BTC set isolated at 5x, no position");
+        assert_eq!(settings(HOLDER, 0), Vec::<(usize, u32)>::new(), "a cross entry is no isolated setting");
+        assert_eq!(settings(HOLDER, 1), [(0, 3)], "a cash-only state keeps its setting");
         assert_eq!(parsed.dexes[0].assets[0].margin_mode, AssetMarginMode::Normal);
         assert_eq!(parsed.dexes[1].assets[0].margin_mode, AssetMarginMode::IsolatedOnly);
         let pair = |size_decimals, quote_token| SpotPair { size_decimals, quote_token, quote_wei_decimals: 8 };
@@ -1249,7 +1259,7 @@ pub(crate) mod tests {
     fn isolated_cash_is_read_from_the_leverage_entry() {
         let parsed = parse_checkpoint_bytes(&fixture()).unwrap();
         let position = &parsed.accounts[&user(ISOLATED)].dex_states[0].positions[0];
-        assert_eq!(position.margin, PositionMargin::Isolated { cash_micro: 12_000_000_000 });
+        assert_eq!(position.margin, PositionMargin::Isolated { cash_micro: 12_000_000_000, leverage: 3 });
         assert_eq!(position.size_raw, -2_000_000);
     }
 

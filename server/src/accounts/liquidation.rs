@@ -182,7 +182,7 @@ fn pool_of<'a>(
     position: &'a Position,
 ) -> Result<Pool<'a>, UnsupportedReason> {
     let isolated_cash = match position.margin {
-        PositionMargin::Isolated { cash_micro } => Some(cash_micro),
+        PositionMargin::Isolated { cash_micro, .. } => Some(cash_micro),
         PositionMargin::Cross => None,
     };
     let token = checkpoint.dexes[state.dex].collateral_token;

@@ -135,9 +135,11 @@ pub(crate) fn silent_change_json(change: &SilentChange, anchor_from: Option<u64>
 }
 
 /// A replayed account the anchor contradicts (design 000433): both states, 10^-8 USDC amounts as decimal text.
-pub(crate) fn replay_mismatch_json(mismatch: &Mismatch, anchor_from: Option<u64>, anchor_to: u64) -> serde_json::Value {
+/// `kind`: `replayMismatch`, or `replayEstimated` for an account whose pools' totals matched and only the split between
+/// cross and isolated cash did not after a modelled isolated transfer (review 000466 r1 P2-2).
+pub(crate) fn replay_mismatch_json(kind: &'static str, mismatch: &Mismatch, anchor_from: Option<u64>, anchor_to: u64) -> serde_json::Value {
     json!({
-        "kind": "replayMismatch",
+        "kind": kind,
         "anchorFrom": anchor_from,
         "anchorTo": anchor_to,
         "user": user_text(mismatch.user),

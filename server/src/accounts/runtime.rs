@@ -1066,7 +1066,7 @@ fn log_replay_check(height: u64, report: &InstallReport) {
         counts.iter().map(|(label, count)| format!("{label} {count}")).collect::<Vec<_>>().join(", ")
     };
     let compared = check.compared.iter().map(|(mode, counts)| {
-        (*mode, format!("{} exact ({} moved) / {} mismatched", counts.exact, counts.moved, counts.mismatched))
+        (*mode, format!("{} exact ({} moved) / {} mismatched / {} estimated", counts.exact, counts.moved, counts.mismatched, counts.estimated))
     });
     let stopped = check.stopped.iter().map(|(reason, count)| (*reason, count.to_string()));
     info!(
@@ -1079,12 +1079,16 @@ fn log_replay_check(height: u64, report: &InstallReport) {
         ACCOUNTS_REPLAY_CHECKED_TOTAL.with_label_values(&[mode, "exact"]).inc_by(counts.exact);
         ACCOUNTS_REPLAY_CHECKED_TOTAL.with_label_values(&[mode, "exactMoved"]).inc_by(counts.moved);
         ACCOUNTS_REPLAY_CHECKED_TOTAL.with_label_values(&[mode, "mismatch"]).inc_by(counts.mismatched);
+        ACCOUNTS_REPLAY_CHECKED_TOTAL.with_label_values(&[mode, "estimated"]).inc_by(counts.estimated);
     }
     for (reason, count) in &check.stopped {
         ACCOUNTS_REPLAY_STOPPED_TOTAL.with_label_values(&[reason]).inc_by(*count);
     }
     for mismatch in &check.samples {
-        record_evidence(&replay_mismatch_json(mismatch, report.previous_anchor, height));
+        record_evidence(&replay_mismatch_json("replayMismatch", mismatch, report.previous_anchor, height));
+    }
+    for estimated in &check.estimated_samples {
+        record_evidence(&replay_mismatch_json("replayEstimated", estimated, report.previous_anchor, height));
     }
 }
 

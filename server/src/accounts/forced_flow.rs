@@ -92,6 +92,8 @@ pub(crate) struct LiquidationInput {
     pub(crate) user: Address,
     pub(crate) size_raw: i64,
     pub(crate) liquidation_px: f64,
+    /// True when the account's replayed cash went through an isolated open, increase or flip since the anchor, whose margin transfer is modelled (research "逐仓成交的划转"): its isolated cash may be short and its cross pool long of the node's by the same amount, so the price may sit nearer the mark (isolated) or farther (cross) than the node's, until the next anchor.
+    pub(crate) cash_estimated: bool,
     pub(crate) order: ExpectedOrder,
 }
 
@@ -109,8 +111,8 @@ pub(crate) struct CoinInputs<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Source {
     Trigger { order: Arc<InnerL4Order>, kind: OrderKind },
-    /// `order` boxed to keep the trigger entries small.
-    Liquidation { user: Address, order: Box<ExpectedOrder> },
+    /// `order` boxed to keep the trigger entries small; `cash_estimated` as `LiquidationInput`'s.
+    Liquidation { user: Address, order: Box<ExpectedOrder>, cash_estimated: bool },
 }
 
 /// The source without its details (a subscription's `sources`).
@@ -314,7 +316,7 @@ fn liquidation_entry(liquidation: &LiquidationInput, size_decimals: u32, marks: 
     let (distance_node_bps, distance_local_bps) = marks.distances(direction, liquidation.liquidation_px);
     let size_raw = liquidation.order.walk_raw;
     Entry {
-        source: Source::Liquidation { user: liquidation.user, order: Box::new(liquidation.order) },
+        source: Source::Liquidation { user: liquidation.user, order: Box::new(liquidation.order), cash_estimated: liquidation.cash_estimated },
         direction,
         side,
         level_px: liquidation.liquidation_px,
@@ -484,7 +486,7 @@ mod tests {
     }
 
     fn liquidation(byte: u8, size_raw: i64, liquidation_px: f64) -> LiquidationInput {
-        LiquidationInput { user: user(byte), size_raw, liquidation_px, order: ExpectedOrder::of(size_raw, MARK_RAW, Cooldown::None) }
+        LiquidationInput { user: user(byte), size_raw, liquidation_px, cash_estimated: false, order: ExpectedOrder::of(size_raw, MARK_RAW, Cooldown::None) }
     }
 
     fn build(orders: &[Order], liquidations: &[LiquidationInput], positions: &[(u8, i64)], local_mark_raw: Option<u64>) -> CoinFlow {

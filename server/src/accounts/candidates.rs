@@ -102,6 +102,8 @@ pub(crate) struct Candidate {
     pub(crate) distance_bps: f64,
     pub(crate) isolated: bool,
     pub(crate) pool_positions: usize,
+    /// True when the account's replayed cash went through an isolated open, increase or flip since the anchor, whose margin transfer is modelled (research "逐仓成交的划转"): its isolated cash may be short and its cross pool long of the node's by the same amount, so the price may sit nearer the mark (isolated) or farther (cross) than the node's, until the next anchor.
+    pub(crate) cash_estimated: bool,
     /// The other coins of its cross pool, which may be liquidated with it (not a guarantee).
     pub(crate) cross_pool_coins: Vec<String>,
     pub(crate) order: ExpectedOrder,
@@ -126,6 +128,7 @@ impl Candidate {
                 candidate.distance_bps.round().to_bits(),
                 candidate.isolated,
                 candidate.pool_positions,
+                candidate.cash_estimated,
                 (order.cooldown, order.first_order_raw, order.cooldown_order_raw, order.walk_raw),
             )
         };
@@ -169,6 +172,7 @@ struct IndexedRow {
     liquidation_px: f64,
     isolated: bool,
     pool_positions: usize,
+    cash_estimated: bool,
 }
 
 /// One coin's indexed rows: by side, (price bits, user), positive prices ordering as their bits.
@@ -484,6 +488,7 @@ impl Candidates {
                 user,
                 size_raw: row.size_raw,
                 liquidation_px: row.liquidation_px,
+                cash_estimated: row.cash_estimated,
                 order: ExpectedOrder::of(row.size_raw, node_mark_raw, book.cooldown(&user)),
             })
             .collect())
@@ -600,6 +605,7 @@ impl Candidates {
                     distance_bps,
                     isolated: row.isolated,
                     pool_positions: row.pool_positions,
+                    cash_estimated: row.cash_estimated,
                     cross_pool_coins: if shared { book.cross_pool_coins(user, coin) } else { Vec::new() },
                     order: ExpectedOrder::of(row.size_raw, mark_raw, book.cooldown(&user)),
                     // the last result stays until a newer one replaces it
@@ -644,7 +650,13 @@ fn note_update(changes: &mut CandidateChanges, coin: &str, user: Address, candid
 /// The row's index entry: a computed price only.
 const fn indexed_row(size_raw: i64, replayed: &Replayed) -> Option<IndexedRow> {
     let LiquidationPx::Computed(liquidation_px) = replayed.row.liquidation_px else { return None };
-    Some(IndexedRow { size_raw, liquidation_px, isolated: replayed.row.isolated, pool_positions: replayed.row.pool_positions })
+    Some(IndexedRow {
+        size_raw,
+        liquidation_px,
+        isolated: replayed.row.isolated,
+        pool_positions: replayed.row.pool_positions,
+        cash_estimated: replayed.row.cash_estimated,
+    })
 }
 
 /// The rows and the marks are trusted at one height: the view available with its replayed rows, the node marks of that
@@ -752,6 +764,7 @@ mod tests {
             distance_bps: 196.2,
             isolated: false,
             pool_positions: 1,
+            cash_estimated: false,
             cross_pool_coins: Vec::new(),
             order: ExpectedOrder::of(1_000_000, 12_500, Cooldown::Unknown),
             walk: BookWalk::NoBook,
@@ -941,6 +954,7 @@ mod walk_tests {
             distance_bps: 100.0,
             isolated: false,
             pool_positions: 1,
+            cash_estimated: false,
             cross_pool_coins: Vec::new(),
             order: ExpectedOrder::of(1_000, 4_000, Cooldown::None),
             walk: BookWalk::Pending,

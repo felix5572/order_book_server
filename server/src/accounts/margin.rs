@@ -61,6 +61,11 @@ impl MarginTable {
         &self.tiers
     }
 
+    /// The first tier's max leverage: the leverage a position opened without a setting takes.
+    pub(crate) fn first_max_leverage(&self) -> u32 {
+        self.tiers[0].max_leverage
+    }
+
     /// Upper bound (exclusive) of tier `index`; infinite for the last tier.
     pub(crate) fn upper_bound_usd(&self, index: usize) -> f64 {
         self.tiers.get(index + 1).map_or(f64::INFINITY, |next| next.lower_bound_usd)

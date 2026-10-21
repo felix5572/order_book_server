@@ -52,6 +52,8 @@ pub(crate) struct Action<'a> {
     #[serde(borrow, rename = "isCross")]
     pub(crate) is_cross: Option<LazyValue<'a>>,
     #[serde(borrow)]
+    pub(crate) leverage: Option<LazyValue<'a>>,
+    #[serde(borrow)]
     pub(crate) amount: Option<LazyValue<'a>>,
     #[serde(borrow)]
     pub(crate) weight: Option<LazyValue<'a>>,

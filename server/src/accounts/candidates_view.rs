@@ -32,6 +32,8 @@ pub(crate) struct CandidateDto {
     liquidation_px_height: u64,
     margin_mode: &'static str,
     pool_positions: usize,
+    /// See `Candidate::cash_estimated`.
+    cash_estimated: bool,
     cross_pool_coins: Vec<String>,
     expected_order: ExpectedOrderDto,
     book_walk: BookWalkDto,
@@ -137,6 +139,7 @@ impl CandidateDto {
             liquidation_px_height: candidate.height,
             margin_mode: if candidate.isolated { "isolated" } else { "cross" },
             pool_positions: candidate.pool_positions,
+            cash_estimated: candidate.cash_estimated,
             cross_pool_coins: candidate.cross_pool_coins.clone(),
             expected_order: ExpectedOrderDto::new(&candidate.order, candidate.size_raw, candidate.size_decimals),
             book_walk: BookWalkDto::new(walk),
@@ -328,6 +331,7 @@ mod tests {
             distance_bps,
             isolated: false,
             pool_positions: 2,
+            cash_estimated: true,
             cross_pool_coins: vec!["BTC".to_string()],
             order: ExpectedOrder {
                 cooldown: Cooldown::Unknown,
@@ -426,7 +430,7 @@ mod tests {
             json(&frame)["data"]["candidates"][0],
             json!({"user": user_text(A), "coin": "PUMP", "szi": "-200000.0", "markPx": "0.004", "liquidationPx": "0.0041",
                    "liquidationDistanceBps": 150.25, "liquidationPxHeight": 7, "marginMode": "cross", "poolPositions": 2,
-                   "crossPoolCoins": ["BTC"],
+                   "crossPoolCoins": ["BTC"], "cashEstimated": true,
                    "expectedOrder": {"side": "B", "cooldown": "unknown", "firstOrderSize": "200000.0",
                                      "cooldownOrderSize": "200000.0", "walkSize": "200000.0", "notional": "800.0"},
                    "bookWalk": {"status": "noBook"}})

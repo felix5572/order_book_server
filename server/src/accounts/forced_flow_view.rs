@@ -176,6 +176,9 @@ struct EntryDto {
     trigger: Option<TriggerDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     expected_order: Option<ExpectedOrderDto>,
+    /// A liquidation's level from a modelled cash replay (`extLiquidationCandidates`' `cashEstimated`); absent on a trigger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cash_estimated: Option<bool>,
     /// `null` unless the walks are `walked`.
     walk: Option<WalkPartDto>,
 }
@@ -348,7 +351,7 @@ fn ready_dto<'a>(ready: &'a ReadyFlow, heights: &FlowHeights, filter: &FlowFilte
 
 fn entry_dto(entry: &Entry, walk: Option<WalkPartDto>, size_decimals: u32) -> EntryDto {
     let size = |raw: u64| format_size_raw(raw.cast_signed(), size_decimals);
-    let (trigger, expected_order) = match &entry.source {
+    let (trigger, expected_order, cash_estimated) = match &entry.source {
         Source::Trigger { order, .. } => (
             Some(TriggerDto {
                 oid: order.oid,
@@ -361,8 +364,11 @@ fn entry_dto(entry: &Entry, walk: Option<WalkPartDto>, size_decimals: u32) -> En
                 order_sz: order.sz.to_str(),
             }),
             None,
+            None,
         ),
-        Source::Liquidation { order, .. } => (None, Some(ExpectedOrderDto::new(order, entry.position_raw, size_decimals))),
+        Source::Liquidation { order, cash_estimated, .. } => {
+            (None, Some(ExpectedOrderDto::new(order, entry.position_raw, size_decimals)), Some(*cash_estimated))
+        }
     };
     EntryDto {
         source: match entry.source.kind() {
@@ -382,6 +388,7 @@ fn entry_dto(entry: &Entry, walk: Option<WalkPartDto>, size_decimals: u32) -> En
         limit_px: entry.limit_px.map(crate::order_book::Px::to_str),
         trigger,
         expected_order,
+        cash_estimated,
         walk,
     }
 }
@@ -424,7 +431,11 @@ mod tests {
     fn liquidation(byte: u8, size: u64, level: f64, distance: f64) -> FlowEntry {
         let size_raw = size.cast_signed();
         let entry = Entry {
-            source: Source::Liquidation { user: Address::repeat_byte(byte), order: Box::new(ExpectedOrder::of(size_raw, 12_500, Cooldown::None)) },
+            source: Source::Liquidation {
+                user: Address::repeat_byte(byte),
+                order: Box::new(ExpectedOrder::of(size_raw, 12_500, Cooldown::None)),
+                cash_estimated: false,
+            },
             direction: Direction::Down,
             side: Side::Ask,
             level_px: level,
@@ -469,6 +480,7 @@ mod tests {
         let entries = data["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 1, "only the 12,300 USD one");
         assert_eq!((entries[0]["size"].as_str(), entries[0]["source"].as_str(), entries[0]["expectedOrder"]["walkSize"].as_str()), (Some("1000000.0"), Some("liquidation"), Some("1000000.0")));
+        assert_eq!(entries[0]["cashEstimated"], serde_json::json!(false), "a liquidation says whether its cash is modelled");
         let bands = &data["bands"]["node"][0];
         assert_eq!((bands["direction"].as_str(), bands["side"].as_str()), (Some("down"), Some("A")));
         let hundred = bands["bands"].as_array().unwrap().iter().find(|band| band["edgeBps"] == 100).unwrap();
