@@ -131,9 +131,33 @@ mod tests {
             let diagnostics = capture(&line);
             assert_eq!((diagnostics.batch_rejected, diagnostics.unknown, diagnostics.samples.len()), (1, 0, 0));
         }
-        // A zero-request / one-error response is not the observed multi-order batch-rejection shape.
-        let line = replica_line(55, &[&[(r#"{"type":"order","orders":[]}"#, &ok(r#"{"type":"order","data":{"statuses":[{"error":"unknown"}]}}"#))]]);
-        assert_eq!(capture(&line).unknown, 1);
+    }
+
+    #[test]
+    fn empty_batch_validation_rejection_is_counted_without_unknown_evidence() {
+        // Real action/receipt excerpts from BM block 1192117276; only the replica wrapper is synthetic.
+        let sample: serde_json::Value = serde_json::from_str(include_str!("pairing/empty_batch_rejection.json")).unwrap();
+        let action = sample["action"].to_string();
+        let response = sample["response"].to_string();
+        let line = replica_line(sample["block"].as_u64().unwrap(), &[&[(&action, &response)]]);
+        let replica = ReplicaLine::parse(&line).unwrap();
+        let actions = MarkActions::of(&replica).unwrap();
+        let MarkAction::Book(book) = &actions.actions[0].action else { panic!("expected book action") };
+        assert!(book.created.is_empty() && book.cancelled.is_empty() && book.takers.is_empty() && book.rejected_iocs.is_empty());
+        let diagnostics = PairingDiagnostics::collect(&actions, &replica, &line);
+        assert_eq!((diagnostics.batch_rejected, diagnostics.unknown, diagnostics.samples.len()), (1, 0, 0));
+    }
+
+    #[test]
+    fn empty_requests_with_non_rejection_receipts_remain_unknown() {
+        for statuses in [r#"[{"resting":{"oid":99}}]"#, r#"[{"error":"bad","resting":{"oid":99}}]"#,
+            r#"[{"error":"one"},{"error":"two"}]"#]
+        {
+            let response = ok(&format!(r#"{{"type":"order","data":{{"statuses":{statuses}}}}}"#));
+            let line = replica_line(55, &[&[(r#"{"type":"order","orders":[]}"#, &response)]]);
+            let diagnostics = capture(&line);
+            assert_eq!((diagnostics.batch_rejected, diagnostics.unknown, diagnostics.samples.len()), (0, 1, 1));
+        }
     }
 
     #[test]

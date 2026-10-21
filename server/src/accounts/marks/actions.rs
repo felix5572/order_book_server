@@ -226,7 +226,8 @@ fn order_anchors<'o>(orders: impl IntoIterator<Item = &'o WireOrder>, statuses: 
         return Ok(anchors);
     }
     if orders.len() != statuses.len() {
-        let batch_rejected = orders.len() > 1 && matches!(statuses, [WireStatus::Object(status)]
+        // A single error rejects the entire batch, including an empty request (BM 1192117276).
+        let batch_rejected = matches!(statuses, [WireStatus::Object(status)]
             if status.error.is_some() && status.resting.is_none() && status.filled.is_none());
         anchors.ioc_pairing_mismatch = Some(if batch_rejected {
             IocPairingMismatch::BatchRejected
