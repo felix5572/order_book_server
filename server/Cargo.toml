@@ -19,7 +19,7 @@ rayon = "1.10"
 # flagged future-incompatible by rustc 1.99) plus the provider/contract stack for nothing.
 alloy = { version = "1.0.22", default-features = false, features = ["std", "serde"] }
 strum_macros = "0.27.2"
-yawc = { version = "0.2.6", features = ["axum"] }
+yawc = { version = "0.3.2", features = ["axum"] }
 flate2 = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6.0"

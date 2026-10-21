@@ -46,7 +46,7 @@ use tokio::{
         mpsc,
     },
 };
-use yawc::{FrameView, OpCode, WebSocket};
+use yawc::{Frame, HttpWebSocket, OpCode};
 
 use crate::ServerConfig;
 
@@ -440,7 +440,7 @@ fn ws_handler(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_socket(
-    socket: WebSocket,
+    socket: HttpWebSocket,
     internal_message_tx: Sender<Arc<InternalMessage>>,
     listener: Arc<Mutex<OrderBookListener>>,
     l4_cache: Arc<L4SnapshotCache>,
@@ -577,7 +577,7 @@ fn forget_pre_withholding_frames(
 /// send fails (writer dead or queue wedged), or the broadcast receiver closes.
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
-    ws_read: &mut futures_util::stream::SplitStream<WebSocket>,
+    ws_read: &mut futures_util::stream::SplitStream<HttpWebSocket>,
     outbound: &Outbound,
     internal_message_rx: &mut tokio::sync::broadcast::Receiver<Arc<InternalMessage>>,
     manager: &mut SubscriptionManager,
@@ -835,12 +835,12 @@ async fn run_session(
 
             msg = ws_read.next() => {
                 if let Some(frame) = msg {
-                    match frame.opcode {
+                    match frame.opcode() {
                         OpCode::Text => {
-                            let text = match std::str::from_utf8(&frame.payload) {
+                            let text = match std::str::from_utf8(frame.payload()) {
                                 Ok(text) => text,
                                 Err(err) => {
-                                    log::warn!("unable to parse websocket content: {err}: {:?}", frame.payload.as_ref());
+                                    log::warn!("unable to parse websocket content: {err}: {:?}", frame.payload().as_ref());
                                     // deserves to close the connection because the payload is not a valid utf8 string.
                                     return;
                                 }
@@ -1193,7 +1193,7 @@ impl Outbound {
 /// yawc's internally-queued control replies, e.g. protocol-level pongs).
 async fn write_task<S>(mut sink: S, mut data_rx: mpsc::Receiver<bytes::Bytes>, mut pong_rx: mpsc::Receiver<bytes::Bytes>)
 where
-    S: futures_util::Sink<FrameView> + Unpin,
+    S: futures_util::Sink<Frame> + Unpin,
     S::Error: std::fmt::Display,
 {
     let mut data_open = true;
@@ -1211,7 +1211,7 @@ where
                 None => { data_open = false; continue; }
             },
         };
-        match tokio::time::timeout(WS_SEND_TIMEOUT, sink.send(FrameView::text(frame))).await {
+        match tokio::time::timeout(WS_SEND_TIMEOUT, sink.send(Frame::text(frame))).await {
             Ok(Ok(())) => MESSAGES_SENT_TOTAL.inc(),
             Ok(Err(err)) => {
                 error!("Failed to send: {err}");
@@ -1842,14 +1842,14 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingSink(Arc<std::sync::Mutex<Vec<bytes::Bytes>>>);
 
-    impl futures_util::Sink<FrameView> for RecordingSink {
+    impl futures_util::Sink<Frame> for RecordingSink {
         type Error = std::convert::Infallible;
 
         fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
-        fn start_send(self: Pin<&mut Self>, item: FrameView) -> std::result::Result<(), Self::Error> {
-            self.0.lock().unwrap().push(item.payload.clone());
+        fn start_send(self: Pin<&mut Self>, item: Frame) -> std::result::Result<(), Self::Error> {
+            self.0.lock().unwrap().push(item.payload().clone());
             Ok(())
         }
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
@@ -1863,13 +1863,13 @@ mod tests {
     /// Sink that is never ready: models a client whose TCP window stays full.
     struct StuckSink;
 
-    impl futures_util::Sink<FrameView> for StuckSink {
+    impl futures_util::Sink<Frame> for StuckSink {
         type Error = std::convert::Infallible;
 
         fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
             Poll::Pending
         }
-        fn start_send(self: Pin<&mut Self>, _item: FrameView) -> std::result::Result<(), Self::Error> {
+        fn start_send(self: Pin<&mut Self>, _item: Frame) -> std::result::Result<(), Self::Error> {
             Ok(())
         }
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
@@ -2106,9 +2106,9 @@ mod tests {
     }
 
     /// The best-bid px of the next bbo frame within `within`, or None.
-    async fn next_bbo_bid_px(ws: &mut WebSocket, within: Duration) -> Option<String> {
+    async fn next_bbo_bid_px(ws: &mut yawc::TcpWebSocket, within: Duration) -> Option<String> {
         let frame = tokio::time::timeout(within, ws.next()).await.ok().flatten()?;
-        let value: serde_json::Value = serde_json::from_slice(&frame.payload).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(frame.payload()).unwrap();
         assert_eq!(value["channel"], "bbo", "{value}");
         Some(value["data"]["bbo"][0]["px"].as_str().unwrap().to_string())
     }
@@ -2121,12 +2121,12 @@ mod tests {
     struct BboSession {
         listener: Arc<Mutex<OrderBookListener>>,
         tx: Sender<Arc<InternalMessage>>,
-        ws: WebSocket,
+        ws: yawc::TcpWebSocket,
         server: tokio::task::JoinHandle<()>,
     }
 
     /// A loopback server (127.0.0.1 only) on a ready book, with the account view `accounts`; a connected client.
-    async fn coin_positions_server(accounts: Option<AccountsHandle>) -> (WebSocket, tokio::task::JoinHandle<()>) {
+    async fn coin_positions_server(accounts: Option<AccountsHandle>) -> (yawc::TcpWebSocket, tokio::task::JoinHandle<()>) {
         let (tx, _rx) = channel(32);
         let mut state = OrderBookListener::new(Some(tx.clone()), false, ActiveL2Params::new(), (true, true, true));
         state.init_from_snapshot(btc_bid_snapshot(PX_100), 10);
@@ -2144,13 +2144,13 @@ mod tests {
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = tcp.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(tcp, app).await.unwrap() });
-        let ws = WebSocket::connect(format!("ws://{addr}/ws").parse().unwrap()).await.unwrap();
+        let ws = yawc::WebSocket::connect(format!("ws://{addr}/ws").parse().unwrap()).await.unwrap();
         (ws, server)
     }
 
-    async fn next_json(ws: &mut WebSocket) -> serde_json::Value {
+    async fn next_json(ws: &mut yawc::TcpWebSocket) -> serde_json::Value {
         let frame = tokio::time::timeout(Duration::from_secs(2), ws.next()).await.unwrap().unwrap();
-        serde_json::from_slice(&frame.payload).unwrap()
+        serde_json::from_slice(frame.payload()).unwrap()
     }
 
     const SUBSCRIBE_PUMP: &str = r#"{"method":"subscribe","subscription":{"type":"extCoinPositions","coin":"PUMP"}}"#;
@@ -2167,7 +2167,7 @@ mod tests {
         };
         let owner = TestOwner::start(trusted_book(&[(user(1), 5)]));
         let (mut ws, server) = coin_positions_server(Some(owner.handle.clone())).await;
-        ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
+        ws.send(Frame::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
         assert_eq!(next_json(&mut ws).await["channel"], "subscriptionResponse");
         let snapshot = next_json(&mut ws).await;
         assert_eq!((snapshot["channel"].as_str(), snapshot["data"]["kind"].as_str()), (Some("extCoinPositions"), Some("snapshot")));
@@ -2191,7 +2191,7 @@ mod tests {
         let withdrawn = next_json(&mut ws).await["data"].clone();
         assert_eq!((withdrawn["kind"].as_str(), withdrawn["coin"].as_str()), (Some("withdrawn"), Some(PUMP)));
         assert!(withdrawn["reason"].as_str().unwrap().starts_with("fills lost lines"), "{withdrawn}");
-        ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
+        ws.send(Frame::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
         let refused = next_json(&mut ws).await;
         assert_eq!(refused["channel"], "error");
         assert!(refused["data"].as_str().unwrap().starts_with("Unable to grab extCoinPositions snapshot"), "{refused}");
@@ -2208,16 +2208,16 @@ mod tests {
         };
         let owner = TestOwner::start(trusted_book(&[(user(1), 5)]));
         let (mut ws, server) = coin_positions_server(Some(owner.handle.clone())).await;
-        ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
+        ws.send(Frame::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
         assert_eq!(next_json(&mut ws).await["channel"], "subscriptionResponse");
         assert_eq!(next_json(&mut ws).await["data"]["kind"], "snapshot");
         owner.kill().await;
         let withdrawn = next_json(&mut ws).await["data"].clone();
         assert_eq!(withdrawn, serde_json::json!({"kind": "withdrawn", "coin": PUMP, "reason": "account owner task exited"}));
-        ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
+        ws.send(Frame::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
         let refused = next_json(&mut ws).await;
         assert_eq!(refused["data"], "Unable to grab extCoinPositions snapshot: stopped: account owner task exited");
-        ws.send(FrameView::text(r#"{"method":"ping"}"#.as_bytes().to_vec())).await.unwrap();
+        ws.send(Frame::text(r#"{"method":"ping"}"#.as_bytes().to_vec())).await.unwrap();
         assert_eq!(next_json(&mut ws).await["channel"], "pong", "the connection stays up");
         server.abort();
     }
@@ -2226,7 +2226,7 @@ mod tests {
     #[allow(clippy::future_not_send)]
     async fn test_coin_positions_needs_the_account_view() {
         let (mut ws, server) = coin_positions_server(None).await;
-        ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
+        ws.send(Frame::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
         let refused = next_json(&mut ws).await;
         assert_eq!((refused["channel"].as_str(), refused["data"].as_str()), (Some("error"), Some("extCoinPositions needs the server started with --accounts")));
         server.abort();
@@ -2243,17 +2243,17 @@ mod tests {
         };
         let subscribe = |max: u32| format!(r#"{{"method":"subscribe","subscription":{{"type":"extLiquidationCandidates","coin":null,"maxDistanceBps":{max}}}}}"#);
         let (mut ws, server) = coin_positions_server(None).await;
-        ws.send(FrameView::text(subscribe(200).into_bytes())).await.unwrap();
+        ws.send(Frame::text(subscribe(200).into_bytes())).await.unwrap();
         assert_eq!(next_json(&mut ws).await["data"], "extLiquidationCandidates needs the server started with --accounts");
         server.abort();
         let owner = TestOwner::start(trusted_book(&[(user(1), 5)]));
         let (mut ws, server) = coin_positions_server(Some(owner.handle.clone())).await;
-        ws.send(FrameView::text(subscribe(1_001).into_bytes())).await.unwrap();
+        ws.send(Frame::text(subscribe(1_001).into_bytes())).await.unwrap();
         assert!(next_json(&mut ws).await["data"].as_str().unwrap().starts_with("Invalid subscription"));
-        ws.send(FrameView::text(subscribe(200).into_bytes())).await.unwrap();
+        ws.send(Frame::text(subscribe(200).into_bytes())).await.unwrap();
         let refused = next_json(&mut ws).await;
         assert_eq!(refused["data"], "Unable to grab extLiquidationCandidates snapshot: the liquidation candidates are not available");
-        ws.send(FrameView::text(r#"{"method":"ping"}"#.as_bytes().to_vec())).await.unwrap();
+        ws.send(Frame::text(r#"{"method":"ping"}"#.as_bytes().to_vec())).await.unwrap();
         assert_eq!(next_json(&mut ws).await["channel"], "pong", "the connection stays up");
         server.abort();
     }
@@ -2282,8 +2282,8 @@ mod tests {
             let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = tcp.local_addr().unwrap();
             let server = tokio::spawn(async move { axum::serve(tcp, app).await.unwrap() });
-            let mut ws = WebSocket::connect(format!("ws://{addr}/ws").parse().unwrap()).await.unwrap();
-            ws.send(FrameView::text(r#"{"method":"subscribe","subscription":{"type":"bbo","coin":"BTC"}}"#.as_bytes().to_vec()))
+            let mut ws = yawc::WebSocket::connect(format!("ws://{addr}/ws").parse().unwrap()).await.unwrap();
+            ws.send(Frame::text(r#"{"method":"subscribe","subscription":{"type":"bbo","coin":"BTC"}}"#.as_bytes().to_vec()))
                 .await
                 .unwrap();
             tokio::time::timeout(Duration::from_secs(1), ws.next()).await.unwrap().unwrap(); // subscription ack

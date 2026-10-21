@@ -5,10 +5,10 @@
 
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use log::warn;
 use tokio::time::{Instant, sleep_until, timeout};
-use yawc::{FrameView, OpCode, Options, WebSocket};
+use yawc::{Frame, OpCode, Options, TcpWebSocket, WebSocket};
 
 use super::{
     protocol::{Parsed, Protocol, Session, excerpt},
@@ -84,8 +84,9 @@ pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets
     loop {
         let read_deadline = Instant::now() + timeouts.read;
         let timer = [ack_deadline, next_ping, pong_deadline].into_iter().flatten().min().unwrap_or(read_deadline).min(read_deadline);
+        // `next_frame`, not the `Stream` impl: that one ends on any read error and drops it
         let frame = tokio::select! {
-            frame = ws.next() => frame,
+            frame = ws.next_frame() => frame,
             () = sleep_until(timer) => {
                 let now = Instant::now();
                 if ack_deadline.is_some_and(|deadline| now >= deadline) {
@@ -107,9 +108,12 @@ pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets
                 continue;
             }
         };
-        let Some(frame) = frame else { return FeedError::Transient(format!("{label}: closed by the venue")) };
-        let text = match frame.opcode {
-            OpCode::Text => match std::str::from_utf8(&frame.payload) {
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(err) => return read_error(label, &err),
+        };
+        let text = match frame.opcode() {
+            OpCode::Text => match std::str::from_utf8(frame.payload()) {
                 Ok(text) => text,
                 Err(err) => return FeedError::Contract(format!("{label}: a text frame not UTF-8: {err}")),
             },
@@ -144,8 +148,8 @@ pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets
     }
 }
 
-async fn send(ws: &mut WebSocket, label: &str, text: String, within: Duration) -> Result<(), FeedError> {
-    match timeout(within, ws.send(FrameView::text(text))).await {
+async fn send(ws: &mut TcpWebSocket, label: &str, text: String, within: Duration) -> Result<(), FeedError> {
+    match timeout(within, ws.send(Frame::text(text))).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(err)) => Err(FeedError::Transient(format!("{label}: send: {err}"))),
         Err(_) => Err(FeedError::Transient(format!("{label}: send not done within {within:?}"))),
@@ -164,12 +168,25 @@ fn connect_error(label: &str, err: &yawc::WebSocketError) -> FeedError {
     }
 }
 
-fn close_error(label: &str, frame: &FrameView) -> FeedError {
+/// A failed read, with yawc's error as it gave it: the network failing or the stream ending is transient; a frame that
+/// breaks the WebSocket protocol, or one over `MAX_PAYLOAD`, is the venue's contract.
+fn read_error(label: &str, err: &yawc::WebSocketError) -> FeedError {
+    match err {
+        yawc::WebSocketError::IoError(io) => FeedError::Transient(format!("{label}: read: {io} (kind {:?})", io.kind())),
+        yawc::WebSocketError::ConnectionClosed => FeedError::Transient(format!("{label}: read: {err}")),
+        _ => FeedError::Contract(format!("{label}: read: {err}")),
+    }
+}
+
+fn close_error(label: &str, frame: &Frame) -> FeedError {
     let code = frame.close_code().map(u16::from);
-    let reason = frame.close_reason().unwrap_or("");
+    let reason = match frame.close_reason() {
+        Ok(reason) => format!("{:?}", reason.unwrap_or("")),
+        Err(err) => format!("(a reason that does not read: {err})"),
+    };
     match code {
-        Some(code) if !TRANSIENT_CLOSE.contains(&code) => FeedError::Contract(format!("{label}: closed by the venue, code {code} {reason:?}")),
-        _ => FeedError::Transient(format!("{label}: closed by the venue, code {code:?} {reason:?}")),
+        Some(code) if !TRANSIENT_CLOSE.contains(&code) => FeedError::Contract(format!("{label}: closed by the venue, code {code} {reason}")),
+        _ => FeedError::Transient(format!("{label}: closed by the venue, code {code:?} {reason}")),
     }
 }
 
@@ -178,6 +195,7 @@ mod tests {
     use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
     use axum::{Router, routing::get};
+    use futures_util::StreamExt;
     use tokio::sync::mpsc;
     use yawc::close::CloseCode;
 
@@ -187,7 +205,7 @@ mod tests {
         sources::{Feed, Kind, MarkSources, Venue},
     };
 
-    type Script = Arc<dyn Fn(WebSocket, mpsc::UnboundedSender<String>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+    type Script = Arc<dyn Fn(yawc::HttpWebSocket, mpsc::UnboundedSender<String>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
     /// A local venue: each connection runs `script`, which reports the requests it read through the channel.
     async fn venue(script: Script) -> (String, mpsc::UnboundedReceiver<String>) {
@@ -209,11 +227,11 @@ mod tests {
         (format!("ws://{address}/"), seen)
     }
 
-    async fn next_text(ws: &mut WebSocket) -> Option<String> {
+    async fn next_text(ws: &mut yawc::HttpWebSocket) -> Option<String> {
         loop {
             let frame = ws.next().await?;
-            if frame.opcode == OpCode::Text {
-                return Some(String::from_utf8(frame.payload.to_vec()).unwrap());
+            if frame.opcode() == OpCode::Text {
+                return Some(String::from_utf8(frame.payload().to_vec()).unwrap());
             }
         }
     }
@@ -244,9 +262,9 @@ mod tests {
         let script: Script = Arc::new(|mut ws, seen| {
             Box::pin(async move {
                 seen.send(next_text(&mut ws).await.unwrap()).unwrap();
-                ws.send(FrameView::text(ACK)).await.unwrap();
-                ws.send(FrameView::text(QUOTE)).await.unwrap();
-                ws.send(FrameView::close(CloseCode::Restart, "rotation")).await.unwrap();
+                ws.send(Frame::text(ACK)).await.unwrap();
+                ws.send(Frame::text(QUOTE)).await.unwrap();
+                ws.send(Frame::close(CloseCode::Restart, "rotation")).await.unwrap();
             })
         });
         let (url, mut seen) = venue(script).await;
@@ -265,7 +283,7 @@ mod tests {
         let script: Script = Arc::new(|mut ws, _| {
             Box::pin(async move {
                 next_text(&mut ws).await.unwrap();
-                ws.send(FrameView::text(r#"{"event":"error","code":"60012","msg":"Invalid request"}"#)).await.unwrap();
+                ws.send(Frame::text(r#"{"event":"error","code":"60012","msg":"Invalid request"}"#)).await.unwrap();
                 // held open until the client leaves
                 while next_text(&mut ws).await.is_some() {}
             })
@@ -281,7 +299,7 @@ mod tests {
         let script: Script = Arc::new(|mut ws, _| {
             Box::pin(async move {
                 next_text(&mut ws).await.unwrap();
-                ws.send(FrameView::text(ACK)).await.unwrap();
+                ws.send(Frame::text(ACK)).await.unwrap();
                 while next_text(&mut ws).await.is_some() {}
             })
         });
@@ -292,12 +310,12 @@ mod tests {
         let script: Script = Arc::new(|mut ws, seen| {
             Box::pin(async move {
                 next_text(&mut ws).await.unwrap();
-                ws.send(FrameView::text(ACK)).await.unwrap();
+                ws.send(Frame::text(ACK)).await.unwrap();
                 let mut answered = false;
                 while let Some(text) = next_text(&mut ws).await {
                     seen.send(text.clone()).unwrap();
                     if text == "ping" && !answered {
-                        ws.send(FrameView::text("pong")).await.unwrap();
+                        ws.send(Frame::text("pong")).await.unwrap();
                         answered = true;
                     }
                 }
@@ -311,7 +329,7 @@ mod tests {
         let script: Script = Arc::new(|mut ws, _| {
             Box::pin(async move {
                 next_text(&mut ws).await.unwrap();
-                ws.send(FrameView::text(ACK)).await.unwrap();
+                ws.send(Frame::text(ACK)).await.unwrap();
                 while next_text(&mut ws).await.is_some() {}
             })
         });
@@ -320,9 +338,37 @@ mod tests {
         assert!(matches!(&error, FeedError::Transient(reason) if reason.contains("no frame for")), "{error:?}");
     }
 
+    /// The venue drops the connection without a close frame: the read error is reported as yawc gave it (it used to
+    /// read "closed by the venue", the `Stream` impl having dropped the error).
+    #[tokio::test]
+    async fn a_dropped_connection_reports_the_read_error() {
+        let script: Script = Arc::new(|mut ws, _| {
+            Box::pin(async move {
+                next_text(&mut ws).await.unwrap();
+                ws.send(Frame::text(ACK)).await.unwrap();
+                ws.send(Frame::text(QUOTE)).await.unwrap();
+                drop(ws);
+            })
+        });
+        let (url, _) = venue(script).await;
+        let (error, _, _) = run(url, 1, None).await;
+        let FeedError::Transient(reason) = &error else { panic!("{error:?}") };
+        assert!(reason.starts_with("spot_okx: read: "), "{reason}");
+        assert!(!reason.contains("closed by the venue"), "{reason}");
+    }
+
+    #[test]
+    fn read_errors_split_into_the_network_and_the_protocol() {
+        let io = yawc::WebSocketError::IoError(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset by peer"));
+        assert!(matches!(read_error("perp_binance", &io), FeedError::Transient(reason) if reason == "perp_binance: read: reset by peer (kind ConnectionReset)"));
+        assert!(matches!(read_error("perp_binance", &yawc::WebSocketError::ConnectionClosed), FeedError::Transient(_)));
+        assert!(matches!(read_error("perp_binance", &yawc::WebSocketError::FrameTooLarge), FeedError::Contract(reason) if reason.contains("Frame too large")));
+        assert!(matches!(read_error("perp_binance", &yawc::WebSocketError::InvalidOpCode(3)), FeedError::Contract(_)));
+    }
+
     #[test]
     fn rotation_closes_are_transient_and_policy_closes_are_not() {
-        let close = |code: u16| FrameView::close(CloseCode::from(code), "bye");
+        let close = |code: u16| Frame::close(CloseCode::from(code), "bye");
         assert!(matches!(close_error("spot_okx", &close(1012)), FeedError::Transient(_)));
         assert!(matches!(close_error("spot_okx", &close(1008)), FeedError::Contract(reason) if reason.contains("code 1008")));
     }
