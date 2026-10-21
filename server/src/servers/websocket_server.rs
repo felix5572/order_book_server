@@ -7,7 +7,7 @@ use crate::{
     accounts::runtime::{AccountsHandle, BookSource, start_accounts},
     listeners::order_book::{
         ActiveL2Params, ActiveSubGuard, ActiveSubs, BookTrust, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey,
-        L2ParamGuard, L2SnapshotParams, OrderBookListener, hl_listen_hft,
+        L2ParamGuard, L2SnapshotParams, OrderBookListener, hl_listen_hft, triggers::TriggerAvailability,
     },
     metrics::{
         BBO_CHANGES_TOTAL, BROADCAST_RECEIVERS, BROADCASTS_TOTAL, CHANNEL_DROPS_TOTAL, CHANNEL_LAG,
@@ -1556,6 +1556,9 @@ struct UntriggeredQuery {
 struct UntriggeredOrders {
     time: u64,
     height: u64,
+    /// Whether these are all the standing trigger orders (design 000451 r3): the last install's dump carried the
+    /// trigger section and converted every order of it, and every live trigger order since parsed.
+    complete: bool,
     data: Vec<(String, Vec<(alloy::primitives::Address, L4Order)>)>,
 }
 
@@ -1589,7 +1592,7 @@ async fn untriggered_body(
         }
         (Instant::now(), guard.compute_untriggered_snapshot(filter_coin.as_ref()))
     };
-    let Some((time, height, mut orders)) = snapshot else {
+    let Some((time, height, mut orders, availability)) = snapshot else {
         return Ok(SnapshotBody::Absent);
     };
     let body = tokio::task::spawn_blocking(move || -> Result<bytes::Bytes> {
@@ -1607,7 +1610,8 @@ async fn untriggered_body(
                 _ => data.push((coin_name, vec![(user, order)])),
             }
         }
-        let body = UntriggeredOrders { time, height, data };
+        let complete = availability == TriggerAvailability::Complete;
+        let body = UntriggeredOrders { time, height, complete, data };
         Ok(bytes::Bytes::from(serde_json::to_string(&body)?))
     })
     .await??;
@@ -1841,11 +1845,13 @@ mod tests {
             cloid: None,
         };
         let order = L4Order::from(inner);
-        let body = UntriggeredOrders { time: 5, height: 7, data: vec![("BTC".to_string(), vec![(user, order)])] };
+        let body =
+            UntriggeredOrders { time: 5, height: 7, complete: false, data: vec![("BTC".to_string(), vec![(user, order)])] };
         let json = serde_json::to_string(&body).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["time"], 5);
         assert_eq!(v["height"], 7);
+        assert_eq!(v["complete"], false);
         assert_eq!(v["data"][0][0], "BTC");
         // Tuple layout: [address, order] - address serialized as lowercase hex.
         assert_eq!(v["data"][0][1][0][0], "0xabcdef0123456789abcdef0123456789abcdef01");

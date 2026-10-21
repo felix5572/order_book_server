@@ -1,5 +1,8 @@
 use crate::{
-    listeners::order_book::state::OrderBookState,
+    listeners::order_book::{
+        state::OrderBookState,
+        triggers::{TriggerAvailability, TriggerBand},
+    },
     metrics::{
         BBO_BROADCAST_LATENCY, EVENT_PROCESSING_LATENCY, EVENTS_PROCESSED_TOTAL, FILE_EVENTS_TOTAL,
         FILE_LINES_PARSED_TOTAL, INSERT_BEFORE_FALLBACK_TOTAL, L2_BROADCAST_LATENCY, L2_CONFLATION_BATCH_SIZE, L2_FLUSH_TOTAL, NODE_LINE_LAG,
@@ -13,7 +16,7 @@ use crate::{
     },
     order_book::{
         Coin, Px, PxBand, Side, Snapshot, Sz,
-        multi_book::{Snapshots, load_snapshots_from_cli_json},
+        multi_book::{Snapshots, TriggerSection, load_snapshots_from_cli_json},
     },
     prelude::*,
     types::{
@@ -62,6 +65,7 @@ const MAX_CACHED_EVENTS: usize = 4_000_000;
 mod l2_conflation;
 pub(crate) mod parallel;
 mod state;
+pub(crate) mod triggers;
 pub(crate) mod utils;
 
 /// Blocks a target checkpoint must lie beyond the streams when chosen, so the
@@ -117,7 +121,7 @@ async fn fetch_and_install_at_checkpoint(
     let output_path = process_rmp_file(snapshot_config, &checkpoint).await?;
     let (height, snapshot, untriggered) =
         load_snapshots_from_cli_json::<InnerL4Order, (Address, L4Order)>(&output_path, checkpoint.height).await?;
-    info!("Snapshot loaded at checkpoint height {height} ({} untriggered orders)", untriggered.len());
+    info!("Snapshot loaded at checkpoint height {height} ({})", untriggered.describe());
     // Phased install: build the replacement book and chase the replay cache
     // down off-lock, then commit in one short lock hold - ingest keeps serving
     // the current book for the whole install.
@@ -242,7 +246,7 @@ const RESYNC_BACKOFF_MAX: Duration = Duration::from_secs(300);
 async fn install_snapshot_phased(
     listener: &Arc<Mutex<OrderBookListener>>,
     snapshot: Snapshots<InnerL4Order>,
-    untriggered: Vec<InnerL4Order>,
+    untriggered: TriggerSection<InnerL4Order>,
     height: u64,
 ) -> Result<()> {
     install_snapshot_phased_impl(
@@ -263,7 +267,7 @@ async fn install_snapshot_phased(
 async fn install_snapshot_phased_impl(
     listener: &Arc<Mutex<OrderBookListener>>,
     snapshot: Snapshots<InnerL4Order>,
-    untriggered: Vec<InnerL4Order>,
+    untriggered: TriggerSection<InnerL4Order>,
     height: u64,
     residual_events_max: usize,
     max_chase_rounds: usize,
@@ -285,14 +289,13 @@ async fn install_snapshot_phased_impl(
     RESYNC_PHASE_DURATION.with_label_values(&["build"]).observe(build_elapsed.as_secs_f64());
     info!("Replacement book built in {}ms", build_elapsed.as_millis());
 
-    // Seed the untriggered table from the live state when the snapshot yielded
-    // none (current hl-node dumps carry no trigger orders - a bare rebuild
-    // would wipe everything accumulated since startup). Runs BEFORE the chase
+    // The new trigger table succeeds the live one (the next generation; the live orders kept when the dump carried
+    // no trigger section - a bare rebuild would wipe everything accumulated since startup). Runs BEFORE the chase
     // replay so evictions cached during the fetch window apply on top.
     {
         let guard = listener.lock().await;
         if let Some(old_state) = guard.order_book_state.as_ref() {
-            new_state.carry_forward_untriggered(old_state);
+            new_state.succeed_triggers(old_state);
         }
     }
 
@@ -770,17 +773,17 @@ impl OrderBookListener {
         info!("Initializing from snapshot at height {height}");
         let mut new_state = OrderBookState::from_snapshot(
             snapshot,
-            Vec::new(),
+            TriggerSection::Absent,
             height,
             0,
             true,
             self.ignore_spot,
             self.track_untriggered,
         );
-        // Mirror the production carry-forward (install_snapshot_phased_impl):
-        // a snapshot with no triggers must not wipe the accumulated table.
+        // Mirror the production succession (install_snapshot_phased_impl): a snapshot without a trigger section
+        // must not wipe the accumulated table.
         if let Some(old_state) = self.order_book_state.as_ref() {
-            new_state.carry_forward_untriggered(old_state);
+            new_state.succeed_triggers(old_state);
         }
         // Free the outgoing book before building its replacement (the phased
         // production path instead keeps it serving and pays the RSS overlap).
@@ -949,9 +952,32 @@ impl OrderBookListener {
     pub(crate) fn compute_untriggered_snapshot(
         &self,
         coin: Option<&Coin>,
-    ) -> Option<(u64, u64, Vec<Arc<InnerL4Order>>)> {
+    ) -> Option<(u64, u64, Vec<Arc<InnerL4Order>>, TriggerAvailability)> {
         self.order_book_state.as_ref().map(|state| state.untriggered_snapshot(coin))
     }
+
+    /// One coin's untriggered trigger orders with a trigger price in `[lo, hi]` (at most `max`), with the book's progress
+    /// and trust: a loss of the order statuses stream withholds the book and may have dropped trigger statuses too, so
+    /// a consumer needs both a complete table and a trusted book of the same withheld period (design 000451 r3).
+    /// `None` before the first install.
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the forced-flow owner, design 000451 batch 2"))]
+    pub(crate) fn untriggered_in_band(&self, coin: &Coin, lo: Px, hi: Px, max: usize) -> Option<TriggerBandAt> {
+        let (time, height, band) = self.order_book_state.as_ref()?.untriggered_in_band(coin, lo, hi, max);
+        Some(TriggerBandAt { time, height, trusted: self.book_trusted(), withheld_periods: self.book_trust.withheld_periods(), band })
+    }
+}
+
+/// `OrderBookListener::untriggered_in_band`.
+#[cfg_attr(not(test), expect(dead_code, reason = "read by the forced-flow owner, design 000451 batch 2"))]
+#[derive(Debug, Clone)]
+pub(crate) struct TriggerBandAt {
+    /// The book's progress: the block time both book streams applied, and the latest height.
+    pub(crate) time: u64,
+    pub(crate) height: u64,
+    pub(crate) trusted: bool,
+    /// `BookTrust::withheld_periods` at the read.
+    pub(crate) withheld_periods: u64,
+    pub(crate) band: TriggerBand,
 }
 
 #[cfg(test)]
@@ -2506,6 +2532,55 @@ mod tests {
         assert_eq!(table[0].oid, 99);
     }
 
+    /// The band read the forced-flow owner takes (design 000451 r3): the table's orders in the band with its
+    /// availability and generation, and the book's progress and trust under the same lock.
+    #[tokio::test]
+    async fn test_untriggered_band_read_carries_availability_generation_and_book_trust() {
+        let px = |value: &str| Px::parse_from_str(value).unwrap();
+        let read = |listener: &OrderBookListener| listener.untriggered_in_band(&Coin::new("BTC"), px("100"), px("120"), 10).unwrap();
+        let oids = |band: &TriggerBandAt| band.band.orders.iter().map(|(_, order)| order.oid).collect::<Vec<_>>();
+        let (mut listener, _rx) = ready_listener();
+        listener.apply_event_batch(10, EventBatch::Orders(make_trigger_status_batch("BTC", 77, 10)), EventSource::OrderStatuses);
+        let live = read(&listener);
+        assert_eq!(oids(&live), vec![77]);
+        assert_eq!(live.band.availability, TriggerAvailability::Gap(triggers::TriggerGap::SnapshotWithoutTriggers));
+        assert_eq!((live.band.generation, live.height, live.trusted, live.withheld_periods), (0, 10, true, 0));
+        let (time, height, _, _) = listener.compute_untriggered_snapshot(None).unwrap();
+        assert_eq!((live.time, live.height), (time, height), "the same progress as the untriggered endpoint");
+
+        let trigger = InnerL4Order {
+            user: Address::new([3; 20]),
+            coin: Coin::new("BTC"),
+            side: Side::Ask,
+            limit_px: Px::new(500),
+            sz: Sz::new(100_000_000),
+            oid: 99,
+            timestamp: 0,
+            trigger_condition: "Price below 115".to_string(),
+            is_trigger: true,
+            trigger_px: "115.0".to_string(),
+            is_position_tpsl: false,
+            reduce_only: true,
+            order_type: "Stop Market".to_string(),
+            tif: None,
+            cloid: None,
+        };
+        let listener = Arc::new(Mutex::new(listener));
+        listener.lock().await.open_cache_window_for_test();
+        install_snapshot_phased(&listener, Snapshots::new(HashMap::new()), TriggerSection::Complete(vec![trigger]), 20)
+            .await
+            .expect("install");
+        let mut guard = listener.lock().await;
+        let installed = read(&guard);
+        assert_eq!(oids(&installed), vec![99], "a complete section replaces the table");
+        assert_eq!((installed.band.availability, installed.band.generation), (TriggerAvailability::Complete, 1));
+
+        guard.mark_desynced("watcher_data_loss");
+        let withheld = read(&guard);
+        assert_eq!((withheld.trusted, withheld.withheld_periods), (false, 1), "a lost status may have been a trigger's");
+        assert_eq!(withheld.band.availability, TriggerAvailability::Complete, "the table's own state is separate");
+    }
+
     /// Feed a paired status + New diff (both halves of an order add) at `height`.
     fn feed_order(listener: &mut OrderBookListener, coin: &str, oid: u64, height: u64) {
         listener.apply_event_batch(
@@ -2692,7 +2767,7 @@ mod tests {
         install_snapshot_phased_impl(
             &listener,
             Snapshots::new(HashMap::new()),
-            Vec::new(),
+            TriggerSection::Absent,
             150,
             0,
             INSTALL_MAX_CHASE_ROUNDS,
@@ -2724,7 +2799,7 @@ mod tests {
         install_snapshot_phased_impl(
             &listener,
             Snapshots::new(HashMap::new()),
-            Vec::new(),
+            TriggerSection::Absent,
             15,
             0,
             INSTALL_MAX_CHASE_ROUNDS,
@@ -2749,7 +2824,7 @@ mod tests {
         listener.lock().await.open_cache_window_for_test();
         feed_order(&mut *listener.lock().await, "NEW", 1, 200);
 
-        install_snapshot_phased(&listener, Snapshots::new(HashMap::new()), Vec::new(), 150).await.expect("install");
+        install_snapshot_phased(&listener, Snapshots::new(HashMap::new()), TriggerSection::Absent, 150).await.expect("install");
 
         let guard = listener.lock().await;
         assert!(guard.is_ready());
@@ -2778,7 +2853,7 @@ mod tests {
         install_snapshot_phased_impl(
             &listener,
             Snapshots::new(HashMap::new()),
-            Vec::new(),
+            TriggerSection::Absent,
             5,
             0,
             INSTALL_MAX_CHASE_ROUNDS,
@@ -2805,7 +2880,7 @@ mod tests {
         feed_order(&mut guard, "NEW", 2, 200);
         let listener = Arc::new(Mutex::new(guard));
 
-        install_snapshot_phased_impl(&listener, Snapshots::new(HashMap::new()), Vec::new(), 150, 0, 0)
+        install_snapshot_phased_impl(&listener, Snapshots::new(HashMap::new()), TriggerSection::Absent, 150, 0, 0)
             .await
             .expect("install");
 
@@ -2830,7 +2905,7 @@ mod tests {
             feed_order(&mut guard, "NEW", 1, 200);
         }
 
-        install_snapshot_phased_impl(&listener, Snapshots::new(HashMap::new()), Vec::new(), 150, 0, 0)
+        install_snapshot_phased_impl(&listener, Snapshots::new(HashMap::new()), TriggerSection::Absent, 150, 0, 0)
             .await
             .expect("install");
 

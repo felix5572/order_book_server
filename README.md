@@ -279,20 +279,21 @@ Response:
 {
   "time": 1702530000000,
   "height": 123456,
+  "complete": true,
   "data": [
     ["BTC", [["0x<owner>", { "coin": "BTC", "side": "B", "limitPx": "64100", "sz": "1.25", "oid": 511698638823, "isTrigger": true, "triggerPx": "64000.0", "orderType": "Stop Market", ... }], ...]],
     ...
   ]
 }
 ```
-`data` is sorted by coin, each order an `[ownerAddress, order]` tuple in the same shape as l4Book orders (`isTrigger: true`, `triggerPx` set). A coin with no pending triggers is simply absent (or `data` is empty) — that is a legitimate state, not an error. Returns `503` until the initial snapshot has been installed, and while the book is withheld after data loss. Supports `Accept-Encoding: gzip` like `/l4Book`.
+`data` is sorted by coin, each order an `[ownerAddress, order]` tuple in the same shape as l4Book orders (`isTrigger: true`, `triggerPx` set). A coin with no pending triggers is simply absent (or `data` is empty) — that is a legitimate state, not an error. `complete` is true only when these are all the standing trigger orders: the last install's dump carried the trigger section for every market and every order of it converted, and every live trigger order since parsed. Otherwise it is false until the next such install, and the orders the table does hold are still served. A coin of a market the server does not keep (a spot coin under `--markets perps`) is never complete; all coins means all of the kept markets. Returns `503` until the initial snapshot has been installed, and while the book is withheld after data loss. Supports `Accept-Encoding: gzip` like `/l4Book`.
 
 Notes:
-- The snapshot invocation passes `--include-trigger-orders`, so every install seeds the table with the **full standing set** of pending trigger orders from the node's state (the dump's per-coin `untriggered_orders` section) — coverage is complete from first boot, including stops placed long before the server started. Entries are then maintained live: upserted on `"open"` statuses, evicted on any terminal status (`canceled`, `triggered`, `filled`, `rejected`, ...). If a dump ever yields no triggers (older hl-node without the flag), the accumulated table is carried forward across the install rather than wiped. Evictions are counted per status in `orderbook_untriggered_evictions_total{status}` — a novel status label after a node upgrade is the signal to re-check the eviction rule.
+- The snapshot invocation passes `--include-trigger-orders`, so every install seeds the table with the **full standing set** of pending trigger orders from the node's state (the dump's per-coin `untriggered_orders` section) — coverage is complete from first boot, including stops placed long before the server started. Entries are then maintained live: upserted on `"open"` statuses, evicted on any terminal status (`canceled`, `triggered`, `filled`, `rejected`, ...). If a dump carries no trigger section at all (an hl-node without the flag), the accumulated table is carried forward across the install rather than wiped, with `complete: false`. Evictions are counted per status in `orderbook_untriggered_evictions_total{status}` — a novel status label after a node upgrade is the signal to re-check the eviction rule.
 - `limitPx` and `sz` are canonicalized through the server's fixed-point types (trailing zeros stripped: `"64100.0"` → `"64100"`); `triggerPx` passes through as the node wrote it and is safe to use as an aggregation key.
 - Position TP/SL orders (`isPositionTpsl: true`, sized to the whole position) carry `sz: "0"` — consumers that drop zero-size rows must special-case them if they need position-attached stops.
 - `children` is always `[]` (the server does not retain child order data, same as l4Book). Child TP/SL orders appear as their own top-level entries once the node emits statuses for them.
-- Disabled in `--bbo-only` mode (the endpoint serves empty `data`) to preserve its lightweight memory envelope. Track the set's size via `orderbook_untriggered_orders_total`.
+- Disabled in `--bbo-only` mode (the endpoint serves empty `data`, `complete: false`) to preserve its lightweight memory envelope. Track the set's size via `orderbook_untriggered_orders_total`.
 
 ### Subscribe to Order Updates (User-Specific)
 Stream raw order status data for a specific user address:

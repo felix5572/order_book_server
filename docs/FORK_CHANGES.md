@@ -352,6 +352,25 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
 判断前的阶段门); 区块交易标记只说明发生了可能使锚点失效的成功操作, 不在锚点之间重算现金、模式与清算价; 空变化
 标记只说明账户自己没有这些事件, 不能证明清算价没变(同池其他仓位的 mark 在动, 组合保证金账户的借贷利息在累积)。
 
+## 2026-10-20 被迫成交阶梯第 1 批: 条件单表(设计 000451 r3)
+
+**用途**: 被迫成交阶梯(止损 + 清算, 第 2 批 `extForcedFlow`)要在同一进程里直接读监听器的未触发条件单, 不另建一份。
+本批把这张表收成一个 owner(`listeners/order_book/triggers.rs` 的 `TriggerTable`), 并给出按触发价区间的读取。
+
+- **存储**: 每币一份按 (触发价, oid) 排序的订单, 另按 oid 记触发价以便删除; 订单 `Arc` 共享, 锁内读取只加引用计数。
+  撤单 / 触发等非 `open` 状态的删除路径不分配内存。触发价解析不了的单不进表(按缺口处理)。
+- **完整性**: 快照转换随结果交出条件单段的状态 `TriggerSection`: 每个市场都带段且全部转换成功为 `Complete`(空段也算);
+  有转换失败或有市场缺段为 `Partial`; 一个市场都没带为 `Absent`。表的可用性 `Complete` / `Gap(原因)`, 原因分
+  `TrackingDisabled`(`--bbo-only`, 或现货过滤下的现货币)、`SnapshotWithoutTriggers`、`SnapshotParseFailed`、
+  `LiveParseFailed`; 第一个缺口一直保留, 只有下一次 `Complete` 的安装能恢复。只有 `Absent` 时沿用旧表的单(原有行为);
+  `Partial` 即使转换结果为空也整表替换。不跟踪的市场(现货过滤下的现货币)按币查询一律不完整(审查 000453 r1)。
+  10-20 bm 实际快照: 1666 个市场全部带段, 132,597 张条件单。
+- **版本**: 每次安装代次 +1; 代次内每币每次增删改版本 +1, 币的单删空后版本也不归零。
+- **区间读取**(`OrderBookListener::untriggered_in_band`, 第 2 批使用): 一个币触发价在 `[lo, hi]` 内的单, 按触发价再按 oid,
+  最多 `max` 张(带索引用的触发价), 超出标 `truncated`; 同时给可用性、代次、版本, 以及同一把锁下盘口的进度(time / height)、是否可信和
+  `withheld_periods`(状态流丢数据可能丢了条件单的状态, 消费方要同时看表完整和盘口可信)。
+- **接口**: `GET /untriggeredOrders` 多一个 `complete` 字段, 只在表 `Complete` 时为 true; 其余行为不变。
+
 ## 已移植(2026-07-05, 底座 47ce696 之上)
 
 1. **官方 PR#9:新单进簿价用 diff 的 px**(status px 对 trigger/转化单可能不同)。

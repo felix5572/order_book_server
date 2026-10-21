@@ -149,7 +149,32 @@ impl<O: InnerOrder> OrderBooks<O> {
 /// "untriggered_orders": [...]}`).
 enum CliMarket<R> {
     Sides([Vec<R>; 2]),
-    WithTriggers { book_orders: [Vec<R>; 2], untriggered_orders: Vec<R> },
+    /// `untriggered_orders` is `None` when the object has no such key.
+    WithTriggers { book_orders: [Vec<R>; 2], untriggered_orders: Option<Vec<R>> },
+}
+
+/// A dump's trigger section, as the trigger table needs it (design 000451 r3).
+#[derive(Debug)]
+pub(crate) enum TriggerSection<O> {
+    /// Every market carried the section and every order of it converted (an empty section is a complete empty table).
+    Complete(Vec<O>),
+    /// The orders that converted, while some did not or some markets carried no section.
+    Partial { orders: Vec<O>, skipped: usize, markets_without: usize },
+    /// No market carried the section (a dump without `--include-trigger-orders`).
+    Absent,
+}
+
+impl<O> TriggerSection<O> {
+    /// The orders it holds, and how it stands, for the install log.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::Complete(orders) => format!("{} untriggered orders, complete", orders.len()),
+            Self::Partial { orders, skipped, markets_without } => {
+                format!("{} untriggered orders, partial: {skipped} unconverted, {markets_without} markets without the section", orders.len())
+            }
+            Self::Absent => "no trigger section".to_string(),
+        }
+    }
 }
 
 /// Hand-written instead of `#[serde(untagged)]`: untagged enums buffer every
@@ -195,7 +220,7 @@ impl<'de, R: Deserialize<'de>> Deserialize<'de> for CliMarket<R> {
                 }
                 Ok(CliMarket::WithTriggers {
                     book_orders: book_orders.ok_or_else(|| serde::de::Error::missing_field("book_orders"))?,
-                    untriggered_orders: untriggered_orders.unwrap_or_default(),
+                    untriggered_orders,
                 })
             }
         }
@@ -204,26 +229,30 @@ impl<'de, R: Deserialize<'de>> Deserialize<'de> for CliMarket<R> {
     }
 }
 
-/// Convert the CLI's parsed per-coin list into typed snapshots plus the flat
-/// untriggered trigger-order list. Book conversion stays strict (a corrupt
-/// book order poisons the install); untriggered conversion is lenient - a bad
-/// entry is skipped and counted, since it only degrades the side table, and
-/// failing the whole snapshot for it would wedge every re-sync.
+/// Convert the CLI's parsed per-coin list into typed snapshots plus the trigger section. Book conversion stays strict
+/// (a corrupt book order poisons the install); trigger conversion is lenient - a bad entry is skipped and counted, and
+/// the section is then `Partial`, since it only degrades the side table, and failing the whole snapshot for it would
+/// wedge every re-sync.
 #[allow(clippy::type_complexity)]
-fn convert_cli_snapshot<O, R>(snapshot: Vec<(String, CliMarket<R>)>, height: u64) -> Result<(u64, Snapshots<O>, Vec<O>)>
+fn convert_cli_snapshot<O, R>(snapshot: Vec<(String, CliMarket<R>)>, height: u64) -> Result<(u64, Snapshots<O>, TriggerSection<O>)>
 where
     O: TryFrom<R, Error = Error>,
 {
     let mut untriggered: Vec<O> = Vec::new();
     let mut untriggered_skipped = 0usize;
+    let (mut markets_with, mut markets_without) = (0usize, 0usize);
     let books = snapshot
         .into_iter()
         .map(|(coin, market)| {
             let ([bids, asks], pending) = match market {
-                CliMarket::Sides(sides) => (sides, Vec::new()),
+                CliMarket::Sides(sides) => (sides, None),
                 CliMarket::WithTriggers { book_orders, untriggered_orders } => (book_orders, untriggered_orders),
             };
-            for raw in pending {
+            match pending {
+                Some(_) => markets_with += 1,
+                None => markets_without += 1,
+            }
+            for raw in pending.into_iter().flatten() {
                 match O::try_from(raw) {
                     Ok(order) => untriggered.push(order),
                     Err(_) => untriggered_skipped += 1,
@@ -238,7 +267,12 @@ where
         crate::metrics::PARSE_ERRORS_TOTAL.with_label_values(&["untriggered"]).inc_by(untriggered_skipped as u64);
         log::warn!("Skipped {untriggered_skipped} unparseable untriggered orders in snapshot");
     }
-    Ok((height, Snapshots::new(books), untriggered))
+    let section = match (markets_with, markets_without, untriggered_skipped) {
+        (0, _, _) => TriggerSection::Absent,
+        (_, 0, 0) => TriggerSection::Complete(untriggered),
+        (_, markets_without, skipped) => TriggerSection::Partial { orders: untriggered, skipped, markets_without },
+    };
+    Ok((height, Snapshots::new(books), section))
 }
 
 /// Load snapshots from a CLI-generated JSON file. The dump carries no height
@@ -249,7 +283,7 @@ where
 pub(crate) async fn load_snapshots_from_cli_json<O, R>(
     snapshot_path: &Path,
     height: u64,
-) -> Result<(u64, Snapshots<O>, Vec<O>)>
+) -> Result<(u64, Snapshots<O>, TriggerSection<O>)>
 where
     O: TryFrom<R, Error = Error> + Send + 'static,
     R: Serialize + for<'a> Deserialize<'a> + Send + 'static,
@@ -261,7 +295,7 @@ where
     // while both the old and new books are alive during the install.
     let snapshot_path = snapshot_path.to_path_buf();
     let parse_start = std::time::Instant::now();
-    let parsed = tokio::task::spawn_blocking(move || -> Result<(u64, Snapshots<O>, Vec<O>)> {
+    let parsed = tokio::task::spawn_blocking(move || -> Result<(u64, Snapshots<O>, TriggerSection<O>)> {
         let file = fs::File::open(&snapshot_path)?;
         let reader = std::io::BufReader::with_capacity(1 << 20, file);
         let snapshot: Vec<(String, CliMarket<R>)> = serde_json::from_reader(reader)?;
@@ -280,7 +314,7 @@ mod tests {
         order_book::{
             InnerOrder, OrderBook, Px, Side, Snapshot, Sz,
             levels::build_l2_level,
-            multi_book::{Coin, Snapshots},
+            multi_book::{Coin, Snapshots, TriggerSection},
         },
         prelude::*,
         types::{
@@ -499,12 +533,12 @@ mod tests {
     /// The --include-trigger-orders dump format: per-coin objects with
     /// `book_orders` + `untriggered_orders`. Both this and the legacy bare
     /// `[bids, asks]` form must parse via the untagged CliMarket enum, and the
-    /// untriggered list must come through typed.
+    /// untriggered list must come through typed, with how complete the section is.
     #[test]
     fn test_cli_snapshot_with_trigger_orders_format() -> Result<()> {
-        let order = |oid: u64, is_trigger: bool| {
+        let order = |oid: u64, is_trigger: bool, limit_px: &str| {
             serde_json::json!(["0x0000000000000000000000000000000000000001", {
-                "coin": "BTC", "side": "B", "limitPx": "100.0", "sz": "1.0", "oid": oid,
+                "coin": "BTC", "side": "B", "limitPx": limit_px, "sz": "1.0", "oid": oid,
                 "timestamp": 1000, "triggerCondition": if is_trigger {"Price above 110"} else {"N/A"},
                 "isTrigger": is_trigger, "triggerPx": if is_trigger {"110.0"} else {"0.0"},
                 "children": [], "isPositionTpsl": false, "reduceOnly": false,
@@ -512,16 +546,42 @@ mod tests {
                 "origSz": "1.0", "tif": null, "cloid": null
             }])
         };
-        let json = serde_json::json!([
-            ["BTC", { "book_orders": [[order(1, false)], []], "untriggered_orders": [order(100, true), order(101, true)] }],
-            ["ETH", [[order(2, false)], []]]
+        let convert = |json: serde_json::Value| -> Result<(u64, Snapshots<InnerL4Order>, TriggerSection<InnerL4Order>)> {
+            let parsed: Vec<(String, super::CliMarket<(Address, L4Order)>)> = serde_json::from_value(json)?;
+            super::convert_cli_snapshot::<InnerL4Order, _>(parsed, 42)
+        };
+        let with_section = serde_json::json!([
+            ["BTC", { "book_orders": [[order(1, false, "100.0")], []], "untriggered_orders": [order(100, true, "100.0"), order(101, true, "100.0")] }],
+            ["ETH", { "book_orders": [[order(2, false, "100.0")], []], "untriggered_orders": [] }]
         ]);
-        let parsed: Vec<(String, super::CliMarket<(Address, L4Order)>)> = serde_json::from_value(json)?;
-        let (height, snapshots, untriggered) = super::convert_cli_snapshot::<InnerL4Order, _>(parsed, 42)?;
+        let (height, snapshots, section) = convert(with_section)?;
         assert_eq!(height, 42);
-        assert_eq!(snapshots.value().len(), 2, "both formats must yield books");
+        assert_eq!(snapshots.value().len(), 2);
+        let TriggerSection::Complete(untriggered) = section else { panic!("every market carried the section: {section:?}") };
         assert_eq!(untriggered.len(), 2);
         assert!(untriggered.iter().all(|o| o.is_trigger && o.trigger_px == "110.0"));
+
+        let mixed = serde_json::json!([
+            ["BTC", { "book_orders": [[order(1, false, "100.0")], []], "untriggered_orders": [order(100, true, "100.0")] }],
+            ["ETH", [[order(2, false, "100.0")], []]]
+        ]);
+        let (_, snapshots, section) = convert(mixed)?;
+        assert_eq!(snapshots.value().len(), 2, "both formats must yield books");
+        let TriggerSection::Partial { orders, skipped: 0, markets_without: 1 } = section else {
+            panic!("a market without the section: {section:?}")
+        };
+        assert_eq!(orders.len(), 1);
+
+        let unconverted = serde_json::json!([
+            ["BTC", { "book_orders": [[], []], "untriggered_orders": [order(100, true, "100.0"), order(101, true, "not a price")] }]
+        ]);
+        let TriggerSection::Partial { orders, skipped: 1, markets_without: 0 } = convert(unconverted)?.2 else {
+            panic!("an order that did not convert")
+        };
+        assert_eq!(orders.len(), 1);
+
+        let legacy = serde_json::json!([["BTC", [[order(1, false, "100.0")], []]]]);
+        assert!(matches!(convert(legacy)?.2, TriggerSection::Absent));
         Ok(())
     }
 
