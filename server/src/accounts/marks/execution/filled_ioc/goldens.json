@@ -1,0 +1,694 @@
+[
+  {
+    "height": 1192106175,
+    "coin": "PROVE",
+    "asset": 201,
+    "block_time": "2026-10-21T16:01:07.614612690",
+    "original_rank": [
+      0,
+      3,
+      7
+    ],
+    "action": {
+      "type": "order",
+      "orders": [
+        {
+          "a": 201,
+          "b": true,
+          "p": "0.1914",
+          "s": "100",
+          "r": false,
+          "t": {
+            "limit": {
+              "tif": "Ioc"
+            }
+          }
+        }
+      ],
+      "grouping": "na"
+    },
+    "response": {
+      "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+      "res": {
+        "status": "ok",
+        "response": {
+          "type": "order",
+          "data": {
+            "statuses": [
+              {
+                "filled": {
+                  "totalSz": "100.0",
+                  "avgPx": "0.19137",
+                  "oid": 581650039904
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "statuses": [
+      {
+        "time": "2026-10-21T16:01:07.614612690",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": "0xf09fb9c131ad0d49f21904470e18bf010700d1a6cca02c1c94686513f0a0e734",
+        "builder": null,
+        "status": "open",
+        "order": {
+          "coin": "PROVE",
+          "side": "B",
+          "limitPx": "0.1914",
+          "sz": "100.0",
+          "oid": 581650039904,
+          "timestamp": 1792598467614,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "100.0",
+          "tif": "Ioc",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T16:01:07.614612690",
+        "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+        "hash": null,
+        "builder": null,
+        "status": "selfTradeCanceled",
+        "order": {
+          "coin": "PROVE",
+          "side": "A",
+          "limitPx": "0.19132",
+          "sz": "870.0",
+          "oid": 581649998094,
+          "timestamp": 1792598465334,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "870.0",
+          "tif": "Alo",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T16:01:07.614612690",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": null,
+        "builder": null,
+        "status": "selfTradeCanceled",
+        "order": {
+          "coin": "PROVE",
+          "side": "A",
+          "limitPx": "0.19132",
+          "sz": "882.0",
+          "oid": 581650011087,
+          "timestamp": 1792598465819,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "882.0",
+          "tif": "Alo",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T16:01:07.614612690",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "PROVE",
+          "side": "B",
+          "limitPx": "0.1914",
+          "sz": "0.0",
+          "oid": 581650039904,
+          "timestamp": 1792598467614,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "100.0",
+          "tif": "Ioc",
+          "cloid": null
+        }
+      }
+    ],
+    "diffs": [
+      {
+        "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+        "oid": 581649998094,
+        "coin": "PROVE",
+        "side": "A",
+        "px": "0.19132",
+        "raw_book_diff": "remove"
+      },
+      {
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "oid": 581650011087,
+        "coin": "PROVE",
+        "side": "A",
+        "px": "0.19132",
+        "raw_book_diff": "remove"
+      }
+    ],
+    "fills": [
+      [
+        "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        {
+          "coin": "PROVE",
+          "px": "0.19137",
+          "sz": "100.0",
+          "side": "B",
+          "time": 1792598467614,
+          "startPosition": "103866.0",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xf09fb9c131ad0d49f21904470e18bf010700d1a6cca02c1c94686513f0a0e734",
+          "oid": 581650039904,
+          "crossed": true,
+          "fee": "0.0",
+          "tid": 140104099352737,
+          "feeToken": "USDC",
+          "twapId": null
+        }
+      ],
+      [
+        "0x7717a7a245d9f950e586822b8c9b46863ed7bd7e",
+        {
+          "coin": "PROVE",
+          "px": "0.19137",
+          "sz": "100.0",
+          "side": "A",
+          "time": 1792598467614,
+          "startPosition": "-55774.0",
+          "dir": "Open Short",
+          "closedPnl": "0.0",
+          "hash": "0xf09fb9c131ad0d49f21904470e18bf010700d1a6cca02c1c94686513f0a0e734",
+          "oid": 581650032421,
+          "crossed": false,
+          "fee": "-0.000191",
+          "tid": 140104099352737,
+          "cloid": "0xede8c0ca61ab434d979375930ab4a6c3",
+          "feeToken": "USDC",
+          "twapId": null
+        }
+      ]
+    ],
+    "source_raw_sha256": {
+      "node_order_statuses_streaming": "7c80f86f1b4ff5cbb5b4283319f03fa482afe9c73b955081fe3801a405e68496",
+      "node_raw_book_diffs_streaming": "a0c9ae05c62760a6eb7fc3b27e7811241fbaf3649a1855bfe868cff335b86643",
+      "node_fills_streaming": "d9e2c68e3857fb8d60f1c1a94d15aae49dc02f2ed121301885a23e147ccd4f70",
+      "system_and_core_writer_actions_streaming": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "replica_cmds": "30734fc8e0f5e3fd2312b3b89ed99c979392e08ea6a6f9a44a971645932fbb77"
+    }
+  },
+  {
+    "height": 1192117608,
+    "coin": "PURR",
+    "asset": 152,
+    "block_time": "2026-10-21T16:14:51.380629313",
+    "original_rank": [
+      0,
+      3,
+      3215
+    ],
+    "action": {
+      "type": "order",
+      "orders": [
+        {
+          "a": 152,
+          "b": true,
+          "p": "0.10457",
+          "s": "2711",
+          "r": false,
+          "t": {
+            "limit": {
+              "tif": "Ioc"
+            }
+          },
+          "c": "0x0000000000000000000001a15edad669"
+        }
+      ],
+      "grouping": {
+        "p": 51441
+      }
+    },
+    "response": {
+      "user": "0x727956612a8700627451204a3ae26268bd1a1525",
+      "res": {
+        "status": "ok",
+        "response": {
+          "type": "order",
+          "data": {
+            "statuses": [
+              {
+                "filled": {
+                  "totalSz": "2711.0",
+                  "avgPx": "0.10448",
+                  "oid": 581661916816,
+                  "cloid": "0x0000000000000000000001a15edad669"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "statuses": [
+      {
+        "time": "2026-10-21T16:14:51.380629313",
+        "user": "0x727956612a8700627451204a3ae26268bd1a1525",
+        "hash": "0xa3a122fb2883dd80a51a04470e4568020c9800e0c386fc524769ce4de787b76b",
+        "builder": null,
+        "status": "open",
+        "order": {
+          "coin": "PURR",
+          "side": "B",
+          "limitPx": "0.10457",
+          "sz": "2711.0",
+          "oid": 581661916816,
+          "timestamp": 1792599291380,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "2711.0",
+          "tif": "Ioc",
+          "cloid": "0x0000000000000000000001a15edad669"
+        }
+      },
+      {
+        "time": "2026-10-21T16:14:51.380629313",
+        "user": "0x4ef66df2067c588eb98896ede3a8e80f85aff085",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "PURR",
+          "side": "A",
+          "limitPx": "0.10445",
+          "sz": "0.0",
+          "oid": 581661344431,
+          "timestamp": 1792599248289,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "437.0",
+          "tif": "Alo",
+          "cloid": "0x0000000000000000c7b6fc1ce302778e"
+        }
+      },
+      {
+        "time": "2026-10-21T16:14:51.380629313",
+        "user": "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "PURR",
+          "side": "A",
+          "limitPx": "0.10446",
+          "sz": "0.0",
+          "oid": 581658023685,
+          "timestamp": 1792599018548,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "402.0",
+          "tif": "Alo",
+          "cloid": "0x0000000000000000c7b6f26f76bcf788"
+        }
+      },
+      {
+        "time": "2026-10-21T16:14:51.380629313",
+        "user": "0x04a8e5197c0685e64982fd5a2f1f9e7feddc4f74",
+        "hash": null,
+        "builder": {
+          "b": "0xc5be9a8d99f7b508fcf24f4c9dbf39e5f584f708",
+          "f": 10
+        },
+        "status": "filled",
+        "order": {
+          "coin": "PURR",
+          "side": "A",
+          "limitPx": "0.10449",
+          "sz": "0.0",
+          "oid": 579449521982,
+          "timestamp": 1792423085236,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "143.0",
+          "tif": "Gtc",
+          "cloid": "0x87d79a9c9dc8346d18fbc33aeea975f2"
+        }
+      },
+      {
+        "time": "2026-10-21T16:14:51.380629313",
+        "user": "0x58a6959adb46003c139383a27d86e53b612d12e9",
+        "hash": null,
+        "builder": {
+          "b": "0xc5be9a8d99f7b508fcf24f4c9dbf39e5f584f708",
+          "f": 10
+        },
+        "status": "filled",
+        "order": {
+          "coin": "PURR",
+          "side": "A",
+          "limitPx": "0.10449",
+          "sz": "0.0",
+          "oid": 580478277998,
+          "timestamp": 1792506621118,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "368.0",
+          "tif": "Gtc",
+          "cloid": "0x8da401f2d57f76ece8aa7b9d507eed05"
+        }
+      },
+      {
+        "time": "2026-10-21T16:14:51.380629313",
+        "user": "0x727956612a8700627451204a3ae26268bd1a1525",
+        "hash": null,
+        "builder": null,
+        "status": "selfTradeCanceled",
+        "order": {
+          "coin": "PURR",
+          "side": "A",
+          "limitPx": "0.10448",
+          "sz": "1895.0",
+          "oid": 581661913747,
+          "timestamp": 1792599291303,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "1895.0",
+          "tif": "Alo",
+          "cloid": "0x0000000000000000000001a15edad66b"
+        }
+      },
+      {
+        "time": "2026-10-21T16:14:51.380629313",
+        "user": "0x727956612a8700627451204a3ae26268bd1a1525",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "PURR",
+          "side": "B",
+          "limitPx": "0.10457",
+          "sz": "0.0",
+          "oid": 581661916816,
+          "timestamp": 1792599291380,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "2711.0",
+          "tif": "Ioc",
+          "cloid": "0x0000000000000000000001a15edad669"
+        }
+      }
+    ],
+    "diffs": [
+      {
+        "user": "0x727956612a8700627451204a3ae26268bd1a1525",
+        "oid": 581661913747,
+        "coin": "PURR",
+        "side": "A",
+        "px": "0.10448",
+        "raw_book_diff": "remove"
+      }
+    ],
+    "fills": [
+      [
+        "0x727956612a8700627451204a3ae26268bd1a1525",
+        {
+          "coin": "PURR",
+          "px": "0.10445",
+          "sz": "325.0",
+          "side": "B",
+          "time": 1792599291380,
+          "startPosition": "5781.0",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xa3a122fb2883dd80a51a04470e4568020c9800e0c386fc524769ce4de787b76b",
+          "oid": 581661916816,
+          "crossed": true,
+          "fee": "0.005702",
+          "tid": 680702580507594,
+          "cloid": "0x0000000000000000000001a15edad669",
+          "feeToken": "USDC",
+          "twapId": null,
+          "priorityGas": "0.00021371"
+        }
+      ],
+      [
+        "0x4ef66df2067c588eb98896ede3a8e80f85aff085",
+        {
+          "coin": "PURR",
+          "px": "0.10445",
+          "sz": "325.0",
+          "side": "A",
+          "time": 1792599291380,
+          "startPosition": "1439.0",
+          "dir": "Close Long",
+          "closedPnl": "0.730925",
+          "hash": "0xa3a122fb2883dd80a51a04470e4568020c9800e0c386fc524769ce4de787b76b",
+          "oid": 581661344431,
+          "crossed": false,
+          "fee": "-0.001018",
+          "tid": 680702580507594,
+          "cloid": "0x0000000000000000c7b6fc1ce302778e",
+          "feeToken": "USDC",
+          "twapId": null
+        }
+      ],
+      [
+        "0x727956612a8700627451204a3ae26268bd1a1525",
+        {
+          "coin": "PURR",
+          "px": "0.10446",
+          "sz": "402.0",
+          "side": "B",
+          "time": 1792599291380,
+          "startPosition": "6106.0",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xa3a122fb2883dd80a51a04470e4568020c9800e0c386fc524769ce4de787b76b",
+          "oid": 581661916816,
+          "crossed": true,
+          "fee": "0.007054",
+          "tid": 120843769967763,
+          "cloid": "0x0000000000000000000001a15edad669",
+          "feeToken": "USDC",
+          "twapId": null,
+          "priorityGas": "0.00026437"
+        }
+      ],
+      [
+        "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+        {
+          "coin": "PURR",
+          "px": "0.10446",
+          "sz": "402.0",
+          "side": "A",
+          "time": 1792599291380,
+          "startPosition": "-581.0",
+          "dir": "Open Short",
+          "closedPnl": "0.0",
+          "hash": "0xa3a122fb2883dd80a51a04470e4568020c9800e0c386fc524769ce4de787b76b",
+          "oid": 581658023685,
+          "crossed": false,
+          "fee": "-0.001259",
+          "tid": 120843769967763,
+          "cloid": "0x0000000000000000c7b6f26f76bcf788",
+          "feeToken": "USDC",
+          "twapId": null
+        }
+      ],
+      [
+        "0x727956612a8700627451204a3ae26268bd1a1525",
+        {
+          "coin": "PURR",
+          "px": "0.10449",
+          "sz": "143.0",
+          "side": "B",
+          "time": 1792599291380,
+          "startPosition": "6508.0",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xa3a122fb2883dd80a51a04470e4568020c9800e0c386fc524769ce4de787b76b",
+          "oid": 581661916816,
+          "crossed": true,
+          "fee": "0.00251",
+          "tid": 402030583318438,
+          "cloid": "0x0000000000000000000001a15edad669",
+          "feeToken": "USDC",
+          "twapId": null,
+          "priorityGas": "0.00009407"
+        }
+      ],
+      [
+        "0x04a8e5197c0685e64982fd5a2f1f9e7feddc4f74",
+        {
+          "coin": "PURR",
+          "px": "0.10449",
+          "sz": "143.0",
+          "side": "A",
+          "time": 1792599291380,
+          "startPosition": "3879.0",
+          "dir": "Close Long",
+          "closedPnl": "0.336765",
+          "hash": "0xa3a122fb2883dd80a51a04470e4568020c9800e0c386fc524769ce4de787b76b",
+          "oid": 579449521982,
+          "crossed": false,
+          "fee": "0.003538",
+          "builderFee": "0.001494",
+          "tid": 402030583318438,
+          "cloid": "0x87d79a9c9dc8346d18fbc33aeea975f2",
+          "feeToken": "USDC",
+          "builder": "0xc5be9a8d99f7b508fcf24f4c9dbf39e5f584f708",
+          "twapId": null
+        }
+      ],
+      [
+        "0x727956612a8700627451204a3ae26268bd1a1525",
+        {
+          "coin": "PURR",
+          "px": "0.10449",
+          "sz": "368.0",
+          "side": "B",
+          "time": 1792599291380,
+          "startPosition": "6651.0",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xa3a122fb2883dd80a51a04470e4568020c9800e0c386fc524769ce4de787b76b",
+          "oid": 581661916816,
+          "crossed": true,
+          "fee": "0.006459",
+          "tid": 768416253971362,
+          "cloid": "0x0000000000000000000001a15edad669",
+          "feeToken": "USDC",
+          "twapId": null,
+          "priorityGas": "0.00024208"
+        }
+      ],
+      [
+        "0x58a6959adb46003c139383a27d86e53b612d12e9",
+        {
+          "coin": "PURR",
+          "px": "0.10449",
+          "sz": "368.0",
+          "side": "A",
+          "time": 1792599291380,
+          "startPosition": "14613.0",
+          "dir": "Close Long",
+          "closedPnl": "0.867008",
+          "hash": "0xa3a122fb2883dd80a51a04470e4568020c9800e0c386fc524769ce4de787b76b",
+          "oid": 580478277998,
+          "crossed": false,
+          "fee": "0.009382",
+          "builderFee": "0.003845",
+          "tid": 768416253971362,
+          "cloid": "0x8da401f2d57f76ece8aa7b9d507eed05",
+          "feeToken": "USDC",
+          "builder": "0xc5be9a8d99f7b508fcf24f4c9dbf39e5f584f708",
+          "twapId": null
+        }
+      ],
+      [
+        "0x727956612a8700627451204a3ae26268bd1a1525",
+        {
+          "coin": "PURR",
+          "px": "0.10449",
+          "sz": "1473.0",
+          "side": "B",
+          "time": 1792599291380,
+          "startPosition": "7019.0",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xa3a122fb2883dd80a51a04470e4568020c9800e0c386fc524769ce4de787b76b",
+          "oid": 581661916816,
+          "crossed": true,
+          "fee": "0.025857",
+          "tid": 291674047220032,
+          "cloid": "0x0000000000000000000001a15edad669",
+          "feeToken": "USDC",
+          "twapId": null,
+          "priorityGas": "0.00096895"
+        }
+      ],
+      [
+        "0x75c3f4a9f37194d42aa141fe5e7b640c48f9dca3",
+        {
+          "coin": "PURR",
+          "px": "0.10449",
+          "sz": "1473.0",
+          "side": "A",
+          "time": 1792599291380,
+          "startPosition": "1086500.0",
+          "dir": "Close Long",
+          "closedPnl": "7.761237",
+          "hash": "0xa3a122fb2883dd80a51a04470e4568020c9800e0c386fc524769ce4de787b76b",
+          "oid": 581603702034,
+          "crossed": false,
+          "fee": "0.006156",
+          "tid": 291674047220032,
+          "feeToken": "USDC",
+          "twapId": null
+        }
+      ]
+    ],
+    "source_raw_sha256": {
+      "node_order_statuses_streaming": "481a55fb199a8bb4ab4846a1def48a17613cb24c489d4efe5ddd775f24f27352",
+      "node_raw_book_diffs_streaming": "30492b855efa8b04c7184d984e1174d0678f783601e3d8b771e5655aa690c6da",
+      "node_fills_streaming": "99f733be2caecaae75316a469e98db1df36f474b804cbba8f4f8c0c7d628ba2b",
+      "system_and_core_writer_actions_streaming": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "replica_cmds": "6c75d177d58c43d4e32cea827a13339e3650d9e5afb00cebca2ad2fdbdf59ae3"
+    }
+  }
+]

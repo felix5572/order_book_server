@@ -18,6 +18,10 @@
 //! run and matches the taker one-to-one to the exact rejected request. This also places old resting orders and
 //! cross-vault cancels (bm ZETA 1191392472, APE 1191420380, PROVE 1191436351); it does not guess vault ownership.
 //!
+//! Successful fully filled IOC runs use `filled_ioc`: matching open/filled endpoints, receipt oid and actual
+//! taker/maker fills place their trailing self-trade cancels, including old cross-vault orders. Interrupted or
+//! competing runs remain unplaced. BM PROVE 1192106175 and PURR 1192117608 otherwise sampled a removed ask.
+//!
 //! For cancellations without that evidence, the earlier conservative attribution remains:
 //! A self-trade cancel (`selfTradeCanceled`) removes a resting order inside the order that would have traded with it.
 //! Its remove anchors to a book action only when that action is the one possible cause:
@@ -47,6 +51,7 @@
 //! update anchors nothing.
 
 mod self_trade;
+mod filled_ioc;
 mod vault;
 mod replacement;
 
@@ -105,6 +110,8 @@ pub(crate) struct BlockStatuses {
     pub(crate) self_trade_cancelled: Vec<StatusOrder>,
     /// No-fill IOC statuses and their contiguous self-trade cancellations, in stream order.
     rejected_iocs: IocRejections,
+    /// Fully filled IOC status runs with explicit receipt and fill evidence.
+    filled_iocs: filled_ioc::FilledIocs,
     /// Automatic close orders produced by vault withdrawals, not ordinary order receipts.
     vault_closes: vault::VaultCloses,
     replacements: replacement::Replacements,
@@ -142,6 +149,7 @@ impl BlockStatuses {
         let mut out = Self::default();
         for status in statuses {
             out.rejected_iocs.observe(&status)?;
+            out.filled_iocs.observe(&status)?;
             out.vault_closes.observe(&status);
             out.replacements.observe(&status)?;
             match (status.status.as_str(), &status.order.cloid) {
@@ -164,7 +172,7 @@ impl BlockStatuses {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len() + self.vault_closes.len() + self.replacements.len()
+        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len() + self.vault_closes.len() + self.replacements.len() + self.filled_iocs.len()
     }
 }
 
@@ -222,7 +230,7 @@ pub(crate) fn price_points_with_system<'b>(
     let native_triggered = statuses.triggered_orders.iter()
         .filter(|order| super::book::is_main_perp(&order.coin) && order_asset(&order.coin).is_some())
         .map(|order| order.oid).collect();
-    let cancelled = cancelled_by_action(actions, statuses, &order_asset, &system.competing_ioc_cancels);
+    let cancelled = cancelled_by_action(actions, statuses, fills, &order_asset, system);
     let vault_closes = statuses.vault_closes.attributed(actions, &system.unplaced_vault_withdrawals);
     let replacements = statuses.replacements.attributed(actions, &order_asset, system);
     points
@@ -251,7 +259,7 @@ struct Removing<'b> {
 }
 
 /// Every book action's removed orders: by oid, by cloid (resolved in execution order) and by self-trade checks.
-fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses, order_asset: impl Fn(&str) -> Option<u32>, system_ioc_cancels: &FxHashSet<u64>) -> Vec<Removing<'b>> {
+fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses, fills: &[BlockFill], order_asset: impl Fn(&str) -> Option<u32>, system: &super::system::SystemAnchors) -> Vec<Removing<'b>> {
     let mut books: Vec<(&RankedAction, &super::actions::BookAnchors)> = actions
         .actions
         .iter()
@@ -276,16 +284,17 @@ fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses, o
         }
         out.push(Removing { rank: action.rank, created: &book.created, cancelled });
     }
-    let attributed = statuses.rejected_iocs.attributed(actions, &order_asset);
+    let mut attributed = statuses.rejected_iocs.attributed(actions, &order_asset);
+    attributed.extend(statuses.filled_iocs.attributed(actions, fills, &order_asset, system));
     for (rank, oids) in &attributed {
         if let Some(action) = out.iter_mut().find(|action| action.rank == *rank) {
-            action.cancelled.extend(oids.iter().filter(|oid| !system_ioc_cancels.contains(oid)));
+            action.cancelled.extend(oids.iter().filter(|oid| !system.competing_ioc_cancels.contains(oid)));
         }
     }
     for cancel in &statuses.self_trade_cancelled {
         // A witnessed IOC run that failed the one-to-one match stays unplaced; do not replace that ambiguity
         // with the weaker same-account heuristic below.
-        if statuses.rejected_iocs.contains_cancel(cancel.oid) {
+        if statuses.rejected_iocs.contains_cancel(cancel.oid) || statuses.filled_iocs.contains_cancel(cancel.oid) {
             continue;
         }
         let Some((creator, created_at)) = books.iter().find(|(_, book)| book.created.contains(&cancel.oid)).map(|(action, book)| (*book, action.rank))
