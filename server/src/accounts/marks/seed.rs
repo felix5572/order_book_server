@@ -205,6 +205,8 @@ struct WireOrderTerms {
 #[derive(Debug)]
 pub(crate) struct WireNativePrices {
     pub(crate) oracle: WireOracle,
+    /// Main clearinghouse's explicit halt set; missing is unknown, not an empty set.
+    pub(crate) halted_assets: Option<Vec<u32>>,
     pub(crate) books: Vec<WireBook>,
     /// `exchange.spot_books`, each with its pair index as `asset`.
     pub(crate) spot_books: Vec<WireBook>,
@@ -254,6 +256,8 @@ pub(crate) struct SpotReferenceBook {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativeAsset {
     pub(crate) name: String,
+    /// The checkpoint's main clearinghouse `halted_assets`; halted reference keys are not refreshed.
+    pub(crate) halted: bool,
     pub(crate) size_decimals: u32,
     /// `pxs2[i][0].p`: the stored oracle, integer price units (10^-(6 - szDecimals)).
     pub(crate) stored_oracle: u64,
@@ -360,8 +364,16 @@ impl MarkSeed {
 
 impl NativeSeed {
     fn from_wire(wire: WireNativePrices, main: &DexMeta, spot_pairs: &[SpotPair]) -> Result<Self, String> {
-        let WireNativePrices { oracle, books, spot_books, system_timing } = wire;
+        let WireNativePrices { oracle, halted_assets, books, spot_books, system_timing } = wire;
         let count = main.assets.len();
+        let halted_assets = halted_assets.ok_or("halted_assets is missing")?;
+        let mut halted = vec![false; count];
+        for asset in halted_assets {
+            let index = usize::try_from(asset).ok().filter(|index| *index < count).ok_or_else(|| format!("halted asset {asset} outside the {count} assets"))?;
+            if std::mem::replace(&mut halted[index], true) {
+                return Err(format!("halted_assets lists asset {asset} twice"));
+            }
+        }
         let spot_references = spot_reference_books(oracle.psro, spot_books, spot_pairs, count)?;
         let mut basis = by_asset(oracle.msoe.e, count, "msoe")?;
         let mut local_price = by_asset(oracle.lmpe, count, "lmpe")?;
@@ -388,6 +400,7 @@ impl NativeSeed {
             let (last_trade_px, orders) = books[index].take().ok_or_else(|| format!("{}: no book", asset()))?;
             assets.push(NativeAsset {
                 name: meta.name.clone(),
+                halted: halted[index],
                 size_decimals: meta.size_decimals,
                 stored_oracle: price_units(stored_oracle.p).map_err(|err| format!("{}: stored oracle {err}", asset()))?,
                 mark: stored_mark(mark).map_err(|err| format!("{}: mark {err}", asset()))?,
@@ -644,6 +657,20 @@ pub(crate) mod tests {
             checkpoint["exchange"]["locus"]["cls"][1]["oracle"]["pxs2"][0][1].as_object_mut().unwrap().remove("u");
         });
         assert!(error.contains("xyz:TSLA: a stored mark without its time"), "{error}");
+    }
+
+    #[test]
+    fn the_halt_set_is_explicit_and_validated_without_blocking_account_seeding() {
+        let seed = MarkSeed::from_checkpoint(parse_checkpoint_bytes(&fixture()).unwrap()).unwrap();
+        assert_eq!(seed.native.assets.iter().map(|asset| asset.halted).collect::<Vec<_>>(), [false, true]);
+        let error = seed_error(|checkpoint| {
+            checkpoint["exchange"]["locus"]["cls"][0].as_object_mut().unwrap().remove("halted_assets");
+        });
+        assert!(error.contains("halted_assets is missing"), "{error}");
+        for (value, expected) in [(json!([2]), "outside the 2 assets"), (json!([1, 1]), "lists asset 1 twice")] {
+            let error = seed_error(|checkpoint| checkpoint["exchange"]["locus"]["cls"][0]["halted_assets"] = value);
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     /// The fixture with `psro` naming spot pair 1 (HYPE/USDC: base szDecimals 2, USDC quote) for PUMP, and the spot

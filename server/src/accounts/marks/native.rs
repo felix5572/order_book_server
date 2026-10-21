@@ -5,9 +5,10 @@
 //! Per coin: the stored oracle, the mark, the basis EMA (msoe), the local price EMA (lmpe), the validators' Spot,
 //! `ExternalPerp` and Mark reference caches and the last trade. Each block:
 //!
-//! 1. every cache refreshes at the block's time: in a new 3,000 ms bucket, members under 10 s old give the median; with
-//!    none, the median and its bucket stay (Codex: "非空才写"), except that an empty cache of a coin a reference action
-//!    processes moves into that block's bucket (PURR's `ExternalPerp`);
+//! 1. each non-halted coin's caches refresh at the block's time: in a new 3,000 ms bucket, members under 10 s old
+//!    give the median; with none, only the old median stays. The bucket still advances, even without a price action.
+//!    The explicit checkpoint halt set skips all three keys, including caches with historical members
+//!    (node 0x42689de-0x4268a36). This corrects the earlier inference that lack of fresh members froze the bucket;
 //! 2. the price actions run in execution order, each reading the book at its cut and the last trade before it:
 //!    - a validator's reference action stores its Spot and `ExternalPerp` members and the Mark member median(A, L, C):
 //!      A = Spot × (1 + basis previewed with the cut's mid), L = median(bid, ask, last trade), C = `ExternalPerp`;
@@ -56,26 +57,18 @@ impl MemberCache {
         if bucket <= self.last_bucket {
             return;
         }
+        // BucketGuard advances before aggregation (0x3ca3ece); only the median write requires a nonempty result
+        // (0x42c13fe). In particular, an empty live ExternalPerp cache must cross action-free blocks too.
+        self.last_bucket = bucket;
         let fresh: Vec<u64> =
             self.members.values().filter(|(_, time_ns)| block_ns.saturating_sub(*time_ns) < MEMBER_LIFETIME_NS).map(|(value, _)| *value).collect();
         if let Some(median) = median_units(&fresh) {
             self.median = Some(median);
-            self.last_bucket = bucket;
         }
     }
 
     fn insert(&mut self, user: Address, value: u64, time_ns: u64) {
         self.members.insert(user, (value, time_ns));
-    }
-
-    /// A reference action processing the coin without a value for this key moves the cache into the block's bucket
-    /// when it has no member at all: PURR's `ExternalPerp` (never a member) follows the block at the checkpoints of
-    /// 10-19 (review 000448 r1: 597481874 → 597482593 over four) and at 1190920000, while the empty caches of the 51
-    /// coins no action processes keep their old buckets there. A cache with members stays with `begin_block`.
-    fn touch_empty(&mut self, block_ns: u64) {
-        if self.members.is_empty() {
-            self.last_bucket = self.last_bucket.max(block_ns / BUCKET_NS);
-        }
     }
 
     fn equals(&self, stored: &ReferenceCache) -> bool {
@@ -113,6 +106,7 @@ fn debug_pair(replayed: &impl std::fmt::Debug, checkpoint: &impl std::fmt::Debug
 #[derive(Debug, Clone)]
 struct CoinPrices {
     name: String,
+    halted: bool,
     size_decimals: u32,
     stored_oracle: u64,
     mark: StoredMark,
@@ -142,6 +136,7 @@ impl CoinPrices {
     fn seeded(asset: NativeAsset, spot_reference_decimals: Option<u32>) -> Self {
         Self {
             name: asset.name,
+            halted: asset.halted,
             size_decimals: asset.size_decimals,
             stored_oracle: asset.stored_oracle,
             mark: asset.mark,
@@ -157,6 +152,9 @@ impl CoinPrices {
     }
 
     fn begin_block(&mut self, block_ns: u64) {
+        if self.halted {
+            return;
+        }
         for cache in [&mut self.spot, &mut self.external_perp, &mut self.marks] {
             cache.begin_block(block_ns);
         }
@@ -179,13 +177,11 @@ impl CoinPrices {
             // a `psro` coin the validator does not price whose spot book has no midpoint: no input for it (0x2da772e)
             return Ok(());
         }
-        match spot {
-            Some(spot) => self.spot.insert(user, spot, time_ns),
-            None => self.spot.touch_empty(time_ns),
+        if let Some(spot) = spot {
+            self.spot.insert(user, spot, time_ns);
         }
-        match external {
-            Some(external) => self.external_perp.insert(user, external, time_ns),
-            None => self.external_perp.touch_empty(time_ns),
+        if let Some(external) = external {
+            self.external_perp.insert(user, external, time_ns);
         }
         let Some((bid, ask, local)) = self.local(cut) else { return Ok(()) };
         let Some(emas) = &self.emas else {
@@ -567,26 +563,54 @@ mod tests {
         assert!(!btc.external_perp.members.contains_key(&other));
     }
 
-    /// Review 000448 r1: a processed coin's empty cache (PURR's `ExternalPerp`) moves into the block's bucket without a
-    /// member or median; a cache with only stale members, and the empty caches of a coin no action processes (PUMP),
-    /// keep theirs.
+    /// An action-free block still refreshes live empty/stale caches; a halted coin's three keys stay untouched.
     #[test]
-    fn a_processed_coin_moves_its_empty_caches_into_the_block_bucket() {
+    fn action_free_blocks_advance_live_caches_and_skip_halted_coins() {
         let mut seed = spot_referenced_seed();
-        let old_bucket = seed.assets[0].references.external_perp.last_bucket;
         seed.assets[0].references.external_perp.members.clear();
+        seed.assets[0].references.external_perp.median = None;
         let mut prices = NativePrices::seeded(&seed);
-        let unpriced = MarkAction::Reference { oracle: Vec::new(), external: Vec::new() };
-        prices.apply(&unpriced, Some(VALIDATOR), T1, |_| spot_cut((Some(82_870_000), Some(82_870_101)))).unwrap();
-        let (btc, pump) = (&prices.coins[0], &prices.coins[1]);
-        assert!(old_bucket < T1 / BUCKET_NS);
-        assert_eq!((btc.external_perp.last_bucket, btc.external_perp.median, btc.external_perp.members.len()), (T1 / BUCKET_NS, Some(828_554), 0));
-        assert_eq!(pump.external_perp.last_bucket, 593_580_423, "not processed");
-        let mut stale = spot_referenced_seed();
-        stale.assets[0].references.external_perp.members[0].2 = T1 - 12_000_000_000;
-        let mut prices = NativePrices::seeded(&stale);
-        prices.apply(&unpriced, Some(VALIDATOR), T1, |_| spot_cut((Some(82_870_000), Some(82_870_101)))).unwrap();
-        assert_eq!(prices.coins[0].external_perp.last_bucket, old_bucket, "a stale member: left to begin_block");
+        let halted = prices.coins[1].clone();
+        prices.begin_block(T1);
+        let btc = &prices.coins[0];
+        assert_eq!((btc.external_perp.last_bucket, btc.external_perp.median, btc.external_perp.members.len()), (T1 / BUCKET_NS, None, 0));
+        let pump = &prices.coins[1];
+        assert_eq!((&pump.spot, &pump.external_perp, &pump.marks), (&halted.spot, &halted.external_perp, &halted.marks));
+        // Even stale members do not freeze a live key; do not confuse absent prices with an asset halt.
+        prices.coins[0].external_perp.insert(VALIDATOR, 7, T1 - 12_000_000_000);
+        prices.coins[0].external_perp.median = Some(5);
+        prices.begin_block(T1 + BUCKET_NS);
+        let btc = &prices.coins[0];
+        assert_eq!((btc.external_perp.last_bucket, btc.external_perp.median), (T1 / BUCKET_NS + 1, Some(5)));
+    }
+
+    /// BM 1191810000 -> 1191820000: the endpoint crosses into a new bucket without any price action.
+    /// PURR's empty `ExternalPerp` cache advances; halted MATIC (empty) and ARK (stale members) stay exactly equal.
+    #[test]
+    fn real_empty_and_halted_caches_match_the_action_free_checkpoint() {
+        #[derive(serde::Deserialize)]
+        struct Cache {
+            last_bucket: u64,
+            median: Option<u64>,
+            members: Vec<(Address, u64, u64)>,
+        }
+        impl Cache {
+            fn state(self) -> MemberCache {
+                MemberCache::seeded(ReferenceCache { last_bucket: self.last_bucket, median: self.median, members: self.members })
+            }
+        }
+        #[derive(serde::Deserialize)]
+        struct Case { coin: String, halted: bool, before: Cache, after: Cache }
+        #[derive(serde::Deserialize)]
+        struct Golden { end_time_ns: u64, cases: Vec<Case> }
+        let golden: Golden = serde_json::from_str(include_str!("reference_bucket_goldens.json")).unwrap();
+        for case in golden.cases {
+            let mut coin = NativePrices::seeded(&native_seed()).coins.remove(0);
+            coin.halted = case.halted;
+            coin.external_perp = case.before.state();
+            coin.begin_block(golden.end_time_ns);
+            assert_eq!(coin.external_perp, case.after.state(), "{}", case.coin);
+        }
     }
 
     /// 0x2da772e: an empty side gives no Spot input. Unpriced otherwise, the coin has no input at all; with an
@@ -623,10 +647,10 @@ mod tests {
         assert_eq!(prices.check_against(&native_seed()).step_limited, [("BTC".to_string(), 1)]);
     }
 
-    /// Kept without a fresh member: on 1190920000 the 5 coins whose members are stale (ARK, DOOD, IP, TON, VINE) and the
-    /// 51 with empty Spot / `ExternalPerp` caches hold old buckets.
+    /// A live key retains its median when members expire, but advances its bucket. The 56 coins whose buckets
+    /// stay old in checkpoints are explicitly halted (including ARK/DOOD/IP/TON/VINE with stale members).
     #[test]
-    fn caches_refresh_per_bucket_from_fresh_members_and_keep_without_any() {
+    fn live_caches_refresh_per_bucket_and_keep_only_the_median_without_fresh_members() {
         let bucket = T1 / BUCKET_NS;
         let mut cache = MemberCache { members: FxHashMap::default(), median: Some(7), last_bucket: bucket };
         cache.insert(VALIDATOR, 828_000, T1);
@@ -636,7 +660,7 @@ mod tests {
         cache.begin_block(T1 + BUCKET_NS);
         assert_eq!((cache.median, cache.last_bucket), (Some(828_000), bucket + 1), "the 12 s old member is out");
         cache.begin_block(T1 + 20_000_000_000);
-        assert_eq!((cache.median, cache.last_bucket), (Some(828_000), bucket + 1), "no member under 10 s: kept");
+        assert_eq!((cache.median, cache.last_bucket), (Some(828_000), (T1 + 20_000_000_000) / BUCKET_NS), "no fresh member: only the median stays");
     }
 
     #[test]

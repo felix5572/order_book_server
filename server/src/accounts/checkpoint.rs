@@ -302,6 +302,8 @@ struct WireClearinghouse {
     meta: WireMeta,
     oracle: WireOracle,
     user_states: WireUserStates,
+    /// Required by the mark seed, kept optional here so an older archive can still seed account balances.
+    halted_assets: Option<Vec<u32>>,
 }
 
 #[derive(Deserialize)]
@@ -697,14 +699,18 @@ fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, Stri
     let mut dexes = Vec::with_capacity(locus.cls.len());
     let mut dex_users = Vec::with_capacity(locus.cls.len());
     let mut first_oracle = None;
-    for WireClearinghouse { meta, oracle, user_states } in locus.cls {
+    let mut native_halted_assets = None;
+    for WireClearinghouse { meta, oracle, user_states, halted_assets } in locus.cls {
         let pdi = meta.pdi;
         let (meta, users) = build_dex(meta, &oracle.pxs2, user_states).map_err(|err| format!("dex pdi {pdi}: {err}"))?;
+        if first_oracle.is_none() {
+            native_halted_assets = halted_assets;
+        }
         first_oracle.get_or_insert(oracle);
         dexes.push(meta);
         dex_users.push(users);
     }
-    let native_prices = WireNativePrices { oracle: first_oracle.ok_or("locus.cls is empty")?, books: perp_dexs.0, spot_books, system_timing: pt.zip(action_delayer).map(|(pt, delayer)| (pt.prp.order_delay_s, delayer.delay_scale)) };
+    let native_prices = WireNativePrices { oracle: first_oracle.ok_or("locus.cls is empty")?, halted_assets: native_halted_assets, books: perp_dexs.0, spot_books, system_timing: pt.zip(action_delayer).map(|(pt, delayer)| (pt.prp.order_delay_s, delayer.delay_scale)) };
     let holders: Vec<Address> = {
         let mut holders: Vec<Address> = dex_users
             .iter()
@@ -1011,6 +1017,7 @@ pub(crate) mod tests {
                                 "collateralTokenName": "USDC"
                             },
                             "oracle": native_oracle_fixture(),
+                            "halted_assets": [1],
                             "user_states": {
                                 "user_to_state": [
                                     [HOLDER, {"u": -12_000_000_000_i64, "p": {"p": [
