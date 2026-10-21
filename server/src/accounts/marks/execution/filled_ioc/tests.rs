@@ -81,7 +81,7 @@ fn endpoints_and_cancel_prices_must_agree() {
             "coin" => tail.order.coin = "BTC".into(),
             "price" => tail.order.limit_px = "0.2".into(),
             "origSz" => tail.order.orig_sz = "101".into(),
-            "sz" => tail.order.sz = "1".into(),
+            "sz" => tail.order.sz.clone_from(&tail.order.orig_sz),
             "tif" => tail.order.tif = Some("Gtc".into()),
             "cloid" => tail.order.cloid = Some("another".into()),
             "time" => tail.order.timestamp -= 1,
@@ -134,4 +134,28 @@ fn incomplete_filled_ioc_run_blocks_the_weaker_same_account_guess() {
         action: MarkAction::Book(BookAnchors { created: vec![cancel], ..Default::default() }) });
     assert_eq!(cut(&g, &a, &SystemAnchors::default()).lo, 1,
         "only the creation anchors; incomplete IOC evidence must block the same-account guess");
+}
+
+#[test]
+fn partial_ioc_terminal_status_still_anchors_its_cancellation() {
+    let mut g = goldens().into_iter().find(|g| g.height == 1_192_236_393).unwrap();
+    assert_eq!(g.statuses.last().unwrap().order.sz, "33.0");
+    assert_eq!(g.statuses[0].order.orig_sz, "99.0");
+    assert_eq!(g.fills.iter().find(|fill| fill.1.crossed).unwrap().1.sz, "66.0");
+    let a = actions(&g, false);
+    assert_eq!(cut(&g, &a, &SystemAnchors::default()).lo, 3,
+        "the removal after the maker fill belongs before SGA");
+    g.statuses.pop();
+    assert_eq!(cut(&g, &a, &SystemAnchors::default()).lo, 2,
+        "without a terminal status only the actual maker fill anchors");
+}
+
+#[test]
+fn terminal_remainder_cannot_equal_or_exceed_the_original_size() {
+    for size in ["99", "100"] {
+        let mut g = goldens().into_iter().find(|g| g.height == 1_192_236_393).unwrap();
+        let a = actions(&g, false);
+        g.statuses.last_mut().unwrap().order.sz = size.into();
+        assert_eq!(cut(&g, &a, &SystemAnchors::default()).lo, 2, "remainder {size}");
+    }
 }

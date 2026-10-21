@@ -18,7 +18,7 @@
 //! run and matches the taker one-to-one to the exact rejected request. This also places old resting orders and
 //! cross-vault cancels (bm ZETA 1191392472, APE 1191420380, PROVE 1191436351); it does not guess vault ownership.
 //!
-//! Successful fully filled IOC runs use `filled_ioc`: matching open/filled endpoints, receipt oid and actual
+//! Successful IOC runs (full or partial fills) use `filled_ioc`: matching open/filled endpoints, receipt oid and actual
 //! taker/maker fills place their trailing self-trade cancels, including old cross-vault orders. Interrupted or
 //! competing runs remain unplaced. BM PROVE 1192106175 and PURR 1192117608 otherwise sampled a removed ask.
 //!
@@ -110,7 +110,7 @@ pub(crate) struct BlockStatuses {
     pub(crate) self_trade_cancelled: Vec<StatusOrder>,
     /// No-fill IOC statuses and their contiguous self-trade cancellations, in stream order.
     rejected_iocs: IocRejections,
-    /// Fully filled IOC status runs with explicit receipt and fill evidence.
+    /// Completed IOC status runs with explicit receipt and fill evidence.
     filled_iocs: filled_ioc::FilledIocs,
     /// Automatic close orders produced by vault withdrawals, not ordinary order receipts.
     vault_closes: vault::VaultCloses,

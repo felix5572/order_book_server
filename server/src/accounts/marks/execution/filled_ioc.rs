@@ -2,7 +2,7 @@
 //! filled(the same taker). BM PROVE 1192106175 and PURR 1192117608 show that the cancels
 //! can follow the maker book updates, immediately before the next bundle's price action.
 //! Require both ends, matching order identity, actual paired fills and one receipt owner.
-//! Partial/interrupted runs stay unplaced; neither maker age nor shared vault ownership is guessed.
+//! Incomplete/interrupted status runs stay unplaced; neither maker age nor shared vault ownership is guessed.
 
 use rustc_hash::FxHashMap;
 use super::{BlockFill, StatusOrder, OrderSide};
@@ -43,9 +43,11 @@ impl FilledIocs {
         }
         let Some(mut run) = self.pending.take() else { return Ok(()) };
         if status.status == "filled" && order.oid == run.taker.oid {
+            // `filled` closes even a partially executed IOC: PROVE 1192236393 kept sz=33
+            // after 66 of 99 filled. The remainder never rests; zero is not a terminal-status invariant.
             run.complete = order.order_type == "Limit" && order.coin == run.taker.coin.as_ref()
                 && order.timestamp == run.timestamp_ms && OrderKey::observed(status)?.as_ref() == Some(&run.key)
-                && ExactDecimal::parse(&order.sz)? == ExactDecimal::from_units(0, 0);
+                && ExactDecimal::parse(&order.sz)? < run.key.sz;
             self.keep(run);
             return Ok(());
         }

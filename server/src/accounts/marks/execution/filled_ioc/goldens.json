@@ -690,5 +690,247 @@
       "system_and_core_writer_actions_streaming": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "replica_cmds": "6c75d177d58c43d4e32cea827a13339e3650d9e5afb00cebca2ad2fdbdf59ae3"
     }
+  },
+  {
+    "height": 1192236393,
+    "coin": "PROVE",
+    "asset": 201,
+    "block_time": "2026-10-21T18:36:45.183689115",
+    "original_rank": [
+      0,
+      3,
+      27
+    ],
+    "action": {
+      "type": "order",
+      "orders": [
+        {
+          "a": 227,
+          "b": false,
+          "p": "0.015833",
+          "s": "1978",
+          "r": false,
+          "t": {
+            "limit": {
+              "tif": "Ioc"
+            }
+          }
+        },
+        {
+          "a": 201,
+          "b": false,
+          "p": "0.19215",
+          "s": "99",
+          "r": false,
+          "t": {
+            "limit": {
+              "tif": "Ioc"
+            }
+          }
+        }
+      ],
+      "grouping": "na"
+    },
+    "response": {
+      "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+      "res": {
+        "status": "ok",
+        "response": {
+          "type": "order",
+          "data": {
+            "statuses": [
+              {
+                "error": "Order could not immediately match against any resting orders. asset=227"
+              },
+              {
+                "filled": {
+                  "totalSz": "66.0",
+                  "avgPx": "0.19218",
+                  "oid": 581764566526
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "statuses": [
+      {
+        "time": "2026-10-21T18:36:45.183689115",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": "0x8656a0fb455b0fc487d00447101569011b0101e0e05e2e962a1f4c4e045ee9af",
+        "builder": null,
+        "status": "open",
+        "order": {
+          "coin": "PROVE",
+          "side": "A",
+          "limitPx": "0.19215",
+          "sz": "99.0",
+          "oid": 581764566526,
+          "timestamp": 1792607805183,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "99.0",
+          "tif": "Ioc",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T18:36:45.183689115",
+        "user": "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "PROVE",
+          "side": "B",
+          "limitPx": "0.19218",
+          "sz": "0.0",
+          "oid": 581764551813,
+          "timestamp": 1792607803568,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "66.0",
+          "tif": "Alo",
+          "cloid": "0x000000000000000008ac14e78cf28bc2"
+        }
+      },
+      {
+        "time": "2026-10-21T18:36:45.183689115",
+        "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+        "hash": null,
+        "builder": null,
+        "status": "selfTradeCanceled",
+        "order": {
+          "coin": "PROVE",
+          "side": "B",
+          "limitPx": "0.19215",
+          "sz": "969.0",
+          "oid": 581764532064,
+          "timestamp": 1792607801519,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "969.0",
+          "tif": "Alo",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-21T18:36:45.183689115",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "PROVE",
+          "side": "A",
+          "limitPx": "0.19215",
+          "sz": "33.0",
+          "oid": 581764566526,
+          "timestamp": 1792607805183,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "99.0",
+          "tif": "Ioc",
+          "cloid": null
+        }
+      }
+    ],
+    "diffs": [
+      {
+        "user": "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+        "oid": 581764551813,
+        "coin": "PROVE",
+        "side": "B",
+        "px": "0.19218",
+        "raw_book_diff": {
+          "update": {
+            "origSz": "66.0",
+            "newSz": "0.0"
+          }
+        }
+      },
+      {
+        "user": "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+        "oid": 581764551813,
+        "coin": "PROVE",
+        "side": "B",
+        "px": "0.19218",
+        "raw_book_diff": "remove"
+      },
+      {
+        "user": "0x010461c14e146ac35fe42271bdc1134ee31c703a",
+        "oid": 581764532064,
+        "coin": "PROVE",
+        "side": "B",
+        "px": "0.19215",
+        "raw_book_diff": "remove"
+      }
+    ],
+    "fills": [
+      [
+        "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+        {
+          "coin": "PROVE",
+          "px": "0.19218",
+          "sz": "66.0",
+          "side": "B",
+          "time": 1792607805183,
+          "startPosition": "-617.0",
+          "dir": "Close Short",
+          "closedPnl": "-0.03696",
+          "hash": "0x8656a0fb455b0fc487d00447101569011b0101e0e05e2e962a1f4c4e045ee9af",
+          "oid": 581764551813,
+          "crossed": false,
+          "fee": "-0.00038",
+          "tid": 957701996662921,
+          "cloid": "0x000000000000000008ac14e78cf28bc2",
+          "feeToken": "USDC",
+          "twapId": null
+        }
+      ],
+      [
+        "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        {
+          "coin": "PROVE",
+          "px": "0.19218",
+          "sz": "66.0",
+          "side": "A",
+          "time": 1792607805183,
+          "startPosition": "104329.0",
+          "dir": "Close Long",
+          "closedPnl": "0.489786",
+          "hash": "0x8656a0fb455b0fc487d00447101569011b0101e0e05e2e962a1f4c4e045ee9af",
+          "oid": 581764566526,
+          "crossed": true,
+          "fee": "0.0",
+          "tid": 957701996662921,
+          "feeToken": "USDC",
+          "twapId": null
+        }
+      ]
+    ],
+    "source_manifest": "cut_block_1192236393_sources.json",
+    "note": "partial IOC: original 99, executed66, terminal filled.sz33; canceled bid precedes SGA in bundle2"
   }
 ]
