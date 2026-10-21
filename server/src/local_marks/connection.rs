@@ -64,7 +64,10 @@ pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets
         Ok(url) => url,
         Err(err) => return FeedError::Contract(format!("{label}: URL {}: {err}", session.url)),
     };
-    let options = Options::default().with_max_payload_read(MAX_PAYLOAD);
+    // permessage-deflate where the venue takes it: bm 10-21, Binance's perp bookTicker stream (173 symbols) without it
+    // was cut 20 times in 13 minutes (no close frame, TCP ended), with it about once in 25 minutes; the trading
+    // system's gateway asks the same of HL (`upstream_options`)
+    let options = Options::default().with_max_payload_read(MAX_PAYLOAD).with_low_latency_compression();
     let mut ws = match timeout(timeouts.connect, WebSocket::connect(url).with_options(options)).await {
         Ok(Ok(ws)) => ws,
         Ok(Err(err)) => return connect_error(label, &err),
@@ -336,6 +339,40 @@ mod tests {
         let (url, _) = venue(script).await;
         let (error, _, _) = run(url, 1, None).await;
         assert!(matches!(&error, FeedError::Transient(reason) if reason.contains("no frame for")), "{error:?}");
+    }
+
+    /// A venue taking permessage-deflate: the quotes arrive compressed and parse the same.
+    #[tokio::test]
+    async fn a_compressed_connection_quotes() {
+        let (seen_tx, mut seen) = mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/",
+            get(move |incoming: yawc::IncomingUpgrade| {
+                let seen_tx = seen_tx.clone();
+                async move {
+                    let (response, upgrade) = incoming.upgrade(Options::default().with_low_latency_compression()).unwrap();
+                    // review 000461 r1 P3: the client asked for it, so the server's answer carries it
+                    let extensions = response.headers().get("sec-websocket-extensions").map(|value| value.to_str().unwrap().to_string());
+                    seen_tx.send(extensions.unwrap_or_default()).unwrap();
+                    tokio::spawn(async move {
+                        let mut ws = upgrade.await.unwrap();
+                        seen_tx.send(next_text(&mut ws).await.unwrap()).unwrap();
+                        ws.send(Frame::text(ACK)).await.unwrap();
+                        ws.send(Frame::text(QUOTE)).await.unwrap();
+                        ws.send(Frame::close(CloseCode::Restart, "rotation")).await.unwrap();
+                    });
+                    response
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (error, slot, btc) = run(format!("ws://{address}/"), 1, None).await;
+        assert!(matches!(&error, FeedError::Transient(reason) if reason.contains("1012")), "{error:?}");
+        assert!(seen.recv().await.unwrap().contains("permessage-deflate"), "compression negotiated");
+        assert_eq!(seen.recv().await.unwrap(), r#"{"op":"subscribe"}"#);
+        assert_eq!(slot.read(now_ms()).entries[btc].1, Validity::Valid);
     }
 
     /// The venue drops the connection without a close frame: the read error is reported as yawc gave it (it used to
