@@ -109,8 +109,9 @@ struct Args {
     replay_cache_events: usize,
 
     /// Run the account view: per-coin positions (checkpoint anchors plus fills) and checkpoint-anchored liquidation
-    /// prices, served at GET /coinPositions and the coinPositions subscription. Parses a ~1.8 GB checkpoint every
-    /// ~12 minutes (~6 s of one core, ~750 MB peak RSS) and reads the fills and misc events streams.
+    /// prices, served at GET /extCoinPositions and the extCoinPositions subscription, and the liquidation candidates of
+    /// the extLiquidationCandidates subscription. Parses a ~1.8 GB checkpoint every ~12 minutes (~6 s of one core,
+    /// ~750 MB peak RSS) and reads the fills and misc events streams.
     #[arg(long, default_value = "false")]
     accounts: bool,
 }
@@ -200,7 +201,7 @@ async fn main() -> Result<()> {
     }
     println!("  Log level: {}", args.log_level);
     if config.accounts {
-        println!("  Accounts: ON (GET /coinPositions, coinPositions subscription)");
+        println!("  Accounts: ON (GET /extCoinPositions, extCoinPositions and extLiquidationCandidates subscriptions)");
     }
     if config.no_resync {
         println!("  Re-sync: DISABLED (--no-resync) — drift tolerated, book will NOT self-heal");

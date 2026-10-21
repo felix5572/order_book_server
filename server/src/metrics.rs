@@ -442,9 +442,9 @@ lazy_static! {
         &["kind"]
     ).expect("metric can be created");
 
-    /// coinPositions frames broadcast by kind (snapshot / changes / withdrawn).
+    /// extCoinPositions frames broadcast by kind (snapshot / changes / withdrawn).
     pub static ref ACCOUNTS_FRAMES_TOTAL: IntCounterVec = IntCounterVec::new(
-        Opts::new("orderbook_accounts_frames_total", "coinPositions frames broadcast"),
+        Opts::new("orderbook_accounts_frames_total", "extCoinPositions frames broadcast"),
         &["kind"]
     ).expect("metric can be created");
 

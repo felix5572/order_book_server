@@ -22,7 +22,7 @@ use super::{
     runtime::{AccountsHandle, start_accounts},
     view::CoinPositionsDto,
 };
-use crate::prelude::Result;
+use crate::{prelude::Result, types::subscription::EXT_COIN_POSITIONS};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const STATUS_LOG_INTERVAL: Duration = Duration::from_secs(60);
@@ -152,7 +152,8 @@ fn record_candidates(frame: &AccountsFrame, out: &mut (dyn Write + Send)) -> std
 fn observe(frame: &AccountsFrame, versions: &mut HashMap<String, u64>, stats: &mut PushStats) {
     match frame {
         AccountsFrame::Coin { coin, version, wire } => {
-            let kind = if wire.starts_with(br#"{"channel":"coinPositions","data":{"kind":"snapshot""#) { "snapshot" } else { "changes" };
+            let snapshot_prefix = format!(r#"{{"channel":"{EXT_COIN_POSITIONS}","data":{{"kind":"snapshot""#);
+            let kind = if wire.starts_with(snapshot_prefix.as_bytes()) { "snapshot" } else { "changes" };
             *stats.frames.entry(kind).or_default() += 1;
             stats.bytes += wire.len();
             stats.largest = stats.largest.max(wire.len());

@@ -11,6 +11,18 @@ pub(crate) mod types;
 
 pub(crate) use types::{Coin, InnerOrder, Oid, Px, PxBand, Side, Sz};
 
+/// One side's levels, best first.
+type LevelsFromBest<'a, O> = Box<dyn Iterator<Item = (&'a Px, &'a PriceLevel<O>)> + 'a>;
+
+/// What a market order of one side meets (`OrderBook::taker_levels`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TakerBook {
+    /// (price, total size), best first.
+    pub(crate) levels: Vec<(Px, Sz)>,
+    /// The best price of the taker's own side (asks for a sale); `None` when it is empty.
+    pub(crate) own_side_best: Option<Px>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct OrderBook<O> {
     // FxHashMap: hashed per add/cancel/modify with trusted internal keys -
@@ -200,11 +212,12 @@ impl<O: InnerOrder> OrderBook<O> {
     }
 
     /// The levels a market order of side `taker` meets, best first, as (price, total size): until they hold `needed`
-    /// or `max_levels` are read. Levels only (`PriceLevel::total_sz`), no orders: cheap under the listener lock.
-    pub(crate) fn taker_levels(&self, taker: Side, needed: Sz, max_levels: usize) -> Vec<(Px, Sz)> {
-        let levels: Box<dyn Iterator<Item = (&Px, &PriceLevel<O>)>> = match taker {
-            Side::Ask => Box::new(self.bids.iter().rev()),
-            Side::Bid => Box::new(self.asks.iter()),
+    /// or `max_levels` are read; and the best price of the taker's own side (with the first level, the book's mid).
+    /// Levels only (`PriceLevel::total_sz`), no orders: cheap under the listener lock.
+    pub(crate) fn taker_levels(&self, taker: Side, needed: Sz, max_levels: usize) -> TakerBook {
+        let (levels, own_side_best): (LevelsFromBest<'_, O>, _) = match taker {
+            Side::Ask => (Box::new(self.bids.iter().rev()), self.asks.keys().next()),
+            Side::Bid => (Box::new(self.asks.iter()), self.bids.keys().next_back()),
         };
         let mut held = 0_u64;
         let mut out = Vec::new();
@@ -215,7 +228,7 @@ impl<O: InnerOrder> OrderBook<O> {
             held = held.saturating_add(level.total_sz().value());
             out.push((*px, level.total_sz()));
         }
-        out
+        TakerBook { levels: out, own_side_best: own_side_best.copied() }
     }
 
     /// Snapshot restricted to price levels inside the (inclusive) band. Filtering
@@ -648,10 +661,15 @@ mod tests {
         book.add_order(factory.order(50, 50, Side::Bid));
         book.add_order(factory.order(150, 70, Side::Ask));
         let sold = book.taker_levels(Side::Ask, Sz::new(250), 10);
-        assert_eq!(sold, [(Px::new(50), Sz::new(250))], "the best bid level holds it");
-        assert_eq!(book.taker_levels(Side::Ask, Sz::new(251), 10), [(Px::new(50), Sz::new(250)), (Px::new(40), Sz::new(100))]);
-        assert_eq!(book.taker_levels(Side::Ask, Sz::new(1_000), 1), [(Px::new(50), Sz::new(250))], "the limit");
-        assert_eq!(book.taker_levels(Side::Bid, Sz::new(1_000), 10), [(Px::new(70), Sz::new(150))], "a buy takes the asks");
+        assert_eq!(sold, TakerBook { levels: vec![(Px::new(50), Sz::new(250))], own_side_best: Some(Px::new(70)) }, "the best bid level holds it");
+        assert_eq!(book.taker_levels(Side::Ask, Sz::new(251), 10).levels, [(Px::new(50), Sz::new(250)), (Px::new(40), Sz::new(100))]);
+        assert_eq!(book.taker_levels(Side::Ask, Sz::new(1_000), 1).levels, [(Px::new(50), Sz::new(250))], "the limit");
+        let bought = book.taker_levels(Side::Bid, Sz::new(1_000), 10);
+        assert_eq!(bought, TakerBook { levels: vec![(Px::new(70), Sz::new(150))], own_side_best: Some(Px::new(50)) }, "a buy takes the asks");
+        let mut bids_only = OrderBook::new();
+        bids_only.add_order(factory.order(100, 40, Side::Bid));
+        let sold = bids_only.taker_levels(Side::Ask, Sz::new(1), 10);
+        assert_eq!(sold.own_side_best, None, "no ask: no mid");
     }
 
     #[test]

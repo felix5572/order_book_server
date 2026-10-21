@@ -19,7 +19,10 @@ use crate::{
     types::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
-        subscription::{SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, OrderUpdate, ServerResponse, Subscription, SubscriptionManager, UserFills},
+        subscription::{
+            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_LIQUIDATION_CANDIDATES,
+            OrderUpdate, ServerResponse, Subscription, SubscriptionManager, UserFills,
+        },
     },
 };
 use axum::{Router, routing::get};
@@ -269,7 +272,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         );
     let app = match &accounts {
         Some(accounts) => app.route(
-            "/coinPositions",
+            EXT_COIN_POSITIONS_PATH,
             get({
                 let accounts = accounts.clone();
                 move |query, headers| coin_positions_handler(query, headers, accounts.clone())
@@ -878,14 +881,14 @@ async fn receive_client_message(
     if let Subscription::CoinPositions { coin } = &subscription {
         let Some(session) = coin_positions.as_mut() else {
             return outbound
-                .send_message(ServerResponse::Error("coinPositions needs the server started with --accounts".to_string()))
+                .send_message(ServerResponse::Error(format!("{EXT_COIN_POSITIONS} needs the server started with --accounts")))
                 .await;
         };
         return session.on_client_message(outbound, manager, client_message, coin).await;
     }
     if let Subscription::LiquidationCandidates { coin, max_distance_bps } = subscription {
         let Some(session) = coin_positions.as_mut() else {
-            let refused = "liquidationCandidates needs the server started with --accounts".to_string();
+            let refused = format!("{EXT_LIQUIDATION_CANDIDATES} needs the server started with --accounts");
             return outbound.send_message(ServerResponse::Error(refused)).await;
         };
         return session.on_candidates_message(outbound, manager, client_message, coin, max_distance_bps).await;
@@ -2081,7 +2084,7 @@ mod tests {
         serde_json::from_slice(&frame.payload).unwrap()
     }
 
-    const SUBSCRIBE_PUMP: &str = r#"{"method":"subscribe","subscription":{"type":"coinPositions","coin":"PUMP"}}"#;
+    const SUBSCRIBE_PUMP: &str = r#"{"method":"subscribe","subscription":{"type":"extCoinPositions","coin":"PUMP"}}"#;
 
     /// Design 000419 r2 4.2 end to end: snapshot on subscribe, a changes frame per touching batch, withdrawal when the
     /// view stops being available, and no new subscription until it is back.
@@ -2098,7 +2101,7 @@ mod tests {
         ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
         assert_eq!(next_json(&mut ws).await["channel"], "subscriptionResponse");
         let snapshot = next_json(&mut ws).await;
-        assert_eq!((snapshot["channel"].as_str(), snapshot["data"]["kind"].as_str()), (Some("coinPositions"), Some("snapshot")));
+        assert_eq!((snapshot["channel"].as_str(), snapshot["data"]["kind"].as_str()), (Some("extCoinPositions"), Some("snapshot")));
         assert_eq!((snapshot["data"]["version"].as_u64(), snapshot["data"]["positions"][0]["szi"].as_str()), (Some(0), Some("5.0")));
 
         // the trusted book read replica_cmds through block 1000: the next complete block is 1001
@@ -2122,7 +2125,7 @@ mod tests {
         ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
         let refused = next_json(&mut ws).await;
         assert_eq!(refused["channel"], "error");
-        assert!(refused["data"].as_str().unwrap().starts_with("Unable to grab coinPositions snapshot"), "{refused}");
+        assert!(refused["data"].as_str().unwrap().starts_with("Unable to grab extCoinPositions snapshot"), "{refused}");
         server.abort();
     }
 
@@ -2144,7 +2147,7 @@ mod tests {
         assert_eq!(withdrawn, serde_json::json!({"kind": "withdrawn", "coin": PUMP, "reason": "account owner task exited"}));
         ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
         let refused = next_json(&mut ws).await;
-        assert_eq!(refused["data"], "Unable to grab coinPositions snapshot: stopped: account owner task exited");
+        assert_eq!(refused["data"], "Unable to grab extCoinPositions snapshot: stopped: account owner task exited");
         ws.send(FrameView::text(r#"{"method":"ping"}"#.as_bytes().to_vec())).await.unwrap();
         assert_eq!(next_json(&mut ws).await["channel"], "pong", "the connection stays up");
         server.abort();
@@ -2156,7 +2159,7 @@ mod tests {
         let (mut ws, server) = coin_positions_server(None).await;
         ws.send(FrameView::text(SUBSCRIBE_PUMP.as_bytes().to_vec())).await.unwrap();
         let refused = next_json(&mut ws).await;
-        assert_eq!((refused["channel"].as_str(), refused["data"].as_str()), (Some("error"), Some("coinPositions needs the server started with --accounts")));
+        assert_eq!((refused["channel"].as_str(), refused["data"].as_str()), (Some("error"), Some("extCoinPositions needs the server started with --accounts")));
         server.abort();
     }
 
@@ -2169,10 +2172,10 @@ mod tests {
             runtime::TestOwner,
             test_support::{trusted_book, user},
         };
-        let subscribe = |max: u32| format!(r#"{{"method":"subscribe","subscription":{{"type":"liquidationCandidates","coin":null,"maxDistanceBps":{max}}}}}"#);
+        let subscribe = |max: u32| format!(r#"{{"method":"subscribe","subscription":{{"type":"extLiquidationCandidates","coin":null,"maxDistanceBps":{max}}}}}"#);
         let (mut ws, server) = coin_positions_server(None).await;
         ws.send(FrameView::text(subscribe(200).into_bytes())).await.unwrap();
-        assert_eq!(next_json(&mut ws).await["data"], "liquidationCandidates needs the server started with --accounts");
+        assert_eq!(next_json(&mut ws).await["data"], "extLiquidationCandidates needs the server started with --accounts");
         server.abort();
         let owner = TestOwner::start(trusted_book(&[(user(1), 5)]));
         let (mut ws, server) = coin_positions_server(Some(owner.handle.clone())).await;
@@ -2180,7 +2183,7 @@ mod tests {
         assert!(next_json(&mut ws).await["data"].as_str().unwrap().starts_with("Invalid subscription"));
         ws.send(FrameView::text(subscribe(200).into_bytes())).await.unwrap();
         let refused = next_json(&mut ws).await;
-        assert_eq!(refused["data"], "Unable to grab liquidationCandidates snapshot: the liquidation candidates are not available");
+        assert_eq!(refused["data"], "Unable to grab extLiquidationCandidates snapshot: the liquidation candidates are not available");
         ws.send(FrameView::text(r#"{"method":"ping"}"#.as_bytes().to_vec())).await.unwrap();
         assert_eq!(next_json(&mut ws).await["channel"], "pong", "the connection stays up");
         server.abort();

@@ -17,6 +17,12 @@ pub(crate) const DEFAULT_LEVELS: usize = 20;
 /// can stall every other client. 256 is comfortably above any legitimate use
 /// (every market × every channel × every L2 param-tuple) while bounding the worst case.
 pub(crate) const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 256;
+/// Our own feeds carry an `ext` prefix, apart from the official API's types: the subscription type and channel of the
+/// account view's positions, and the `GET` path of the same view.
+pub(crate) const EXT_COIN_POSITIONS: &str = "extCoinPositions";
+pub(crate) const EXT_COIN_POSITIONS_PATH: &str = "/extCoinPositions";
+/// The subscription type and channel of the liquidation candidates.
+pub(crate) const EXT_LIQUIDATION_CANDIDATES: &str = "extLiquidationCandidates";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "method")]
@@ -50,12 +56,13 @@ pub(crate) enum Subscription {
     /// HIP-3 deployer oracle updates for the listed coins.
     #[serde(rename_all = "camelCase")]
     Oracle { coins: Vec<String> },
-    /// The account view's positions of one coin (design 000419): a snapshot, then changes; needs `--accounts`.
-    #[serde(rename_all = "camelCase")]
+    /// `extCoinPositions`: the account view's positions of one coin (design 000419): a snapshot, then changes; needs
+    /// `--accounts`.
+    #[serde(rename = "extCoinPositions", rename_all = "camelCase")]
     CoinPositions { coin: String },
-    /// The positions within `max_distance_bps` of their liquidation price, of one coin or all (design 000443): a
-    /// snapshot, then enter / update / exit; needs `--accounts`.
-    #[serde(rename_all = "camelCase")]
+    /// `extLiquidationCandidates`: the positions within `max_distance_bps` of their liquidation price, of one coin or
+    /// all (design 000443): a snapshot, then enter / update / exit; needs `--accounts`.
+    #[serde(rename = "extLiquidationCandidates", rename_all = "camelCase")]
     LiquidationCandidates { coin: Option<String>, max_distance_bps: u32 },
 }
 
@@ -161,8 +168,8 @@ impl Subscription {
             Self::UserFills { .. } => "userFills",
             Self::BookDiffs { .. } => "bookDiffs",
             Self::Oracle { .. } => "oracleUpdates",
-            Self::CoinPositions { .. } => "coinPositions",
-            Self::LiquidationCandidates { .. } => "liquidationCandidates",
+            Self::CoinPositions { .. } => EXT_COIN_POSITIONS,
+            Self::LiquidationCandidates { .. } => EXT_LIQUIDATION_CANDIDATES,
         }
     }
 }
@@ -508,6 +515,19 @@ mod test {
         assert_eq!(Subscription::OrderUpdates { user: "".to_string() }.type_label(), "orderUpdates");
         assert_eq!(Subscription::UserFills { user: "".to_string() }.type_label(), "userFills");
         assert_eq!(Subscription::BookDiffs { coin: "".to_string() }.type_label(), "bookDiffs");
+    }
+
+    /// The `ext` feeds' wire type, label and constant agree.
+    #[test]
+    fn ext_feeds_parse_and_label_by_their_ext_names() {
+        let parse = |text: &str| serde_json::from_str::<Subscription>(text).unwrap();
+        let positions = parse(r#"{"type":"extCoinPositions","coin":"BTC"}"#);
+        assert_eq!(positions.type_label(), super::EXT_COIN_POSITIONS);
+        let candidates = parse(r#"{"type":"extLiquidationCandidates","coin":null,"maxDistanceBps":50}"#);
+        assert_eq!(candidates.type_label(), super::EXT_LIQUIDATION_CANDIDATES);
+        for old in [r#"{"type":"coinPositions","coin":"BTC"}"#, r#"{"type":"liquidationCandidates","coin":null,"maxDistanceBps":50}"#] {
+            assert!(serde_json::from_str::<Subscription>(old).is_err(), "{old}");
+        }
     }
 
     // ==================== SubscriptionManager Tests ====================

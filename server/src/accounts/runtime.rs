@@ -135,7 +135,7 @@ enum Query {
     Candidates { reply: oneshot::Sender<std::result::Result<CandidatesSnapshot, String>> },
 }
 
-/// Queries the owner task and joins its `coinPositions` push.
+/// Queries the owner task and joins its `extCoinPositions` push.
 #[derive(Clone)]
 pub(crate) struct AccountsHandle {
     queries: mpsc::Sender<Query>,

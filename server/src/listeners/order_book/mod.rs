@@ -441,6 +441,8 @@ pub(crate) struct TakerLevels {
     pub(crate) withheld_periods: u64,
     /// (price, total size), best first.
     pub(crate) levels: Vec<(Px, Sz)>,
+    /// The best price of the taker's own side: with the first level, the book's mid.
+    pub(crate) own_side_best: Option<Px>,
 }
 
 pub(crate) struct OrderBookListener {
@@ -929,13 +931,14 @@ impl OrderBookListener {
     /// The levels a market order meets in one coin's book (design 000443 r2 revision 4), with the book's progress and
     /// trust as they stand under the lock; `None` before the first snapshot or without the coin's book.
     pub(crate) fn taker_levels(&self, coin: &Coin, taker: Side, needed: Sz, max_levels: usize) -> Option<TakerLevels> {
-        let (time, height, levels) = self.order_book_state.as_ref()?.taker_levels(coin, taker, needed, max_levels)?;
+        let (time, height, book) = self.order_book_state.as_ref()?.taker_levels(coin, taker, needed, max_levels)?;
         Some(TakerLevels {
             time,
             height,
             trusted: self.book_trusted(),
             withheld_periods: self.book_trust.withheld_periods(),
-            levels,
+            levels: book.levels,
+            own_side_best: book.own_side_best,
         })
     }
 

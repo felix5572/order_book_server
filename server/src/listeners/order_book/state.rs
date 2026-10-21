@@ -51,7 +51,7 @@ struct PendingStatus {
 }
 
 /// A coin's taker levels with the book's progress: (block time, height, (price, total size) best first).
-pub(super) type TakerLevelsAt = (u64, u64, Vec<(Px, crate::order_book::Sz)>);
+pub(super) type TakerLevelsAt = (u64, u64, crate::order_book::TakerBook);
 
 pub(super) struct OrderBookState {
     order_book: OrderBooks<InnerL4Order>,

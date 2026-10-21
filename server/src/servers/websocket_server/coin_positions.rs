@@ -1,5 +1,5 @@
-//! The account view's side of a WS connection — `coinPositions` (design 000419 r2 4.1 / 4.2) and, through
-//! `liquidation_candidates`, `liquidationCandidates` (design 000443) — and the `GET /coinPositions` handler. The account
+//! The account view's side of a WS connection — `extCoinPositions` (design 000419 r2 4.1 / 4.2) and, through
+//! `liquidation_candidates`, `extLiquidationCandidates` (design 000443) — and the `GET /extCoinPositions` handler. The account
 //! view reaches connections through its own broadcast, never the book's channel.
 
 use std::{collections::HashMap, sync::Arc};
@@ -19,7 +19,7 @@ use crate::{
         runtime::AccountsHandle,
         view::{CoinPositionsDto, CoinPositionsFrame},
     },
-    types::subscription::{ClientMessage, ServerResponse, Subscription, SubscriptionManager},
+    types::subscription::{ClientMessage, EXT_COIN_POSITIONS, ServerResponse, Subscription, SubscriptionManager},
 };
 
 const OWNER_GONE: &str = "account owner task exited";
@@ -35,7 +35,7 @@ pub(super) struct AccountsSession {
     accounts: AccountsHandle,
     /// `None` once the owner is gone.
     frames: Option<broadcast::Receiver<Arc<AccountsFrame>>>,
-    /// `coinPositions`, by coin.
+    /// `extCoinPositions`, by coin.
     subscribed: HashMap<String, Subscribed>,
     candidates: CandidateSubscriptions,
 }
@@ -48,7 +48,7 @@ impl AccountsSession {
         Self { accounts, frames, subscribed: HashMap::new(), candidates: CandidateSubscriptions::new(book) }
     }
 
-    /// Subscribe / unsubscribe of `liquidationCandidates`. Returns false when the connection must be dropped.
+    /// Subscribe / unsubscribe of `extLiquidationCandidates`. Returns false when the connection must be dropped.
     pub(super) async fn on_candidates_message(
         &mut self,
         outbound: &Outbound,
@@ -99,7 +99,7 @@ impl AccountsSession {
                 }
                 // the owner numbers every frame of a coin it broadcasts; a gap is a lost frame
                 if *version != subscribed.version + 1 {
-                    error!("coinPositions {coin}: frame {version} after {}; withdrawing", subscribed.version);
+                    error!("{EXT_COIN_POSITIONS} {coin}: frame {version} after {}; withdrawing", subscribed.version);
                     let reason = format!("frames {} to {} missed", subscribed.version + 1, version - 1);
                     return self.withdraw(outbound, manager, coin, &reason).await;
                 }
@@ -118,7 +118,7 @@ impl AccountsSession {
         self.withdraw_all(outbound, manager, reason).await && self.candidates.withdraw_all(outbound, manager, reason).await
     }
 
-    /// Subscribe / unsubscribe of `coinPositions` for `coin`. Returns false when the connection must be dropped.
+    /// Subscribe / unsubscribe of `extCoinPositions` for `coin`. Returns false when the connection must be dropped.
     pub(super) async fn on_client_message(
         &mut self,
         outbound: &Outbound,
@@ -149,7 +149,7 @@ impl AccountsSession {
                 manager.unsubscribe(subscription);
                 let reason = query_error_text(coin, &err);
                 return outbound
-                    .send_message(ServerResponse::Error(format!("Unable to grab coinPositions snapshot: {reason}")))
+                    .send_message(ServerResponse::Error(format!("Unable to grab {EXT_COIN_POSITIONS} snapshot: {reason}")))
                     .await;
             }
         };
@@ -192,7 +192,7 @@ pub(super) struct CoinPositionsQuery {
     coin: String,
 }
 
-/// `GET /coinPositions?coin=`: 200 with the view, 404 for a coin outside the anchor universe, 503 with the reason while
+/// `GET /extCoinPositions?coin=`: 200 with the view, 404 for a coin outside the anchor universe, 503 with the reason while
 /// the view is unavailable. The view is gzipped when the client accepts it (PUMP's is ~2 MB of JSON), as `/l4Book`.
 pub(super) async fn coin_positions_handler(
     axum::extract::Query(query): axum::extract::Query<CoinPositionsQuery>,
@@ -315,13 +315,13 @@ mod tests {
         let mut session = AccountsSession::new(owner.handle.clone(), BookTrust::new());
         assert!(session.on_client_message(&outbound, &mut manager, subscribe("NOPE"), "NOPE").await);
         let error = json(&data.recv().await.unwrap());
-        assert_eq!(error["data"], "Unable to grab coinPositions snapshot: NOPE is not a coin of the account anchor universe");
+        assert_eq!(error["data"], "Unable to grab extCoinPositions snapshot: NOPE is not a coin of the account anchor universe");
         assert!(manager.subscriptions().is_empty());
         owner.loss(Stream::Fills).await;
         wait_unavailable(&owner).await;
         assert!(session.on_client_message(&outbound, &mut manager, subscribe(PUMP), PUMP).await);
         let error = json(&data.recv().await.unwrap());
-        assert!(error["data"].as_str().unwrap().starts_with("Unable to grab coinPositions snapshot: fills lost lines"), "{error}");
+        assert!(error["data"].as_str().unwrap().starts_with("Unable to grab extCoinPositions snapshot: fills lost lines"), "{error}");
         assert!(manager.subscriptions().is_empty());
     }
 

@@ -267,13 +267,13 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
   256 MiB; 通道关闭即退出; 可选上报定位跳过)。订单簿的读取行为不变。换文件时旧文件剩余部分每读一块(8 MiB)就交给
   消费者, 送完再读下一块, 不再攒成一个整体(000429 r1 P2; 订单簿的行和顺序不变); 目录布局两种: `hourly/<日>/<时>`
   与 `replica_cmds` 的 `<会话>/<日>/<起始块高>`(会话、日按名字取最新, 文件按块高数值取最大)。
-- **接口**: `GET /coinPositions?coin=`、订阅 `coinPositions`(snapshot / changes / withdrawn, 按币 version;
+- **接口**: `GET /extCoinPositions?coin=`、订阅 `extCoinPositions`(snapshot / changes / withdrawn, 按币 version;
   只给有订阅的币生成帧, 走独立广播, 不占盘口通道; 积压或断号即撤订阅)。见 README "Account view"。
 - **验收工具**: `accounts_checkpoint_probe`(单份 checkpoint 全部仓位)、`accounts_follow_probe`(独立跑视图并定时落盘,
   供主仓库 `follow_vs_node.py` 对照节点)。
 - **罕见事件留证**(000425): 非 market 清算方式、没见过的成交方向 / 账本类型、未知 misc 事件各打一行
   `ACCOUNTS_EVIDENCE <json>`(WARN, 带原始行), 锚点与成交推出的数量不一致记 `silentPositionChange`(每次装锚点最多
-  100 条); 计数 `orderbook_accounts_evidence_total{kind}`。`GET /coinPositions` 按 `Accept-Encoding` 返回 gzip。
+  100 条); 计数 `orderbook_accounts_evidence_total{kind}`。`GET /extCoinPositions` 按 `Accept-Encoding` 返回 gzip。
 - **组合保证金账户**(设计 000427 r2): 解析多读 `blp`(储备的指数、每账户借 / 存上限、LTV、oracle 价 `o`)和全部代币精度,
   组合保证金账户保留储备币的现货余额与借贷份额(现货余额只留持仓账户, 解析峰值内存反而降到约 440 MB)。`portfolio.rs`
   是抵押值、他币债务、可借余量(不足 1 USDC 记 0)和账户比率的唯一实现; 全仓池现金 = 现货 USDC + 存款 − 借款 + 各 USDC
@@ -336,6 +336,13 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
   实际成员数。推送: mark 的普通变动不推; mark 由可用变不可用或恢复时, 对已订阅的币推一次 snapshot(账户视图本身仍可用)。
   每个锚点的逐行自检扩展到多仓位池(锚点的数量、记录的表、checkpoint 的 mark); 判等容差改为按清算价和 mark 两者较大者的
   1e-12(远离 mark 的极小清算价有浮点相消)。
+- **清算候选推送 `extLiquidationCandidates`**(设计 000443 r3, 实现 000446 r2): 回放行中离清算价 1000bp 以内的仓位,
+  带预计市价清算单(10 万美元以内整仓、以上五分之一, 部分清算后 30 秒内整仓; 冷却按完成块归并)和静态盘口扫单。
+  同币同方向按 mark 先到的顺序共用深度(`together`, 前序量 `aheadSize`), 另给单独扫单(`alone`); 两者都带均价、最深价及其
+  离盘口中间价(`midPx`)的 bp。扫单在独立任务里, 监听器锁内只复制档位(≤2,000 档); 结果按盘口可信代次、请求版本和数量校验
+  后才发布。订阅按币和阈值投影, 首次快照, 之后进入 / 更新 / 移出。
+- **自扩展接口统一 `ext` 前缀**(10-21): 订阅类型与推送 channel `extCoinPositions`、`extLiquidationCandidates`, HTTP
+  `GET /extCoinPositions`; 名字集中在 `types/subscription.rs` 的常量。旧名直接拒绝(此前没有下游消费)。
 
 **实测**(10-19, bm): 对齐的单仓位池清算价与节点 0.1bp 以内(另有 3 个节点只给 4–5 位有效数字的显示精度差);
 锚点之间约 40 万个仓位按成交推出的数量与下一份 checkpoint 逐个相同。只核对了 USDC 抵押池。

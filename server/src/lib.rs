@@ -70,8 +70,8 @@ pub struct ServerConfig {
     /// re-sync. 0 = keep the built-in default.
     pub replay_cache_events: usize,
     /// Run the account view (per-coin positions and anchored liquidation prices, design 000419): parses the node's
-    /// periodic checkpoints and its fills / misc events streams, and serves `GET /coinPositions` and the
-    /// `coinPositions` subscription.
+    /// periodic checkpoints and its fills / misc events streams, and serves `GET /extCoinPositions` and the
+    /// `extCoinPositions` subscription.
     pub accounts: bool,
 }
 

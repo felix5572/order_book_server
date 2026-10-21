@@ -2,7 +2,7 @@
 //! of their liquidation price, with the market liquidation order each would take.
 //!
 //! Only replayed rows of the applied height count (r2 revision 1): their size, pool cash, members and node marks are all
-//! of that block. An anchor's row stays in `coinPositions` and never becomes a candidate. The rows are indexed per coin
+//! of that block. An anchor's row stays in `extCoinPositions` and never becomes a candidate. The rows are indexed per coin
 //! and side by liquidation price, so a mark move is a range query. A block re-reads the rows of the accounts its events
 //! touched, and of the accounts sharing a pool with a coin whose mark moved (their prices move with it); a coin is
 //! evaluated again when its mark moved, one of its rows changed, or it has candidates (their cooldown runs on block
@@ -73,6 +73,8 @@ pub(crate) enum BookWalk {
         book_time: u64,
         /// The book's withheld periods at the copy: the estimate holds only while the book stays trusted in it.
         withheld_periods: u64,
+        /// The book's mid at the copy; `None` with an empty side.
+        mid_px: Option<f64>,
     },
 }
 
@@ -343,6 +345,7 @@ impl Candidates {
                 book_height: result.book_height,
                 book_time: result.book_time,
                 withheld_periods: result.withheld_periods,
+                mid_px: result.mid_px,
             };
             let candidate = published.get_mut(user).unwrap_or_else(|| unreachable!("checked above"));
             if candidate.walk != walk {
@@ -809,7 +812,7 @@ mod walk_tests {
             checkpoint::tests::{HOLDER, user as checkpoint_user},
             liquidation::solve,
             test_support::{ANCHOR_TABLE, ListedMarks, PUMP, block_actions, fixture_table, replay_book},
-            walk::WalkEnd,
+            walk::{WalkEnd, WalkPart},
         },
         order_book::Px,
     };
@@ -825,8 +828,10 @@ mod walk_tests {
     }
 
     fn result(key: &WalkKey, version: u64, withheld_periods: u64) -> WalkResult {
-        let share = WalkShare { ahead: 0, filled: 7, vwap_px: Some(0.012), deepest_px: Some(Px::new(1)), levels: 3, end: WalkEnd::Filled };
-        WalkResult { key: key.clone(), version, book_height: 9, book_time: 10, trusted: true, withheld_periods, shares: vec![share] }
+        let part = WalkPart { filled: 7, vwap_px: Some(0.012), deepest_px: Some(Px::new(1)), levels: 3, end: WalkEnd::Filled };
+        let share = WalkShare { ahead: 0, together: part.clone(), alone: part };
+        let mid_px = Some(0.0125);
+        WalkResult { key: key.clone(), version, book_height: 9, book_time: 10, trusted: true, withheld_periods, mid_px, shares: vec![share] }
     }
 
     fn walk_of(refresh: &Refresh) -> Vec<BookWalk> {
@@ -912,8 +917,18 @@ mod walk_tests {
         let key: WalkKey = (PUMP.to_string(), Side::Ask);
         let request = mailbox.drain().remove(&key).unwrap();
         assert_eq!(request.sequence.iter().map(|(user, _, _)| *user).collect::<Vec<_>>(), [x, a, b], "from the highest price");
-        let share = WalkShare { ahead: 0, filled: 1, vwap_px: Some(1.0), deepest_px: None, levels: 1, end: WalkEnd::Filled };
-        let walked = WalkResult { key: key.clone(), version: request.version, book_height: 9, book_time: 10, trusted: true, withheld_periods: 0, shares: vec![share; 3] };
+        let part = WalkPart { filled: 1, vwap_px: Some(1.0), deepest_px: None, levels: 1, end: WalkEnd::Filled };
+        let share = WalkShare { ahead: 0, together: part.clone(), alone: part };
+        let walked = WalkResult {
+            key: key.clone(),
+            version: request.version,
+            book_height: 9,
+            book_time: 10,
+            trusted: true,
+            withheld_periods: 0,
+            mid_px: None,
+            shares: vec![share; 3],
+        };
         assert!(matches!(candidates.apply_walk(walked), Refresh::Changes(_)));
         candidates.published.get_mut(PUMP).unwrap().get_mut(&a).unwrap().order.walk_raw = 2_000;
         let mut changes = candidates.changes_at(Trusted { anchor: 1, height: 3, time_ms: 4 });

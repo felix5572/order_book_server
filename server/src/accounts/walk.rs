@@ -1,7 +1,8 @@
 //! Static book walks of the liquidation candidates (design 000443 r1 section 3, r2 revisions 3–4, r3 revisions 1, 2,
 //! 4). The candidates of one coin and side walk the public book together: ordered by when the mark reaches them (a
 //! long's sale first at the highest liquidation price, a short's buy at the lowest; equal prices by address), each
-//! takes its walk size from where the ones before it stopped. Static: no cascade, no refill.
+//! takes its walk size from where the ones before it stopped. Each also walks its size alone from the best level (the
+//! book as if no other candidate sold first). Static: no cascade, no refill.
 //!
 //! The account owner sends a request per (coin, side) whose ordered sizes changed; a mailbox keeps only the newest of
 //! each. The walk task copies the side's levels under the listener lock (`PriceLevel::total_sz`, at most
@@ -51,11 +52,9 @@ pub(crate) enum WalkEnd {
     TruncatedAtLevels,
 }
 
-/// One candidate's share of a cumulative walk; sizes in 1e-8 units.
+/// One walk of a size over the levels; sizes in 1e-8 units.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct WalkShare {
-    /// What the candidates before it take.
-    pub(crate) ahead: u64,
+pub(crate) struct WalkPart {
     pub(crate) filled: u64,
     /// Size-weighted price of what it filled; `None` when nothing.
     pub(crate) vwap_px: Option<f64>,
@@ -64,6 +63,17 @@ pub(crate) struct WalkShare {
     /// Levels it touched.
     pub(crate) levels: usize,
     pub(crate) end: WalkEnd,
+}
+
+/// One candidate's walks; sizes in 1e-8 units.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WalkShare {
+    /// What the candidates before it take.
+    pub(crate) ahead: u64,
+    /// Its share of the cumulative walk, from where the candidates before it stopped.
+    pub(crate) together: WalkPart,
+    /// Its size walked alone from the best level.
+    pub(crate) alone: WalkPart,
 }
 
 /// The shares of one request, with the book they were read from.
@@ -75,30 +85,52 @@ pub(crate) struct WalkResult {
     pub(crate) book_time: u64,
     pub(crate) trusted: bool,
     pub(crate) withheld_periods: u64,
+    /// The book's mid at the copy (the walked side's best and the taker side's own best); `None` with an empty side.
+    pub(crate) mid_px: Option<f64>,
     /// In the request's order.
     pub(crate) shares: Vec<WalkShare>,
 }
 
-/// The cumulative walk of `sizes` (in order) over `levels` (best first); `truncated` when the levels stop at the copy
-/// limit.
+/// The walks of `sizes` (in order) over `levels` (best first), each cumulative and alone; `truncated` when the levels
+/// stop at the copy limit.
 pub(crate) fn allocate(levels: &[(Px, Sz)], sizes: &[u64], truncated: bool) -> Vec<WalkShare> {
-    let mut level = 0;
-    let mut used_in_level = 0_u64;
+    let mut together = LevelCursor::default();
     let mut ahead = 0_u64;
     let mut shares = Vec::with_capacity(sizes.len());
     for &size in sizes {
+        let share = WalkShare {
+            ahead,
+            together: together.take(levels, size, truncated),
+            alone: LevelCursor::default().take(levels, size, truncated),
+        };
+        shares.push(share);
+        ahead += size;
+    }
+    shares
+}
+
+/// Where a walk stands in the levels: the level and what of it is already taken.
+#[derive(Debug, Default)]
+struct LevelCursor {
+    level: usize,
+    used_in_level: u64,
+}
+
+impl LevelCursor {
+    /// Takes `size` from here on.
+    fn take(&mut self, levels: &[(Px, Sz)], size: u64, truncated: bool) -> WalkPart {
         let (mut filled, mut notional, mut touched, mut deepest) = (0_u64, 0.0_f64, 0, None);
-        while filled < size && level < levels.len() {
-            let (px, level_sz) = levels[level];
-            let take = (level_sz.value() - used_in_level).min(size - filled);
+        while filled < size && self.level < levels.len() {
+            let (px, level_sz) = levels[self.level];
+            let take = (level_sz.value() - self.used_in_level).min(size - filled);
             filled += take;
             notional = (px.value() as f64).mul_add(take as f64, notional);
             touched += 1;
             deepest = Some(px);
-            used_in_level += take;
-            if used_in_level == level_sz.value() {
-                level += 1;
-                used_in_level = 0;
+            self.used_in_level += take;
+            if self.used_in_level == level_sz.value() {
+                self.level += 1;
+                self.used_in_level = 0;
             }
         }
         let end = if filled == size {
@@ -108,11 +140,14 @@ pub(crate) fn allocate(levels: &[(Px, Sz)], sizes: &[u64], truncated: bool) -> V
         } else {
             WalkEnd::BookExhausted
         };
-        let vwap_px = (filled > 0).then(|| notional / filled as f64 / 10f64.powi(FIXED_POINT_DECIMALS.cast_signed()));
-        shares.push(WalkShare { ahead, filled, vwap_px, deepest_px: deepest, levels: touched, end });
-        ahead += size;
+        let vwap_px = (filled > 0).then(|| notional / filled as f64 / fixed_point_scale());
+        WalkPart { filled, vwap_px, deepest_px: deepest, levels: touched, end }
     }
-    shares
+}
+
+/// 10^8: a listener price or size integer per unit.
+fn fixed_point_scale() -> f64 {
+    10f64.powi(FIXED_POINT_DECIMALS.cast_signed())
 }
 
 /// A candidate's walk size in the listener's units.
@@ -198,8 +233,15 @@ async fn walk(source: &impl LevelSource, key: WalkKey, request: WalkRequest) -> 
     let levels = source.taker_levels(&key.0, key.1, needed, MAX_WALK_LEVELS).await?;
     let held: u64 = levels.levels.iter().map(|(_, sz)| sz.value()).sum();
     let truncated = levels.levels.len() == MAX_WALK_LEVELS && held < needed.value();
+    #[expect(clippy::cast_precision_loss, reason = "prices are below 2^53 in 1e-8 units")]
+    let mid_px = levels
+        .levels
+        .first()
+        .zip(levels.own_side_best)
+        .map(|((best, _), own)| f64::midpoint(best.value() as f64, own.value() as f64) / fixed_point_scale());
     Some(WalkResult {
         shares: allocate(&levels.levels, &sizes, truncated),
+        mid_px,
         key,
         version: request.version,
         book_height: levels.height,
@@ -217,21 +259,28 @@ mod tests {
         (Px::new(px * 100_000_000), Sz::new(sz * 100_000_000))
     }
 
-    /// Codex's 000443 r1 counterexample: bids 99×1, 98×1, 97×1; A then B each sell 1, then A sells 2.
+    /// Codex's 000443 r1 counterexample: bids 99×1, 98×1, 97×1; A then B each sell 1, then A sells 2. Alone, each
+    /// walks from the best bid.
     #[test]
     fn candidates_share_the_depth_in_order() {
         let book = [level(99, 1), level(98, 1), level(97, 1)];
         let unit = 100_000_000;
         let shares = allocate(&book, &[unit, unit], false);
-        assert_eq!((shares[1].ahead, shares[1].vwap_px, shares[1].deepest_px), (unit, Some(98.0), Some(Px::new(98 * unit))));
+        let second = &shares[1];
+        assert_eq!((second.ahead, second.together.vwap_px, second.together.deepest_px), (unit, Some(98.0), Some(Px::new(98 * unit))));
+        assert_eq!((second.alone.vwap_px, second.alone.deepest_px, second.alone.levels), (Some(99.0), Some(Px::new(99 * unit)), 1));
         let shares = allocate(&book, &[2 * unit, unit], false);
-        assert_eq!((shares[0].vwap_px, shares[0].levels, shares[0].end), (Some(98.5), 2, WalkEnd::Filled));
-        assert_eq!((shares[1].ahead, shares[1].vwap_px, shares[1].deepest_px), (2 * unit, Some(97.0), Some(Px::new(97 * unit))));
+        assert_eq!((shares[0].together.vwap_px, shares[0].together.levels, shares[0].together.end), (Some(98.5), 2, WalkEnd::Filled));
+        assert_eq!(shares[0].alone, shares[0].together, "the first walks alone");
+        let second = &shares[1];
+        assert_eq!((second.ahead, second.together.vwap_px, second.together.deepest_px), (2 * unit, Some(97.0), Some(Px::new(97 * unit))));
         let short = allocate(&book, &[2 * unit, 2 * unit], false);
-        assert_eq!((short[1].filled, short[1].end), (unit, WalkEnd::BookExhausted));
-        assert_eq!(allocate(&book, &[2 * unit, 2 * unit], true)[1].end, WalkEnd::TruncatedAtLevels, "the copy stopped, not the book");
+        assert_eq!((short[1].together.filled, short[1].together.end), (unit, WalkEnd::BookExhausted));
+        assert_eq!((short[1].alone.filled, short[1].alone.end, short[1].alone.vwap_px), (2 * unit, WalkEnd::Filled, Some(98.5)));
+        let truncated = allocate(&book, &[2 * unit, 2 * unit], true);
+        assert_eq!(truncated[1].together.end, WalkEnd::TruncatedAtLevels, "the copy stopped, not the book");
         let empty = allocate(&[], &[unit], false);
-        assert_eq!((empty[0].filled, empty[0].vwap_px, empty[0].deepest_px), (0, None, None));
+        assert_eq!((empty[0].together.filled, empty[0].together.vwap_px, empty[0].alone.deepest_px), (0, None, None));
     }
 
     #[test]
@@ -254,7 +303,14 @@ mod tests {
     async fn the_walker_answers_the_newest_request() {
         let mailbox = Arc::new(WalkMailbox::default());
         let (results_tx, mut results) = mpsc::channel(4);
-        let levels = TakerLevels { time: 5, height: 6, trusted: true, withheld_periods: 2, levels: vec![level(99, 1), level(98, 1)] };
+        let levels = TakerLevels {
+            time: 5,
+            height: 6,
+            trusted: true,
+            withheld_periods: 2,
+            levels: vec![level(99, 1), level(98, 1)],
+            own_side_best: Some(Px::new(100 * 100_000_000)),
+        };
         let key: WalkKey = ("PUMP".to_string(), Side::Ask);
         let user = Address::repeat_byte(1);
         mailbox.post(key.clone(), WalkRequest { version: 1, sequence: vec![(user, 300_000_000, false)] });
@@ -262,7 +318,8 @@ mod tests {
         let task = tokio::spawn(run_walker(Fixed(levels), mailbox, results_tx));
         let result = results.recv().await.unwrap();
         assert_eq!((result.version, result.book_height, result.book_time, result.withheld_periods), (2, 6, 5, 2));
-        assert_eq!(result.shares.iter().map(|share| share.vwap_px).collect::<Vec<_>>(), [Some(99.0)]);
+        assert_eq!(result.shares.iter().map(|share| share.together.vwap_px).collect::<Vec<_>>(), [Some(99.0)]);
+        assert_eq!(result.mid_px, Some(99.5), "the best bid 99 and the best ask 100");
         drop(results);
         task.abort();
     }

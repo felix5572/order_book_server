@@ -1,4 +1,4 @@
-//! The `liquidationCandidates` subscriptions of a WS connection (design 000443): each projects the owner's candidate
+//! The `extLiquidationCandidates` subscriptions of a WS connection (design 000443): each projects the owner's candidate
 //! frames onto its coin and distance (`CandidateProjection`); a missed frame or the feed withdrawn ends it.
 
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ use crate::{
         candidates_view::{CandidateFilter, CandidateProjection},
         runtime::AccountsHandle,
     },
-    types::subscription::{ClientMessage, ServerResponse, Subscription, SubscriptionManager},
+    types::subscription::{ClientMessage, EXT_LIQUIDATION_CANDIDATES, ServerResponse, Subscription, SubscriptionManager},
 };
 
 pub(super) struct CandidateSubscriptions {
@@ -62,7 +62,7 @@ impl CandidateSubscriptions {
             Ok(snapshot) => snapshot,
             Err(reason) => {
                 manager.unsubscribe(subscription);
-                let message = format!("Unable to grab liquidationCandidates snapshot: {reason}");
+                let message = format!("Unable to grab {EXT_LIQUIDATION_CANDIDATES} snapshot: {reason}");
                 return outbound.send_message(ServerResponse::Error(message)).await;
             }
         };
@@ -90,7 +90,7 @@ impl CandidateSubscriptions {
             }
         }
         for (subscription, reason) in gaps {
-            error!("liquidationCandidates: {reason}; withdrawing");
+            error!("{EXT_LIQUIDATION_CANDIDATES}: {reason}; withdrawing");
             if !self.withdraw(outbound, manager, &subscription, &reason).await {
                 return false;
             }

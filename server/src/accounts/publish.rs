@@ -1,4 +1,4 @@
-//! Live push of `coinPositions` (design 000419 r2 4.2): the per-coin subscriber registry the WS connections hold
+//! Live push of `extCoinPositions` (design 000419 r2 4.2): the per-coin subscriber registry the WS connections hold
 //! guards in, and the frames the owner broadcasts after each step. Frames are built only for coins with a subscriber,
 //! serialized once and shared by every connection.
 //!
@@ -205,7 +205,7 @@ mod tests {
         let frame = received.try_recv().unwrap();
         assert!(matches!(frame.as_ref(), AccountsFrame::Coin { coin, version: 1, .. } if coin == PUMP));
         let json = wire_json(&frame);
-        assert_eq!((json["channel"].as_str(), json["data"]["kind"].as_str()), (Some("coinPositions"), Some("changes")));
+        assert_eq!((json["channel"].as_str(), json["data"]["kind"].as_str()), (Some("extCoinPositions"), Some("changes")));
         book.record_lost_block(Stream::Fills, 2_000);
         assert!(!publisher.track(&book));
         assert!(matches!(received.try_recv().unwrap().as_ref(), AccountsFrame::WithdrawAll { reason } if reason.contains("2000")));

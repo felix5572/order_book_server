@@ -1,4 +1,4 @@
-//! The served JSON of `coinPositions` (design 000419 r2 4.1 / 4.2, with the r3/r4 field changes), built from book
+//! The served JSON of `extCoinPositions` (design 000419 r2 4.1 / 4.2, with the r3/r4 field changes), built from book
 //! views. One position shape for the HTTP response, the WS frames and the follow probe's dumps.
 
 use alloy::primitives::Address;
@@ -11,6 +11,7 @@ use super::{
     portfolio::PortfolioMargin,
     size::format_size_raw,
 };
+use crate::types::subscription::EXT_COIN_POSITIONS;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -168,7 +169,7 @@ impl CoinPositionsFrame {
         }
     }
 
-    /// The wire frame `{"channel":"coinPositions","data":<frame>}`, the envelope every `ServerResponse` has.
+    /// The wire frame `{"channel":"extCoinPositions","data":<frame>}`, the envelope every `ServerResponse` has.
     #[expect(clippy::expect_used, reason = "these DTOs have string keys and finite numbers only; serializing cannot fail")]
     pub(crate) fn to_wire(&self) -> bytes::Bytes {
         #[derive(Serialize)]
@@ -176,7 +177,7 @@ impl CoinPositionsFrame {
             channel: &'static str,
             data: &'a CoinPositionsFrame,
         }
-        let wire = serde_json::to_vec(&Envelope { channel: "coinPositions", data: self }).expect("serializable DTOs");
+        let wire = serde_json::to_vec(&Envelope { channel: EXT_COIN_POSITIONS, data: self }).expect("serializable DTOs");
         bytes::Bytes::from(wire)
     }
 }

@@ -1,4 +1,4 @@
-//! The served `liquidationCandidates` feed (design 000443 r1 section 5, r2 revision 5): each subscription projects the
+//! The served `extLiquidationCandidates` feed (design 000443 r1 section 5, r2 revision 5): each subscription projects the
 //! server's candidate set (`candidates::MAX_CANDIDATE_DISTANCE_BPS`) onto its own coin and distance, with its own
 //! version. A candidate enters or exits a subscription as its published distance crosses the subscription's threshold.
 
@@ -12,9 +12,9 @@ use super::{
     cooldown::Cooldown,
     size::format_size_raw,
     view::user_text,
-    walk::WalkEnd,
+    walk::{WalkEnd, WalkPart},
 };
-use crate::order_book::Sz;
+use crate::{order_book::Sz, types::subscription::EXT_LIQUIDATION_CANDIDATES};
 
 /// Micro-USD notionals are printed with six decimals.
 const MICRO_DECIMALS: u32 = 6;
@@ -38,6 +38,7 @@ pub(crate) struct CandidateDto {
 }
 
 /// The static walk of the public book (design 000443 r2 revisions 3–4, r3 revisions 1–2, 4).
+#[expect(clippy::large_enum_variant, reason = "a short-lived DTO, built per row as it is serialized")]
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum BookWalkDto {
@@ -48,14 +49,13 @@ enum BookWalkDto {
     /// Not walked yet.
     Pending,
     Walked {
-        /// Sizes in the coin's units, prices in USD; `null` prices when nothing filled.
-        vwap_px: Option<String>,
-        deepest_px: Option<String>,
-        filled_size: String,
-        levels: usize,
+        /// The book's mid at the copy, USD; `null` with an empty side.
+        mid_px: Option<String>,
+        /// Its share of the cumulative walk, after the candidates before it (`aheadSize`).
+        together: WalkPartDto,
+        /// Its size walked alone from the best level.
+        alone: WalkPartDto,
         ahead_size: String,
-        /// `filled`, `bookExhausted`, or `truncatedAtLevels` (the copy stopped at 2,000 levels, the book may hold more).
-        end: &'static str,
         /// `unknownCooldownAsFull` when this candidate or one before it walks a whole position for an unknown cooldown.
         assumption: &'static str,
         book_height: u64,
@@ -63,9 +63,41 @@ enum BookWalkDto {
     },
 }
 
+/// One walk: sizes in the coin's units, prices in USD; `null` prices when nothing filled.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WalkPartDto {
+    vwap_px: Option<String>,
+    deepest_px: Option<String>,
+    /// How far the deepest level is from the mid, bp; `null` without a mid or a fill.
+    deepest_bps_from_mid: Option<f64>,
+    filled_size: String,
+    levels: usize,
+    /// `filled`, `bookExhausted`, or `truncatedAtLevels` (the copy stopped at 2,000 levels, the book may hold more).
+    end: &'static str,
+}
+
+impl WalkPartDto {
+    fn new(part: &WalkPart, mid_px: Option<f64>) -> Self {
+        let deepest = part.deepest_px.map(|px| px.value() as f64 / 1e8);
+        Self {
+            vwap_px: part.vwap_px.map(|px| px.to_string()),
+            deepest_px: part.deepest_px.map(crate::order_book::Px::to_str),
+            deepest_bps_from_mid: deepest.zip(mid_px).map(|(deepest, mid)| (deepest - mid).abs() / mid * 10_000.0),
+            filled_size: Sz::new(part.filled).to_str(),
+            levels: part.levels,
+            end: match part.end {
+                WalkEnd::Filled => "filled",
+                WalkEnd::BookExhausted => "bookExhausted",
+                WalkEnd::TruncatedAtLevels => "truncatedAtLevels",
+            },
+        }
+    }
+}
+
 impl BookWalkDto {
     fn new(walk: &BookWalk) -> Self {
-        let BookWalk::Walked { share, unknown_cooldown_as_full, book_height, book_time, .. } = walk else {
+        let BookWalk::Walked { share, unknown_cooldown_as_full, book_height, book_time, mid_px, .. } = walk else {
             return match walk {
                 BookWalk::NoBook => Self::NoBook,
                 BookWalk::Untrusted => Self::Untrusted,
@@ -73,16 +105,10 @@ impl BookWalkDto {
             };
         };
         Self::Walked {
-            vwap_px: share.vwap_px.map(|px| px.to_string()),
-            deepest_px: share.deepest_px.map(crate::order_book::Px::to_str),
-            filled_size: Sz::new(share.filled).to_str(),
-            levels: share.levels,
+            mid_px: mid_px.map(|px| px.to_string()),
+            together: WalkPartDto::new(&share.together, *mid_px),
+            alone: WalkPartDto::new(&share.alone, *mid_px),
             ahead_size: Sz::new(share.ahead).to_str(),
-            end: match share.end {
-                WalkEnd::Filled => "filled",
-                WalkEnd::BookExhausted => "bookExhausted",
-                WalkEnd::TruncatedAtLevels => "truncatedAtLevels",
-            },
             assumption: if *unknown_cooldown_as_full { "unknownCooldownAsFull" } else { "known" },
             book_height: *book_height,
             book_time: *book_time,
@@ -163,7 +189,7 @@ enum CandidatesBody {
 }
 
 impl CandidatesFrame {
-    /// The wire frame `{"channel":"liquidationCandidates","data":<frame>}`.
+    /// The wire frame `{"channel":"extLiquidationCandidates","data":<frame>}`.
     #[expect(clippy::expect_used, reason = "these DTOs have string keys and finite numbers only; serializing cannot fail")]
     pub(crate) fn to_wire(&self) -> bytes::Bytes {
         #[derive(Serialize)]
@@ -171,7 +197,7 @@ impl CandidatesFrame {
             channel: &'static str,
             data: &'a CandidatesFrame,
         }
-        bytes::Bytes::from(serde_json::to_vec(&Envelope { channel: "liquidationCandidates", data: self }).expect("serializable DTOs"))
+        bytes::Bytes::from(serde_json::to_vec(&Envelope { channel: EXT_LIQUIDATION_CANDIDATES, data: self }).expect("serializable DTOs"))
     }
 }
 
@@ -347,7 +373,7 @@ mod tests {
         let filter = CandidateFilter { coin: Some("PUMP".to_string()), max_distance_bps: 200 };
         let (mut projection, first) = CandidateProjection::subscribe(filter, &snapshot, None);
         let first = json(&first);
-        assert_eq!((first["channel"].as_str(), first["data"]["kind"].as_str(), first["data"]["version"].as_u64()), (Some("liquidationCandidates"), Some("snapshot"), Some(0)));
+        assert_eq!((first["channel"].as_str(), first["data"]["kind"].as_str(), first["data"]["version"].as_u64()), (Some("extLiquidationCandidates"), Some("snapshot"), Some(0)));
         assert_eq!((first["data"]["coin"].as_str(), first["data"]["maxDistanceBps"].as_u64()), (Some("PUMP"), Some(200)));
         assert_eq!(users(&first, "candidates"), [user_text(A)]);
         assert!(matches!(projection.apply(&changes(3, vec![], vec![("PUMP", A, 300.0)], vec![]), None), Ok(None)), "in the snapshot already");
@@ -362,6 +388,34 @@ mod tests {
     }
 
     /// r1 section 5 / r2 revision 2: a candidate's served fields.
+    #[test]
+    fn serializes_a_walk_together_and_alone_with_the_distance_from_the_mid() {
+        let unit = 100_000_000;
+        let part = |vwap_px: f64, deepest: u64| WalkPart {
+            filled: 2 * unit,
+            vwap_px: Some(vwap_px),
+            deepest_px: Some(crate::order_book::Px::new(deepest)),
+            levels: 2,
+            end: WalkEnd::Filled,
+        };
+        let walk = BookWalk::Walked {
+            share: crate::accounts::walk::WalkShare { ahead: unit, together: part(100.75, 101 * unit), alone: part(100.25, 1005 * unit / 10) },
+            unknown_cooldown_as_full: false,
+            book_height: 9,
+            book_time: 10,
+            withheld_periods: 0,
+            mid_px: Some(100.0),
+        };
+        let walked = serde_json::to_value(BookWalkDto::new(&walk)).unwrap();
+        assert_eq!((walked["status"].as_str(), walked["midPx"].as_str(), walked["aheadSize"].as_str()), (Some("walked"), Some("100"), Some("1")));
+        let parts = (&walked["together"], &walked["alone"]);
+        assert_eq!((parts.0["deepestBpsFromMid"].as_f64(), parts.1["deepestBpsFromMid"].as_f64()), (Some(100.0), Some(50.0)));
+        assert_eq!((parts.0["vwapPx"].as_str(), parts.1["deepestPx"].as_str(), parts.1["end"].as_str()), (Some("100.75"), Some("100.5"), Some("filled")));
+        let BookWalk::Walked { share, .. } = walk else { unreachable!() };
+        let no_mid = BookWalk::Walked { share, unknown_cooldown_as_full: false, book_height: 9, book_time: 10, withheld_periods: 0, mid_px: None };
+        assert_eq!(serde_json::to_value(BookWalkDto::new(&no_mid)).unwrap()["alone"]["deepestBpsFromMid"], serde_json::Value::Null);
+    }
+
     #[test]
     fn serializes_a_candidate_with_its_expected_order() {
         let snapshot = CandidatesSnapshot { version: 1, height: 7, time_ms: 7_000, candidates: vec![("PUMP".to_string(), A, candidate(150.25))] };
