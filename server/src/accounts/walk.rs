@@ -19,6 +19,7 @@ use std::{
 
 use alloy::primitives::Address;
 use log::error;
+use prometheus::Histogram;
 use tokio::sync::{Notify, mpsc};
 
 use crate::{
@@ -245,31 +246,55 @@ impl<K: Eq + std::hash::Hash, V> Mailbox<K, V> {
     }
 }
 
+/// The histograms a reader times its copies under the listener lock with: waiting for the lock, holding it.
+#[derive(Clone)]
+pub(crate) struct LockTimers {
+    pub(crate) wait: Histogram,
+    pub(crate) hold: Histogram,
+}
+
+impl LockTimers {
+    /// The liquidation candidates' book walks (design 000443 r2 revision 4 acceptance).
+    fn liquidation_walks() -> Self {
+        Self { wait: LIQUIDATION_WALK_LOCK_WAIT_SECONDS.clone(), hold: LIQUIDATION_WALK_LOCK_HOLD_SECONDS.clone() }
+    }
+}
+
+/// `copy` under the listener lock, the wait and the hold timed.
+pub(crate) async fn under_lock<T: Send>(
+    listener: &tokio::sync::Mutex<OrderBookListener>,
+    timers: &LockTimers,
+    copy: impl FnOnce(&OrderBookListener) -> T + Send,
+) -> T {
+    let waited = Instant::now();
+    let guard = listener.lock().await;
+    let locked = Instant::now();
+    timers.wait.observe(locked.duration_since(waited).as_secs_f64());
+    let copied = copy(&guard);
+    drop(guard);
+    timers.hold.observe(locked.elapsed().as_secs_f64());
+    copied
+}
+
 /// Where a walk reads its levels.
 pub(crate) trait LevelSource: Send + Sync + 'static {
-    fn taker_levels(&self, coin: &str, taker: Side, needed: Sz, max_levels: usize) -> impl Future<Output = Option<TakerLevels>> + Send;
+    fn taker_levels(&self, coin: &str, taker: Side, needed: Sz, max_levels: usize, timers: &LockTimers) -> impl Future<Output = Option<TakerLevels>> + Send;
 }
 
 impl LevelSource for Arc<tokio::sync::Mutex<OrderBookListener>> {
-    async fn taker_levels(&self, coin: &str, taker: Side, needed: Sz, max_levels: usize) -> Option<TakerLevels> {
-        let waited = Instant::now();
-        let listener = self.lock().await;
-        let copied = Instant::now();
-        LIQUIDATION_WALK_LOCK_WAIT_SECONDS.observe(copied.duration_since(waited).as_secs_f64());
+    async fn taker_levels(&self, coin: &str, taker: Side, needed: Sz, max_levels: usize, timers: &LockTimers) -> Option<TakerLevels> {
         // the lock is held for the level copy only
-        let levels = listener.taker_levels(&Coin::new(coin), taker, needed, max_levels);
-        drop(listener);
-        LIQUIDATION_WALK_LOCK_HOLD_SECONDS.observe(copied.elapsed().as_secs_f64());
-        levels
+        under_lock(self, timers, |listener| listener.taker_levels(&Coin::new(coin), taker, needed, max_levels)).await
     }
 }
 
 /// The walk task: every pending request, its levels copied under the source's lock and allocated outside it. It ends
 /// when the owner drops the results' receiver.
 pub(crate) async fn run_walker(source: impl LevelSource, mailbox: Arc<WalkMailbox>, results: mpsc::Sender<WalkResult>) {
+    let timers = LockTimers::liquidation_walks();
     loop {
         for (key, request) in mailbox.take().await {
-            let Some(result) = walk(&source, key, request).await else { continue };
+            let Some(result) = walk(&source, &timers, key, request).await else { continue };
             if results.send(result).await.is_err() {
                 error!("liquidation candidates: the account owner is gone; the book walks stop");
                 return;
@@ -292,10 +317,10 @@ pub(crate) fn mid_px(levels: &TakerLevels) -> Option<f64> {
 }
 
 /// One request; `None` when the coin has no book (outside the market filter, or before the first snapshot).
-async fn walk(source: &impl LevelSource, key: WalkKey, request: WalkRequest) -> Option<WalkResult> {
+async fn walk(source: &impl LevelSource, timers: &LockTimers, key: WalkKey, request: WalkRequest) -> Option<WalkResult> {
     let sizes: Vec<u64> = request.sequence.iter().map(|(_, size, _)| *size).collect();
     let needed = Sz::new(sizes.iter().sum());
-    let levels = source.taker_levels(&key.0, key.1, needed, MAX_WALK_LEVELS).await?;
+    let levels = source.taker_levels(&key.0, key.1, needed, MAX_WALK_LEVELS, timers).await?;
     let truncated = levels_truncated(&levels, needed);
     Some(WalkResult {
         shares: allocate(&levels.levels, &sizes, truncated),
@@ -370,7 +395,7 @@ mod tests {
     struct Fixed(TakerLevels);
 
     impl LevelSource for Fixed {
-        fn taker_levels(&self, _: &str, taker: Side, _: Sz, max_levels: usize) -> impl Future<Output = Option<TakerLevels>> + Send {
+        fn taker_levels(&self, _: &str, taker: Side, _: Sz, max_levels: usize, _: &LockTimers) -> impl Future<Output = Option<TakerLevels>> + Send {
             assert_eq!((taker, max_levels), (Side::Ask, MAX_WALK_LEVELS), "a long is sold into the bids");
             std::future::ready(Some(self.0.clone()))
         }

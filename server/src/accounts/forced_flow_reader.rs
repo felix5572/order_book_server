@@ -9,10 +9,11 @@ use tokio::sync::{Mutex, mpsc};
 
 use super::{
     forced_flow::Tier,
-    walk::{LevelSource, Limit, MAX_WALK_LEVELS, Mailbox, WalkPart, alone_walks, levels_truncated, mid_px},
+    walk::{LevelSource, Limit, LockTimers, MAX_WALK_LEVELS, Mailbox, WalkPart, alone_walks, levels_truncated, mid_px, under_lock},
 };
 use crate::{
     listeners::order_book::{OrderBookListener, TriggerBandAt},
+    metrics::{FORCED_FLOW_LOCK_HOLD_SECONDS, FORCED_FLOW_LOCK_WAIT_SECONDS, FORCED_FLOW_WALKED_ENTRIES_TOTAL},
     order_book::{Coin, Px, Side, Sz},
 };
 
@@ -68,29 +69,35 @@ pub(crate) enum FlowRead {
 
 /// Where the reads go: the trigger orders of a band besides the levels.
 pub(crate) trait FlowSource: LevelSource {
-    fn trigger_band(&self, coin: &str, lo: Px, hi: Px, max: usize) -> impl Future<Output = Option<TriggerBandAt>> + Send;
+    fn trigger_band(&self, coin: &str, lo: Px, hi: Px, max: usize, timers: &LockTimers) -> impl Future<Output = Option<TriggerBandAt>> + Send;
 }
 
 impl FlowSource for Arc<Mutex<OrderBookListener>> {
-    async fn trigger_band(&self, coin: &str, lo: Px, hi: Px, max: usize) -> Option<TriggerBandAt> {
+    async fn trigger_band(&self, coin: &str, lo: Px, hi: Px, max: usize, timers: &LockTimers) -> Option<TriggerBandAt> {
         // the lock is held for the copy of the band's `Arc`s only
-        self.lock().await.untriggered_in_band(&Coin::new(coin), lo, hi, max)
+        under_lock(self, timers, |listener| listener.untriggered_in_band(&Coin::new(coin), lo, hi, max)).await
     }
+}
+
+/// The forced flow's timers of one read (design 000451 batch 3).
+fn read_timers(read: &str) -> LockTimers {
+    LockTimers { wait: FORCED_FLOW_LOCK_WAIT_SECONDS.with_label_values(&[read]), hold: FORCED_FLOW_LOCK_HOLD_SECONDS.with_label_values(&[read]) }
 }
 
 /// The reader task: every pending job, read and sent back. It ends when the owner drops the results' receiver.
 pub(crate) async fn run_flow_reader(source: impl FlowSource, mailbox: Arc<FlowMailbox>, results: mpsc::Sender<FlowRead>) {
+    let (band_timers, walk_timers) = (read_timers("band"), read_timers("walk"));
     loop {
         for ((coin, tier, _), job) in mailbox.take().await {
             let read = match job {
                 FlowJob::Band { version, lo, hi } => {
-                    let read = source.trigger_band(&coin, lo, hi, MAX_BAND_ORDERS).await;
+                    let read = source.trigger_band(&coin, lo, hi, MAX_BAND_ORDERS, &band_timers).await;
                     FlowRead::Band { coin, tier, version, read }
                 }
                 FlowJob::Walk { version, sides } => {
                     let mut walked = Vec::with_capacity(sides.len());
                     for (taker, items) in sides {
-                        walked.push(side_walks(&source, &coin, taker, &items).await);
+                        walked.push(side_walks(&source, &walk_timers, &coin, taker, &items).await);
                     }
                     FlowRead::Walk { coin, tier, version, sides: walked }
                 }
@@ -104,11 +111,12 @@ pub(crate) async fn run_flow_reader(source: impl FlowSource, mailbox: Arc<FlowMa
 }
 
 /// One side's levels, deep enough for the largest entry, and each entry walked alone over them.
-async fn side_walks(source: &impl FlowSource, coin: &str, taker: Side, items: &[WalkItem]) -> SideWalks {
+async fn side_walks(source: &impl FlowSource, timers: &LockTimers, coin: &str, taker: Side, items: &[WalkItem]) -> SideWalks {
     let needed = Sz::new(items.iter().map(|(size, _)| *size).max().unwrap_or(0));
-    let Some(levels) = source.taker_levels(coin, taker, needed, MAX_WALK_LEVELS).await else {
+    let Some(levels) = source.taker_levels(coin, taker, needed, MAX_WALK_LEVELS, timers).await else {
         return SideWalks { taker, book: None, walks: Vec::new() };
     };
+    FORCED_FLOW_WALKED_ENTRIES_TOTAL.inc_by(items.len() as u64);
     let book = BookAt { height: levels.height, time: levels.time, trusted: levels.trusted, withheld_periods: levels.withheld_periods, mid_px: mid_px(&levels) };
     SideWalks { taker, book: Some(book), walks: alone_walks(&levels.levels, items, levels_truncated(&levels, needed)) }
 }

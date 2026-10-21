@@ -43,7 +43,7 @@ use super::{
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, NodePrices, Publisher},
     candidates::{BookLink, Candidates, CandidatesSnapshot},
     forced_flow::Tier,
-    forced_flow_owner::{DemandKey, FlowDemand, FlowDemandGuard, FlowFrame, FlowLink, ForcedFlow, OwnerView},
+    forced_flow_owner::{DemandKey, FlowDemand, FlowDemandGuard, FlowFrame, FlowLink, FlowOutput, ForcedFlow, OwnerView},
     forced_flow_reader::{FlowMailbox, FlowRead, run_flow_reader},
     walk::{WalkMailbox, WalkResult, run_walker},
 };
@@ -60,7 +60,7 @@ use crate::{
         ACCOUNTS_HELD_FILLS, ACCOUNTS_OPEN_POSITIONS, ACCOUNTS_PENDING_BLOCKS, ACCOUNTS_REPLAY_CHECKED_TOTAL,
         ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL, ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL, ACCOUNTS_REPLAY_STOPPED_TOTAL, ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL,
         ACCOUNTS_STALE_FILL_BATCHES_SKIPPED_TOTAL, ACCOUNTS_STREAM_HEIGHT, ACCOUNTS_TRUSTED, ACCOUNTS_UNKNOWN_MISC_EVENTS_TOTAL,
-        LIQUIDATION_CANDIDATES, LIQUIDATION_CANDIDATES_REFRESH_SECONDS,
+        FORCED_FLOW_OWNER_SECONDS, LIQUIDATION_CANDIDATES, LIQUIDATION_CANDIDATES_REFRESH_SECONDS,
         NODE_MARKS_AVAILABLE, NODE_MARKS_CHECKED_TOTAL, NODE_MARKS_CHECKS_SKIPPED_TOTAL, NODE_MARKS_HEIGHT,
         NODE_MARKS_LOGGED_INPUTS, NODE_MARKS_REBUILDS_TOTAL, NODE_MARKS_SEED_FAILURES_TOTAL, NODE_MARKS_SEED_HEIGHT,
         NODE_MARKS_AMBIGUOUS_CUTS_TOTAL, NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL,
@@ -281,6 +281,14 @@ async fn next_flow_read(reads: &mut Option<mpsc::Receiver<FlowRead>>) -> Option<
 
 /// Whether the local marks' next snapshot came (`false`) or their channel closed (`true`); pending forever while they
 /// are not attached. Cancel-safe.
+/// One forced flow step on the owner task, timed (design 000451 batch 3).
+fn time_flow_step(step: &str, work: impl FnOnce() -> FlowOutput) -> FlowOutput {
+    let started = Instant::now();
+    let output = work();
+    FORCED_FLOW_OWNER_SECONDS.with_label_values(&[step]).observe(started.elapsed().as_secs_f64());
+    output
+}
+
 async fn next_local_snapshot(flow: &mut ForcedFlow) -> bool {
     match flow.local_snapshots() {
         Some(snapshots) => snapshots.changed().await.is_err(),
@@ -596,7 +604,7 @@ async fn run_owner(
                 match query {
                     Query::ForcedFlow { coin, tier, reply } => {
                         let view = OwnerView { book: &book, marks: marks.at(), candidates: &candidates };
-                        publisher.publish_forced_flow(flow.query(coin, tier, reply, Instant::now(), &view));
+                        publisher.publish_forced_flow(time_flow_step("query", || flow.query(coin, tier, reply, Instant::now(), &view)));
                     }
                     Query::AttachLocalMarks(snapshots) => flow.attach_local(snapshots),
                     query => answer(&book, &marks, &candidates, query),
@@ -612,15 +620,15 @@ async fn run_owner(
                     continue;
                 };
                 let view = OwnerView { book: &book, marks: marks.at(), candidates: &candidates };
-                publisher.publish_forced_flow(flow.on_read(read, Instant::now(), &view));
+                publisher.publish_forced_flow(time_flow_step("read", || flow.on_read(read, Instant::now(), &view)));
             }
             _ = flow_tick.tick() => {
                 let view = OwnerView { book: &book, marks: marks.at(), candidates: &candidates };
-                publisher.publish_forced_flow(flow.tick(Instant::now(), &view));
+                publisher.publish_forced_flow(time_flow_step("tick", || flow.tick(Instant::now(), &view)));
             }
             closed = next_local_snapshot(&mut flow) => {
                 let view = OwnerView { book: &book, marks: marks.at(), candidates: &candidates };
-                publisher.publish_forced_flow(flow.on_local(closed, Instant::now(), &view));
+                publisher.publish_forced_flow(time_flow_step("local", || flow.on_local(closed, Instant::now(), &view)));
             }
             _ = supervision.tick() => {
                 supervise(&mut book, &mut marks, &threads);

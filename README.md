@@ -412,7 +412,7 @@ With `--accounts`, per coin, the market flow a mark move would force out (design
 GET /extForcedFlow?maxDistanceBps=100[&coin=BTC][&sources=trigger,liquidation][&excludeCoins=ETH,SOL][&minNotionalUsd=10000]
 ```
 - Each query, and each new subscription, is answered with each coin's frame from a computation started no earlier than it (a frame's age does not prove its inputs unchanged): a computation under way is not voided - it answers the queries that came before it started, then one more runs for the later ones - and answers within 10 s. 400 for parameters a subscription would refuse (unknown ones included), 503 while the forced flow is unavailable.
-- Frames in `orderbook_accounts_frames_total{kind="forcedFlow"|"forcedFlowWithdrawn"}`.
+- Frames in `orderbook_accounts_frames_total{kind="forcedFlow"|"forcedFlowWithdrawn"}`. The reads under the listener lock in `orderbook_forced_flow_lock_wait_seconds{read}` and `orderbook_forced_flow_lock_hold_seconds{read}` (`band`: a coin's trigger orders in a band; `walk`: one side's levels), the entries walked in `orderbook_forced_flow_walked_entries_total`, and the work on the account owner task per step in `orderbook_forced_flow_owner_seconds{step}` (`query`, `read`, `tick`, `local`).
 
 ### Local marks (extMarkPrices, extMarkInputs)
 

@@ -393,6 +393,12 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
   `local_marks_probe` 可在不重启 OB 的情况下单独跑行情。指标 `orderbook_local_marks_feed_{frames,disconnects,unknown_frames}_total`、
   `orderbook_local_marks_feed_stopped`。
 
+## 2026-10-21 被迫成交阶梯第 3 批(部分): 开销指标
+
+- 读取任务在监听器锁下的等待和持有时间按读取种类(`band` 区间条件单、`walk` 一侧盘口)计时, 扫盘条数计数; 账户 owner 上每一步
+  (`query`/`read`/`tick`/`local`)的耗时。锁计时抽成 `walk.rs` 的 `under_lock` + `LockTimers`, 清算候选扫盘沿用原指标名。
+- 触发核对、数量核对改为 bm 上的离线验收(主仓 `analyze/research/`), 不在 OB 里常驻。
+
 ## 2026-10-21 被迫成交阶梯第 2 批: `extForcedFlow`(设计 000451 r1–r5)
 
 - **只报事实**: 条件单(监听器条件单表的区间读, 第 1 批 `b4faa4b`)和清算(清算候选的底层清算价索引, 按双口径范围取, 同一个

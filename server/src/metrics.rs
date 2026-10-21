@@ -572,6 +572,33 @@ lazy_static! {
             .buckets(vec![0.000001, 0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05])
     ).expect("metric can be created");
 
+    /// The forced flow's reads under the listener lock (design 000451 batch 3), per read (`band`: a coin's trigger
+    /// orders in a band, `walk`: one side's levels): waiting for the lock, and holding it to copy.
+    pub static ref FORCED_FLOW_LOCK_WAIT_SECONDS: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("orderbook_forced_flow_lock_wait_seconds", "Forced flow read wait for the listener lock")
+            .buckets(vec![0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5]),
+        &["read"]
+    ).expect("metric can be created");
+
+    pub static ref FORCED_FLOW_LOCK_HOLD_SECONDS: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("orderbook_forced_flow_lock_hold_seconds", "Forced flow read copy under the listener lock")
+            .buckets(vec![0.000001, 0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]),
+        &["read"]
+    ).expect("metric can be created");
+
+    /// The forced flow's work on the account owner task per step (`query`, `read`, `tick`, `local`).
+    pub static ref FORCED_FLOW_OWNER_SECONDS: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("orderbook_forced_flow_owner_seconds", "Forced flow step time on the account owner task")
+            .buckets(vec![0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5]),
+        &["step"]
+    ).expect("metric can be created");
+
+    /// Entries the forced flow walked (each alone over its side's levels).
+    pub static ref FORCED_FLOW_WALKED_ENTRIES_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_forced_flow_walked_entries_total",
+        "Forced flow entries walked"
+    ).expect("metric can be created");
+
     /// The published liquidation candidates (within the server's distance).
     pub static ref LIQUIDATION_CANDIDATES: IntGauge = IntGauge::new(
         "orderbook_liquidation_candidates",
@@ -698,6 +725,10 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(LIQUIDATION_CANDIDATES.clone())).ok();
     REGISTRY.register(Box::new(LIQUIDATION_WALK_LOCK_WAIT_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(LIQUIDATION_WALK_LOCK_HOLD_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(FORCED_FLOW_LOCK_WAIT_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(FORCED_FLOW_LOCK_HOLD_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(FORCED_FLOW_OWNER_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(FORCED_FLOW_WALKED_ENTRIES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_UNKNOWN_FRAMES_TOTAL.clone())).ok();
