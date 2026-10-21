@@ -21,6 +21,9 @@
 //! them. So `filled` and `marginCanceled` release - the children the table linked to the parent and those its line
 //! lists under their own oids (a modify's successor) -, and every other status of the parent leaves them waiting until
 //! their own statuses end them (review 000463 r1 P2-1: a parent's `canceled` activated them until their own came).
+//! A parent that fills in its own block (a market or IOC order, a crossing limit order) fills before its children's
+//! `open` lines: they take part as they open (bm 10-21 14:35-15:07: 84 such children were held waiting for good, and
+//! 28 more through a later modify of them).
 //!
 //! A modify of a waiting child keeps its successor waiting: the modify opens the new oid and cancels the old one right
 //! after it, hash-less, in the block (bm 10-21 hour 11: 129,306 of 129,342 such pairs were modifies by oid or cloid,
@@ -34,7 +37,7 @@
 use std::{borrow::Borrow, collections::BTreeMap, ops::Bound, sync::Arc};
 
 use alloy::primitives::Address;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     order_book::{
@@ -338,6 +341,19 @@ impl ChildKey {
 struct ExpectedChildren {
     height: u64,
     parents: FxHashMap<ChildKey, Vec<u64>>,
+    /// The parents of the block that filled (or were margin canceled) before their announced children opened: a
+    /// market, IOC or crossing order fills in its own block and its children's `open` lines follow its `filled` (bm
+    /// 10-21 14:35-15:07: 84 children, 47 of market orders, 28 of IOC, 9 of GTC). Those children take part at once.
+    released: FxHashSet<u64>,
+}
+
+impl ExpectedChildren {
+    /// `parent` left releasing its children: those it announced in the block and not yet opened take part as they open.
+    fn note_release(&mut self, parent: u64) {
+        if self.parents.values().any(|parents| parents.contains(&parent)) {
+            self.released.insert(parent);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -499,9 +515,10 @@ impl TriggerTable {
                 self.announce_children(height, user, order);
             }
             if order.is_trigger && self.tracks(&order.coin) {
-                self.claim_parent(user, order);
+                let of_a_filled_parent = self.claim_parent(user, order);
                 let parsed = InnerL4Order::try_from((user, order.clone()));
-                if hash.is_some() && !self.families.parent_of.contains_key(&order.oid) && self.families.holds_any(user, &order.coin) {
+                // a child known to take part is no modify's successor (review 000465 r1 P2)
+                if !of_a_filled_parent && hash.is_some() && !self.families.parent_of.contains_key(&order.oid) && self.families.holds_any(user, &order.coin) {
                     let order_text = parsed.map_err(|err| err.to_string());
                     self.successor = Some(Successor { height, user, coin: order.coin.clone(), oid: order.oid, order: order_text });
                     return false;
@@ -511,7 +528,12 @@ impl TriggerTable {
             return false;
         }
         match status {
-            "filled" | "marginCanceled" => self.release_children(order),
+            "filled" | "marginCanceled" => {
+                self.release_children(order);
+                if !self.expected.parents.is_empty() {
+                    self.expected.note_release(order.oid);
+                }
+            }
             "triggered" => {}
             // a cancel, a rejection, any other status: the children wait for their own statuses or a successor's
             _ => self.families.leave_waiting(order.oid),
@@ -569,24 +591,35 @@ impl TriggerTable {
         }
     }
 
-    /// A trigger order's own `open`: linked to the parent that announced it in this block, if one did.
-    fn claim_parent(&mut self, user: Address, order: &L4Order) {
+    /// A trigger order's own `open`: linked to the parent that announced it in this block, if one did and is still
+    /// live. Whether it is the child of a parent that already filled in the block: it takes part as it opens.
+    fn claim_parent(&mut self, user: Address, order: &L4Order) -> bool {
         if self.expected.parents.is_empty() || self.families.parent_of.contains_key(&order.oid) {
-            return;
+            return false;
         }
         let key = ChildKey::of(user, order);
-        let Some(parents) = self.expected.parents.get_mut(&key) else { return };
+        let Some(parents) = self.expected.parents.get_mut(&key) else { return false };
         let parent = parents.remove(0);
         if parents.is_empty() {
             self.expected.parents.remove(&key);
         }
+        if self.expected.released.contains(&parent) {
+            return true;
+        }
         self.families.link(order.oid, parent);
+        false
     }
 
     /// A status of another block: the announcements of the previous one end; a child never seen is counted, and the
     /// table is a gap until a complete install.
     fn expire_expected(&mut self, height: u64) {
-        if self.expected.height == height || self.expected.parents.is_empty() {
+        if self.expected.height == height {
+            return;
+        }
+        if !self.expected.released.is_empty() {
+            self.expected.released.clear();
+        }
+        if self.expected.parents.is_empty() {
             return;
         }
         let unmatched: usize = self.expected.parents.values().map(Vec::len).sum();
@@ -992,6 +1025,25 @@ mod tests {
         assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![21]);
         assert!(table.on_status(12, USER, "triggered", None, &wire(&survivor)));
         assert_eq!(table.count(), 0);
+    }
+
+    /// Review 000465 r1 P2: the child of a parent that filled (or was margin canceled) before it opened takes part at
+    /// once, even beside a waiting child of its account and coin: not held as a modify's successor, so the next line,
+    /// that waiting child's hash-less `canceled`, does not move it under the waiting child's parent.
+    #[test]
+    fn the_child_of_a_filled_parent_takes_part_beside_a_waiting_child() {
+        for released_by in ["filled", "marginCanceled"] {
+            let waiting = stop("BTC", 2, "110");
+            let mut table = TriggerTable::seeded(TriggerSection::Complete(vec![waiting.clone()]), &ParentLinks::from_iter([(2, 1)]), Vec::new(), true, true);
+            let child = stop("BTC", 11, "108");
+            table.on_status(7, USER, "open", HASH, &parent(10, &[&child], Some(10)));
+            table.on_status(7, USER, released_by, None, &parent(10, &[], None));
+            table.on_status(7, USER, "open", HASH, &wire(&child));
+            assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![11], "{released_by}");
+            assert!(table.on_status(7, USER, "canceled", None, &wire(&waiting)));
+            assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![11], "{released_by}");
+            assert_eq!((table.families.parent_of.get(&11), table.availability(None)), (None, TriggerAvailability::Complete), "{released_by}");
+        }
     }
 
     /// Review 000463 r1 P2-3: a dump without a trigger section keeps the previous table, a table holding waiting

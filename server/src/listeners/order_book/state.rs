@@ -1061,6 +1061,61 @@ mod tests {
         assert_eq!(in_band(&state), vec![581_250_704_215]);
     }
 
+    /// bm 10-21 blocks 1192030080 and 1192032675: an order that fills in its own block - a market buy with its stop, an
+    /// IOC sale with its take profit and stop - fills before its children's `open` lines; the children take part as they
+    /// open (they were held waiting for good: 84 children of 14:35-15:07 the node triggered, unlisted). Block 1192032705
+    /// modifies that take profit and stop: the new ones take part, the old ones leave.
+    #[test]
+    fn the_children_of_an_order_filled_in_its_own_block_take_part_as_they_open() {
+        let mut state =
+            OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Complete(Vec::new()), &ParentLinks::default(), 0, 0, true, false, true);
+        let apply = |state: &mut OrderBookState, lines: &[&str]| {
+            for text in lines {
+                let line: Batch<NodeDataOrderStatus> = serde_json::from_str(text).unwrap();
+                state.apply_order_statuses_hft(line).unwrap();
+            }
+        };
+        let btc = Coin::new("BTC");
+        let in_band = |state: &OrderBookState| -> Vec<u64> {
+            let mut oids: Vec<u64> = state
+                .untriggered_in_band(&btc, Px::parse_from_str("80000").unwrap(), Px::parse_from_str("90000").unwrap(), 10)
+                .2
+                .orders
+                .iter()
+                .map(|(_, order)| order.oid)
+                .collect();
+            oids.sort_unstable();
+            oids
+        };
+        // the market buy 760 announces its stop, fills, then the stop 761 opens
+        let market = [
+            r#"{"local_time":"2026-10-21T14:29:54.743498127","block_time":"2026-10-21T14:29:54.266275991","block_number":1192030080,"events":[{"time":"2026-10-21T14:29:54.266275991","user":"0x7a2029d93e60bb7d5eaf156b4ba51fd1e606c6f3","hash":"0xb3f8024a96879ab2b57104470cef80020a000030318ab98457c0ad9d558b749d","builder":null,"status":"open","order":{"coin":"BTC","side":"A","limitPx":"77157.0","sz":"0.07602","oid":581553695760,"timestamp":1792592994266,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[{"coin":"BTC","side":"B","limitPx":"93060.0","sz":"0.07602","oid":581553695760,"timestamp":1792592994266,"triggerCondition":"Price above 84600","isTrigger":true,"triggerPx":"84600.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"0.07602","tif":null,"cloid":null}],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Market","origSz":"0.07602","tif":"FrontendMarket","cloid":null}}]}"#,
+            r#"{"local_time":"2026-10-21T14:29:54.743504669","block_time":"2026-10-21T14:29:54.266275991","block_number":1192030080,"events":[{"time":"2026-10-21T14:29:54.266275991","user":"0x7a2029d93e60bb7d5eaf156b4ba51fd1e606c6f3","hash":null,"builder":null,"status":"filled","order":{"coin":"BTC","side":"A","limitPx":"77157.0","sz":"0.0","oid":581553695760,"timestamp":1792592994266,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Market","origSz":"0.07602","tif":"FrontendMarket","cloid":null}}]}"#,
+            r#"{"local_time":"2026-10-21T14:29:54.743520198","block_time":"2026-10-21T14:29:54.266275991","block_number":1192030080,"events":[{"time":"2026-10-21T14:29:54.266275991","user":"0x7a2029d93e60bb7d5eaf156b4ba51fd1e606c6f3","hash":"0xb3f8024a96879ab2b57104470cef80020a000030318ab98457c0ad9d558b749d","builder":null,"status":"open","order":{"coin":"BTC","side":"B","limitPx":"93060.0","sz":"0.07602","oid":581553695761,"timestamp":1792592994266,"triggerCondition":"Price above 84600","isTrigger":true,"triggerPx":"84600.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"0.07602","tif":null,"cloid":null}}]}"#
+        ];
+        apply(&mut state, &market);
+        assert_eq!(in_band(&state), vec![581_553_695_761]);
+        // the IOC sale 081 announces its take profit and stop, fills, then 082 and 083 open
+        let ioc = [
+            r#"{"local_time":"2026-10-21T14:32:59.071480673","block_time":"2026-10-21T14:32:58.701084543","block_number":1192032675,"events":[{"time":"2026-10-21T14:32:58.701084543","user":"0x71217c06cdf5456d75db5a0d540323f63e8789c5","hash":"0x124807c7a59ee05a13c104470cf9a302032a00ad4091ff2cb610b31a6492ba44","builder":{"b":"0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81","f":35},"status":"open","order":{"coin":"BTC","side":"B","limitPx":"88140.0","sz":"0.00325","oid":581557679081,"timestamp":1792593178701,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[{"coin":"BTC","side":"A","limitPx":"82999.0","sz":"0.00325","oid":581557679081,"timestamp":1792593178701,"triggerCondition":"Price above 84693","isTrigger":true,"triggerPx":"84693.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Take Profit Market","origSz":"0.00325","tif":null,"cloid":"0x021300280100000000000000000000c7"},{"coin":"BTC","side":"A","limitPx":"82074.0","sz":"0.00325","oid":581557679081,"timestamp":1792593178701,"triggerCondition":"Price below 83749","isTrigger":true,"triggerPx":"83749.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"0.00325","tif":null,"cloid":"0x02230028010000000000000000000049"}],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"0.00325","tif":"Ioc","cloid":"0x020300280100000000000000000000bd"}}]}"#,
+            r#"{"local_time":"2026-10-21T14:32:59.071488016","block_time":"2026-10-21T14:32:58.701084543","block_number":1192032675,"events":[{"time":"2026-10-21T14:32:58.701084543","user":"0x71217c06cdf5456d75db5a0d540323f63e8789c5","hash":null,"builder":{"b":"0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81","f":35},"status":"filled","order":{"coin":"BTC","side":"B","limitPx":"88140.0","sz":"0.00001","oid":581557679081,"timestamp":1792593178701,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"0.00325","tif":"Ioc","cloid":"0x020300280100000000000000000000bd"}}]}"#,
+            r#"{"local_time":"2026-10-21T14:32:59.071496913","block_time":"2026-10-21T14:32:58.701084543","block_number":1192032675,"events":[{"time":"2026-10-21T14:32:58.701084543","user":"0x71217c06cdf5456d75db5a0d540323f63e8789c5","hash":"0x124807c7a59ee05a13c104470cf9a302032a00ad4091ff2cb610b31a6492ba44","builder":{"b":"0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81","f":35},"status":"open","order":{"coin":"BTC","side":"A","limitPx":"82999.0","sz":"0.00325","oid":581557679082,"timestamp":1792593178701,"triggerCondition":"Price above 84693","isTrigger":true,"triggerPx":"84693.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Take Profit Market","origSz":"0.00325","tif":null,"cloid":"0x021300280100000000000000000000c7"}}]}"#,
+            r#"{"local_time":"2026-10-21T14:32:59.071503796","block_time":"2026-10-21T14:32:58.701084543","block_number":1192032675,"events":[{"time":"2026-10-21T14:32:58.701084543","user":"0x71217c06cdf5456d75db5a0d540323f63e8789c5","hash":"0x124807c7a59ee05a13c104470cf9a302032a00ad4091ff2cb610b31a6492ba44","builder":{"b":"0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81","f":35},"status":"open","order":{"coin":"BTC","side":"A","limitPx":"82074.0","sz":"0.00325","oid":581557679083,"timestamp":1792593178701,"triggerCondition":"Price below 83749","isTrigger":true,"triggerPx":"83749.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"0.00325","tif":null,"cloid":"0x02230028010000000000000000000049"}}]}"#
+        ];
+        apply(&mut state, &ioc);
+        assert_eq!(in_band(&state), vec![581_553_695_761, 581_557_679_082, 581_557_679_083]);
+        // a later block modifies them: 225 succeeds 082, 226 succeeds 083
+        let modify = [
+            r#"{"local_time":"2026-10-21T14:33:01.734745239","block_time":"2026-10-21T14:33:01.260365326","block_number":1192032705,"events":[{"time":"2026-10-21T14:33:01.260365326","user":"0x71217c06cdf5456d75db5a0d540323f63e8789c5","hash":"0xb4111719e24fa6b5b58a04470cf9c102051700ff7d42c58757d9c26ca14380a0","builder":{"b":"0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81","f":35},"status":"open","order":{"coin":"BTC","side":"A","limitPx":"80458.0","sz":"0.0","oid":581557725225,"timestamp":1792593181260,"triggerCondition":"Price above 84693","isTrigger":true,"triggerPx":"84693.0","children":[],"isPositionTpsl":true,"reduceOnly":true,"orderType":"Take Profit Market","origSz":"0.0","tif":null,"cloid":"0x021300280100000000000000000000c7"}}]}"#,
+            r#"{"local_time":"2026-10-21T14:33:01.734751761","block_time":"2026-10-21T14:33:01.260365326","block_number":1192032705,"events":[{"time":"2026-10-21T14:33:01.260365326","user":"0x71217c06cdf5456d75db5a0d540323f63e8789c5","hash":null,"builder":{"b":"0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81","f":35},"status":"canceled","order":{"coin":"BTC","side":"A","limitPx":"82999.0","sz":"0.00325","oid":581557679082,"timestamp":1792593178701,"triggerCondition":"Price above 84693","isTrigger":true,"triggerPx":"84693.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Take Profit Market","origSz":"0.00325","tif":null,"cloid":"0x021300280100000000000000000000c7"}}]}"#,
+            r#"{"local_time":"2026-10-21T14:33:01.734761459","block_time":"2026-10-21T14:33:01.260365326","block_number":1192032705,"events":[{"time":"2026-10-21T14:33:01.260365326","user":"0x71217c06cdf5456d75db5a0d540323f63e8789c5","hash":"0xb4111719e24fa6b5b58a04470cf9c102051700ff7d42c58757d9c26ca14380a0","builder":{"b":"0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81","f":35},"status":"open","order":{"coin":"BTC","side":"A","limitPx":"79562.0","sz":"0.0","oid":581557725226,"timestamp":1792593181260,"triggerCondition":"Price below 83749","isTrigger":true,"triggerPx":"83749.0","children":[],"isPositionTpsl":true,"reduceOnly":true,"orderType":"Stop Market","origSz":"0.0","tif":null,"cloid":"0x02230028010000000000000000000049"}}]}"#,
+            r#"{"local_time":"2026-10-21T14:33:01.734769935","block_time":"2026-10-21T14:33:01.260365326","block_number":1192032705,"events":[{"time":"2026-10-21T14:33:01.260365326","user":"0x71217c06cdf5456d75db5a0d540323f63e8789c5","hash":null,"builder":{"b":"0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81","f":35},"status":"canceled","order":{"coin":"BTC","side":"A","limitPx":"82074.0","sz":"0.00325","oid":581557679083,"timestamp":1792593178701,"triggerCondition":"Price below 83749","isTrigger":true,"triggerPx":"83749.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"0.00325","tif":null,"cloid":"0x02230028010000000000000000000049"}}]}"#
+        ];
+        apply(&mut state, &modify);
+        assert_eq!(in_band(&state), vec![581_553_695_761, 581_557_725_225, 581_557_725_226]);
+        assert_eq!(state.untriggered_snapshot(Some(&btc)).3, TriggerAvailability::Complete);
+    }
+
     /// bm 10-21 block 1191902954: a bot's `batchModify` of its PONS limit sale 039 with its take profit 040 and stop
     /// 041, both waiting: each modify opens the new oid and cancels the old one right after it, the new parent's `open`
     /// lists no children. The new take profit and stop wait on, and the new parent's `filled` (listing them) releases
