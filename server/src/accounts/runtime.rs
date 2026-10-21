@@ -33,7 +33,7 @@ use super::{
     checkpoint::parse_checkpoint_file,
     marks::{
         CheckpointGrid, MARK_STREAMS, MarkInputs, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild,
-        actions::MarkActions, execution::BlockFill, pairing::PairingDiagnostics, seed::MarkSeed,
+        actions::MarkActions, execution::BlockFill, pairing::PairingDiagnostics, seed::MarkSeed, system::SystemAction,
     },
     misc::MiscEvent,
     evidence::{
@@ -76,6 +76,8 @@ const HIP3_ORACLE_UPDATES_MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 const BOOK_DIFFS_MAX_LINE_BYTES: usize = 1024 * 1024;
 /// One status per line: 604 bytes median over 76,031,570 lines (2026-10-20 12 UTC).
 const ORDER_STATUSES_MAX_LINE_BYTES: usize = 1024 * 1024;
+/// `CoreWriter` attempts are normally single orders; cap each batch like the fills stream.
+const SYSTEM_ACTIONS_MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// The largest `replica_cmds` line measured 6.4 MB (bm, 2026-10-19).
 const BLOCK_ACTIONS_MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 /// Checkpoints appear complete (a new file has its final size at first sight, 2026-10-19), every ~12 minutes.
@@ -96,6 +98,7 @@ enum Input {
     BookDiffs(std::result::Result<(Batch<NodeDataOrderDiff>, LineKey), LineError>),
     /// Every order-status line, with its identity; unused statuses still delimit cancellation runs.
     OrderStatuses(std::result::Result<(Batch<NodeDataOrderStatus>, LineKey), LineError>),
+    SystemActions(std::result::Result<(Batch<SystemAction>, LineKey), LineError>),
     /// The account view's and the node marks' reading of the line (the latter fails apart), with the instant it was read.
     BlockActions(std::result::Result<(BlockActions, std::result::Result<MarkActions, String>), LineError>, Instant, PairingDiagnostics),
     /// The stream's reader proved that every line written before the instant reached the owner (design 000433 r3).
@@ -258,6 +261,8 @@ pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Resul
         data_dir.join("node_order_statuses_streaming"),
         ORDER_STATUSES_MAX_LINE_BYTES,
     );
+    let system_actions = hourly("AccountSystemActions", "accounts_system_actions",
+        data_dir.join("system_and_core_writer_actions_streaming"), SYSTEM_ACTIONS_MAX_LINE_BYTES);
     let block_actions = LineStream {
         name: "AccountBlockActions",
         lag_label: "accounts_block_actions",
@@ -272,6 +277,7 @@ pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Resul
         proving_watcher("HIP-3 oracle updates watcher", hip3_oracle_updates, Stream::Hip3OracleUpdates, hip3_input, input_tx.clone()),
         proving_watcher("book diffs watcher", book_diffs, Stream::BookDiffs, book_diffs_input, input_tx.clone()),
         proving_watcher("order statuses watcher", order_statuses, Stream::OrderStatuses, order_statuses_input, input_tx.clone()),
+        proving_watcher("system actions watcher", system_actions, Stream::SystemActions, system_actions_input, input_tx.clone()),
         Supervised {
             name: "block actions watcher",
             handle: spawn_line_watcher(
@@ -342,6 +348,13 @@ fn hip3_input(line: String) -> Input {
 /// Every market's diffs: the node marks keep the main dex's books, and every diff anchors the execution points.
 fn book_diffs_input(line: String) -> Input {
     Input::BookDiffs(parse_line::<NodeDataOrderDiff>(&line).and_then(|batch| {
+        let key = line_key(&line, batch.block_number())?;
+        Ok((batch, key))
+    }))
+}
+
+fn system_actions_input(line: String) -> Input {
+    Input::SystemActions(parse_line::<SystemAction>(&line).and_then(|batch| {
         let key = line_key(&line, batch.block_number())?;
         Ok((batch, key))
     }))
@@ -535,6 +548,7 @@ fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut Bl
         Input::Hip3OracleUpdates(Ok((batch, key))) => assembler.receive_hip3_oracle_updates(batch, key),
         Input::BookDiffs(Ok((batch, key))) => assembler.receive_book_diffs(batch, key),
         Input::OrderStatuses(Ok((batch, key))) => assembler.receive_order_statuses(batch, key),
+        Input::SystemActions(Ok((batch, key))) => assembler.receive_system_actions(batch, key),
         Input::BlockActions(Ok((block, mark_actions)), read_at, mut diagnostics) => {
             marks.sample_ioc_pairings(&mut diagnostics);
             for (kind, count) in [("batchRejected", diagnostics.batch_rejected), ("unknown", diagnostics.unknown),
@@ -553,6 +567,7 @@ fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut Bl
         Input::Hip3OracleUpdates(Err(err)) => return lost(book, marks, Stream::Hip3OracleUpdates, "parse_error", &err),
         Input::BookDiffs(Err(err)) => return lost(book, marks, Stream::BookDiffs, "parse_error", &err),
         Input::OrderStatuses(Err(err)) => return lost(book, marks, Stream::OrderStatuses, "parse_error", &err),
+        Input::SystemActions(Err(err)) => return lost(book, marks, Stream::SystemActions, "parse_error", &err),
         Input::BlockActions(Err(err), _, _) => return lost(book, marks, Stream::BlockActions, "parse_error", &err),
         Input::Loss(stream) => {
             let error = "the watcher skipped lines while positioning at its start, or discarded buffered data".to_string();
@@ -562,8 +577,8 @@ fn apply_input(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &mut Bl
     apply_assembly(book, marks, assembler, assembly)
 }
 
-const ASSEMBLED_STREAMS: [Stream; 6] =
-    [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses, Stream::BlockActions];
+const ASSEMBLED_STREAMS: [Stream; 7] =
+    [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses, Stream::BlockActions, Stream::SystemActions];
 
 /// Records what the assembly could not apply, then applies the released blocks in order: the marks first, so the
 /// account view's block finds them at its height (design 000439 r1 4.1).
@@ -598,10 +613,10 @@ fn apply_assembly(book: &mut AccountBook, marks: &mut NodeMarks, assembler: &Blo
     }
     let mut touched = Touched::default();
     for block in completed {
-        let CompletedBlock { actions, fills, misc_events, hip3_oracle_updates, book_diffs, mark_actions, order_statuses } = block;
+        let CompletedBlock { actions, fills, misc_events, hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions } = block;
         let height = actions.height;
         let mark_fills = fills.iter().flat_map(Batch::events_ref).map(BlockFill::of).collect();
-        let inputs = MarkInputs { hip3_oracle_updates, book_diffs, mark_actions, order_statuses, fills: mark_fills };
+        let inputs = MarkInputs { hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions, fills: mark_fills };
         report_marks_block(height, marks.apply_block(height, inputs));
         touched.absorb(report_block(book.apply_block(actions, fills, misc_events)));
         ACCOUNTS_APPLIED_HEIGHT.set(height.cast_signed());
@@ -1063,8 +1078,8 @@ impl TestOwner {
 
 /// The streams whose readers send read-through proofs.
 #[cfg(test)]
-const PROVING_STREAMS: [Stream; 5] =
-    [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses];
+const PROVING_STREAMS: [Stream; 6] =
+    [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses, Stream::SystemActions];
 
 #[cfg(test)]
 mod tests {
@@ -1393,7 +1408,7 @@ mod tests {
             input_tx.send(Input::BlockActions(Ok((block_actions(height, &[]), Ok(actions))), Instant::now(), PairingDiagnostics::default())).await.unwrap();
         }
         let read_through = Instant::now() + Duration::from_millis(1);
-        for stream in [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses] {
+        for stream in PROVING_STREAMS {
             input_tx.send(Input::ReadThrough(stream, read_through)).await.unwrap();
         }
         let installed = tokio::time::timeout(Duration::from_secs(2), async {
@@ -1423,4 +1438,27 @@ mod tests {
         assert_eq!(pushed["liquidationPxSource"], "replay");
         assert_eq!((&pushed["liquidationPx"], &pushed["markPx"]), (&read["liquidationPx"], &read["markPx"]));
     }
+
+    #[test]
+    fn late_system_actions_withhold_marks_through_the_runtime_until_a_covering_seed() {
+        use crate::accounts::{marks::tests::trusted_marks, test_support::{block_actions, marks_seed, trusted_book, user}};
+        let mut book = trusted_book(&[(user(1), 5)]);
+        let mut marks = trusted_marks();
+        let mut assembler = BlockAssembler::default();
+        let account_before = book.availability().map(|_| ());
+        let actions = MarkActions { height: 1_002, time_ns: 0, actions: Vec::new() };
+        apply_input(&mut book, &mut marks, &mut assembler,
+            Input::BlockActions(Ok((block_actions(1_002, &[]), Ok(actions))), Instant::now(), PairingDiagnostics::default()));
+        assert_eq!(marks.availability(), Ok(1_001));
+        apply_input(&mut book, &mut marks, &mut assembler, system_actions_input(batch_line(1_000, "")));
+        let loss = Unavailable::DataLoss { stream: Stream::SystemActions, bound: LossBound::Block(1_000) };
+        assert_eq!(marks.availability(), Err(loss.clone()));
+        assert_eq!(marks.price_snapshot(), Err(loss.clone()), "local marks must not consume the invalid state");
+        assert_eq!(book.availability().map(|_| ()), account_before, "system actions are a marks-only input");
+        marks.install(marks_seed(999));
+        assert_eq!(marks.availability(), Err(loss), "a seed before the dropped block cannot recover it");
+        marks.install(marks_seed(1_001));
+        assert_eq!(marks.availability(), Ok(1_001));
+    }
+
 }

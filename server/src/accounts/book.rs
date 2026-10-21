@@ -82,6 +82,8 @@ pub(crate) enum Stream {
     BookDiffs,
     /// `node_order_statuses_streaming`, cancels by cloid and triggers: read by the node marks, not by the account view.
     OrderStatuses,
+    /// Executed system/CoreWriter attempts, read by the marks only.
+    SystemActions,
 }
 
 impl Stream {
@@ -93,6 +95,7 @@ impl Stream {
             Self::Hip3OracleUpdates => "hip3_oracle_updates",
             Self::BookDiffs => "book_diffs",
             Self::OrderStatuses => "order_statuses",
+            Self::SystemActions => "system_actions",
         }
     }
 }
@@ -787,7 +790,7 @@ impl AccountBook {
             Stream::Fills => Some(&mut self.fills),
             Stream::MiscEvents => Some(&mut self.misc_events),
             Stream::BlockActions => Some(&mut self.block_actions),
-            Stream::Hip3OracleUpdates | Stream::BookDiffs | Stream::OrderStatuses => None,
+            Stream::Hip3OracleUpdates | Stream::BookDiffs | Stream::OrderStatuses | Stream::SystemActions => None,
         }
     }
 

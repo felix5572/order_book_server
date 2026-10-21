@@ -1,0 +1,248 @@
+{
+  "source": {
+    "height": 1191429459,
+    "archive": "/home/yfb222333/research-data/hyperliquid-trade/ob_accounts_verify_20261019/audit_20261021T0305/focus_blocks",
+    "binary_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36"
+  },
+  "time_ns": 1792549764398902861,
+  "system": [
+    {
+      "user": "0x66f762da80e1905104f3703ad1a3723d775e2787",
+      "nonce": 4370368,
+      "evm_tx_hash": "0x8f13058aed21e85f5dc59682047d8fe17532278d850e85e78efbc5ab35645db6",
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 1,
+            "b": false,
+            "p": "2440.5",
+            "s": "0.4172",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Ioc"
+              }
+            },
+            "c": "0x0000000000000000000000000000002c"
+          }
+        ],
+        "grouping": "na"
+      }
+    }
+  ],
+  "statuses": [
+    {
+      "time": "2026-10-21T02:29:24.398902861",
+      "user": "0x66f762da80e1905104f3703ad1a3723d775e2787",
+      "hash": "0x31cdfc37d2fa7bfb3347044703c553000009141d6dfd9acdd596a78a91fe55e5",
+      "builder": null,
+      "status": "open",
+      "order": {
+        "coin": "ETH",
+        "side": "A",
+        "limitPx": "2440.5",
+        "sz": "0.4172",
+        "oid": 581053416509,
+        "timestamp": 1792549764398,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Limit",
+        "origSz": "0.4172",
+        "tif": "Ioc",
+        "cloid": "0x0000000000000000000000000000002c"
+      }
+    },
+    {
+      "time": "2026-10-21T02:29:24.398902861",
+      "user": "0x66f762da80e1905104f3703ad1a3723d775e2787",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "ETH",
+        "side": "A",
+        "limitPx": "2440.5",
+        "sz": "0.0",
+        "oid": 581053416509,
+        "timestamp": 1792549764398,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Limit",
+        "origSz": "0.4172",
+        "tif": "Ioc",
+        "cloid": "0x0000000000000000000000000000002c"
+      }
+    },
+    {
+      "time": "2026-10-21T02:29:24.398902861",
+      "user": "0x31f1ad6bfb8b38ce11af09f3a7c69b5e8c75c33c",
+      "hash": null,
+      "builder": null,
+      "status": "triggered",
+      "order": {
+        "coin": "ZEC",
+        "side": "A",
+        "limitPx": "1138.5",
+        "sz": "0.0",
+        "oid": 581053406801,
+        "timestamp": 1792549763314,
+        "triggerCondition": "Price below 1265",
+        "isTrigger": true,
+        "triggerPx": "1265.0",
+        "children": [],
+        "isPositionTpsl": true,
+        "reduceOnly": true,
+        "orderType": "Stop Market",
+        "origSz": "0.0",
+        "tif": null,
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T02:29:24.398902861",
+      "user": "0x31f1ad6bfb8b38ce11af09f3a7c69b5e8c75c33c",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "ZEC",
+        "side": "A",
+        "limitPx": "1138.6",
+        "sz": "0.0",
+        "oid": 581053406801,
+        "timestamp": 1792549764398,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": true,
+        "reduceOnly": true,
+        "orderType": "Stop Market",
+        "origSz": "0.71",
+        "tif": "Gtc",
+        "cloid": null
+      }
+    }
+  ],
+  "fills": [
+    [
+      "0x2540a75c0c0e43b85b7793d045da4b225f9ac4e1",
+      {
+        "coin": "ETH",
+        "px": "2446.7",
+        "sz": "0.4172",
+        "side": "B",
+        "time": 1792549764398,
+        "startPosition": "1642.9005",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0x31cdfc37d2fa7bfb3347044703c553000009141d6dfd9acdd596a78a91fe55e5",
+        "oid": 581053215845,
+        "crossed": false,
+        "fee": "0.081661",
+        "tid": 775307537677705,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x66f762da80e1905104f3703ad1a3723d775e2787",
+      {
+        "coin": "ETH",
+        "px": "2446.7",
+        "sz": "0.4172",
+        "side": "A",
+        "time": 1792549764398,
+        "startPosition": "0.2854",
+        "dir": "Long > Short",
+        "closedPnl": "4.061242",
+        "hash": "0x31cdfc37d2fa7bfb3347044703c553000009141d6dfd9acdd596a78a91fe55e5",
+        "oid": 581053416509,
+        "crossed": true,
+        "fee": "0.459343",
+        "tid": 775307537677705,
+        "cloid": "0x0000000000000000000000000000002c",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x7717a7a245d9f950e586822b8c9b46863ed7bd7e",
+      {
+        "coin": "ZEC",
+        "px": "1264.9",
+        "sz": "0.71",
+        "side": "B",
+        "time": 1792549764398,
+        "startPosition": "-450.12",
+        "dir": "Close Short",
+        "closedPnl": "-2.590222",
+        "hash": "0xe4a172d2ec8bbe76e61b044703c5530101008ab8878edd48886a1e25ab8f9861",
+        "oid": 581053403642,
+        "crossed": false,
+        "fee": "-0.00898",
+        "tid": 780444167356316,
+        "cloid": "0xa7266bb68cfaa1beaae39c2ffd5dae4f",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x31f1ad6bfb8b38ce11af09f3a7c69b5e8c75c33c",
+      {
+        "coin": "ZEC",
+        "px": "1264.9",
+        "sz": "0.71",
+        "side": "A",
+        "time": 1792549764398,
+        "startPosition": "0.71",
+        "dir": "Close Long",
+        "closedPnl": "-1.409989",
+        "hash": "0xe4a172d2ec8bbe76e61b044703c5530101008ab8878edd48886a1e25ab8f9861",
+        "oid": 581053406801,
+        "crossed": true,
+        "fee": "0.404135",
+        "tid": 780444167356316,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ]
+  ],
+  "diffs": [
+    {
+      "user": "0x2540a75c0c0e43b85b7793d045da4b225f9ac4e1",
+      "oid": 581053215845,
+      "coin": "ETH",
+      "side": "B",
+      "px": "2446.7",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "57.0995",
+          "newSz": "56.6823"
+        }
+      }
+    },
+    {
+      "user": "0x7717a7a245d9f950e586822b8c9b46863ed7bd7e",
+      "oid": 581053403642,
+      "coin": "ZEC",
+      "side": "B",
+      "px": "1264.9",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.9",
+          "newSz": "0.19"
+        }
+      }
+    }
+  ]
+}

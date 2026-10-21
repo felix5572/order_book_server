@@ -148,6 +148,10 @@ impl BlockStatuses {
         Ok(out)
     }
 
+    pub(crate) fn system_ioc_cancels(&self, oid: u64) -> Vec<u64> {
+        self.rejected_iocs.cancels_for(oid)
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len()
     }
@@ -176,11 +180,23 @@ pub(crate) struct PricePoint<'b> {
 
 /// The price actions of a block in execution order, each with its cut; `order_asset` gives a coin's asset id as an
 /// order names it (`None` for a market the marks cannot name).
+#[cfg(test)]
 pub(crate) fn price_points<'b>(
     actions: &'b MarkActions,
     statuses: &BlockStatuses,
     diffs: &[BookDiff],
     fills: &[BlockFill],
+    order_asset: impl Fn(&str) -> Option<u32>,
+) -> Result<Vec<PricePoint<'b>>, String> {
+    price_points_with_system(actions, statuses, diffs, fills, &super::system::SystemAnchors::default(), order_asset)
+}
+
+pub(crate) fn price_points_with_system<'b>(
+    actions: &'b MarkActions,
+    statuses: &BlockStatuses,
+    diffs: &[BookDiff],
+    fills: &[BlockFill],
+    system: &super::system::SystemAnchors,
     order_asset: impl Fn(&str) -> Option<u32>,
 ) -> Result<Vec<PricePoint<'b>>, String> {
     let mut points: Vec<&RankedAction> = actions.actions.iter().filter(|action| !matches!(action.action, MarkAction::Book(_))).collect();
@@ -195,11 +211,15 @@ pub(crate) fn price_points<'b>(
     let native_triggered = statuses.triggered_orders.iter()
         .filter(|order| super::book::is_main_perp(&order.coin) && order_asset(&order.coin).is_some())
         .map(|order| order.oid).collect();
-    let cancelled = cancelled_by_action(actions, statuses, &order_asset);
+    let cancelled = cancelled_by_action(actions, statuses, &order_asset, &system.competing_ioc_cancels);
     points
         .into_iter()
         .map(|action| {
-            let anchors = Anchors::around(action.rank, &cancelled, &native_triggered, &set_globals);
+            let mut anchors = Anchors::around(action.rank, &cancelled, &native_triggered, &set_globals);
+            anchors.created[0].extend(&system.before.created);
+            anchors.created[1].extend(&system.after.created);
+            anchors.cancelled[0].extend(&system.before.cancelled);
+            anchors.cancelled[1].extend(&system.after.cancelled);
             let cut = anchors.cut(diffs, fills).map_err(|err| format!("block {} action at {:?}: {err}", actions.height, action.rank))?;
             Ok(PricePoint { action, cut })
         })
@@ -214,7 +234,7 @@ struct Removing<'b> {
 }
 
 /// Every book action's removed orders: by oid, by cloid (resolved in execution order) and by self-trade checks.
-fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses, order_asset: impl Fn(&str) -> Option<u32>) -> Vec<Removing<'b>> {
+fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses, order_asset: impl Fn(&str) -> Option<u32>, system_ioc_cancels: &FxHashSet<u64>) -> Vec<Removing<'b>> {
     let mut books: Vec<(&RankedAction, &super::actions::BookAnchors)> = actions
         .actions
         .iter()
@@ -242,7 +262,7 @@ fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses, o
     let attributed = statuses.rejected_iocs.attributed(actions, &order_asset);
     for (rank, oids) in &attributed {
         if let Some(action) = out.iter_mut().find(|action| action.rank == *rank) {
-            action.cancelled.extend(oids);
+            action.cancelled.extend(oids.iter().filter(|oid| !system_ioc_cancels.contains(oid)));
         }
     }
     for cancel in &statuses.self_trade_cancelled {

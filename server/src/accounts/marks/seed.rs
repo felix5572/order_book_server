@@ -208,6 +208,8 @@ pub(crate) struct WireNativePrices {
     pub(crate) books: Vec<WireBook>,
     /// `exchange.spot_books`, each with its pair index as `asset`.
     pub(crate) spot_books: Vec<WireBook>,
+    /// (ordinary order delay in seconds, delay scale); absent on older archives.
+    pub(crate) system_timing: Option<(f64, f64)>,
 }
 
 // ─── domain ─────────────────────────────────────────────────────────────────
@@ -226,6 +228,7 @@ pub(crate) struct MarkSeed {
 /// The main dex's price state, by asset index.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativeSeed {
+    pub(crate) system_timing: Option<(f64, f64)>,
     pub(crate) assets: Vec<NativeAsset>,
     /// The spot books `oracle.psro` names, in its order.
     pub(crate) spot_references: Vec<SpotReferenceBook>,
@@ -356,7 +359,7 @@ impl MarkSeed {
 
 impl NativeSeed {
     fn from_wire(wire: WireNativePrices, main: &DexMeta, spot_pairs: &[SpotPair]) -> Result<Self, String> {
-        let WireNativePrices { oracle, books, spot_books } = wire;
+        let WireNativePrices { oracle, books, spot_books, system_timing } = wire;
         let count = main.assets.len();
         let spot_references = spot_reference_books(oracle.psro, spot_books, spot_pairs, count)?;
         let mut basis = by_asset(oracle.msoe.e, count, "msoe")?;
@@ -393,7 +396,7 @@ impl NativeSeed {
                 orders,
             });
         }
-        Ok(Self { assets, spot_references })
+        Ok(Self { system_timing, assets, spot_references })
     }
 }
 
@@ -694,4 +697,13 @@ pub(crate) mod tests {
         checkpoint["exchange"]["perp_dexs"][0]["books"][0]["bod"]["e"][0] = json!({"x": 1});
         assert!(parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).is_err());
     }
+    #[test]
+    fn corewriter_delay_parameters_come_from_the_checkpoint() {
+        let mut wire: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        wire["exchange"]["pt"] = serde_json::json!({"prp":{"D":0.33}});
+        wire["exchange"]["action_delayer"] = serde_json::json!({"delay_scale":1.0});
+        let seed = MarkSeed::from_checkpoint(parse_checkpoint_bytes(&rmp_serde::to_vec(&wire).unwrap()).unwrap()).unwrap();
+        assert_eq!(seed.native.system_timing, Some((0.33, 1.0)));
+    }
+
 }

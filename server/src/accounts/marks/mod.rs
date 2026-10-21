@@ -24,13 +24,14 @@ pub(crate) mod native;
 pub(crate) mod pairing;
 pub(crate) mod rules;
 pub(crate) mod seed;
+pub(crate) mod system;
 
 use rustc_hash::FxHashMap;
 
 use self::{
     actions::{MarkActions, Rank},
     book::{Applied, BookDiff, BooksCheck, NativeBooks},
-    execution::{BlockFill, BlockStatuses, BookCuts, price_points},
+    execution::{BlockFill, BlockStatuses, BookCuts},
     native::{CoinCut, CoinPriceState, NativePrices, PricesCheck},
     rules::wire_units,
     seed::{Hip3Coin, MarkSeed, StoredMark, exact_price_units},
@@ -48,7 +49,7 @@ pub(crate) const MAX_LOG_INPUTS: usize = 2_000_000;
 /// Mismatches listed per check (all are counted), and ambiguous cuts listed per seed interval.
 const MAX_CHECK_SAMPLES: usize = 20;
 /// The streams the marks read; a log overflow is a loss of each.
-pub(crate) const MARK_STREAMS: [Stream; 5] = [Stream::Fills, Stream::BlockActions, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses];
+pub(crate) const MARK_STREAMS: [Stream; 6] = [Stream::Fills, Stream::BlockActions, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses, Stream::SystemActions];
 
 /// The node's checkpoint heights: `anchor + k * interval` (`checkpoint_grid`, the two newest on disk at start).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,10 +82,11 @@ pub(crate) struct MarkInputs {
     pub(crate) book_diffs: Vec<Batch<NodeDataOrderDiff>>,
     /// The marks' reading of the block's `replica_cmds` line; an error is a loss of that stream for the marks.
     pub(crate) mark_actions: Result<MarkActions, String>,
-    /// Cancels of orders with a cloid and triggers.
+    /// Ordered statuses, including normal boundaries and `CoreWriter` identity evidence.
     pub(crate) order_statuses: Vec<Batch<NodeDataOrderStatus>>,
     /// Every fill of the block, in order.
     pub(crate) fills: Vec<BlockFill>,
+    pub(crate) system_actions: Vec<Batch<system::SystemAction>>,
 }
 
 /// One block's mark inputs as logged and applied.
@@ -95,6 +97,7 @@ struct BlockInputs {
     /// `None` when the line broke the marks' contract.
     actions: Option<MarkActions>,
     statuses: BlockStatuses,
+    system: system::SystemBlock,
     fills: Vec<BlockFill>,
 }
 
@@ -120,7 +123,12 @@ impl BlockInputs {
             Ok(actions) => out.actions = Some(actions),
             Err(err) => report.errors.push((Stream::BlockActions, err)),
         }
-        match BlockStatuses::of(inputs.order_statuses.into_iter().flat_map(Batch::events)) {
+        let statuses: Vec<_> = inputs.order_statuses.into_iter().flat_map(Batch::events).collect();
+        match system::SystemBlock::of(inputs.system_actions.into_iter().flat_map(Batch::events), &statuses) {
+            Ok(system) => out.system = system,
+            Err(err) => report.errors.push((Stream::SystemActions, format!("block {height}: {err}"))),
+        }
+        match BlockStatuses::of(statuses) {
             Ok(statuses) => out.statuses = statuses,
             Err(err) => report.errors.push((Stream::OrderStatuses, format!("block {height}: {err}"))),
         }
@@ -131,7 +139,7 @@ impl BlockInputs {
     /// The block's time counts as one: it refreshes the reference caches with no action at all (review 000444 r1 P2-1).
     fn len(&self) -> usize {
         let actions = self.actions.as_ref().map_or(0, |actions| 1 + actions.actions.len());
-        self.hip3.len() + self.diffs.len() + actions + self.statuses.len() + self.fills.len()
+        self.hip3.len() + self.diffs.len() + actions + self.statuses.len() + self.fills.len() + self.system.len()
     }
 }
 
@@ -147,6 +155,8 @@ struct MarkState {
     hip3: FxHashMap<String, Hip3Coin>,
     books: NativeBooks,
     prices: NativePrices,
+    /// Checkpoint order delay in seconds and its scale, used only to place system book effects.
+    system_timing: Option<(f64, f64)>,
     /// A diff did not fit the books, or the block's price actions broke the contract: the books, or the prices, stay
     /// as they were until a seed replaces them (the loss withholds the marks).
     books_broken: bool,
@@ -156,9 +166,10 @@ struct MarkState {
 impl MarkState {
     fn seeded(seed: MarkSeed) -> Self {
         let MarkSeed { height, time_ms, native, hip3 } = seed;
+        let system_timing = native.system_timing;
         let prices = NativePrices::seeded(&native);
         let books = NativeBooks::seeded(native);
-        Self { seed: AnchorInfo { height, time_ms }, height, time_ms, hip3, books, prices, books_broken: false, prices_broken: false }
+        Self { seed: AnchorInfo { height, time_ms }, height, time_ms, hip3, books, prices, system_timing, books_broken: false, prices_broken: false }
     }
 
     /// Applies block `height`; coins outside the seed's universe (listed since) are counted and skipped, a value that
@@ -172,9 +183,9 @@ impl MarkState {
         let cuts = self.apply_diffs(height, &inputs.diffs, report);
         let trades = self.block_trades(height, &inputs.fills, report);
         if let Some(actions) = inputs.actions.as_ref().filter(|_| !self.books_broken && !self.prices_broken)
-            && let Err(err) = self.apply_prices(actions, inputs, &cuts, &trades, report)
+            && let Err((stream, err)) = self.apply_prices(actions, inputs, &cuts, &trades, report)
         {
-            report.errors.push((Stream::BlockActions, format!("block {height}: {err}")));
+            report.errors.push((stream, format!("block {height}: {err}")));
             self.prices_broken = true;
         }
         for (asset, trades) in trades {
@@ -245,9 +256,10 @@ impl MarkState {
         cuts: &BookCuts,
         trades: &FxHashMap<usize, Vec<(usize, u64)>>,
         report: &mut MarksBlockReport,
-    ) -> Result<(), String> {
+    ) -> Result<(), (Stream, String)> {
         let books = &self.books;
-        for point in price_points(actions, &inputs.statuses, &inputs.diffs, &inputs.fills, |coin| books.order_asset(coin))? {
+        let system = inputs.system.anchors(actions, &inputs.statuses, self.system_timing, |coin| books.order_asset(coin)).map_err(|err| (Stream::SystemActions, err))?;
+        for point in execution::price_points_with_system(actions, &inputs.statuses, &inputs.diffs, &inputs.fills, &system, |coin| books.order_asset(coin)).map_err(|err| (Stream::BlockActions, err))? {
             if point.cut.lo < point.cut.hi {
                 report.ambiguous_cuts += 1;
                 report.ambiguous_samples.push(AmbiguousCut { rank: point.action.rank, lo: point.cut.lo, hi: point.cut.hi });
@@ -260,7 +272,7 @@ impl MarkState {
                     .and_then(|trades| trades.iter().take_while(|(index, _)| *index < point.cut.fills_lo).last())
                     .map(|(_, px)| *px),
             };
-            self.prices.apply(&point.action.action, point.action.user, actions.time_ns, cut_of)?;
+            self.prices.apply(&point.action.action, point.action.user, actions.time_ns, cut_of).map_err(|err| (Stream::BlockActions, err))?;
         }
         Ok(())
     }
@@ -331,6 +343,7 @@ struct MarkStreams {
     hip3_oracle_updates: StreamProgress,
     book_diffs: StreamProgress,
     order_statuses: StreamProgress,
+    system_actions: StreamProgress,
 }
 
 impl MarkStreams {
@@ -341,6 +354,7 @@ impl MarkStreams {
             hip3_oracle_updates: StreamProgress::starting(started_ms),
             book_diffs: StreamProgress::starting(started_ms),
             order_statuses: StreamProgress::starting(started_ms),
+            system_actions: StreamProgress::starting(started_ms),
         }
     }
 
@@ -351,6 +365,7 @@ impl MarkStreams {
             Stream::Hip3OracleUpdates => Some(&mut self.hip3_oracle_updates),
             Stream::BookDiffs => Some(&mut self.book_diffs),
             Stream::OrderStatuses => Some(&mut self.order_statuses),
+            Stream::SystemActions => Some(&mut self.system_actions),
             Stream::MiscEvents => None,
         }
     }
@@ -361,17 +376,21 @@ impl MarkStreams {
         self.hip3_oracle_updates.check(Stream::Hip3OracleUpdates, seed)?;
         self.book_diffs.check(Stream::BookDiffs, seed)?;
         self.order_statuses.check(Stream::OrderStatuses, seed)?;
+        self.system_actions.check(Stream::SystemActions, seed)?;
         Ok(())
     }
 
     /// The streams a block's inputs show read up to it (`replica_cmds` has a line for every block).
     fn record_read(&mut self, height: u64, inputs: &MarkInputs) {
         self.block_actions.record_read(height);
+        // The assembler requires the system reader's read-through even when this sparse stream emits no row.
+        self.system_actions.record_read(height);
         let read = [
             (&mut self.fills, inputs.fills.is_empty()),
             (&mut self.hip3_oracle_updates, inputs.hip3_oracle_updates.is_empty()),
             (&mut self.book_diffs, inputs.book_diffs.is_empty()),
             (&mut self.order_statuses, inputs.order_statuses.is_empty()),
+
         ];
         for (progress, empty) in read {
             if !empty {
@@ -752,7 +771,7 @@ pub(crate) mod tests {
     impl Default for MarkInputs {
         fn default() -> Self {
             let mark_actions = Ok(MarkActions { height: 0, time_ns: 0, actions: Vec::new() });
-            Self { hip3_oracle_updates: Vec::new(), book_diffs: Vec::new(), mark_actions, order_statuses: Vec::new(), fills: Vec::new() }
+            Self { hip3_oracle_updates: Vec::new(), book_diffs: Vec::new(), mark_actions, order_statuses: Vec::new(), fills: Vec::new(), system_actions: Vec::new() }
         }
     }
 
@@ -1280,7 +1299,7 @@ pub(crate) mod tests {
         spot.members = vec![(Address::repeat_byte(1), 828_720, T0)];
         let mut marks = NodeMarks::new(GRID, 0);
         marks.install(checkpoint.clone());
-        for stream in [Stream::Fills, Stream::BlockActions, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses] {
+        for stream in MARK_STREAMS {
             marks.streams.get_mut(stream).unwrap().record_read(1_000);
         }
         let empty = |height, time_ns| MarkInputs {
@@ -1312,4 +1331,13 @@ pub(crate) mod tests {
         assert!(!log.push(11, BlockInputs { hip3: vec![update], ..BlockInputs::default() }), "one more overflows");
         assert_eq!((log.base, log.inputs, log.reaches(10), log.reaches(11)), (Some(11), 0, false, true));
     }
+    #[test]
+    fn system_stream_loss_withholds_marks_until_a_covering_seed() {
+        let mut marks = trusted_marks();
+        marks.record_lost_block(Stream::SystemActions, 1_001);
+        assert!(marks.availability().is_err());
+        assert_eq!(marks.install(seed(1_001)).rebuild, Rebuild::Replayed { blocks: 0 });
+        assert_eq!(marks.availability(), Ok(1_001));
+    }
+
 }

@@ -78,6 +78,14 @@ impl IocRejections {
         self.groups.iter().any(|group| group.cancelled.contains(&oid))
     }
 
+    pub(super) fn cancels_for(&self, oid: u64) -> Vec<u64> {
+        let mut groups = self.groups.iter().filter(|g| g.taker.oid == oid);
+        match (groups.next(), groups.next()) {
+            (Some(group), None) => group.cancelled.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     pub(super) fn len(&self) -> usize {
         self.groups.iter().map(|group| 1 + group.cancelled.len()).sum()
     }

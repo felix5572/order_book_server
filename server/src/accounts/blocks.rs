@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, time::Instant};
 use alloy::primitives::Address;
 use rustc_hash::FxHashSet;
 
-use super::{actions::BlockActions, book::Stream, marks::actions::MarkActions, misc::MiscEvent};
+use super::{actions::BlockActions, book::Stream, marks::{actions::MarkActions, system::SystemAction}, misc::MiscEvent};
 use crate::{
     order_book::Side,
     types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus, OracleUpdateEvent},
@@ -55,6 +55,7 @@ pub(crate) struct CompletedBlock {
     pub(crate) mark_actions: Result<MarkActions, String>,
     /// Every status in stream order: even an unused one closes a rejected IOC cancellation run.
     pub(crate) order_statuses: Vec<Batch<NodeDataOrderStatus>>,
+    pub(crate) system_actions: Vec<Batch<SystemAction>>,
 }
 
 /// The distinct lines of one stream held for a block.
@@ -81,6 +82,7 @@ struct PendingBlock {
     hip3_oracle_updates: KeyedLines<OracleUpdateEvent>,
     book_diffs: KeyedLines<NodeDataOrderDiff>,
     order_statuses: KeyedLines<NodeDataOrderStatus>,
+    system_actions: KeyedLines<SystemAction>,
     inputs: usize,
 }
 
@@ -113,6 +115,7 @@ pub(crate) struct BlockAssembler {
     hip3_read_through: Option<Instant>,
     book_diffs_read_through: Option<Instant>,
     order_statuses_read_through: Option<Instant>,
+    system_actions_read_through: Option<Instant>,
 }
 
 impl BlockAssembler {
@@ -166,6 +169,10 @@ impl BlockAssembler {
 
     pub(crate) fn receive_order_statuses(&mut self, batch: Batch<NodeDataOrderStatus>, key: LineKey) -> Assembly {
         self.receive_keyed_line(Stream::OrderStatuses, batch, key, |pending| &mut pending.order_statuses)
+    }
+
+    pub(crate) fn receive_system_actions(&mut self, batch: Batch<SystemAction>, key: LineKey) -> Assembly {
+        self.receive_keyed_line(Stream::SystemActions, batch, key, |pending| &mut pending.system_actions)
     }
 
     /// Holds a line of `stream` for its block unless a line of the same identity is held already.
@@ -238,6 +245,7 @@ impl BlockAssembler {
             Stream::Hip3OracleUpdates => &mut self.hip3_read_through,
             Stream::BookDiffs => &mut self.book_diffs_read_through,
             Stream::OrderStatuses => &mut self.order_statuses_read_through,
+            Stream::SystemActions => &mut self.system_actions_read_through,
             // a block's own line completes it on `replica_cmds`
             Stream::BlockActions => return Assembly::default(),
         };
@@ -274,11 +282,12 @@ impl BlockAssembler {
             && proven(self.misc_read_through)
             && proven(self.hip3_read_through)
             && proven(self.book_diffs_read_through)
-            && proven(self.order_statuses_read_through);
+            && proven(self.order_statuses_read_through)
+            && proven(self.system_actions_read_through);
         if !complete {
             return None;
         }
-        let PendingBlock { actions, fills, misc_events, hip3_oracle_updates, book_diffs, order_statuses, inputs, .. } =
+        let PendingBlock { actions, fills, misc_events, hip3_oracle_updates, book_diffs, order_statuses, system_actions, inputs, .. } =
             self.pending.remove(&block)?;
         self.inputs -= inputs;
         self.released = Some(block);
@@ -291,6 +300,7 @@ impl BlockAssembler {
             book_diffs: book_diffs.lines,
             mark_actions,
             order_statuses: order_statuses.lines,
+            system_actions: system_actions.lines,
         })
     }
 
@@ -311,6 +321,9 @@ impl BlockAssembler {
             }
             if !pending.book_diffs.lines.is_empty() {
                 assembly.lost.push((Stream::BookDiffs, height));
+            }
+            if !pending.system_actions.lines.is_empty() {
+                assembly.lost.push((Stream::SystemActions, height));
             }
             if !pending.order_statuses.lines.is_empty() {
                 assembly.lost.push((Stream::OrderStatuses, height));
@@ -359,7 +372,7 @@ mod tests {
 
     /// Proofs of the readers other than `stream`, at `at`.
     fn prove_others(assembler: &mut BlockAssembler, stream: Stream, at: Instant) -> Vec<u64> {
-        let others = [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses]
+        let others = [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses, Stream::SystemActions]
             .into_iter()
             .filter(|other| *other != stream);
         others.flat_map(|other| heights(&assembler.receive_read_through(other, at))).collect()
@@ -381,6 +394,7 @@ mod tests {
         assert_eq!(heights(&assembler.receive_read_through(Stream::Hip3OracleUpdates, at(25))), Vec::<u64>::new());
         assert_eq!(heights(&assembler.receive_read_through(Stream::BookDiffs, at(25))), Vec::<u64>::new());
         assert_eq!(heights(&assembler.receive_read_through(Stream::OrderStatuses, at(25))), Vec::<u64>::new());
+        assert_eq!(heights(&assembler.receive_read_through(Stream::SystemActions, at(25))), Vec::<u64>::new());
         let fills_proof = assembler.receive_read_through(Stream::Fills, at(15));
         assert!(heights(&fills_proof).is_empty(), "the misc events reader has proved nothing yet");
         let misc_proof = assembler.receive_read_through(Stream::MiscEvents, at(25));
@@ -395,7 +409,7 @@ mod tests {
     /// Every reader's proof is needed: with the other three proved past block 101's successor, 101 waits for it.
     #[test]
     fn each_readers_proof_is_needed() {
-        for stream in [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses] {
+        for stream in [Stream::Fills, Stream::MiscEvents, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses, Stream::SystemActions] {
             let at = clock();
             let mut assembler = started(&at);
             assembler.receive_block_actions(block_actions(101, &[]), no_marks(), at(10));
@@ -446,6 +460,7 @@ mod tests {
         assembler.receive_read_through(Stream::Hip3OracleUpdates, at(30));
         assembler.receive_read_through(Stream::BookDiffs, at(30));
         assembler.receive_read_through(Stream::OrderStatuses, at(30));
+        assembler.receive_read_through(Stream::SystemActions, at(30));
         let released = assembler.receive_read_through(Stream::MiscEvents, at(30));
         assert_eq!(heights(&released), [100, 101]);
         let block = &released.completed[1];
@@ -511,4 +526,21 @@ mod tests {
         assert_eq!(overflow.lost.len(), MAX_PENDING_BLOCKS, "every held fills block is lost");
         assert_eq!((assembler.released(), assembler.pending_blocks()), (Some(block), 0));
     }
+    #[test]
+    fn system_actions_are_deduplicated_gated_and_late_rows_are_losses() {
+        let at = clock();
+        let mut a = started(&at);
+        let line = || sonic_rs::from_str::<Batch<SystemAction>>(r#"{"local_time":"2026-10-21T02:29:24.78","block_time":"2026-10-21T02:29:24.39","block_number":100,"events":[]}"#).unwrap();
+        assert_eq!(a.receive_system_actions(line(), 7).duplicates, []);
+        assert_eq!(a.receive_system_actions(line(), 7).duplicates, [(Stream::SystemActions, 1)]);
+        a.receive_block_actions(block_actions(101, &[]), no_marks(), at(10));
+        assert_eq!(prove_others(&mut a, Stream::SystemActions, at(20)), Vec::<u64>::new());
+        assert!(a.receive_read_through(Stream::SystemActions, at(5)).completed.is_empty());
+        let released = a.receive_read_through(Stream::SystemActions, at(20));
+        assert_eq!(heights(&released), [100]);
+        assert_eq!(released.completed[0].system_actions.len(), 1);
+        assert_eq!(a.receive_system_actions(line(), 8).lost, [(Stream::SystemActions, 100)]);
+    }
+
+
 }

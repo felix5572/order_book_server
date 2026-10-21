@@ -19,7 +19,7 @@ use serde::{
 
 use super::{
     margin::MarginTable,
-    marks::seed::{WireBook, WireNativeBooks, WireNativePrices, WireOracle, WirePx},
+    marks::{seed::{WireBook, WireNativeBooks, WireNativePrices, WireOracle, WirePx}, system::{WirePriority, WireDelayer}},
 };
 use crate::prelude::Result;
 
@@ -281,6 +281,8 @@ struct WireCheckpoint {
 /// `locus` precedes `perp_dexs` on disk (1190680000); the order does not matter to the parse.
 #[derive(Deserialize)]
 struct WireExchange {
+    pt: Option<WirePriority>,
+    action_delayer: Option<WireDelayer>,
     locus: ParsedLocus,
     perp_dexs: WireNativeBooks,
     /// Every spot pair's book (1,121 books, 131,402 orders on 1190920000); the marks keep those `oracle.psro` names.
@@ -688,7 +690,7 @@ pub(crate) fn parse_checkpoint_bytes(bytes: &[u8]) -> Result<CheckpointAccounts>
 }
 
 fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, String> {
-    let WireExchange { locus, perp_dexs, spot_books } = exchange;
+    let WireExchange { locus, perp_dexs, spot_books, pt, action_delayer } = exchange;
     let time_ms = node_time_ns(&locus.ctx.time).map_err(|err| format!("ctx.time: {err}"))? / 1_000_000;
     let mut dexes = Vec::with_capacity(locus.cls.len());
     let mut dex_users = Vec::with_capacity(locus.cls.len());
@@ -700,7 +702,7 @@ fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, Stri
         dexes.push(meta);
         dex_users.push(users);
     }
-    let native_prices = WireNativePrices { oracle: first_oracle.ok_or("locus.cls is empty")?, books: perp_dexs.0, spot_books };
+    let native_prices = WireNativePrices { oracle: first_oracle.ok_or("locus.cls is empty")?, books: perp_dexs.0, spot_books, system_timing: pt.zip(action_delayer).map(|(pt, delayer)| (pt.prp.order_delay_s, delayer.delay_scale)) };
     let holders: Vec<Address> = {
         let mut holders: Vec<Address> = dex_users
             .iter()

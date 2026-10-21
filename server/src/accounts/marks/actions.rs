@@ -285,33 +285,33 @@ impl WireStatus {
     }
 }
 
-#[derive(Deserialize)]
-struct WireOrder {
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct WireOrder {
     /// The asset id.
-    a: u32,
+    pub(super) a: u32,
     /// Is buy.
-    b: bool,
+    pub(super) b: bool,
     /// The limit price.
-    p: String,
-    s: String,
-    r: bool,
-    c: Option<String>,
-    t: WireOrderType,
+    pub(super) p: String,
+    pub(super) s: String,
+    pub(super) r: bool,
+    pub(super) c: Option<String>,
+    pub(super) t: WireOrderType,
 }
 
-#[derive(Deserialize)]
-struct WireOrderType {
-    limit: Option<WireLimit>,
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct WireOrderType {
+    pub(super) limit: Option<WireLimit>,
 }
 
-#[derive(Deserialize)]
-struct WireLimit {
-    tif: String,
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct WireLimit {
+    pub(super) tif: String,
 }
 
 impl WireOrder {
     /// An ALO limit order; a trigger order is not.
-    fn is_alo(&self) -> bool {
+    pub(super) fn is_alo(&self) -> bool {
         self.t.limit.as_ref().is_some_and(|limit| limit.tif == "Alo")
     }
 
