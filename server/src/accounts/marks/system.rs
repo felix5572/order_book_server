@@ -28,6 +28,8 @@ enum Action {
     Cancel { cancels: Vec<Cancel>, f: Option<bool> },
     #[serde(rename = "cancelByCloid")]
     CancelByCloid { cancels: Vec<CancelByCloid>, f: Option<bool> },
+    #[serde(rename = "vaultTransfer")]
+    VaultTransfer { #[serde(rename = "vaultAddress")] vault: Address, #[serde(rename = "isDeposit")] is_deposit: bool },
     #[serde(other)]
     Other,
 }
@@ -70,6 +72,8 @@ pub(crate) struct SystemBlock {
     observed: Vec<ObservedOrder>,
     cancels: Vec<CancelRequest>,
     cancelled: Vec<(Address, String, u64, Option<String>)>,
+    /// Attempts have no receipts here; do not assign their possible closes to a native withdrawal.
+    vault_withdrawals: FxHashSet<Address>,
 }
 
 #[derive(Debug, Default)]
@@ -78,12 +82,16 @@ pub(crate) struct SystemAnchors {
     pub(crate) after: BookAnchors,
     /// A system request may own these runs even when its unique attribution is unresolved.
     pub(crate) competing_ioc_cancels: FxHashSet<u64>,
+    pub(crate) unplaced_vault_withdrawals: FxHashSet<Address>,
 }
 
 impl SystemBlock {
     pub(crate) fn of(events: impl IntoIterator<Item = SystemAction>, statuses: &[NodeDataOrderStatus]) -> Result<Self, String> {
         let mut out = Self::default();
         for event in events {
+            if let Action::VaultTransfer { vault, is_deposit: false } = event.action {
+                out.vault_withdrawals.insert(vault);
+            }
             // System transfers also share this stream. They have no book anchor; no synthetic order is created.
             if event.evm_tx_hash.is_none() { continue; }
             match event.action {
@@ -101,7 +109,7 @@ impl SystemBlock {
                 }
                 Action::Cancel { cancels, f } => out.cancels.extend(cancels.into_iter().map(|c| CancelRequest { user: event.user, asset: c.a, oid: Some(c.o), cloid: None, delayed: f.map(|flag| !flag) })),
                 Action::CancelByCloid { cancels, f } => out.cancels.extend(cancels.into_iter().map(|c| CancelRequest { user: event.user, asset: c.asset, oid: None, cloid: Some(c.cloid), delayed: f.map(|flag| !flag) })),
-                Action::Other => {}
+                Action::Other | Action::VaultTransfer { .. } => {}
             }
         }
         if out.requests.is_empty() && out.cancels.is_empty() { return Ok(out); }
@@ -124,12 +132,12 @@ impl SystemBlock {
         Ok(out)
     }
 
-    pub(crate) const fn len(&self) -> usize { self.requests.len() + self.observed.len() + self.cancels.len() + self.cancelled.len() }
+    pub(crate) fn len(&self) -> usize { self.requests.len() + self.observed.len() + self.cancels.len() + self.cancelled.len() + self.vault_withdrawals.len() }
 
     pub(crate) fn anchors(&self, actions: &MarkActions, statuses: &BlockStatuses, timing: Option<(f64, f64)>,
         asset: impl Fn(&str) -> Option<u32>) -> Result<SystemAnchors, String> {
-        let mut out = SystemAnchors::default();
-        if self.len() == 0 || actions.actions.iter().all(|a| matches!(a.action, MarkAction::Book(_))) { return Ok(out); }
+        let mut out = SystemAnchors { unplaced_vault_withdrawals: self.vault_withdrawals.clone(), ..SystemAnchors::default() };
+        if self.len() == 0 || actions.actions.iter().all(|a| !a.action.is_price()) { return Ok(out); }
         let books: Vec<_> = actions.actions.iter().filter_map(|a| match &a.action {
             MarkAction::Book(book) => Some((a.user, book)), _ => None,
         }).collect();

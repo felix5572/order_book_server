@@ -5,7 +5,6 @@
 //! as `usdClassTransfer` and `send` are not: their ledger events already mark the account.
 
 use alloy::primitives::Address;
-use serde::Deserialize;
 
 use super::{
     checkpoint::node_time_ns,
@@ -130,26 +129,13 @@ pub(crate) fn block_actions(replica: &ReplicaLine<'_>) -> Result<BlockActions, S
                 "ok" => {}
                 status => return Err(format!("multiSig with status {status:?}")),
             }
-            let raw = paired.action.payload.as_ref().ok_or("multiSig without payload")?;
-            let payload: MultiSigPayload<'_> = sonic_rs::from_str(raw.as_raw_str())
-                .map_err(|err| format!("multiSig payload: {err}"))?;
-            if payload.action.action_type == "multiSig" {
-                return Err("nested multiSig execution is not verified".to_string());
-            }
-            kept_action(&payload.action, paired.response)
+            kept_action(&paired.action.multi_sig_action()?, paired.response)
         };
         if let Some(action) = read().map_err(|err| format!("block {height}: bundle {}: {err}", paired.bundle_hash))? {
             kept.push(action);
         }
     }
     Ok(BlockActions { height, time_ms, actions: kept })
-}
-
-/// Account-only unwrap. The shared replica/mark ordering retains the original outer action and position.
-#[derive(Deserialize)]
-struct MultiSigPayload<'a> {
-    #[serde(borrow)]
-    action: Action<'a>,
 }
 
 fn kept_action(action: &Action<'_>, response: &Response<'_>) -> Result<Option<KeptAction>, String> {

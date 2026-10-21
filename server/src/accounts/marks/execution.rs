@@ -47,6 +47,7 @@
 //! update anchors nothing.
 
 mod self_trade;
+mod vault;
 
 use self::self_trade::IocRejections;
 use alloy::primitives::Address;
@@ -103,6 +104,8 @@ pub(crate) struct BlockStatuses {
     pub(crate) self_trade_cancelled: Vec<StatusOrder>,
     /// No-fill IOC statuses and their contiguous self-trade cancellations, in stream order.
     rejected_iocs: IocRejections,
+    /// Automatic close orders produced by vault withdrawals, not ordinary order receipts.
+    vault_closes: vault::VaultCloses,
 }
 
 /// An order as a status names it.
@@ -137,6 +140,7 @@ impl BlockStatuses {
         let mut out = Self::default();
         for status in statuses {
             out.rejected_iocs.observe(&status)?;
+            out.vault_closes.observe(&status);
             match (status.status.as_str(), &status.order.cloid) {
                 ("canceled", Some(cloid)) => {
                     out.cancelled_cloids.entry((status.user, cloid.clone())).or_insert(status.order.oid);
@@ -157,7 +161,7 @@ impl BlockStatuses {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len()
+        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len() + self.vault_closes.len()
     }
 }
 
@@ -203,7 +207,7 @@ pub(crate) fn price_points_with_system<'b>(
     system: &super::system::SystemAnchors,
     order_asset: impl Fn(&str) -> Option<u32>,
 ) -> Result<Vec<PricePoint<'b>>, String> {
-    let mut points: Vec<&RankedAction> = actions.actions.iter().filter(|action| !matches!(action.action, MarkAction::Book(_))).collect();
+    let mut points: Vec<&RankedAction> = actions.actions.iter().filter(|action| action.action.is_price()).collect();
     if points.is_empty() {
         return Ok(Vec::new());
     }
@@ -216,10 +220,15 @@ pub(crate) fn price_points_with_system<'b>(
         .filter(|order| super::book::is_main_perp(&order.coin) && order_asset(&order.coin).is_some())
         .map(|order| order.oid).collect();
     let cancelled = cancelled_by_action(actions, statuses, &order_asset, &system.competing_ioc_cancels);
+    let vault_closes = statuses.vault_closes.attributed(actions, &system.unplaced_vault_withdrawals);
     points
         .into_iter()
         .map(|action| {
             let mut anchors = Anchors::around(action.rank, &cancelled, &native_triggered, &statuses.triggered, &set_globals);
+            for (rank, oid) in &vault_closes {
+                let side = usize::from(*rank > action.rank);
+                anchors.created[side].insert(*oid);
+            }
             anchors.created[0].extend(&system.before.created);
             anchors.created[1].extend(&system.after.created);
             anchors.cancelled[0].extend(&system.before.cancelled);

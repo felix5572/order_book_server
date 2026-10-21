@@ -1,0 +1,2432 @@
+{
+  "source": {
+    "height": 1191962420,
+    "block_time": "2026-10-21T13:08:20.329326281",
+    "withdrawal_rank": [
+      0,
+      3,
+      624
+    ],
+    "sga_rank": [
+      1,
+      3,
+      0
+    ],
+    "original_diff_range": [
+      634,
+      686
+    ],
+    "original_fill_range": [
+      2,
+      70
+    ],
+    "raw_sha256": {
+      "node_fills_streaming.jsonl.gz": "d8074bd7cfe97bee5b5aa0c359fcc709406abc5046cea576cdac0371078b0435",
+      "node_order_statuses_streaming.jsonl.gz": "3dcba97b9022239c1c84bfad168d4cca31773bd71aac3816d98b0755c52dba44",
+      "node_raw_book_diffs_streaming.jsonl.gz": "d0bbdbc058d2e2f4087d190e41f796228407481abf0dc838f57c55f827de05fd",
+      "replica_cmds_1191960000.jsonl.gz": "0b4f76078472dd4d0213426fe57a5bd47fce0fed4ed1bf3d910832a98ebd737a",
+      "system_and_core_writer_actions_streaming.jsonl.gz": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "action": {
+    "type": "vaultTransfer",
+    "vaultAddress": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+    "isDeposit": false,
+    "usd": 2200000000
+  },
+  "response": {
+    "user": "0x720ee107c6edc662546068be326f9163cc327a61",
+    "res": {
+      "status": "ok",
+      "response": {
+        "type": "default"
+      }
+    }
+  },
+  "statuses": [
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "BTC",
+        "side": "A",
+        "limitPx": "81209.0",
+        "sz": "0.0",
+        "oid": 581447015079,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "0.01905",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "LINK",
+        "side": "A",
+        "limitPx": "12.103",
+        "sz": "0.0",
+        "oid": 581447015080,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "50.3",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "AAVE",
+        "side": "A",
+        "limitPx": "151.49",
+        "sz": "0.0",
+        "oid": 581447015081,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "3.68",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "COMP",
+        "side": "A",
+        "limitPx": "25.313",
+        "sz": "0.0",
+        "oid": 581447015082,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "4.01",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "UNI",
+        "side": "A",
+        "limitPx": "7.2973",
+        "sz": "0.0",
+        "oid": 581447015083,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "21.7",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "ZRO",
+        "side": "A",
+        "limitPx": "1.9936",
+        "sz": "0.0",
+        "oid": 581447015084,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "124.4",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "NEAR",
+        "side": "A",
+        "limitPx": "5.0858",
+        "sz": "0.0",
+        "oid": 581447015085,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "53.8",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "FIL",
+        "side": "A",
+        "limitPx": "1.0107",
+        "sz": "0.0",
+        "oid": 581447015086,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "107.9",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "ONDO",
+        "side": "A",
+        "limitPx": "0.45051",
+        "sz": "0.0",
+        "oid": 581447015087,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "326.0",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "ETHFI",
+        "side": "A",
+        "limitPx": "0.70156",
+        "sz": "0.0",
+        "oid": 581447015088,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "192.7",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "ENA",
+        "side": "A",
+        "limitPx": "0.20251",
+        "sz": "0.0",
+        "oid": 581447015089,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "1066.0",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "HYPE",
+        "side": "A",
+        "limitPx": "79.184",
+        "sz": "0.0",
+        "oid": 581447015090,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "6.38",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "MORPHO",
+        "side": "A",
+        "limitPx": "2.3329",
+        "sz": "0.0",
+        "oid": 581447015091,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "88.2",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "VVV",
+        "side": "A",
+        "limitPx": "25.621",
+        "sz": "0.0",
+        "oid": 581447015092,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "10.3",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "SKY",
+        "side": "A",
+        "limitPx": "0.07454",
+        "sz": "0.0",
+        "oid": 581447015093,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "1528.0",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-21T13:08:20.329326281",
+      "user": "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "AERO",
+        "side": "A",
+        "limitPx": "0.83621",
+        "sz": "0.0",
+        "oid": 581447015094,
+        "timestamp": 1792588100329,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Vault Close",
+        "origSz": "365.0",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    }
+  ],
+  "diffs": [
+    {
+      "user": "0x37c1e493c8a452ab3f5a6d01fda87795b91e7851",
+      "oid": 581446917349,
+      "coin": "BTC",
+      "side": "B",
+      "px": "83720.0",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.17225",
+          "newSz": "0.1532"
+        }
+      }
+    },
+    {
+      "user": "0x9d81a3adf84bd66528b62f2bda03e2e24bed3416",
+      "oid": 581446886623,
+      "coin": "LINK",
+      "side": "B",
+      "px": "12.476",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "72.1",
+          "newSz": "21.8"
+        }
+      }
+    },
+    {
+      "user": "0xea0e878d5da1f786c035355cd7a8d381a6276766",
+      "oid": 581447009231,
+      "coin": "AAVE",
+      "side": "B",
+      "px": "156.16",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "2.26",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x2a6a2af2f0992f3c52b82c79a4c8fe1c8cf0fe45",
+      "oid": 581446925855,
+      "coin": "AAVE",
+      "side": "B",
+      "px": "156.14",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.1",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x63f6411ca61733af716c9a50a56a84ea38a0af59",
+      "oid": 581447005377,
+      "coin": "AAVE",
+      "side": "B",
+      "px": "156.14",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "3.02",
+          "newSz": "1.7"
+        }
+      }
+    },
+    {
+      "user": "0xea0e878d5da1f786c035355cd7a8d381a6276766",
+      "oid": 581447009231,
+      "coin": "AAVE",
+      "side": "B",
+      "px": "156.16",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0x2a6a2af2f0992f3c52b82c79a4c8fe1c8cf0fe45",
+      "oid": 581446925855,
+      "coin": "AAVE",
+      "side": "B",
+      "px": "156.14",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      "oid": 581446996860,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.092",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.49",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x0cf706aa8d7260e3cd5fe0de11d7f3e899753e5b",
+      "oid": 581446878941,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.089",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.06",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x4ef66df2067c588eb98896ede3a8e80f85aff085",
+      "oid": 581446960830,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.089",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.49",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0xc1fd39727cd10fe97ccac228888f025309560a93",
+      "oid": 581446988169,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.089",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.45",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x5b52403396a365f9f7e33e87488564017e1f97a8",
+      "oid": 581446865887,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.086",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.49",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+      "oid": 581446835587,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.084",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.49",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x7684d0c6d84d22b481ef3d2587c475f878836e51",
+      "oid": 581446957029,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.081",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.49",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+      "oid": 581446806773,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.079",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.49",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      "oid": 581446806834,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.076",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.49",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+      "oid": 581446806768,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.073",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.49",
+          "newSz": "0.42"
+        }
+      }
+    },
+    {
+      "user": "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      "oid": 581446996860,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.092",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0x0cf706aa8d7260e3cd5fe0de11d7f3e899753e5b",
+      "oid": 581446878941,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.089",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0x4ef66df2067c588eb98896ede3a8e80f85aff085",
+      "oid": 581446960830,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.089",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0xc1fd39727cd10fe97ccac228888f025309560a93",
+      "oid": 581446988169,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.089",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0x5b52403396a365f9f7e33e87488564017e1f97a8",
+      "oid": 581446865887,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.086",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+      "oid": 581446835587,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.084",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0x7684d0c6d84d22b481ef3d2587c475f878836e51",
+      "oid": 581446957029,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.081",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+      "oid": 581446806773,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.079",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      "oid": 581446806834,
+      "coin": "COMP",
+      "side": "B",
+      "px": "26.076",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0xd0956a1eba0a9060baf5f73ee26b9601dc47ec43",
+      "oid": 581447010874,
+      "coin": "UNI",
+      "side": "B",
+      "px": "7.5226",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "27.6",
+          "newSz": "5.9"
+        }
+      }
+    },
+    {
+      "user": "0x8e555c7f07eebea796dec9b9273e8c1b88a1abdc",
+      "oid": 581447014817,
+      "coin": "ZRO",
+      "side": "B",
+      "px": "2.0548",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "7.3",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x4e60e3a4a32d63d245aa4e4ce304b4254b088f95",
+      "oid": 581447011469,
+      "coin": "ZRO",
+      "side": "B",
+      "px": "2.0547",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "194.7",
+          "newSz": "77.6"
+        }
+      }
+    },
+    {
+      "user": "0x8e555c7f07eebea796dec9b9273e8c1b88a1abdc",
+      "oid": 581447014817,
+      "coin": "ZRO",
+      "side": "B",
+      "px": "2.0548",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00",
+      "oid": 581447003570,
+      "coin": "NEAR",
+      "side": "B",
+      "px": "5.2429",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "190.9",
+          "newSz": "137.1"
+        }
+      }
+    },
+    {
+      "user": "0xd0956a1eba0a9060baf5f73ee26b9601dc47ec43",
+      "oid": 581447004336,
+      "coin": "FIL",
+      "side": "B",
+      "px": "1.0418",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "133.6",
+          "newSz": "25.7"
+        }
+      }
+    },
+    {
+      "user": "0x53136b4a7c432585f28903b77c7816a723e0271f",
+      "oid": 581447007155,
+      "coin": "ONDO",
+      "side": "B",
+      "px": "0.46442",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "1504.0",
+          "newSz": "1178.0"
+        }
+      }
+    },
+    {
+      "user": "0x4e60e3a4a32d63d245aa4e4ce304b4254b088f95",
+      "oid": 581447013847,
+      "coin": "ETHFI",
+      "side": "B",
+      "px": "0.7232",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "435.7",
+          "newSz": "243.0"
+        }
+      }
+    },
+    {
+      "user": "0x8e555c7f07eebea796dec9b9273e8c1b88a1abdc",
+      "oid": 581446998639,
+      "coin": "ENA",
+      "side": "B",
+      "px": "0.20875",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "169.0",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x5b52403396a365f9f7e33e87488564017e1f97a8",
+      "oid": 581446995411,
+      "coin": "ENA",
+      "side": "B",
+      "px": "0.20873",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "6261.0",
+          "newSz": "5364.0"
+        }
+      }
+    },
+    {
+      "user": "0x8e555c7f07eebea796dec9b9273e8c1b88a1abdc",
+      "oid": 581446998639,
+      "coin": "ENA",
+      "side": "B",
+      "px": "0.20875",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0xc029043cd00b80363130fa058818459a521842a1",
+      "oid": 581446975750,
+      "coin": "HYPE",
+      "side": "B",
+      "px": "81.632",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "24.32",
+          "newSz": "17.94"
+        }
+      }
+    },
+    {
+      "user": "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      "oid": 581447014339,
+      "coin": "MORPHO",
+      "side": "B",
+      "px": "2.4046",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "66.8",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x7684d0c6d84d22b481ef3d2587c475f878836e51",
+      "oid": 581447014350,
+      "coin": "MORPHO",
+      "side": "B",
+      "px": "2.4046",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "50.1",
+          "newSz": "28.7"
+        }
+      }
+    },
+    {
+      "user": "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      "oid": 581447014339,
+      "coin": "MORPHO",
+      "side": "B",
+      "px": "2.4046",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0xf8c27415801f1871287446c9933221fc5ce70062",
+      "oid": 581446978680,
+      "coin": "VVV",
+      "side": "B",
+      "px": "26.412",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.42",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x53136b4a7c432585f28903b77c7816a723e0271f",
+      "oid": 581447003694,
+      "coin": "VVV",
+      "side": "B",
+      "px": "26.407",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "4.41",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0xea0e878d5da1f786c035355cd7a8d381a6276766",
+      "oid": 581446894528,
+      "coin": "VVV",
+      "side": "B",
+      "px": "26.405",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "4.41",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0xa382fa9f4bb1dd4e3120cf0507a67384ad1ef1f7",
+      "oid": 581446871793,
+      "coin": "VVV",
+      "side": "B",
+      "px": "26.402",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "4.41",
+          "newSz": "3.35"
+        }
+      }
+    },
+    {
+      "user": "0xf8c27415801f1871287446c9933221fc5ce70062",
+      "oid": 581446978680,
+      "coin": "VVV",
+      "side": "B",
+      "px": "26.412",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0x53136b4a7c432585f28903b77c7816a723e0271f",
+      "oid": 581447003694,
+      "coin": "VVV",
+      "side": "B",
+      "px": "26.407",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0xea0e878d5da1f786c035355cd7a8d381a6276766",
+      "oid": 581446894528,
+      "coin": "VVV",
+      "side": "B",
+      "px": "26.405",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0x4e60e3a4a32d63d245aa4e4ce304b4254b088f95",
+      "oid": 581447012251,
+      "coin": "SKY",
+      "side": "B",
+      "px": "0.076836",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "5206.0",
+          "newSz": "3678.0"
+        }
+      }
+    },
+    {
+      "user": "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      "oid": 581447008057,
+      "coin": "AERO",
+      "side": "B",
+      "px": "0.86201",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "215.0",
+          "newSz": "0.0"
+        }
+      }
+    },
+    {
+      "user": "0x223537ac9a856c31f4043e86ced86bb29f06653e",
+      "oid": 581446980129,
+      "coin": "AERO",
+      "side": "B",
+      "px": "0.86198",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "307.0",
+          "newSz": "157.0"
+        }
+      }
+    },
+    {
+      "user": "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      "oid": 581447008057,
+      "coin": "AERO",
+      "side": "B",
+      "px": "0.86201",
+      "raw_book_diff": "remove"
+    }
+  ],
+  "fills": [
+    [
+      "0x37c1e493c8a452ab3f5a6d01fda87795b91e7851",
+      {
+        "coin": "BTC",
+        "px": "83720.0",
+        "sz": "0.01905",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-0.01512",
+        "dir": "Short > Long",
+        "closedPnl": "1.90512",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446917349,
+        "crossed": false,
+        "fee": "-0.047845",
+        "tid": 524934816169269,
+        "cloid": "0x000000000058527f000033a51b7c1c30",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "BTC",
+        "px": "83720.0",
+        "sz": "0.01905",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "58.03388",
+        "dir": "Close Long",
+        "closedPnl": "48.903255",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015079,
+        "crossed": true,
+        "fee": "0.637946",
+        "tid": 524934816169269,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x9d81a3adf84bd66528b62f2bda03e2e24bed3416",
+      {
+        "coin": "LINK",
+        "px": "12.476",
+        "sz": "50.3",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "218.6",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446886623,
+        "crossed": false,
+        "fee": "-0.018826",
+        "tid": 1036232897323054,
+        "cloid": "0x00000000000000008442a87fd8bbe129",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "LINK",
+        "px": "12.476",
+        "sz": "50.3",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "153419.6",
+        "dir": "Close Long",
+        "closedPnl": "-8.915675",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015080,
+        "crossed": true,
+        "fee": "0.251017",
+        "tid": 1036232897323054,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0xea0e878d5da1f786c035355cd7a8d381a6276766",
+      {
+        "coin": "AAVE",
+        "px": "156.16",
+        "sz": "2.26",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-8.11",
+        "dir": "Close Short",
+        "closedPnl": "0.146222",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447009231,
+        "crossed": false,
+        "fee": "-0.010587",
+        "tid": 552218433133754,
+        "cloid": "0x0000000000000000159b2779c9316f24",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "AAVE",
+        "px": "156.16",
+        "sz": "2.26",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "11230.96",
+        "dir": "Close Long",
+        "closedPnl": "18.05627",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015081,
+        "crossed": true,
+        "fee": "0.141168",
+        "tid": 552218433133754,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x2a6a2af2f0992f3c52b82c79a4c8fe1c8cf0fe45",
+      {
+        "coin": "AAVE",
+        "px": "156.14",
+        "sz": "0.1",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "0.4",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446925855,
+        "crossed": false,
+        "fee": "0.002342",
+        "tid": 579922383742323,
+        "cloid": "0x9ad4573590ccbc99a8d06145f1f07a41",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "AAVE",
+        "px": "156.14",
+        "sz": "0.1",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "11228.7",
+        "dir": "Close Long",
+        "closedPnl": "0.79695",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015081,
+        "crossed": true,
+        "fee": "0.006245",
+        "tid": 579922383742323,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x63f6411ca61733af716c9a50a56a84ea38a0af59",
+      {
+        "coin": "AAVE",
+        "px": "156.14",
+        "sz": "1.32",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-12.59",
+        "dir": "Close Short",
+        "closedPnl": "0.060588",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447005377,
+        "crossed": false,
+        "fee": "-0.006183",
+        "tid": 231206147891272,
+        "cloid": "0x0000000000000000159b27e9c161c48e",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "AAVE",
+        "px": "156.14",
+        "sz": "1.32",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "11228.6",
+        "dir": "Close Long",
+        "closedPnl": "10.51974",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015081,
+        "crossed": true,
+        "fee": "0.082441",
+        "tid": 231206147891272,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      {
+        "coin": "COMP",
+        "px": "26.092",
+        "sz": "0.49",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-1.06",
+        "dir": "Close Short",
+        "closedPnl": "0.005341",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446996860,
+        "crossed": false,
+        "fee": "-0.000383",
+        "tid": 356771142487123,
+        "cloid": "0x0000000000000000cf6c162b087d3e18",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "COMP",
+        "px": "26.092",
+        "sz": "0.49",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "12212.72",
+        "dir": "Close Long",
+        "closedPnl": "1.539384",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015082,
+        "crossed": true,
+        "fee": "0.005114",
+        "tid": 356771142487123,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x0cf706aa8d7260e3cd5fe0de11d7f3e899753e5b",
+      {
+        "coin": "COMP",
+        "px": "26.089",
+        "sz": "0.06",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-1.2",
+        "dir": "Close Short",
+        "closedPnl": "-0.000168",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446878941,
+        "crossed": false,
+        "fee": "-0.000046",
+        "tid": 184312847205314,
+        "cloid": "0x0000000000000000cf6c1f62b17d541f",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "COMP",
+        "px": "26.089",
+        "sz": "0.06",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "12212.23",
+        "dir": "Close Long",
+        "closedPnl": "0.188316",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015082,
+        "crossed": true,
+        "fee": "0.000626",
+        "tid": 184312847205314,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x4ef66df2067c588eb98896ede3a8e80f85aff085",
+      {
+        "coin": "COMP",
+        "px": "26.089",
+        "sz": "0.49",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "1.3",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446960830,
+        "crossed": false,
+        "fee": "-0.000383",
+        "tid": 1048117795225914,
+        "cloid": "0x0000000000000000cf6c1474c42ad919",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "COMP",
+        "px": "26.089",
+        "sz": "0.49",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "12212.17",
+        "dir": "Close Long",
+        "closedPnl": "1.537914",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015082,
+        "crossed": true,
+        "fee": "0.005113",
+        "tid": 1048117795225914,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0xc1fd39727cd10fe97ccac228888f025309560a93",
+      {
+        "coin": "COMP",
+        "px": "26.089",
+        "sz": "0.45",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-5547.4",
+        "dir": "Close Short",
+        "closedPnl": "-0.801405",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446988169,
+        "crossed": false,
+        "fee": "0.001408",
+        "tid": 61287535073536,
+        "cloid": "0x2abca054be3b4450a26a4df3b5aec7d5",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "COMP",
+        "px": "26.089",
+        "sz": "0.45",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "12211.68",
+        "dir": "Close Long",
+        "closedPnl": "1.41237",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015082,
+        "crossed": true,
+        "fee": "0.004696",
+        "tid": 61287535073536,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x5b52403396a365f9f7e33e87488564017e1f97a8",
+      {
+        "coin": "COMP",
+        "px": "26.086",
+        "sz": "0.49",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-0.22",
+        "dir": "Short > Long",
+        "closedPnl": "0.00374",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446865887,
+        "crossed": false,
+        "fee": "-0.000383",
+        "tid": 840382088580900,
+        "cloid": "0x0000000000000000cf6c1fe5ac3a8bb8",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "COMP",
+        "px": "26.086",
+        "sz": "0.49",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "12211.23",
+        "dir": "Close Long",
+        "closedPnl": "1.536444",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015082,
+        "crossed": true,
+        "fee": "0.005112",
+        "tid": 840382088580900,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+      {
+        "coin": "COMP",
+        "px": "26.084",
+        "sz": "0.49",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-0.2",
+        "dir": "Short > Long",
+        "closedPnl": "-0.0002",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446835587,
+        "crossed": false,
+        "fee": "-0.000383",
+        "tid": 782758842100942,
+        "cloid": "0x0000000000000000cf6c1662e6a3f1ed",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "COMP",
+        "px": "26.084",
+        "sz": "0.49",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "12210.74",
+        "dir": "Close Long",
+        "closedPnl": "1.535464",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015082,
+        "crossed": true,
+        "fee": "0.005112",
+        "tid": 782758842100942,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x7684d0c6d84d22b481ef3d2587c475f878836e51",
+      {
+        "coin": "COMP",
+        "px": "26.081",
+        "sz": "0.49",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "0.01",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446957029,
+        "crossed": false,
+        "fee": "-0.000383",
+        "tid": 626405130666854,
+        "cloid": "0x0000000000000000cf6c13e57acb998a",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "COMP",
+        "px": "26.081",
+        "sz": "0.49",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "12210.25",
+        "dir": "Close Long",
+        "closedPnl": "1.533994",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015082,
+        "crossed": true,
+        "fee": "0.005111",
+        "tid": 626405130666854,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+      {
+        "coin": "COMP",
+        "px": "26.079",
+        "sz": "0.49",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "1.41",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446806773,
+        "crossed": false,
+        "fee": "-0.000383",
+        "tid": 219652219603694,
+        "cloid": "0x0000000000000000cf6c1396e83bf231",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "COMP",
+        "px": "26.079",
+        "sz": "0.49",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "12209.76",
+        "dir": "Close Long",
+        "closedPnl": "1.533014",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015082,
+        "crossed": true,
+        "fee": "0.005111",
+        "tid": 219652219603694,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      {
+        "coin": "COMP",
+        "px": "26.076",
+        "sz": "0.49",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-0.57",
+        "dir": "Close Short",
+        "closedPnl": "0.013181",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446806834,
+        "crossed": false,
+        "fee": "-0.000383",
+        "tid": 67541726062458,
+        "cloid": "0x0000000000000000cf6c12294e1f08a7",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "COMP",
+        "px": "26.076",
+        "sz": "0.49",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "12209.27",
+        "dir": "Close Long",
+        "closedPnl": "1.531544",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015082,
+        "crossed": true,
+        "fee": "0.00511",
+        "tid": 67541726062458,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+      {
+        "coin": "COMP",
+        "px": "26.073",
+        "sz": "0.07",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "0.29",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446806768,
+        "crossed": false,
+        "fee": "-0.000054",
+        "tid": 362746115857054,
+        "cloid": "0x0000000000000000cf6c13a6ed43df59",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "COMP",
+        "px": "26.073",
+        "sz": "0.07",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "12208.78",
+        "dir": "Close Long",
+        "closedPnl": "0.218582",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015082,
+        "crossed": true,
+        "fee": "0.00073",
+        "tid": 362746115857054,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0xd0956a1eba0a9060baf5f73ee26b9601dc47ec43",
+      {
+        "coin": "UNI",
+        "px": "7.5226",
+        "sz": "21.7",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "74.2",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447010874,
+        "crossed": false,
+        "fee": "-0.004897",
+        "tid": 319229244786831,
+        "cloid": "0x00000000000000006d2f5c6472b6dde6",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "UNI",
+        "px": "7.5226",
+        "sz": "21.7",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "66255.1",
+        "dir": "Close Long",
+        "closedPnl": "-12.208203",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015083,
+        "crossed": true,
+        "fee": "0.065296",
+        "tid": 319229244786831,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x8e555c7f07eebea796dec9b9273e8c1b88a1abdc",
+      {
+        "coin": "ZRO",
+        "px": "2.0548",
+        "sz": "7.3",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "220.4",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447014817,
+        "crossed": false,
+        "fee": "0.00162",
+        "tid": 440994058571108,
+        "cloid": "0x0000000000000000099e95736f70345e",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "ZRO",
+        "px": "2.0548",
+        "sz": "7.3",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "379090.4",
+        "dir": "Close Long",
+        "closedPnl": "3.077899",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015084,
+        "crossed": true,
+        "fee": "0.006",
+        "tid": 440994058571108,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x4e60e3a4a32d63d245aa4e4ce304b4254b088f95",
+      {
+        "coin": "ZRO",
+        "px": "2.0547",
+        "sz": "117.1",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-54.3",
+        "dir": "Short > Long",
+        "closedPnl": "0.300822",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447011469,
+        "crossed": false,
+        "fee": "-0.002406",
+        "tid": 933565421850725,
+        "cloid": "0xd7876b00000000002e00000000000000",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "ZRO",
+        "px": "2.0547",
+        "sz": "117.1",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "379083.1",
+        "dir": "Close Long",
+        "closedPnl": "49.361163",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015084,
+        "crossed": true,
+        "fee": "0.096242",
+        "tid": 933565421850725,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0xecb63caa47c7c4e77f60f1ce858cf28dc2b82b00",
+      {
+        "coin": "NEAR",
+        "px": "5.2429",
+        "sz": "53.8",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-244908.0",
+        "dir": "Close Short",
+        "closedPnl": "-9.295026",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447003570,
+        "crossed": false,
+        "fee": "-0.008462",
+        "tid": 735576344070365,
+        "cloid": "0x67392588098879567ff10fffffffffff",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "NEAR",
+        "px": "5.2429",
+        "sz": "53.8",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "163862.9",
+        "dir": "Close Long",
+        "closedPnl": "51.293458",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015085,
+        "crossed": true,
+        "fee": "0.112827",
+        "tid": 735576344070365,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0xd0956a1eba0a9060baf5f73ee26b9601dc47ec43",
+      {
+        "coin": "FIL",
+        "px": "1.0418",
+        "sz": "107.9",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "118.1",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447004336,
+        "crossed": false,
+        "fee": "-0.003372",
+        "tid": 215958473316838,
+        "cloid": "0x0000000000000000ffc0fac8b39d1776",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "FIL",
+        "px": "1.0418",
+        "sz": "107.9",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "328883.1",
+        "dir": "Close Long",
+        "closedPnl": "-8.398936",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015086,
+        "crossed": true,
+        "fee": "0.044964",
+        "tid": 215958473316838,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x53136b4a7c432585f28903b77c7816a723e0271f",
+      {
+        "coin": "ONDO",
+        "px": "0.46442",
+        "sz": "326.0",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-4438.0",
+        "dir": "Close Short",
+        "closedPnl": "-0.394134",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447007155,
+        "crossed": false,
+        "fee": "-0.004542",
+        "tid": 869124849381225,
+        "cloid": "0x0000000000000000b3321b9ed2d462ba",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "ONDO",
+        "px": "0.46442",
+        "sz": "326.0",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "993235.0",
+        "dir": "Close Long",
+        "closedPnl": "-2.910528",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015087,
+        "crossed": true,
+        "fee": "0.06056",
+        "tid": 869124849381225,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x4e60e3a4a32d63d245aa4e4ce304b4254b088f95",
+      {
+        "coin": "ETHFI",
+        "px": "0.7232",
+        "sz": "192.7",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "5094.5",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447013847,
+        "crossed": false,
+        "fee": "-0.001393",
+        "tid": 111875114186578,
+        "cloid": "0x0fb0b700000000007900000000000000",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "ETHFI",
+        "px": "0.7232",
+        "sz": "192.7",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "587055.6",
+        "dir": "Close Long",
+        "closedPnl": "9.068462",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015088,
+        "crossed": true,
+        "fee": "0.055744",
+        "tid": 111875114186578,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x8e555c7f07eebea796dec9b9273e8c1b88a1abdc",
+      {
+        "coin": "ENA",
+        "px": "0.20875",
+        "sz": "169.0",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-6322.0",
+        "dir": "Close Short",
+        "closedPnl": "0.16224",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446998639,
+        "crossed": false,
+        "fee": "0.00381",
+        "tid": 682838708231281,
+        "cloid": "0x0000000000000000099e95735573e250",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "ENA",
+        "px": "0.20875",
+        "sz": "169.0",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "3247112.0",
+        "dir": "Close Long",
+        "closedPnl": "1.479933",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015089,
+        "crossed": true,
+        "fee": "0.014111",
+        "tid": 682838708231281,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x5b52403396a365f9f7e33e87488564017e1f97a8",
+      {
+        "coin": "ENA",
+        "px": "0.20873",
+        "sz": "897.0",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "7475.0",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446995411,
+        "crossed": false,
+        "fee": "-0.005616",
+        "tid": 765137425151487,
+        "cloid": "0x000000000000000034f69f5c7f524e9b",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "ENA",
+        "px": "0.20873",
+        "sz": "897.0",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "3246943.0",
+        "dir": "Close Long",
+        "closedPnl": "7.837089",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015089,
+        "crossed": true,
+        "fee": "0.074892",
+        "tid": 765137425151487,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0xc029043cd00b80363130fa058818459a521842a1",
+      {
+        "coin": "HYPE",
+        "px": "81.632",
+        "sz": "6.38",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "13.57",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446975750,
+        "crossed": false,
+        "fee": "-0.015624",
+        "tid": 1002960115397558,
+        "cloid": "0x0000000000000000000001a15e512adf",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "HYPE",
+        "px": "81.632",
+        "sz": "6.38",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "19433.78",
+        "dir": "Close Long",
+        "closedPnl": "-16.518458",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015090,
+        "crossed": true,
+        "fee": "0.208324",
+        "tid": 1002960115397558,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      {
+        "coin": "MORPHO",
+        "px": "2.4046",
+        "sz": "66.8",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "9.6",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447014339,
+        "crossed": false,
+        "fee": "-0.004818",
+        "tid": 189848848416443,
+        "cloid": "0x000000000000000003ae87ce5a9c47a0",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "MORPHO",
+        "px": "2.4046",
+        "sz": "66.8",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "268619.5",
+        "dir": "Close Long",
+        "closedPnl": "-2.657304",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015091,
+        "crossed": true,
+        "fee": "0.06425",
+        "tid": 189848848416443,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x7684d0c6d84d22b481ef3d2587c475f878836e51",
+      {
+        "coin": "MORPHO",
+        "px": "2.4046",
+        "sz": "21.4",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-184.4",
+        "dir": "Close Short",
+        "closedPnl": "-0.149586",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447014350,
+        "crossed": false,
+        "fee": "-0.001543",
+        "tid": 60823667805413,
+        "cloid": "0x000000000000000003ae8c0a1b29080e",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "MORPHO",
+        "px": "2.4046",
+        "sz": "21.4",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "268552.7",
+        "dir": "Close Long",
+        "closedPnl": "-0.851292",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015091,
+        "crossed": true,
+        "fee": "0.020583",
+        "tid": 60823667805413,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0xf8c27415801f1871287446c9933221fc5ce70062",
+      {
+        "coin": "VVV",
+        "px": "26.412",
+        "sz": "0.42",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-0.92",
+        "dir": "Close Short",
+        "closedPnl": "-1.089354",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446978680,
+        "crossed": false,
+        "fee": "0.001663",
+        "tid": 811004782124846,
+        "cloid": "0x0000000000000000000732baade8e3ef",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "VVV",
+        "px": "26.412",
+        "sz": "0.42",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "31370.48",
+        "dir": "Close Long",
+        "closedPnl": "0.70749",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015092,
+        "crossed": true,
+        "fee": "0.004437",
+        "tid": 811004782124846,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x53136b4a7c432585f28903b77c7816a723e0271f",
+      {
+        "coin": "VVV",
+        "px": "26.407",
+        "sz": "4.41",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-11.52",
+        "dir": "Close Short",
+        "closedPnl": "0.745731",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447003694,
+        "crossed": false,
+        "fee": "-0.003493",
+        "tid": 1014862407154930,
+        "cloid": "0x000000000000000011006bbae6a2ca62",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "VVV",
+        "px": "26.407",
+        "sz": "4.41",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "31370.06",
+        "dir": "Close Long",
+        "closedPnl": "7.406595",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015092,
+        "crossed": true,
+        "fee": "0.046581",
+        "tid": 1014862407154930,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0xea0e878d5da1f786c035355cd7a8d381a6276766",
+      {
+        "coin": "VVV",
+        "px": "26.405",
+        "sz": "4.41",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-6.15",
+        "dir": "Close Short",
+        "closedPnl": "0.683991",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446894528,
+        "crossed": false,
+        "fee": "-0.003493",
+        "tid": 831813730653178,
+        "cloid": "0x00000000000000001100637dd5c5e6ad",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "VVV",
+        "px": "26.405",
+        "sz": "4.41",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "31365.65",
+        "dir": "Close Long",
+        "closedPnl": "7.397775",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015092,
+        "crossed": true,
+        "fee": "0.046578",
+        "tid": 831813730653178,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0xa382fa9f4bb1dd4e3120cf0507a67384ad1ef1f7",
+      {
+        "coin": "VVV",
+        "px": "26.402",
+        "sz": "1.06",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-6.45",
+        "dir": "Close Short",
+        "closedPnl": "0.097414",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446871793,
+        "crossed": false,
+        "fee": "-0.000839",
+        "tid": 708333292984333,
+        "cloid": "0x000000000000000011006531d5bf0bdc",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "VVV",
+        "px": "26.402",
+        "sz": "1.06",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "31361.24",
+        "dir": "Close Long",
+        "closedPnl": "1.77497",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015092,
+        "crossed": true,
+        "fee": "0.011194",
+        "tid": 708333292984333,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x4e60e3a4a32d63d245aa4e4ce304b4254b088f95",
+      {
+        "coin": "SKY",
+        "px": "0.076836",
+        "sz": "1528.0",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-25900.0",
+        "dir": "Close Short",
+        "closedPnl": "-0.16044",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447012251,
+        "crossed": false,
+        "fee": "-0.001174",
+        "tid": 1054687027311780,
+        "cloid": "0x2a92790000000000ce00000000000000",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "SKY",
+        "px": "0.076836",
+        "sz": "1528.0",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "4654514.0",
+        "dir": "Close Long",
+        "closedPnl": "5.619984",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015093,
+        "crossed": true,
+        "fee": "0.046962",
+        "tid": 1054687027311780,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      {
+        "coin": "AERO",
+        "px": "0.86201",
+        "sz": "215.0",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-954.0",
+        "dir": "Close Short",
+        "closedPnl": "-0.39044",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447008057,
+        "crossed": false,
+        "fee": "-0.005559",
+        "tid": 217783724398974,
+        "cloid": "0x00000000000000000f22f53784817dd3",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "AERO",
+        "px": "0.86201",
+        "sz": "215.0",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "1112081.0",
+        "dir": "Close Long",
+        "closedPnl": "19.566505",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015094,
+        "crossed": true,
+        "fee": "0.074132",
+        "tid": 217783724398974,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x223537ac9a856c31f4043e86ced86bb29f06653e",
+      {
+        "coin": "AERO",
+        "px": "0.86198",
+        "sz": "150.0",
+        "side": "B",
+        "time": 1792588100329,
+        "startPosition": "-879.0",
+        "dir": "Close Short",
+        "closedPnl": "-0.2271",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581446980129,
+        "crossed": false,
+        "fee": "-0.003878",
+        "tid": 560778550635346,
+        "cloid": "0x0000000000000000000001a1592d307b",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x654016a8c9fcf0c4cb7ed6078aba21f7f399f7b7",
+      {
+        "coin": "AERO",
+        "px": "0.86198",
+        "sz": "150.0",
+        "side": "A",
+        "time": 1792588100329,
+        "startPosition": "1111866.0",
+        "dir": "Close Long",
+        "closedPnl": "13.64655",
+        "hash": "0xf4d908bb03c25d2ef65204470be73402027000a09ec57c0198a1b40dc2c63719",
+        "oid": 581447015094,
+        "crossed": true,
+        "fee": "0.051718",
+        "tid": 560778550635346,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ]
+  ]
+}

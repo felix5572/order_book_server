@@ -36,10 +36,18 @@ pub(crate) struct RankedAction {
 pub(crate) enum MarkAction {
     /// An order, modify, batchModify, cancel or cancelByCloid that succeeded.
     Book(BookAnchors),
+    /// A successful vault withdrawal can create IOC `Vault Close` orders absent from its default receipt.
+    VaultWithdraw { vault: Address },
     /// Per main-dex asset, the submitted (oracle, mark); `None` for an asset the publisher does not price.
     SetGlobal(Vec<Option<(String, String)>>),
     /// A validator's submitted oracle and external perp prices, by coin.
     Reference { oracle: Vec<(String, String)>, external: Vec<(String, String)> },
+}
+
+impl MarkAction {
+    pub(crate) const fn is_price(&self) -> bool {
+        matches!(self, Self::SetGlobal(_) | Self::Reference { .. })
+    }
 }
 
 /// What a book action did to resting orders (research method 2): the orders it created (resting or filled at once,
@@ -99,9 +107,21 @@ impl MarkActions {
 }
 
 fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String> {
-    let action = paired.action;
+    // Vault withdrawals wrapped by multiSig still execute at the outer action's category-3 rank.
+    // Other wrapped actions retain their existing unsupported mark-attribution scope.
+    let inner;
+    let action = if paired.action.action_type == "multiSig" {
+        match paired.response.res.status {
+            "err" => return Ok(None),
+            "ok" => {},
+            status => return Err(format!("multiSig with status {status:?}")),
+        }
+        inner = paired.action.multi_sig_action()?;
+        if inner.action_type != "vaultTransfer" { return Ok(None); }
+        &inner
+    } else { paired.action };
     let kind = action.action_type;
-    if !matches!(kind, "order" | "modify" | "batchModify" | "cancel" | "cancelByCloid" | "SetGlobalAction" | "validatorL1UpdateReferenceOracle") {
+    if !matches!(kind, "order" | "modify" | "batchModify" | "cancel" | "cancelByCloid" | "vaultTransfer" | "SetGlobalAction" | "validatorL1UpdateReferenceOracle") {
         return Ok(None);
     }
     match paired.response.res.status {
@@ -152,6 +172,12 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
             let cancels: Vec<WireCancelByCloid> = action.field(action.cancels.as_ref(), "cancels")?;
             let cancelled_cloids = succeeded(cancels.into_iter().map(|cancel| cancel.cloid), &statuses()?)?;
             (2, MarkAction::Book(BookAnchors { cancelled_cloids, ..BookAnchors::default() }))
+        }
+        "vaultTransfer" => {
+            let deposit: bool = action.field(action.is_deposit.as_ref(), "isDeposit")?;
+            if deposit { return Ok(None); }
+            let vault = action.field(action.vault_address.as_ref(), "vaultAddress")?;
+            (3, MarkAction::VaultWithdraw { vault })
         }
         "SetGlobalAction" => {
             let pxs: Vec<(Option<String>, Option<String>)> = action.field(action.pxs.as_ref(), "pxs")?;

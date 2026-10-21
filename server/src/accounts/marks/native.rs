@@ -381,7 +381,7 @@ impl NativePrices {
         cut_of: impl Fn(usize) -> CoinCut,
     ) -> Result<(), String> {
         match action {
-            MarkAction::Book(_) => Ok(()),
+            MarkAction::Book(_) | MarkAction::VaultWithdraw { .. } => Ok(()),
             MarkAction::SetGlobal(pxs) => {
                 for (asset, pair) in pxs.iter().enumerate() {
                     let Some((oracle, mark)) = pair else { continue };

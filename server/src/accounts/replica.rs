@@ -55,7 +55,11 @@ pub(crate) struct Action<'a> {
     pub(crate) amount: Option<LazyValue<'a>>,
     #[serde(borrow)]
     pub(crate) weight: Option<LazyValue<'a>>,
-    /// Kept raw: only the account action adapter unwraps successful `multiSig` actions.
+    #[serde(borrow, rename = "vaultAddress")]
+    pub(crate) vault_address: Option<LazyValue<'a>>,
+    #[serde(borrow, rename = "isDeposit")]
+    pub(crate) is_deposit: Option<LazyValue<'a>>,
+    /// Kept raw: each projection unwraps successful `multiSig` actions only for its supported inner types.
     #[serde(borrow)]
     pub(crate) payload: Option<LazyValue<'a>>,
     #[serde(borrow)]
@@ -76,7 +80,24 @@ pub(crate) struct Action<'a> {
     pub(crate) external_perp_pxs: Option<LazyValue<'a>>,
 }
 
+#[derive(Deserialize)]
+struct MultiSigPayload<'a> {
+    #[serde(borrow)]
+    action: Action<'a>,
+}
+
 impl Action<'_> {
+    /// The executed inner action; the caller still uses the outer receipt and execution rank.
+    pub(crate) fn multi_sig_action(&self) -> Result<Action<'_>, String> {
+        let raw = self.payload.as_ref().ok_or("multiSig without payload")?;
+        let payload: MultiSigPayload<'_> = sonic_rs::from_str(raw.as_raw_str())
+            .map_err(|err| format!("multiSig payload: {err}"))?;
+        if payload.action.action_type == "multiSig" {
+            return Err("nested multiSig execution is not verified".to_string());
+        }
+        Ok(payload.action)
+    }
+
     /// A payload field the action's type requires.
     pub(crate) fn field<T: DeserializeOwned>(&self, raw: Option<&LazyValue<'_>>, name: &str) -> Result<T, String> {
         let raw = raw.ok_or_else(|| format!("{} without {name}", self.action_type))?;
