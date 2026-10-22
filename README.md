@@ -224,6 +224,20 @@ Response:
 { "channel": "bbo", "data": { "coin": "BTC", "time": 1702530000000, "bbo": [{ "px": "100000.0", "sz": "0.5", "n": 1 }, { "px": "100001.0", "sz": "0.3", "n": 1 }] } }
 ```
 
+BBO producer deduplication happens **before** the shared broadcast ring: coins with no live BBO
+subscriber are skipped, and deep-book changes with unchanged best bid/ask price and size do not
+consume ring capacity. `bbo_publication_quotes_total{outcome="not_subscribed"|"unchanged"|"published"}`
+counts these decisions per coin/book event. `bbo_changes_total{coin}` instead counts enqueued
+changes across connections and is not a unique exchange update count.
+
+This does not rate-limit or conflate real quote transitions: A → B → A is delivered in order.
+The existing price/size change predicate and optional heartbeat stay unchanged. New subscriptions
+invalidate that coin's producer dedup state so their first subsequent book event can carry a quote;
+a new book-trust period also forces republication. The last subscription drops that coin's cached
+state. The BBO lane remains shared across **actively subscribed** coins; genuine ring overruns still
+withdraw subscriptions explicitly rather than silently skip transitions. CPU-owner isolation and
+this producer filter address different sources of backlog; live acceptance must cross checkpoints.
+
 ### Subscribe to Trades
 ```json
 { "method": "subscribe", "subscription": { "type": "trades", "coin": "BTC" } }

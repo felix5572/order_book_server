@@ -13,7 +13,7 @@ use crate::{
     accounts::runtime::{AccountsHandle, BookSource, start_accounts},
     listeners::order_book::{
         ActiveL2Params, ActiveSubGuard, ActiveSubs, BookTrust, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey,
-        L2ParamGuard, L2SnapshotParams, OrderBookListener, hl_listen_hft, triggers::TriggerAvailability,
+        L2ParamGuard, L2SnapshotParams, OrderBookListener, bbo::{BboKey, key as bbo_key}, hl_listen_hft, triggers::TriggerAvailability,
     },
     local_marks::{feeds::LocalMarkFeeds, owner::LocalMarks, sources::MarkSources},
     metrics::{
@@ -62,11 +62,6 @@ struct L2Entry {
     last_sent: Instant,
     payload: Option<L2Book>,
 }
-
-/// Raw fixed-point (px, sz) pairs for the best bid and ask. Comparing these
-/// for dedup avoids the four String allocations the old tuple cost per BBO
-/// per connection per change-check.
-type BboKey = (Option<(u64, u64)>, Option<(u64, u64)>);
 
 /// Per-coin cached BBO broadcast. `tuple` is used for change-based dedup;
 /// `payload` is resent verbatim (with refreshed `time`) when the heartbeat fires,
@@ -1158,10 +1153,7 @@ async fn send_ws_data_from_bbo(
         let (best_bid, best_ask) = (&cb.raw.0, &cb.raw.1);
         // Dedup on the raw fixed-point values BEFORE rendering anything: the
         // strings are only built when the BBO actually changed.
-        let current: BboKey = (
-            best_bid.as_ref().map(|(px, sz, _)| (px.value(), sz.value())),
-            best_ask.as_ref().map(|(px, sz, _)| (px.value(), sz.value())),
-        );
+        let current = bbo_key(&cb.raw);
 
         if last_bbo.get(coin).map(|e| e.tuple) != Some(current) {
             // Canonical wire format (Px/Sz::to_str) - matches what the L2 path

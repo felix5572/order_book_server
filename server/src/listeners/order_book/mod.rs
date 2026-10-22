@@ -62,6 +62,7 @@ use utils::{
 /// another re-sync rather than risk OOM.
 const MAX_CACHED_EVENTS: usize = 4_000_000;
 
+pub(crate) mod bbo;
 mod l2_conflation;
 pub(crate) mod parallel;
 mod state;
@@ -602,7 +603,7 @@ impl OrderBookListener {
         self.user_fills_tx.clone()
     }
 
-    /// BBO is emitted per book event (measured >13k/s). It must not evict public
+    /// BBO publishes subscribed price/size changes. It must not evict public
     /// trades/L4 events, or make clients without BBO subscriptions drain that traffic.
     pub(crate) fn bbo_sender(&self) -> Sender<Arc<BboUpdate>> {
         self.bbo_tx.clone()
@@ -1658,33 +1659,18 @@ impl OrderBookListener {
             self.mark_desynced(reason);
         }
 
-        // Fast BBO broadcast - ONLY for coins that changed AND only when a bbo
-        // subscription is live. Without the gate we'd `get_bbos_for_coins`
-        // (map build + Coin clones) per change even with zero subscribers.
-        // Withheld while the book is known to miss orders (see `book_trusted`).
-        if !changed_coins.is_empty() && self.book_trusted() {
-            if let Some(state) = &self.order_book_state {
-                if self.bbo_tx.receiver_count() > 0 {
-                    if self.active_subs.wants(BroadcastKind::Bbo) {
-                        let bbo_start = Instant::now();
-                        let (time, bbos) = state.get_bbos_for_coins(&changed_coins);
-                        static BBO_BROADCAST_COUNT: AtomicU64 = AtomicU64::new(0);
-                        let bc = BBO_BROADCAST_COUNT.fetch_add(1, Ordering::Relaxed);
-                        if bc % 1000 == 0 {
-                            log::debug!("Fast BBO broadcast #{} at time {} for {} coins", bc, time, changed_coins.len());
-                        }
-                        // broadcast::Sender::send is non-blocking; the previous
-                        // tokio::spawn wrapper added task overhead with no benefit.
-                        let bbos = bbos
-                            .into_iter()
-                            .map(|(coin, raw)| (coin, CoinBbo { raw, frame: SharedFrame::new() }))
-                            .collect();
-                        let withheld_period = self.book_trust.withheld_periods();
-                        let msg = Arc::new(BboUpdate { bbos, time, withheld_period });
-                        drop(self.bbo_tx.send(msg));
-                        BBO_BROADCAST_LATENCY.observe(bbo_start.elapsed().as_secs_f64());
-                    }
-                }
+        // Do not enqueue deep-book churn or quotes nobody subscribes to. Real
+        // price/size transitions still publish immediately, without a timer.
+        if !changed_coins.is_empty() && self.book_trusted() && self.bbo_tx.receiver_count() > 0
+            && self.active_subs.wants(BroadcastKind::Bbo)
+            && let Some(state) = &self.order_book_state
+        {
+            let started = Instant::now();
+            if let Some(update) = self.active_subs.bbo.changes(
+                &changed_coins, self.book_trust.withheld_periods(), |coins| state.get_bbos_for_coins(coins),
+            ) {
+                drop(self.bbo_tx.send(Arc::new(update)));
+                BBO_BROADCAST_LATENCY.observe(started.elapsed().as_secs_f64());
             }
         }
 
@@ -1951,6 +1937,7 @@ enum BroadcastKind {
 #[derive(Clone, Default)]
 pub(crate) struct ActiveSubs {
     inner: Arc<ActiveSubCounts>,
+    bbo: bbo::BboSubscriptions,
 }
 
 #[derive(Default)]
@@ -1990,7 +1977,11 @@ impl ActiveSubs {
             Subscription::BookDiffs { .. } => vec![self.acquire(BroadcastKind::L4Diffs)],
             Subscription::Trades { .. } => vec![self.acquire(BroadcastKind::Trades)],
             Subscription::UserFills { .. } => vec![self.acquire(BroadcastKind::UserFills)],
-            Subscription::Bbo { .. } => vec![self.acquire(BroadcastKind::Bbo)],
+            Subscription::Bbo { coin } => {
+                let mut guard = self.acquire(BroadcastKind::Bbo);
+                guard.bbo = Some(self.bbo.acquire(coin));
+                vec![guard]
+            },
             Subscription::L2Book { .. } => Vec::new(),
             // Low-frequency side stream: the listener broadcasts it whenever any receiver
             // exists (it never touches the book), so it registers no gated family.
@@ -2005,7 +1996,7 @@ impl ActiveSubs {
 
     fn acquire(&self, kind: BroadcastKind) -> ActiveSubGuard {
         self.inner.counter(kind).fetch_add(1, Ordering::SeqCst);
-        ActiveSubGuard { inner: self.inner.clone(), kind }
+        ActiveSubGuard { inner: self.inner.clone(), kind, bbo: None }
     }
 
     fn wants(&self, kind: BroadcastKind) -> bool {
@@ -2018,6 +2009,7 @@ impl ActiveSubs {
 pub(crate) struct ActiveSubGuard {
     inner: Arc<ActiveSubCounts>,
     kind: BroadcastKind,
+    bbo: Option<bbo::BboSubscriptionGuard>,
 }
 
 impl Drop for ActiveSubGuard {
@@ -3563,6 +3555,39 @@ mod tests {
         while let Ok(msg) = rx.try_recv() {
             assert!(!matches!(msg.as_ref(), InternalMessage::L4OrderStatuses { .. } | InternalMessage::L4OrderDiffs { .. }));
         }
+    }
+
+    #[test]
+    fn test_bbo_ring_ignores_deep_book_churn_and_unsubscribed_coins() {
+        let (mut listener, _public_rx) = ready_listener();
+        // Snapshot best bid is 110; feed_order adds at 100, below the best.
+        listener.init_from_snapshot(snapshot_with("BTC", 1, 11_000_000_000), 1);
+        let mut rx = listener.bbo_sender().subscribe();
+        let subscription = Subscription::Bbo { coin: "BTC".into() };
+        let guards = listener.active_subs().acquire_for(&subscription);
+        feed_order(&mut listener, "BTC", 2, 2);
+        let initial = rx.try_recv().unwrap();
+        assert_eq!(initial.bbos["BTC"].raw.0.unwrap().0.value(), 11_000_000_000);
+        assert!(rx.try_recv().is_err());
+        // More than a full 16,384-message ring of genuine deep-level changes.
+        // They must not consume any BBO capacity or cause a receiver gap.
+        for height in 3..20_003 {
+            let (old, new) = if height % 2 == 1 { ("1.0", "2.0") } else { ("2.0", "1.0") };
+            let batch = make_diff_batch("BTC", 2, height, serde_json::json!({"update": {"origSz": old, "newSz": new}}));
+            listener.apply_event_batch(height, EventBatch::BookDiffs(batch), EventSource::OrderDiffs);
+        }
+        feed_order(&mut listener, "ETH", 3, 20_003);
+        assert_eq!(rx.len(), 0, "deep BTC churn and unsubscribed ETH never enter the BBO ring");
+        assert!(listener.book_trusted());
+        // A second client must receive the same quote on its first book event.
+        let mut second_rx = listener.bbo_sender().subscribe();
+        let second_guards = listener.active_subs().acquire_for(&subscription);
+        feed_order(&mut listener, "BTC", 4, 20_004);
+        assert!(second_rx.try_recv().is_ok());
+        drop(second_guards);
+        drop(guards);
+        feed_order(&mut listener, "BTC", 5, 20_005);
+        assert_eq!(second_rx.len(), 0, "last unsubscribe turns publication off");
     }
 
     // ==================== Parse / apply split ====================

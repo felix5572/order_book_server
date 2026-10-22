@@ -337,7 +337,15 @@ lazy_static! {
         &["kind"]
     ).expect("metric can be created");
 
-    /// BBO changes per coin (top 5 tracked individually)
+    /// Quote candidates before the shared BBO ring; one count per coin/book
+    /// event, never per connection. Only `published` enters the ring.
+    #[allow(clippy::expect_used, reason = "literal metric name and labels are valid at registration")]
+    pub static ref BBO_PUBLICATION_QUOTES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("bbo_publication_quotes_total", "BBO quote candidates by publication outcome"),
+        &["outcome"]
+    ).expect("metric can be created");
+
+    /// Changed BBO frames enqueued per coin, summed over subscribed connections.
     pub static ref BBO_CHANGES_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("bbo_changes_total", "BBO changes by coin"),
         &["coin"]
@@ -815,6 +823,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(UNTRIGGERED_MISREAD_TRIGGERS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(BBO_CHANGES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(BBO_PUBLICATION_QUOTES_TOTAL.clone())).ok();
 
     // Resync & lock metrics
     REGISTRY.register(Box::new(RESYNC_PHASE_DURATION.clone())).ok();
