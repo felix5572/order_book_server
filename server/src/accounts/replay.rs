@@ -1719,7 +1719,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn trailing_stop_marks_reconcile_both_mrna_cash_intervals_with_funding() {
+    fn trailing_stop_marks_reconcile_mrna_and_crcl_cash_intervals() {
         let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/trailing_stop_cash_goldens.json")).unwrap();
         for case in golden["cases"].as_array().unwrap() { check_hip3_execution_cash(case, true); }
     }
