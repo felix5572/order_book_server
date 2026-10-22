@@ -488,6 +488,9 @@ pub(crate) enum Rebuild {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct MarksInstallReport {
+    /// Per-trade projections reconstructed after the seed. Transient, bounded by `InputLog`'s retained fills;
+    /// exported only when the whole reconstruction is trusted, then consumed by the account event log.
+    pub(crate) fill_prices: Vec<(u64, FillMarkPrices)>,
     pub(crate) previous_seed: Option<u64>,
     pub(crate) check: MarksCheck,
     pub(crate) rebuild: Rebuild,
@@ -707,15 +710,17 @@ impl NodeMarks {
             _ => MarksCheck::Skipped("noSnapshot"),
         };
         let mut errors = Vec::new();
-        let rebuild = self.rebuild(seed, &mut errors);
+        let mut fill_prices = Vec::new();
+        let rebuild = self.rebuild(seed, &mut errors, &mut fill_prices);
         // only a seed the state now stands on clears an older failure; one the log could not reach changed nothing
         if rebuild != Rebuild::LogDoesNotReach && self.seed_failure.as_ref().is_some_and(|(failed, _)| *failed < height) {
             self.seed_failure = None;
         }
-        MarksInstallReport { previous_seed, check, rebuild, errors }
+        if self.availability().is_err() { fill_prices.clear(); }
+        MarksInstallReport { fill_prices, previous_seed, check, rebuild, errors }
     }
 
-    fn rebuild(&mut self, seed: MarkSeed, errors: &mut Vec<(Stream, String)>) -> Rebuild {
+    fn rebuild(&mut self, seed: MarkSeed, errors: &mut Vec<(Stream, String)>, fill_prices: &mut Vec<(u64, FillMarkPrices)>) -> Rebuild {
         let height = seed.height;
         let rebuild = match self.applied {
             Some(applied) if applied > height => {
@@ -729,6 +734,7 @@ impl NodeMarks {
                     // coins outside the universe were counted when the block was applied
                     let mut replayed = MarksBlockReport::default();
                     state.apply(*block, inputs, &mut replayed);
+                    if !replayed.fill_prices.is_empty() { fill_prices.push((*block, replayed.fill_prices)); }
                     replayed_errors.extend(replayed.errors.into_iter().map(|error| (*block, error)));
                     blocks += 1;
                 }
@@ -883,6 +889,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn seed_replay_restores_startup_execution_marks_only_when_trusted() {
+        for lost in [false, true] {
+            let mut marks = NodeMarks::new(GRID, STARTED_MS);
+            run(&mut marks, 990..=1_002, &[(1_001, "360.0")]);
+            assert!(marks.at().is_none(), "no seed yet");
+            if lost { marks.record_lost_block(Stream::Fills, 1_002); }
+            let report = marks.install(seed(1_000));
+            if lost {
+                assert!(report.fill_prices.is_empty(), "a later seed cannot repair loss after itself");
+            } else {
+                assert_eq!(report.fill_prices.len(), 1);
+                let (height, prices) = &report.fill_prices[0];
+                assert_eq!(*height, 1_001);
+                assert!(!prices.is_empty(), "reconstructed input survives checkpoint installation");
+            }
+        }
+    }
+
+    #[test]
     fn the_grid_holds_its_anchor_and_every_interval_both_ways() {
         assert!([800, 1_000, 1_100, 2_000].into_iter().all(|height| GRID.contains(height)));
         assert!(![999, 1_001, 1_050].into_iter().any(|height| GRID.contains(height)));
@@ -897,6 +922,7 @@ pub(crate) mod tests {
         assert!(marks.seed_ready(1_000), "unavailable before the first seed: installs at once");
         let first = marks.install(seed(995));
         let expected = MarksInstallReport {
+            fill_prices: Vec::new(),
             previous_seed: None,
             check: MarksCheck::Skipped("noSnapshot"),
             rebuild: Rebuild::Replayed { blocks: 0 },

@@ -568,10 +568,10 @@ async fn run_owner(
     loop {
         tokio::select! {
             Some(input) = inputs.recv() => {
-                let touched = apply_input(&mut diagnostics, &mut book, &mut marks, &mut assembler, input);
+                let mut touched = apply_input(&mut diagnostics, &mut book, &mut marks, &mut assembler, input);
                 // a seed made ready by these blocks installs before anything is pushed: the frames carry the marks a
                 // query would read (review 000445 r1 P2)
-                install_seed_ready(&mut diagnostics, &mut marks, &mut held_seed);
+                touched.absorb(install_seed_ready(&mut diagnostics, &mut book, &mut marks, &mut held_seed));
                 if publisher.track(&book) {
                     publisher.push_changes(&mut book, &touched, marks.at());
                 }
@@ -883,7 +883,7 @@ fn receive_anchor(
 ) -> bool {
     match message {
         AnchorMessage::Parsed { parsed, seed } => {
-            receive_seed(diagnostics, marks, held_seed, parsed.anchor.height, seed);
+            let restored = receive_seed(diagnostics, book, marks, held_seed, parsed.anchor.height, seed);
             if let Some(replaced) = held.replace(parsed) {
                 info!("accounts: anchor {} superseded while waiting for its blocks", replaced.anchor.height);
                 ACCOUNTS_ANCHOR_SKIPPED_TOTAL.inc();
@@ -892,7 +892,7 @@ fn receive_anchor(
             if let Some(waiting) = held {
                 info!("accounts: anchor {} waits until its blocks are applied", waiting.anchor.height);
             }
-            installed
+            installed || !restored.accounts.is_empty()
         }
         AnchorMessage::Failed { height, error } => {
             error!("accounts: checkpoint {height} failed to parse, withholding the view and the node marks: {error}");
@@ -906,37 +906,45 @@ fn receive_anchor(
 
 fn receive_seed(
     diagnostics: &mut AccountDiagnostics,
+    book: &mut AccountBook,
     marks: &mut NodeMarks,
     held_seed: &mut Option<Box<MarkSeed>>,
     height: u64,
     seed: std::result::Result<Box<MarkSeed>, String>,
-) {
+) -> Touched {
     match seed {
         Ok(seed) => {
             if let Some(replaced) = held_seed.replace(seed) {
                 info!("node marks: seed {} superseded while waiting for its blocks", replaced.height);
             }
-            install_seed_ready(diagnostics, marks, held_seed);
+            install_seed_ready(diagnostics, book, marks, held_seed)
         }
         Err(error) => {
             error!("node marks: checkpoint {height} cannot seed our reconstruction, withholding the marks: {error}");
             NODE_MARKS_SEED_FAILURES_TOTAL.inc();
             marks.record_seed_failure(height, error);
+            Touched::default()
         }
     }
 }
 
 /// Installs the held seed once the marks are ready for it.
-fn install_seed_ready(diagnostics: &mut AccountDiagnostics, marks: &mut NodeMarks, held_seed: &mut Option<Box<MarkSeed>>) {
+fn install_seed_ready(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, marks: &mut NodeMarks, held_seed: &mut Option<Box<MarkSeed>>) -> Touched {
     let Some(seed) = held_seed.take_if(|seed| marks.seed_ready(seed.height)) else {
-        return;
+        return Touched::default();
     };
     let height = seed.height;
-    log_marks_install(diagnostics, height, &marks.install(*seed));
+    let report = marks.install(*seed);
+    let touched = book.restore_execution_marks(&report.fill_prices);
+    if !touched.accounts.is_empty() {
+        info!("accounts: seed {height} restored execution marks across {} blocks for {} accounts", report.fill_prices.len(), touched.accounts.len());
+    }
+    log_marks_install(diagnostics, height, &report);
+    touched
 }
 
 fn log_marks_install(diagnostics: &mut AccountDiagnostics, height: u64, report: &MarksInstallReport) {
-    let MarksInstallReport { previous_seed, check, rebuild, errors } = report;
+    let MarksInstallReport { previous_seed, check, rebuild, errors, fill_prices: _ } = report;
     let rebuild_label = match rebuild {
         Rebuild::Replayed { .. } => "replayed",
         Rebuild::Ahead => "ahead",

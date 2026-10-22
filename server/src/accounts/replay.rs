@@ -120,6 +120,8 @@ pub(crate) enum AccountEvent {
 /// whose decimals the strings carry).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FillEvent {
+    /// Retained wire identity for execution marks rebuilt after checkpoint loading.
+    tid: u64,
     coin: String,
     side: Side,
     px: String,
@@ -147,6 +149,7 @@ impl FillEvent {
         let backstop = fill.liquidation.as_ref().is_some_and(|liquidation| liquidation.method == BACKSTOP_METHOD)
             && fill.dir != ADL_DIR;
         Ok(Self {
+            tid: fill.tid,
             coin: fill.coin.clone(),
             side: fill.side,
             px: fill.px.clone(),
@@ -156,6 +159,14 @@ impl FillEvent {
             backstop,
             mark,
         })
+    }
+
+    /// Replace only this block/trade's projection using a completed trusted seed replay, never a current mark.
+    pub(crate) fn restore_mark(&mut self, block: u64, prices: &super::marks::fill_prices::FillMarkPrices) -> bool {
+        let mark = prices.get(block, &self.coin, self.tid);
+        if self.mark == mark { return false; }
+        self.mark = mark;
+        true
     }
 
     /// The pool's cash change for a market of these decimals.
@@ -413,6 +424,18 @@ impl MarginStates {
         let markets = Markets::of(checkpoint)?;
         let accounts = checkpoint.accounts.iter().map(|(user, account)| (*user, AccountMargin::of(account, &markets))).collect();
         Ok(Self { markets, accounts })
+    }
+
+    /// Rebuild only accounts whose retained execution-price evidence changed. Other accounts and the immutable
+    /// market universe already belong to this anchor; cloning the full 135k-account state would add avoidable work.
+    pub(crate) fn restart_accounts(&mut self, anchor: &Self, users: &FxHashSet<Address>) {
+        for user in users {
+            if let Some(account) = anchor.accounts.get(user) {
+                self.accounts.insert(*user, account.clone());
+            } else {
+                self.accounts.remove(user);
+            }
+        }
     }
 
     /// Moves `user`'s state by its event of `block`; accounts not tracked or stopped are left as they are. Returns

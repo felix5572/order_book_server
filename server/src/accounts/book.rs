@@ -1019,6 +1019,30 @@ impl AccountBook {
         report
     }
 
+    /// A seed can reconstruct fills received while its checkpoint was loading. Patch the retained event projections
+    /// before installing the account anchor, and refresh an already active replay as well. One scan of the bounded
+    /// event log; no repeated scan per block and no persistent second price cache. Loss/overflow flags stay unchanged.
+    pub(crate) fn restore_execution_marks(&mut self, prices: &[(u64, super::marks::fill_prices::FillMarkPrices)]) -> Touched {
+        if prices.is_empty() { return Touched::default(); }
+        let blocks: FxHashMap<_, _> = prices.iter().map(|(height, prices)| (*height, prices)).collect();
+        let mut accounts = FxHashSet::default();
+        for logged in &mut self.events {
+            if let Some(prices) = blocks.get(&logged.block)
+                && let AccountEvent::Fill(fill) = &mut logged.event
+                && fill.restore_mark(logged.block, prices)
+            {
+                accounts.insert(logged.user);
+            }
+        }
+        if !accounts.is_empty() && let Some(replay) = &mut self.replay {
+            replay.current.restart_accounts(&replay.anchored, &accounts);
+            for logged in self.events.iter().filter(|logged| accounts.contains(&logged.user)) {
+                replay.current.apply(logged.block, logged.user, &logged.event);
+            }
+        }
+        Touched { accounts: accounts.into_iter().collect(), positions: Vec::new() }
+    }
+
     /// Installs a newer anchor. Heights only increase: the poller sends each checkpoint once, newest first.
     pub(crate) fn install_anchor(&mut self, anchor: Anchor) -> InstallReport {
         let Anchor { height, time_ms, coins: mut anchor_coins, account_modes, margins } = anchor;
@@ -2369,6 +2393,41 @@ mod tests {
         assert!(book.availability().is_ok(), "does not stop the account view or mark service");
     }
 
+
+    #[test]
+    fn restored_marks_correct_active_and_future_cash_replay_without_hiding_event_loss() {
+        use crate::accounts::test_support::fills_line;
+        use crate::accounts::marks::{MarkInputs, execution::BlockFill, fill_prices::FillMarkPrices, tests::trusted_marks};
+        let isolated = checkpoint_user(ISOLATED);
+        let mut actual = replay_book(1_000, 1_001, &[(isolated, -2_000_000)]);
+        let mut expected = replay_book(1_000, 1_001, &[(isolated, -2_000_000)]);
+        for book in [&mut actual, &mut expected] {
+            let replay = book.replay.as_mut().unwrap();
+            replay.anchored.add_cross_cash(&isolated, 0, 1_000_000_000_000);
+            replay.current.add_cross_cash(&isolated, 0, 1_000_000_000_000);
+        }
+        let raw = fills_line(1_002, &[(isolated, "BTC", "A", 5, "0.0", "0.001")]).replace("\"px\":\"1.0\"", "\"px\":\"70000.0\"");
+        let batch: Batch<NodeDataFill> = sonic_rs::from_str(&raw).unwrap();
+        let mut marks = trusted_marks();
+        let prices = marks.apply_block(1_002, MarkInputs { fills: batch.events_ref().iter().map(BlockFill::of).collect(), ..MarkInputs::default() }).fill_prices;
+        actual.apply_block(block_actions(1_002, &[]), vec![batch.clone()], Vec::new(), |_| None, &FillMarkPrices::default());
+        expected.apply_block(block_actions(1_002, &[]), vec![batch], Vec::new(), |_| None, &prices);
+        let wanted = &expected.replay.as_ref().unwrap().current;
+        assert!(actual.replay.as_ref().unwrap().current.check_against(wanted, wanted).compared.values().any(|c| c.estimated > 0), "missing mark must change this fixture's cash");
+        actual.events_dropped = true;
+        assert_eq!(actual.restore_execution_marks(&[(1_003, FillMarkPrices::default())]), Touched::default(), "another block cannot change the trade");
+        let touched = actual.restore_execution_marks(&[(1_002, prices)]);
+        assert_eq!(touched.accounts, [isolated]);
+        assert!(actual.events_dropped, "price evidence does not repair an account event-log gap");
+        let check = actual.replay.as_ref().unwrap().current.check_against(wanted, wanted);
+        assert!(check.compared.values().all(|c| c.estimated == 0 && c.mismatched == 0));
+        let mut next = anchor(1_001, &[(PUMP, 0, &[(isolated, -2_000_000)])]);
+        next.margins = per_dex_with_main_cash(-12_000_000_000);
+        next.margins.add_cross_cash(&isolated, 0, 1_000_000_000_000);
+        actual.install_anchor(next);
+        let check = actual.replay.as_ref().unwrap().current.check_against(wanted, wanted);
+        assert!(check.compared.values().all(|c| c.estimated == 0 && c.mismatched == 0), "patched event survives future anchor replay");
+    }
 
     #[test]
     fn execution_marks_are_retained_in_the_event_log_when_a_new_anchor_replays_fills() {

@@ -37,6 +37,8 @@ pub(crate) struct FillMarkPrices {
 }
 
 impl FillMarkPrices {
+    pub(super) fn is_empty(&self) -> bool { self.coins.is_empty() }
+
     pub(crate) fn get(&self, height: u64, coin: &str, tid: u64) -> Option<FillMarkRange> {
         if height != self.height { return None; }
         self.coins.get(coin)?.get(&tid).copied().flatten()
