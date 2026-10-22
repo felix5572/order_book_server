@@ -199,8 +199,9 @@ pub(crate) enum StopReason {
     /// A unified account's HIP-4 outcome fill (`#N`): its sizes are not measured.
     OutcomeFill,
     UnknownMarket(String),
-    /// `topUpIsolatedOnlyMargin`: never seen.
-    TopUpIsolatedOnlyMargin,
+    /// Target-leverage top-up needs the mark, size and isolated equity at its execution point.
+    /// Client 6911b792's 0x3c94170 rule is known; that action state and a live golden are still absent.
+    TopUpIsolatedOnlyMargin { asset: u32, target_leverage: String },
     /// The state contradicts an event or the event does not read (the text says which).
     Contradiction(String),
 }
@@ -212,6 +213,8 @@ impl StopReason {
             Self::UnknownAccountMode(detail) | Self::UnreadLedger(detail) | Self::UnknownMarket(detail) | Self::Contradiction(detail) => {
                 format!("{}:{detail}", self.label())
             }
+            Self::TopUpIsolatedOnlyMargin { asset, target_leverage } =>
+                format!("{}:asset={asset},targetLeverage={target_leverage},executionStateUnverified", self.label()),
             _ => self.label().to_string(),
         }
     }
@@ -233,7 +236,7 @@ impl StopReason {
             Self::NonUsdcSpotFill => "nonUsdcSpotFill",
             Self::OutcomeFill => "outcomeFill",
             Self::UnknownMarket(_) => "unknownMarket",
-            Self::TopUpIsolatedOnlyMargin => "topUpIsolatedOnlyMargin",
+            Self::TopUpIsolatedOnlyMargin { .. } => "topUpIsolatedOnlyMargin",
             Self::Contradiction(_) => "contradiction",
         }
     }
@@ -740,7 +743,9 @@ fn apply_action(account: &mut AccountMargin, markets: &Markets, block: u64, acti
                 account.switch(block, key);
             }
         }
-        BlockAction::TopUpIsolatedOnlyMargin => return Err(StopReason::TopUpIsolatedOnlyMargin),
+        BlockAction::TopUpIsolatedOnlyMargin { asset, target_leverage } => {
+            return Err(StopReason::TopUpIsolatedOnlyMargin { asset: *asset, target_leverage: target_leverage.clone() });
+        }
         BlockAction::SetAbstraction => return Err(StopReason::AccountModeSwitch),
         BlockAction::Withdraw { amount_wei } => add_main(account, markets, -amount_wei)?,
         BlockAction::ReserveRequestWeight { cost_wei } => add_main(account, markets, -cost_wei)?,
@@ -1429,7 +1434,7 @@ pub(crate) mod tests {
         let cases = [
             (BlockAction::IsolatedMargin { asset: 0, ntli_micro: 1 }, "without an isolated position"),
             (BlockAction::SetAbstraction, "accountModeSwitch"),
-            (BlockAction::TopUpIsolatedOnlyMargin, "topUpIsolatedOnlyMargin"),
+            (BlockAction::TopUpIsolatedOnlyMargin { asset: 1, target_leverage: "0.75".into() }, "topUpIsolatedOnlyMargin"),
             (BlockAction::Leverage { asset: 77, is_cross: true, leverage: 20 }, "action asset 77"),
         ];
         for (action, expected) in cases {
@@ -1714,6 +1719,23 @@ pub(crate) mod tests {
         assert!(!account.margin_updated_in(7, 0), "another standard dex has separate cash");
         account.pools = Pools::Unified(0);
         assert!(account.margin_updated_in(7, 0), "unified capacity is shared");
+    }
+
+    #[test]
+    fn target_leverage_gap_is_local_to_the_account_and_keeps_diagnostic_inputs() {
+        let mut states = per_dex();
+        let before = states.accounts[&user(ISOLATED)].json();
+        let other = states.accounts[&user(HOLDER)].json();
+        let action = BlockAction::TopUpIsolatedOnlyMargin { asset: 1, target_leverage: "0.7500".into() };
+        states.apply(7, user(ISOLATED), &AccountEvent::Action(action));
+        let stopped = states.accounts[&user(ISOLATED)].stop.as_ref().unwrap();
+        assert_eq!(stopped.block, Some(7));
+        assert_eq!(stopped.reason.label(), "topUpIsolatedOnlyMargin", "bounded metric label is unchanged");
+        assert_eq!(stopped.reason.text(),
+            "topUpIsolatedOnlyMargin:asset=1,targetLeverage=0.7500,executionStateUnverified");
+        assert_eq!(states.accounts[&user(ISOLATED)].json(), before, "do not guess a transfer or change the leverage setting");
+        assert!(states.replays(&user(HOLDER)));
+        assert_eq!(states.accounts[&user(HOLDER)].json(), other);
     }
 
 }

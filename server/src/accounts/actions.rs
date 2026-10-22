@@ -48,8 +48,9 @@ pub(crate) enum BlockAction {
     /// position is open ("Cannot switch leverage type with open position."), so a switch moves no cash; an isolated
     /// position's later fills move margin at the leverage (research "逐仓成交的划转").
     Leverage { asset: u32, is_cross: bool, leverage: u32 },
-    /// `topUpIsolatedOnlyMargin`: never seen; its payload is not read.
-    TopUpIsolatedOnlyMargin,
+    /// `topUpIsolatedOnlyMargin`: a target effective leverage, NOT the integer leverage setting.
+    /// Keep the API float string verbatim for diagnosis until execution-time state permits cash replay.
+    TopUpIsolatedOnlyMargin { asset: u32, target_leverage: String },
     /// `userSetAbstraction`, `agentSetAbstraction`.
     SetAbstraction,
     /// `withdraw3`: the amount rounded to micro USDC (fee included), stored in 10^-8 USDC, leaves the main
@@ -62,7 +63,7 @@ pub(crate) enum BlockAction {
 impl BlockAction {
     pub(crate) const fn kind(&self) -> BlockActionKind {
         match self {
-            Self::IsolatedMargin { .. } | Self::Leverage { .. } | Self::TopUpIsolatedOnlyMargin => BlockActionKind::Margin,
+            Self::IsolatedMargin { .. } | Self::Leverage { .. } | Self::TopUpIsolatedOnlyMargin { .. } => BlockActionKind::Margin,
             Self::SetAbstraction => BlockActionKind::AccountMode,
             Self::Withdraw { .. } => BlockActionKind::Withdrawal,
             Self::ReserveRequestWeight { .. } => BlockActionKind::RequestWeight,
@@ -78,7 +79,10 @@ impl BlockAction {
                 is_cross: action.field(action.is_cross.as_ref(), "isCross")?,
                 leverage: action.field(action.leverage.as_ref(), "leverage")?,
             },
-            "topUpIsolatedOnlyMargin" => Self::TopUpIsolatedOnlyMargin,
+            "topUpIsolatedOnlyMargin" => Self::TopUpIsolatedOnlyMargin {
+                asset: action.field(action.asset.as_ref(), "asset")?,
+                target_leverage: action.field(action.leverage.as_ref(), "leverage")?,
+            },
             "userSetAbstraction" | "agentSetAbstraction" => Self::SetAbstraction,
             "withdraw3" => {
                 let amount: String = action.field(action.amount.as_ref(), "amount")?;
@@ -199,19 +203,38 @@ pub(crate) mod tests {
             (r#"{"type":"userSetAbstraction","signatureChainId":"0xa4b1","hyperliquidChain":"Mainnet","user":"0x77cb5ed9458def628fdb13e0f9098cc3a454bd04","abstraction":"u","nonce":1792446348734}"#, BlockAction::SetAbstraction),
             (r#"{"type":"agentSetAbstraction","abstraction":"u"}"#, BlockAction::SetAbstraction),
             (r#"{"type":"withdraw3","signatureChainId":"0xa4b1","hyperliquidChain":"Mainnet","destination":"0x619d9addcefccbe3bde5591b72b9cbe1103c5e43","amount":"34.390000","time":1792446358887}"#, BlockAction::Withdraw { amount_wei: 3_439_000_000 }),
-            (r#"{"type":"topUpIsolatedOnlyMargin","asset":5,"anything":[1]}"#, BlockAction::TopUpIsolatedOnlyMargin),
         ];
         for (payload, expected) in cases {
             let line = REAL_LINE.replace(LEVERAGE_ACTION, payload);
             assert_eq!(parse_block_actions(&line).unwrap().actions, [(expected.clone(), address(LEVERAGE_VAULT))], "{payload}");
         }
         let kinds = [
-            (BlockAction::TopUpIsolatedOnlyMargin, BlockActionKind::Margin),
+            (BlockAction::TopUpIsolatedOnlyMargin { asset: 5, target_leverage: "0.75".into() }, BlockActionKind::Margin),
             (BlockAction::SetAbstraction, BlockActionKind::AccountMode),
             (BlockAction::Withdraw { amount_wei: 1 }, BlockActionKind::Withdrawal),
         ];
         for (action, kind) in kinds {
             assert_eq!(action.kind(), kind);
+        }
+    }
+
+    /// API-contract fixture, not an observed successful mainnet action (none in the 2026-10-22 scan).
+    #[test]
+    fn target_leverage_topup_retains_payload_and_rejections_do_not_invalidate_cash() {
+        let payload = r#"{"type":"topUpIsolatedOnlyMargin","asset":110104,"leverage":"0.7500"}"#;
+        let line = REAL_LINE.replace(LEVERAGE_ACTION, payload);
+        assert_eq!(parse_block_actions(&line).unwrap().actions,
+            [(BlockAction::TopUpIsolatedOnlyMargin { asset: 110_104, target_leverage: "0.7500".into() }, address(LEVERAGE_VAULT))]);
+        for bad in [
+            r#"{"type":"topUpIsolatedOnlyMargin","asset":110104}"#,
+            r#"{"type":"topUpIsolatedOnlyMargin","asset":110104,"leverage":0.75}"#,
+            r#"{"type":"topUpIsolatedOnlyMargin","leverage":"0.75"}"#,
+        ] {
+            let invalid = REAL_LINE.replace(LEVERAGE_ACTION, bad);
+            assert!(parse_block_actions(&invalid).is_err(), "a successful action requires the API fields: {bad}");
+            let rejected = invalid.replace(r#"{"status":"ok","response":{"type":"default"}}"#,
+                r#"{"status":"err","response":"Asset not strict isolated"}"#);
+            assert!(parse_block_actions(&rejected).unwrap().actions.is_empty(), "rejected payloads move no cash");
         }
     }
 
