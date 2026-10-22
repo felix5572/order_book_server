@@ -50,8 +50,9 @@ struct PerpMarket {
     asset: usize,
     size_decimals: u32,
     margin_mode: AssetMarginMode,
-    /// The leverage of an isolated position opened without a setting (an isolated-only asset): its margin table's
-    /// first tier's (checkpoints 1192420000-1192430000: 51 of 56 such positions, the other 5 set by `updateLeverage`).
+    /// A position opened without a setting takes min(first-tier max leverage, 20). Client 6911b792's constructor
+    /// 0x44ce291..0x44ce2b6 caps only this default; a stored or successful explicit setting takes precedence.
+    /// JPY H1192705810 / checkpoints1192700000..1192710000 confirm 20 on a 50x table (see the golden).
     default_leverage: u32,
 }
 
@@ -91,7 +92,7 @@ impl Markets {
                     asset: asset_index,
                     size_decimals: asset.size_decimals,
                     margin_mode: asset.margin_mode.clone(),
-                    default_leverage: table.first_max_leverage(),
+                    default_leverage: table.first_max_leverage().min(20),
                 };
                 markets.perps.insert(asset.name.clone(), market);
             }
@@ -1617,6 +1618,57 @@ pub(crate) mod tests {
         assert_eq!(account.isolated[&(0, 0)], case["after"][1].as_i64().unwrap() * WEI_PER_MICRO, "{} {}", fill.coin, case["block"]);
         assert_eq!(totals(account)[&0], before_total + cash_flow, "a transfer conserves the pool total");
         assert!(!account.estimated, "{} {}", fill.coin, case["block"]);
+    }
+
+    #[test]
+    fn default_leverage_caps_high_tiers_without_changing_explicit_settings() {
+        for (maximum, expected) in [(3, 3), (20, 20), (21, 20), (50, 20)] {
+            let states = states(|checkpoint| {
+                checkpoint["exchange"]["locus"]["cls"][0]["meta"]["marginTableIdToMarginTable"][1][1]
+                    ["margin_tiers"][0]["max_leverage"] = json!(maximum);
+            });
+            assert_eq!(states.markets.perps["BTC"].default_leverage, expected);
+            assert_eq!(states.accounts[&user(ISOLATED)].isolated_leverage[&(0, 0)], 5, "stored settings are not defaults");
+        }
+    }
+
+    #[test]
+    fn recorded_jpy_open_uses_twenty_default_and_preserves_explicit_fifty() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("replay/isolated_default_leverage_golden.json")).unwrap();
+        assert!(golden["before"]["position"].is_null(), "no prior position or leverage setting");
+        let recorded_after = &golden["after"]["position"]["l"]["I"];
+        assert_eq!(recorded_after["l"], 20);
+        let mark = parse_size_raw(golden["execution_mark"]["previous"]["price"]["px"].as_str().unwrap(), 4).unwrap().cast_unsigned();
+        assert!(golden["execution_mark"]["same_block_updates"].as_array().unwrap().is_empty());
+        // The fixture maps the recorded dex-1 asset 24 to index 0. Fills, table, mark and cash remain recorded
+        // values; unrelated fixture holdings deliberately keep the cross-capacity uncertainty visible.
+        for explicit in [None, Some(50)] {
+            let mut states = states(|checkpoint| {
+                checkpoint["exchange"]["locus"]["ust"][0][1].as_object_mut().unwrap().remove("a");
+                let dex = &mut checkpoint["exchange"]["locus"]["cls"][1];
+                dex["meta"]["universe"] = json!([golden["market"]]);
+                dex["meta"]["marginTableIdToMarginTable"] = json!([[50, golden["margin_table"]]]);
+                dex["user_states"]["user_to_state"] = json!([[HOLDER, {"u": golden["before"]["cross_cash_micro"]}]]);
+            });
+            let holder = user(HOLDER);
+            let account = states.accounts.get_mut(&holder).unwrap();
+            account.cross_exposure_seen.insert(1); // Real JPY owner also holds cross NVDA and GOLD.
+            if let Some(leverage) = explicit { account.isolated_leverage.insert((1, 0), leverage); }
+            let before = totals(account);
+            let mut flow = 0;
+            for wire in golden["fills"].as_array().unwrap() {
+                let fill: Fill = serde_json::from_value(wire.clone()).unwrap();
+                let event = FillEvent::at_mark(&fill, Some(FillMarkRange { min_px_raw: mark, max_px_raw: mark, size_decimals: 2 })).unwrap();
+                flow += event.cash_wei(2, 4).unwrap();
+                states.apply(golden["height"].as_u64().unwrap(), holder, &AccountEvent::Fill(event));
+            }
+            let account = &states.accounts[&holder];
+            let expected = if explicit.is_some() { &golden["observed_old_replay_cash_micro"] } else { &recorded_after["u"] };
+            assert_eq!(account.isolated[&(1, 0)], expected.as_i64().unwrap() * WEI_PER_MICRO);
+            assert_eq!(totals(account)[&1], before[&1] + flow, "margin moves conserve total cash");
+            assert!(account.estimated, "cross free collateral is still unknown; this regression verifies the default");
+            assert_eq!(stop(&states, HOLDER), None);
+        }
     }
 
     #[test]

@@ -61,7 +61,7 @@ impl MarginTable {
         &self.tiers
     }
 
-    /// The first tier's max leverage: the leverage a position opened without a setting takes.
+    /// The first tier's maximum leverage; account initialization applies its separate default cap.
     pub(crate) fn first_max_leverage(&self) -> u32 {
         self.tiers[0].max_leverage
     }

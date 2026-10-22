@@ -1,0 +1,139 @@
+{
+  "client_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+  "constructor": "0x44ce150; cap at 0x44ce291..0x44ce2b6; fill caller 0x42603ce..0x42603e1",
+  "user": "0xdd581daa63b7e89fb50ca24e954628d15cde0606",
+  "height": 1192705810,
+  "coin": "xyz:JPY",
+  "dex": 1,
+  "asset": 24,
+  "anchor_from": 1192700000,
+  "anchor_to": 1192710000,
+  "source_sha256": {
+    "1192700000_selected_states.json": "59cd2f670e525a547a7c839cb817327677ff3a57363c9eb74efb7f0e6c153219",
+    "1192710000_selected_states.json": "fb3184bb6aa22eb00af94d11cb54a5d9ffe31f8d5fbd268832843246dcf7ab83",
+    "node_fills_streaming_affected_window.jsonl.gz": "721e9778207ed75e86de588401deaf0f44786873484b5848f24c1c408c9c570a",
+    "replica_actions_selected.jsonl.gz": "95ff151cebae91aa2371df238669b7523390068680c152c6ff9eab6dad2774c6"
+  },
+  "fills": [
+    {
+      "coin": "xyz:JPY",
+      "px": "157.62",
+      "sz": "4.25",
+      "side": "A",
+      "time": 1792641627230,
+      "startPosition": "0.0",
+      "dir": "Open Short",
+      "closedPnl": "0.0",
+      "hash": "0x872c74ecceac7dbb88a60447173f1202017800d269af9c8d2af5203f8da057a6",
+      "oid": 582171507306,
+      "crossed": true,
+      "fee": "0.060289",
+      "tid": 58266778753546,
+      "cloid": "0x05d39d913cd84921aaa9c7fb67488807",
+      "feeToken": "USDC",
+      "twapId": null,
+      "deployerFee": "0.030144"
+    },
+    {
+      "coin": "xyz:JPY",
+      "px": "157.62",
+      "sz": "8.75",
+      "side": "A",
+      "time": 1792641627230,
+      "startPosition": "-4.25",
+      "dir": "Open Short",
+      "closedPnl": "0.0",
+      "hash": "0x872c74ecceac7dbb88a60447173f1202017800d269af9c8d2af5203f8da057a6",
+      "oid": 582171507306,
+      "crossed": true,
+      "fee": "0.124125",
+      "tid": 248062330186332,
+      "cloid": "0x05d39d913cd84921aaa9c7fb67488807",
+      "feeToken": "USDC",
+      "twapId": null,
+      "deployerFee": "0.062062"
+    }
+  ],
+  "before": {
+    "cross_cash_micro": -10506361347,
+    "position": null
+  },
+  "market": {
+    "szDecimals": 2,
+    "name": "xyz:JPY",
+    "marginTableId": 50,
+    "marginMode": "noCross"
+  },
+  "margin_table": {
+    "description": "",
+    "margin_tiers": [
+      {
+        "lower_bound": 0,
+        "max_leverage": 50,
+        "maintenance_deduction": 0
+      }
+    ],
+    "collateral_token": 0
+  },
+  "after": {
+    "cross_cash_micro": -10609229671,
+    "position": {
+      "s": -1300,
+      "l": {
+        "I": {
+          "l": 20,
+          "u": 2151601586
+        }
+      },
+      "M": 50,
+      "e": 2049060000
+    }
+  },
+  "rejected_setting": {
+    "height": 1192705702,
+    "bundle_id": "0x1b1a3808ac60ad949c39ff2eae879fdf06c9c962f7dd677d290cd9e879479e8f",
+    "action_index": 682,
+    "action": {
+      "type": "updateLeverage",
+      "asset": 110024,
+      "isCross": true,
+      "leverage": 10
+    },
+    "receipt": {
+      "user": "0xdd581daa63b7e89fb50ca24e954628d15cde0606",
+      "res": {
+        "status": "err",
+        "response": "Cross margin is not allowed for this asset."
+      }
+    },
+    "raw_block_sha256": "32cbcd6c1be5472b8b758375e2c277bae0b8a8af91bf56b562ba94d02f9e9dd2"
+  },
+  "execution_mark": {
+    "previous": {
+      "height": 1192705803,
+      "block_time": "2026-10-22T04:00:26.681102526",
+      "price": {
+        "px": "157.64",
+        "last_update_time": "2026-10-22T04:00:26.681102526",
+        "daily_px": "158.06"
+      },
+      "source": "/home/ubuntu/hl/data/hip3_oracle_updates_streaming/hourly/20261022/4",
+      "raw_line_sha256": "a72d5e5cb285104cd4964747e40f81e7937271536eaba949862ca8ddf5b052ed"
+    },
+    "same_block_updates": [],
+    "next": {
+      "height": 1192705839,
+      "block_time": "2026-10-22T04:00:29.672186415",
+      "price": {
+        "px": "157.64",
+        "last_update_time": "2026-10-22T04:00:29.672186415",
+        "daily_px": "158.06"
+      },
+      "source": "/home/ubuntu/hl/data/hip3_oracle_updates_streaming/hourly/20261022/4",
+      "raw_line_sha256": "2704265f38eb89a85a4fd2a9ccdf8b63efc288e4e0ecf1629a0a7e8f7754cb18"
+    },
+    "note": "Final HIP-3 mark stream; no JPY update in the fill block, so previous stored mark is the execution price."
+  },
+  "observed_old_replay_cash_micro": 2090121986,
+  "scope": "Exact JPY isolated cash regression at recorded mark. Other cross positions keep capacity estimated; not a full-account exactness claim."
+}
