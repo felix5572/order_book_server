@@ -25,6 +25,12 @@
 //! `open` lines: they take part as they open (bm 10-21 14:35-15:07: 84 such children were held waiting for good, and
 //! 28 more through a later modify of them).
 //!
+//! A modify of a parent moves its children to the successor: bm 10-22 hours 01-02, 308 of the 310 hash-less `canceled`
+//! of a parent listing children came right after the same account's `open` of a new order of the coin (none right
+//! before it); the successor's lines may list the children (its `canceled` at its own modify, its `filled`) or not (a
+//! successor filling at once), and 8 of the children triggered later. So the children wait for the successor from the
+//! modify on, and their own modifies follow them there.
+//!
 //! A modify of a waiting child keeps its successor waiting: the modify opens the new oid and cancels the old one right
 //! after it, hash-less, in the block (bm 10-21 hour 11: 129,306 of 129,342 such pairs were modifies by oid or cloid,
 //! all 111 of trigger orders; a bot's `batchModify` of a limit order with its TP and SL moves all three so, and the new
@@ -227,6 +233,16 @@ impl Families {
         self.children_of.entry(parent).or_default().push(child);
     }
 
+    /// A modify of a parent: the children still waiting for it wait for its successor.
+    fn adopt(&mut self, old: u64, new: u64) {
+        let Some(listed) = self.children_of.remove(&old) else { return };
+        let waiting: Vec<u64> = listed.into_iter().filter(|child| self.parent_of.get(child) == Some(&old)).collect();
+        for &child in &waiting {
+            self.parent_of.insert(child, new);
+        }
+        self.children_of.entry(new).or_default().extend(waiting);
+    }
+
     /// A modify's successor of a waiting child waits for the same parent (on its list while the parent is live).
     fn inherit(&mut self, old: u64, new: u64) {
         let Some(&parent) = self.parent_of.get(&old) else { return };
@@ -305,6 +321,25 @@ struct Successor {
     order: std::result::Result<InnerL4Order, String>,
 }
 
+/// A non-trigger order opened by an account holding a waiting child of its coin, kept for one status: when that status
+/// is the hash-less `canceled` of the coin's parent, the order is the parent's modify and the children wait for it (bm
+/// 10-22 01:26:09 block 1192577049: a limit sell's modify opens the new oid, cancels the old one listing the TP and SL
+/// under their own oids, and the new order, its `open` and `filled` listing none, fills at once; the node triggered the
+/// TP 8 minutes later). Nothing is held out of the band meanwhile.
+#[derive(Debug, Clone)]
+struct ParentSuccessor {
+    height: u64,
+    user: Address,
+    coin: String,
+    oid: u64,
+}
+
+impl ParentSuccessor {
+    fn modified_by(&self, height: u64, user: Address, status: &str, hash: Option<&str>, order: &L4Order) -> bool {
+        status == "canceled" && hash.is_none() && height == self.height && user == self.user && order.coin == self.coin
+    }
+}
+
 /// A child as its parent's live `open` lists it - under the parent's oid -, to be told by its own `open` line, which
 /// follows in the same block (bm 10-21 hour 09: 1,745 children, each after its parent, each matched by these fields).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -364,6 +399,7 @@ pub(crate) struct TriggerTable {
     families: Families,
     expected: ExpectedChildren,
     successor: Option<Successor>,
+    parent_successor: Option<ParentSuccessor>,
     /// Kept when a coin's orders are all gone, so a coin that gets orders again does not reuse a version.
     versions: FxHashMap<Coin, u64>,
     generation: u64,
@@ -398,6 +434,7 @@ impl TriggerTable {
             families: Families::default(),
             expected: ExpectedChildren::default(),
             successor: None,
+            parent_successor: None,
             versions: FxHashMap::default(),
             generation: 0,
             availability,
@@ -504,11 +541,12 @@ impl TriggerTable {
 
     /// One status of the order statuses stream, `height` its block's: an `open` adds a trigger order and announces a
     /// parent's children; any other status of an oid ends its order, a parent's `filled` or `marginCanceled` releasing
-    /// the children waiting for it. Whether a held order left (the order statuses hot path: allocation-free for an order
-    /// without children or announced siblings).
+    /// the children waiting for it, its modify moving them to the successor. Whether a held order left (the order
+    /// statuses hot path: allocation-free for an order without children or announced siblings).
     pub(crate) fn on_status(&mut self, height: u64, user: Address, status: &str, hash: Option<&str>, order: &L4Order) -> bool {
         self.expire_expected(height);
         self.settle_successor(height, user, status, hash, order);
+        let parent_successor = self.parent_successor.take();
         let oid = Oid::new(order.oid);
         if status == "open" {
             if !order.children.is_empty() && self.tracks(&order.coin) {
@@ -525,6 +563,9 @@ impl TriggerTable {
                 }
                 self.open(parsed, &order.coin, &oid);
             }
+            if !order.is_trigger && hash.is_some() && self.families.holds_any(user, &order.coin) {
+                self.parent_successor = Some(ParentSuccessor { height, user, coin: order.coin.clone(), oid: order.oid });
+            }
             return false;
         }
         match status {
@@ -535,8 +576,11 @@ impl TriggerTable {
                 }
             }
             "triggered" => {}
-            // a cancel, a rejection, any other status: the children wait for their own statuses or a successor's
-            _ => self.families.leave_waiting(order.oid),
+            _ => match parent_successor.filter(|successor| successor.modified_by(height, user, status, hash, order)) {
+                Some(successor) => self.families.adopt(order.oid, successor.oid),
+                // a cancel, a rejection, any other status: the children wait for their own statuses or a successor's
+                None => self.families.leave_waiting(order.oid),
+            },
         }
         self.close(&order.coin, &oid)
     }
@@ -669,6 +713,7 @@ impl TriggerTable {
             self.coins.clone_from(&previous.coins);
             self.families.clone_from(&previous.families);
             self.successor.clone_from(&previous.successor);
+            self.parent_successor.clone_from(&previous.parent_successor);
             log::info!("Snapshot carried no trigger section; kept {} untriggered trigger orders from the previous state", self.count());
         }
     }
@@ -1121,6 +1166,57 @@ mod tests {
         table.on_status(9, USER, "filled", None, &parent(78, &[&stop_loss, &take_profit], None));
         assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![792, 793]);
         assert!(table.families.parent_of.is_empty() && table.families.children_of.is_empty());
+    }
+
+    /// bm 10-22 block 1192577049 (forced flow acceptance run9): a modify of a parent opens the successor and cancels the
+    /// old oid right after it, hash-less; the successor, its `open` and `filled` listing no children, fills at once and
+    /// the node triggered the TP 8 minutes later. The children wait for the successor from the modify on, through its
+    /// own modifies (blocks 1192588386 and 1192588523, the second listing the child under its oid), and its `filled`
+    /// releases them. A hashed cancel, a successor of another coin, or another line between the two is no modify.
+    #[test]
+    fn a_parents_modify_moves_its_waiting_children_to_the_successor() {
+        const OTHER: Address = Address::new([3; 20]);
+        let (stop_loss, take_profit) = (stop("BTC", 11, "105"), stop("BTC", 12, "110"));
+        let mut filled_at_once = table(TriggerSection::Complete(Vec::new()));
+        filled_at_once.on_status(7, USER, "open", HASH, &parent(10, &[&stop_loss, &take_profit], Some(10)));
+        filled_at_once.on_status(7, USER, "open", HASH, &wire(&stop_loss));
+        filled_at_once.on_status(7, USER, "open", HASH, &wire(&take_profit));
+        filled_at_once.on_status(8, USER, "open", HASH, &parent(20, &[], None));
+        filled_at_once.on_status(8, USER, "canceled", None, &parent(10, &[&stop_loss, &take_profit], None));
+        assert_eq!((oids(&band(&filled_at_once, "BTC", "100", "120", 10)), held(&filled_at_once)), (Vec::<u64>::new(), vec![11, 12]));
+        filled_at_once.on_status(8, USER, "filled", None, &parent(20, &[], None));
+        assert_eq!(oids(&band(&filled_at_once, "BTC", "100", "120", 10)), vec![11, 12]);
+        assert!(filled_at_once.families.parent_of.is_empty() && filled_at_once.families.children_of.is_empty());
+
+        let child = stop("BTC", 31, "105");
+        let mut modified_again = table(TriggerSection::Complete(Vec::new()));
+        modified_again.on_status(7, USER, "open", HASH, &parent(30, &[&child], Some(30)));
+        modified_again.on_status(7, USER, "open", HASH, &wire(&child));
+        modified_again.on_status(8, USER, "open", HASH, &parent(40, &[], None));
+        modified_again.on_status(8, USER, "canceled", None, &parent(30, &[&child], None));
+        modified_again.on_status(9, USER, "open", HASH, &parent(50, &[], None));
+        modified_again.on_status(9, USER, "canceled", None, &parent(40, &[&child], None));
+        assert_eq!((oids(&band(&modified_again, "BTC", "100", "120", 10)), held(&modified_again)), (Vec::<u64>::new(), vec![31]));
+        modified_again.on_status(10, USER, "filled", None, &parent(50, &[], None));
+        assert_eq!(oids(&band(&modified_again, "BTC", "100", "120", 10)), vec![31]);
+
+        for (cancel_hash, successor_coin, line_between) in [(HASH, "BTC", false), (None, "ETH", false), (None, "BTC", true)] {
+            let child = stop("BTC", 61, "105");
+            let mut unmodified = table(TriggerSection::Complete(Vec::new()));
+            unmodified.on_status(7, USER, "open", HASH, &parent(60, &[&child], Some(60)));
+            unmodified.on_status(7, USER, "open", HASH, &wire(&child));
+            let mut successor = parent(70, &[], None);
+            successor.coin = successor_coin.to_string();
+            unmodified.on_status(8, USER, "open", HASH, &successor);
+            if line_between {
+                unmodified.on_status(8, OTHER, "canceled", HASH, &wire(&stop("ETH", 99, "1")));
+            }
+            unmodified.on_status(8, USER, "canceled", cancel_hash, &parent(60, &[&child], None));
+            unmodified.on_status(8, USER, "filled", None, &successor);
+            let case = format!("{cancel_hash:?} {successor_coin} {line_between}");
+            assert_eq!((oids(&band(&unmodified, "BTC", "100", "120", 10)), held(&unmodified)), (Vec::<u64>::new(), vec![61]), "{case}");
+            assert!(unmodified.on_status(8, USER, "canceled", None, &wire(&child)), "{case}");
+        }
     }
 
     /// A trigger order with children keeps them waiting through its `triggered`; a child the block announced but whose
