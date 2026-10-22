@@ -37,10 +37,11 @@ impl TriggerPrice {
         if self.coin.as_ref() != coin { return false; }
         let Ok(level) = crate::accounts::marks::seed::exact_price_units(&self.price, size_decimals) else { return false; };
         if level == 0 { return false; }
-        // Strict crossing deliberately excludes equality until the client's boundary semantics are sampled.
+        // BM TSLA 1193424645 and META 1193428334 trigger on reaching the threshold in either direction.
+        // Require the opening price to be strictly ineligible: an already-met trigger has no new-write proof.
         match self.direction {
-            Direction::Down => before > level && after < level,
-            Direction::Up => before < level && after > level,
+            Direction::Down => before > level && after <= level,
+            Direction::Up => before < level && after >= level,
         }
     }
 }

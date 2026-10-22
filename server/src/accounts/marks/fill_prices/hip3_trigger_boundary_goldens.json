@@ -1,0 +1,440 @@
+{
+  "provenance": {
+    "source": "BM 1193420000 to 1193430000 checkpoints, paired fills, triggered statuses and sole successful setOracle per block",
+    "archive": "research_data/ob_hourly_watch_20261021/cash_meta_1193420000_1193440000",
+    "scope": "Actual upward Stop Limit at 380.0 and downward Stop Market at 644.0 trigger on equality. Cash tests cover each complete isolated ledger, with ample cross funding. META also includes its preceding strict crossing fill. Other account coin flows are outside this test.",
+    "production_cash_errors_micro": {
+      "xyz:TSLA": -4874,
+      "xyz:META": -224
+    }
+  },
+  "cases": [
+    {
+      "user": "0x44da7d7412e5e881d950ae8dd35fb000a04beee3",
+      "coin": "xyz:TSLA",
+      "seed_from": 1193420000,
+      "seed_to": 1193430000,
+      "size_decimals": 3,
+      "checkpoint_before": {
+        "l": {
+          "I": {
+            "l": 20,
+            "u": 0
+          }
+        },
+        "f": {
+          "a": 5940581
+        }
+      },
+      "checkpoint_after": {
+        "s": 513,
+        "l": {
+          "I": {
+            "l": 20,
+            "u": -185307315
+          }
+        },
+        "f": {
+          "a": 5940581
+        },
+        "e": 194945130
+      },
+      "events": [
+        {
+          "height": 1193424645,
+          "before_mark": "379.96",
+          "updates": [
+            [
+              "380.0",
+              "Normal"
+            ]
+          ],
+          "fill": {
+            "coin": "xyz:TSLA",
+            "px": "380.01",
+            "sz": "0.513",
+            "side": "B",
+            "time": 1792693316636,
+            "startPosition": "0.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x0d561ff5ae3801f50ecf04472237050203da00db493b20c7b11ecb486d3bdbdf",
+            "oid": 582840533421,
+            "crossed": true,
+            "fee": "0.114315",
+            "builderFee": "0.097472",
+            "tid": 277951268506387,
+            "cloid": "0x01a164afb271767aa42ffc9bb45bb5f6",
+            "feeToken": "USDC",
+            "builder": "0x7cc0fd2b76835ab96aa4a3501a9f65e75677e781",
+            "twapId": null,
+            "deployerFee": "0.007579"
+          },
+          "legs": [
+            [
+              "0x44da7d7412e5e881d950ae8dd35fb000a04beee3",
+              {
+                "coin": "xyz:TSLA",
+                "px": "380.01",
+                "sz": "0.513",
+                "side": "B",
+                "time": 1792693316636,
+                "startPosition": "0.0",
+                "dir": "Open Long",
+                "closedPnl": "0.0",
+                "hash": "0x0d561ff5ae3801f50ecf04472237050203da00db493b20c7b11ecb486d3bdbdf",
+                "oid": 582840533421,
+                "crossed": true,
+                "fee": "0.114315",
+                "builderFee": "0.097472",
+                "tid": 277951268506387,
+                "cloid": "0x01a164afb271767aa42ffc9bb45bb5f6",
+                "feeToken": "USDC",
+                "builder": "0x7cc0fd2b76835ab96aa4a3501a9f65e75677e781",
+                "twapId": null,
+                "deployerFee": "0.007579"
+              }
+            ],
+            [
+              "0x5c9b84105d63f0c8ed35fd62f66d9b8c6800ce01",
+              {
+                "coin": "xyz:TSLA",
+                "px": "380.01",
+                "sz": "0.513",
+                "side": "A",
+                "time": 1792693316636,
+                "startPosition": "35.271",
+                "dir": "Close Long",
+                "closedPnl": "1.330722",
+                "hash": "0x0d561ff5ae3801f50ecf04472237050203da00db493b20c7b11ecb486d3bdbdf",
+                "oid": 582878145188,
+                "crossed": false,
+                "fee": "0.001247",
+                "tid": 277951268506387,
+                "cloid": "0x8a0becf3d786d5ef000029000000444b",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.000623"
+              }
+            ]
+          ],
+          "source_sha256": "3ec1bec34e1924a3ba1ee6c88c52fd78831f6f2d9915f9f478d5a17f81779b2a",
+          "coin": "xyz:TSLA",
+          "size_decimals": 3,
+          "time_ns": 1792693316636724862,
+          "after_mark": "380.0",
+          "normal": true,
+          "oracle_rank": [
+            0,
+            3,
+            980
+          ],
+          "triggered_status": {
+            "time": "2026-10-22T18:21:56.636724862",
+            "user": "0x44da7d7412e5e881d950ae8dd35fb000a04beee3",
+            "hash": null,
+            "builder": {
+              "b": "0x7cc0fd2b76835ab96aa4a3501a9f65e75677e781",
+              "f": 50
+            },
+            "status": "triggered",
+            "order": {
+              "coin": "xyz:TSLA",
+              "side": "B",
+              "limitPx": "380.2",
+              "sz": "0.513",
+              "oid": 582840533421,
+              "timestamp": 1792690599497,
+              "triggerCondition": "Price above 380",
+              "isTrigger": true,
+              "triggerPx": "380.0",
+              "children": [],
+              "isPositionTpsl": false,
+              "reduceOnly": false,
+              "orderType": "Stop Limit",
+              "origSz": "0.513",
+              "tif": null,
+              "cloid": "0x01a164afb271767aa42ffc9bb45bb5f6"
+            }
+          },
+          "status_source_sha256": "9d47b9deb06c8c6522a61f4e41c0ace6f702d2e9b5f3d6af50f1b966177d187b",
+          "action_source_sha256": "19780642da469a4a10ae62e3ffaae2e7767ecb36099e75eade2efbead36af62f"
+        }
+      ]
+    },
+    {
+      "user": "0x5558e128e4966301451f6011b1f6cbfb294d9ab0",
+      "coin": "xyz:META",
+      "seed_from": 1193420000,
+      "seed_to": 1193430000,
+      "size_decimals": 3,
+      "checkpoint_before": {
+        "s": 113,
+        "l": {
+          "I": {
+            "l": 15,
+            "u": -70886454
+          }
+        },
+        "f": {
+          "a": 82004,
+          "o": 6499,
+          "c": 3491
+        },
+        "e": 75898840
+      },
+      "checkpoint_after": {
+        "s": 136,
+        "l": {
+          "I": {
+            "l": 15,
+            "u": -84719454
+          }
+        },
+        "f": {
+          "a": 82004,
+          "o": 6499
+        },
+        "e": 90711760
+      },
+      "events": [
+        {
+          "height": 1193428291,
+          "before_mark": "644.2",
+          "updates": [
+            [
+              "644.07",
+              "Normal"
+            ]
+          ],
+          "fill": {
+            "coin": "xyz:META",
+            "px": "644.04",
+            "sz": "0.017",
+            "side": "B",
+            "time": 1792693577665,
+            "startPosition": "0.113",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x4d333d7a1084aaa74eac0447224543020891005fab87c979f0fbe8cccf888491",
+            "oid": 582580361682,
+            "crossed": false,
+            "fee": "0.005789",
+            "builderFee": "0.005474",
+            "tid": 534800151576530,
+            "cloid": "0x01a163d94f317753823fc38d66213cee",
+            "feeToken": "USDC",
+            "builder": "0x7cc0fd2b76835ab96aa4a3501a9f65e75677e781",
+            "twapId": null,
+            "deployerFee": "0.000142"
+          },
+          "legs": [
+            [
+              "0x5558e128e4966301451f6011b1f6cbfb294d9ab0",
+              {
+                "coin": "xyz:META",
+                "px": "644.04",
+                "sz": "0.017",
+                "side": "B",
+                "time": 1792693577665,
+                "startPosition": "0.113",
+                "dir": "Open Long",
+                "closedPnl": "0.0",
+                "hash": "0x4d333d7a1084aaa74eac0447224543020891005fab87c979f0fbe8cccf888491",
+                "oid": 582580361682,
+                "crossed": false,
+                "fee": "0.005789",
+                "builderFee": "0.005474",
+                "tid": 534800151576530,
+                "cloid": "0x01a163d94f317753823fc38d66213cee",
+                "feeToken": "USDC",
+                "builder": "0x7cc0fd2b76835ab96aa4a3501a9f65e75677e781",
+                "twapId": null,
+                "deployerFee": "0.000142"
+              }
+            ],
+            [
+              "0x238e562f896bffe34e65f13c3f7922909a30c9ee",
+              {
+                "coin": "xyz:META",
+                "px": "644.04",
+                "sz": "0.017",
+                "side": "A",
+                "time": 1792693577665,
+                "startPosition": "0.017",
+                "dir": "Close Long",
+                "closedPnl": "-0.06273",
+                "hash": "0x4d333d7a1084aaa74eac0447224543020891005fab87c979f0fbe8cccf888491",
+                "oid": 582781635713,
+                "crossed": true,
+                "fee": "0.000945",
+                "tid": 534800151576530,
+                "feeToken": "USDC",
+                "builder": "0xcd254d2a328f7f67c7c6fef930a4757516f7b601",
+                "twapId": null,
+                "deployerFee": "0.000425"
+              }
+            ]
+          ],
+          "source_sha256": "55ef6100e2914ebfa1b82a8aeda5b0a987d808de3133835c9557637f71abfc75",
+          "coin": "xyz:META",
+          "size_decimals": 3,
+          "time_ns": 1792693577665888876,
+          "after_mark": "644.07",
+          "normal": true,
+          "oracle_rank": [
+            1,
+            3,
+            1083
+          ],
+          "triggered_status": {
+            "time": "2026-10-22T18:26:17.665888876",
+            "user": "0x238e562f896bffe34e65f13c3f7922909a30c9ee",
+            "hash": null,
+            "builder": {
+              "b": "0xcd254d2a328f7f67c7c6fef930a4757516f7b601",
+              "f": 0
+            },
+            "status": "triggered",
+            "order": {
+              "coin": "xyz:META",
+              "side": "A",
+              "limitPx": "579.72",
+              "sz": "0.017",
+              "oid": 582781635713,
+              "timestamp": 1792687212553,
+              "triggerCondition": "Price below 644.14",
+              "isTrigger": true,
+              "triggerPx": "644.14",
+              "children": [],
+              "isPositionTpsl": false,
+              "reduceOnly": true,
+              "orderType": "Stop Market",
+              "origSz": "0.017",
+              "tif": null,
+              "cloid": null
+            }
+          },
+          "status_source_sha256": "f12dcee70bb2d898055b550fff4dfda1f4d84ea95f2dc608fcbccd93f807fcea",
+          "action_source_sha256": "d09c756be2eebca20a3f19e10d8081ca67f241bda421a6b158862fa52fabfca7"
+        },
+        {
+          "height": 1193428334,
+          "before_mark": "644.07",
+          "updates": [
+            [
+              "644.0",
+              "Normal"
+            ]
+          ],
+          "fill": {
+            "coin": "xyz:META",
+            "px": "644.04",
+            "sz": "0.006",
+            "side": "B",
+            "time": 1792693580660,
+            "startPosition": "0.13",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0xea0cce5e4f5e53a5eb86044722456e0205ef0043ea5172778dd579b10e522d90",
+            "oid": 582580361682,
+            "crossed": false,
+            "fee": "0.002043",
+            "builderFee": "0.001932",
+            "tid": 1000128396914824,
+            "cloid": "0x01a163d94f317753823fc38d66213cee",
+            "feeToken": "USDC",
+            "builder": "0x7cc0fd2b76835ab96aa4a3501a9f65e75677e781",
+            "twapId": null,
+            "deployerFee": "0.00005"
+          },
+          "legs": [
+            [
+              "0x5558e128e4966301451f6011b1f6cbfb294d9ab0",
+              {
+                "coin": "xyz:META",
+                "px": "644.04",
+                "sz": "0.006",
+                "side": "B",
+                "time": 1792693580660,
+                "startPosition": "0.13",
+                "dir": "Open Long",
+                "closedPnl": "0.0",
+                "hash": "0xea0cce5e4f5e53a5eb86044722456e0205ef0043ea5172778dd579b10e522d90",
+                "oid": 582580361682,
+                "crossed": false,
+                "fee": "0.002043",
+                "builderFee": "0.001932",
+                "tid": 1000128396914824,
+                "cloid": "0x01a163d94f317753823fc38d66213cee",
+                "feeToken": "USDC",
+                "builder": "0x7cc0fd2b76835ab96aa4a3501a9f65e75677e781",
+                "twapId": null,
+                "deployerFee": "0.00005"
+              }
+            ],
+            [
+              "0x866e2d28684ae20e207dbb00e9f827c37dbf2d42",
+              {
+                "coin": "xyz:META",
+                "px": "644.04",
+                "sz": "0.006",
+                "side": "A",
+                "time": 1792693580660,
+                "startPosition": "57.385",
+                "dir": "Close Long",
+                "closedPnl": "-0.021282",
+                "hash": "0xea0cce5e4f5e53a5eb86044722456e0205ef0043ea5172778dd579b10e522d90",
+                "oid": 582813159666,
+                "crossed": true,
+                "fee": "0.000347",
+                "tid": 1000128396914824,
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.000173"
+              }
+            ]
+          ],
+          "source_sha256": "baa5e1a473b1a83167b4b3e456fbe718190cf27cc3258790a6e566e4aed744c1",
+          "coin": "xyz:META",
+          "size_decimals": 3,
+          "time_ns": 1792693580660609824,
+          "after_mark": "644.0",
+          "normal": true,
+          "oracle_rank": [
+            2,
+            3,
+            561
+          ],
+          "triggered_status": {
+            "time": "2026-10-22T18:26:20.660609824",
+            "user": "0x866e2d28684ae20e207dbb00e9f827c37dbf2d42",
+            "hash": null,
+            "builder": null,
+            "status": "triggered",
+            "order": {
+              "coin": "xyz:META",
+              "side": "A",
+              "limitPx": "579.6",
+              "sz": "0.0",
+              "oid": 582813159666,
+              "timestamp": 1792688774454,
+              "triggerCondition": "Price below 644",
+              "isTrigger": true,
+              "triggerPx": "644.0",
+              "children": [],
+              "isPositionTpsl": true,
+              "reduceOnly": true,
+              "orderType": "Stop Market",
+              "origSz": "0.0",
+              "tif": null,
+              "cloid": null
+            }
+          },
+          "status_source_sha256": "9fbb1861d36090fbcc9a3a2e5c75d936ae02ea74593bc9705d37c789abbc9780",
+          "action_source_sha256": "10a8c365656748e45773dd52194152d5e87fb6001ae25343e864187ceb59c013"
+        }
+      ]
+    }
+  ]
+}

@@ -1684,12 +1684,18 @@ pub(crate) mod tests {
         let mut states = per_dex();
         let account = states.accounts.get_mut(&user(ISOLATED)).unwrap();
         account.isolated.clear();
-        account.isolated.insert((0, 0), before["l"]["I"]["u"].as_i64().unwrap() * WEI_PER_MICRO);
+        if before["s"].as_i64().unwrap_or(0) != 0 {
+            account.isolated.insert((0, 0), before["l"]["I"]["u"].as_i64().unwrap() * WEI_PER_MICRO);
+        }
         account.pools = per_dex_pools(&[(0, 1_000_000_000_000_000_000)]);
         account.cross_exposure_seen.clear();
         let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, default_leverage: leverage };
         for event in case["events"].as_array().unwrap() {
-            let prices = crate::accounts::marks::fill_prices::golden_prices(case, event);
+            let prices = if event.get("triggered_status").is_some() {
+                crate::accounts::marks::fill_prices::trigger_golden_prices(event)
+            } else {
+                crate::accounts::marks::fill_prices::golden_prices(case, event)
+            };
             let fill: Fill = serde_json::from_value(event["fill"].clone()).unwrap();
             let event = FillEvent::at_mark(&fill, prices.get(event["height"].as_u64().unwrap(), &fill.coin, fill.tid)).unwrap();
             let flow = event.cash_wei(decimals, MAX_PERP_DECIMALS - decimals).unwrap();
@@ -1697,6 +1703,12 @@ pub(crate) mod tests {
         }
         assert_eq!(account.isolated[&(0, 0)], after["l"]["I"]["u"].as_i64().unwrap() * WEI_PER_MICRO, "{} {}", case["user"], case["coin"]);
         if require_no_estimate { assert!(!account.estimated, "uniquely ordered marks with ample funds are exact"); }
+    }
+
+    #[test]
+    fn equality_trigger_marks_reconcile_tsla_open_and_meta_increase_cash() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/hip3_trigger_boundary_goldens.json")).unwrap();
+        for case in golden["cases"].as_array().unwrap() { check_hip3_execution_cash(case, true); }
     }
 
     #[test]

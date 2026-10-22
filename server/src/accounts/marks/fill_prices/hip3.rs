@@ -246,6 +246,30 @@ mod tests {
     }
 
     #[test]
+    fn recorded_equality_triggers_select_the_new_mark_on_both_sides() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("hip3_trigger_boundary_goldens.json")).unwrap();
+        for case in golden["cases"].as_array().unwrap() {
+            for event in case["events"].as_array().unwrap() {
+                let input = TriggerFixture::of(event);
+                let coin = event["coin"].as_str().unwrap();
+                let decimals = input.coins[coin].size_decimals;
+                let expected = exact_price_units(event["after_mark"].as_str().unwrap(), decimals).unwrap();
+                let prices = input.prices();
+                for fill in &input.fills {
+                    let range = prices.get(input.height, &fill.coin, fill.tid).unwrap();
+                    assert_eq!((range.min_px_raw, range.max_px_raw), (expected, expected), "{coin} {}", input.height);
+                }
+                let trigger = input.statuses.trigger_prices.values().next().unwrap().as_ref().unwrap();
+                let level = exact_price_units(event["triggered_status"]["order"]["triggerPx"].as_str().unwrap(), decimals).unwrap();
+                // Equality on the old price is already eligible; it cannot prove this write caused execution.
+                assert!(!trigger.crossed_by(coin, level, expected, decimals));
+                let opening = input.coins[coin].mark.unwrap().px;
+                assert!(!trigger.crossed_by(coin, opening, opening, decimals));
+            }
+        }
+    }
+
+    #[test]
     fn trigger_price_proof_requires_unique_write_status_and_taker() {
         let cases = trigger_cases();
         let case = &cases["cases"][0];
