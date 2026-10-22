@@ -371,6 +371,14 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
   `withheld_periods`(状态流丢数据可能丢了条件单的状态, 消费方要同时看表完整和盘口可信)。
 - **接口**: `GET /untriggeredOrders` 多一个 `complete` 字段, 只在表 `Complete` 时为 true; 其余行为不变。
 
+## 2026-10-22 被迫成交: 帧带出条件单表自己的高度
+
+- **现象**(验收 run2 79 次、run6 3 次): 帧的 `listenerHeight` 是订单状态流和盘口差分流里较远的那个(`OrderBookState::latest`), 条件单表只随订单
+  状态流前进; 差分领先时帧标着块 H, 表才到 H−1 或 H−2, 那两块里下的条件单看着像"表该有却没列"。单子不丢, 晚一两块出现; 消费方若拿
+  `listenerHeight` 判断条件单部分的新鲜度会以为更新。
+- **改法**: 区间读取(`untriggered_in_band`)在同一把锁下带出 `status_height`(订单状态流已应用的块), 帧 `heights` 新增 `triggerStatusHeight`;
+  `listenerHeight` 含义不变(盘口部分仍用它)。一行一条状态, 所以该块本身可能只应用了一部分, 更早的块完整。
+
 ## 2026-10-21 账户重放: 逐仓成交不再停重放
 
 - **现象**(被迫成交验收 run4, bm 10-21 14:35–15:07): 966 次市价清算里 106 次触发前的最后一帧没列出, 其中 65 次是逐仓仓位在检查点之后

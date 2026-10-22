@@ -140,6 +140,8 @@ pub(crate) struct FlowHeights {
     pub(crate) trigger_version: u64,
     pub(crate) listener_height: u64,
     pub(crate) listener_time: u64,
+    /// `TriggerBandAt::status_height`: how far the trigger part is, where `listener_height` is the furthest stream.
+    pub(crate) trigger_status_height: u64,
     pub(crate) local_published_ms: Option<u64>,
     /// (height, time) of the bids the sales walked, and of the asks the buys walked.
     pub(crate) sell_walk_book: Option<(u64, u64)>,
@@ -492,6 +494,7 @@ impl ForcedFlow {
             trigger_version: read.band.version,
             listener_height: read.height,
             listener_time: read.time,
+            trigger_status_height: read.status_height,
             local_published_ms,
             sell_walk_book: None,
             buy_walk_book: None,
@@ -742,7 +745,7 @@ mod tests {
 
     fn band_at(orders: Vec<(Px, Arc<InnerL4Order>)>, availability: TriggerAvailability, trusted: bool) -> TriggerBandAt {
         let band = TriggerBand { availability, generation: 1, version: 3, orders, placed_nowhere: Vec::new(), truncated: false };
-        TriggerBandAt { time: 5, height: 7, trusted, withheld_periods: 0, band }
+        TriggerBandAt { time: 5, height: 7, status_height: 6, trusted, withheld_periods: 0, band }
     }
 
     /// HOLDER's trailing stop waiting for its activation (`triggerPx` 0).
@@ -871,7 +874,7 @@ mod tests {
         let published = owner.answer(PUMP, Tier::Mid, read.clone(), start);
         assert_eq!(published.frames.len(), 1);
         let frame = &published.frames[0];
-        assert_eq!((frame.seq, frame.heights.listener_height, frame.heights.trigger_version), (1, 7, 3));
+        assert_eq!((frame.seq, frame.heights.listener_height, frame.heights.trigger_status_height, frame.heights.trigger_version), (1, 7, 6, 3));
         let flow = ready(frame);
         assert_eq!((flow.triggers.clone(), flow.entries.len()), (TriggerStatus::Complete, 1));
         let entry = &flow.entries[0];

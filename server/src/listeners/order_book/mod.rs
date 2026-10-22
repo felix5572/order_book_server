@@ -979,8 +979,9 @@ impl OrderBookListener {
     /// a consumer needs both a complete table and a trusted book of the same withheld period (design 000451 r3).
     /// `None` before the first install.
     pub(crate) fn untriggered_in_band(&self, coin: &Coin, lo: Px, hi: Px, max: usize) -> Option<TriggerBandAt> {
-        let (time, height, band) = self.order_book_state.as_ref()?.untriggered_in_band(coin, lo, hi, max);
-        Some(TriggerBandAt { time, height, trusted: self.book_trusted(), withheld_periods: self.book_trust.withheld_periods(), band })
+        let state = self.order_book_state.as_ref()?;
+        let (time, height, band) = state.untriggered_in_band(coin, lo, hi, max);
+        Some(TriggerBandAt { time, height, status_height: state.status_height(), trusted: self.book_trusted(), withheld_periods: self.book_trust.withheld_periods(), band })
     }
 }
 
@@ -1001,6 +1002,10 @@ pub(crate) struct TriggerBandAt {
     /// The book's progress: the block time both book streams applied, and the latest height.
     pub(crate) time: u64,
     pub(crate) height: u64,
+    /// The block of the last order status the table applied: the trigger table moves with that stream alone, so it is
+    /// behind `height` while the diffs lead; the blocks below are complete, this one possibly in part (one status a
+    /// line). bm 10-21 run6: 3 of 6,279 triggers were placed in the blocks between the two.
+    pub(crate) status_height: u64,
     pub(crate) trusted: bool,
     /// `BookTrust::withheld_periods` at the read.
     pub(crate) withheld_periods: u64,
@@ -2573,6 +2578,11 @@ mod tests {
         assert_eq!((live.band.generation, live.height, live.trusted, live.withheld_periods), (0, 10, true, 0));
         let (time, height, _, _) = listener.compute_untriggered_snapshot(None).unwrap();
         assert_eq!((live.time, live.height), (time, height), "the same progress as the untriggered endpoint");
+        assert_eq!(live.status_height, 10);
+        // the diffs lead (a block of another coin's book): the table is still at the statuses' block
+        listener.apply_event_batch(12, EventBatch::BookDiffs(make_diff_batch("ETH", 5, 12, serde_json::json!({"new": {"sz": "1.0"}}))), EventSource::OrderDiffs);
+        let ahead = read(&listener);
+        assert_eq!((ahead.height, ahead.status_height), (12, 10), "the furthest stream, and the trigger table's");
 
         let trigger = InnerL4Order {
             user: Address::new([3; 20]),

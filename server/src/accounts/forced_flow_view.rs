@@ -101,6 +101,7 @@ struct HeightsDto {
     trigger_version: u64,
     listener_height: u64,
     listener_time: u64,
+    trigger_status_height: u64,
     local_published_ms: Option<u64>,
 }
 
@@ -268,8 +269,17 @@ fn mark_text(mark_raw: u64, size_decimals: u32) -> String {
 
 impl<'a> FlowFrameDto<'a> {
     pub(crate) fn of(frame: &'a FlowFrame, filter: &FlowFilter) -> Self {
-        let FlowHeights { accounts_height, accounts_time_ms, trigger_generation, trigger_version, listener_height, listener_time, local_published_ms, .. } =
-            frame.heights;
+        let FlowHeights {
+            accounts_height,
+            accounts_time_ms,
+            trigger_generation,
+            trigger_version,
+            listener_height,
+            listener_time,
+            trigger_status_height,
+            local_published_ms,
+            ..
+        } = frame.heights;
         let body = match &frame.content {
             FlowContent::Unavailable(reason) => BodyDto::Unavailable { reason },
             FlowContent::Ready(ready) => BodyDto::Ready(Box::new(ready_dto(ready, &frame.heights, filter))),
@@ -279,7 +289,16 @@ impl<'a> FlowFrameDto<'a> {
             tier_bps: frame.tier.bps(),
             max_distance_bps: filter.max_distance_bps,
             seq: frame.seq,
-            heights: HeightsDto { accounts_height, accounts_time_ms, trigger_generation, trigger_version, listener_height, listener_time, local_published_ms },
+            heights: HeightsDto {
+                accounts_height,
+                accounts_time_ms,
+                trigger_generation,
+                trigger_version,
+                listener_height,
+                listener_time,
+                trigger_status_height,
+                local_published_ms,
+            },
             body,
         }
     }
@@ -481,6 +500,7 @@ mod tests {
         assert_eq!(entries.len(), 1, "only the 12,300 USD one");
         assert_eq!((entries[0]["size"].as_str(), entries[0]["source"].as_str(), entries[0]["expectedOrder"]["walkSize"].as_str()), (Some("1000000.0"), Some("liquidation"), Some("1000000.0")));
         assert_eq!(entries[0]["cashEstimated"], serde_json::json!(false), "a liquidation says whether its cash is modelled");
+        assert!(data["heights"]["triggerStatusHeight"].is_u64(), "the trigger table's own height beside the listener's");
         let bands = &data["bands"]["node"][0];
         assert_eq!((bands["direction"].as_str(), bands["side"].as_str()), (Some("down"), Some("A")));
         let hundred = bands["bands"].as_array().unwrap().iter().find(|band| band["edgeBps"] == 100).unwrap();
