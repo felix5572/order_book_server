@@ -1,6 +1,7 @@
 //! Execution marks for isolated HIP-3 fills. BM 1192960000..1192970000: a unique successful setOracle
 //! anchors its sole Normal write, and receipt-backed ordinary takers select the preceding/following mark.
-//! A fixed trigger crossed by the sole Normal write consumes that new mark (BM NET1193124226, SPCX1193126889).
+//! A recorded trigger threshold crossed by the sole Normal write consumes that new mark (BM NET1193124226, SPCX1193126889).
+//! Trailing Stop Market uses its realized triggered-status threshold (MRNA1193502103), not a future trailing estimate.
 //! Fallback/multiple writes, already-satisfied or unrecognized triggers and unreceipted effects keep the full range.
 //! This refines cash inputs only: the node-mark owner still consumes every written price unchanged.
 
@@ -292,6 +293,60 @@ mod tests {
             let range = prices.get(input.height, &fill.coin, fill.tid).unwrap();
             assert_eq!((range.min_px_raw, range.max_px_raw), (3_153_500, 3_156_700));
         }
+    }
+
+    fn trailing_stop_case() -> serde_json::Value {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("trailing_stop_cash_goldens.json")).unwrap();
+        golden["cases"][0]["events"].as_array().unwrap().iter().find(|e|
+            e["triggered_status"]["order"]["orderType"] == "Trailing Stop Market").unwrap().clone()
+    }
+
+    #[test]
+    fn trailing_stop_recorded_threshold_selects_the_only_crossing_write() {
+        let case = trailing_stop_case();
+        let input = TriggerFixture::of(&case);
+        for fill in &input.fills {
+            let range = input.prices().get(input.height, &fill.coin, fill.tid).unwrap();
+            assert_eq!((range.min_px_raw, range.max_px_raw), (2_018_800, 2_018_800));
+        }
+        // Synthetic rising counterpart checks side-to-direction conversion; the recorded case above is a sell.
+        let mut rising = case;
+        rising["before_mark"] = "201.88".into(); rising["after_mark"] = "202.00".into();
+        rising["triggered_status"]["order"]["side"] = "B".into();
+        rising["triggered_status"]["order"]["triggerCondition"] = "Activation immediate, retracement 2%, best 198".into();
+        rising["triggered_status"]["order"]["triggerPx"] = "201.96".into();
+        let input = TriggerFixture::of(&rising); let fill = &input.fills[0];
+        let range = input.prices().get(input.height, &fill.coin, fill.tid).unwrap();
+        assert_eq!((range.min_px_raw, range.max_px_raw), (2_020_000, 2_020_000));
+    }
+
+    #[test]
+    fn trailing_stop_missing_or_conflicting_evidence_keeps_the_full_range() {
+        let changes: [fn(&mut serde_json::Value); 6] = [
+            |v| v["triggered_status"]["order"]["triggerPx"] = "0.0".into(),
+            |v| v["triggered_status"]["order"]["triggerPx"] = "bad".into(),
+            |v| v["triggered_status"]["order"]["triggerCondition"] = "Triggered".into(),
+            |v| v["triggered_status"]["order"]["isTrigger"] = false.into(),
+            |v| v["triggered_status"]["order"]["orderType"] = "Trailing Stop Limit".into(),
+            |v| v["triggered_status"]["order"]["side"] = "B".into(),
+        ];
+        for change in changes {
+            let mut case = trailing_stop_case(); change(&mut case);
+            let input = TriggerFixture::of(&case); let fill = &input.fills[0];
+            let range = input.prices().get(input.height, &fill.coin, fill.tid).unwrap();
+            assert_eq!((range.min_px_raw, range.max_px_raw), (2_018_800, 2_019_600));
+        }
+        for opening in ["201.8898", "201.8850"] {
+            let mut case = trailing_stop_case(); case["before_mark"] = opening.into();
+            let input = TriggerFixture::of(&case); let fill = &input.fills[0];
+            let range = input.prices().get(input.height, &fill.coin, fill.tid).unwrap();
+            assert_ne!(range.min_px_raw, range.max_px_raw, "already eligible at the opening mark");
+        }
+        let mut duplicate = TriggerFixture::of(&trailing_stop_case());
+        duplicate.updates.push(duplicate.updates[0].clone());
+        let fill = &duplicate.fills[0];
+        let range = duplicate.prices().get(duplicate.height, &fill.coin, fill.tid).unwrap();
+        assert_eq!((range.min_px_raw, range.max_px_raw), (2_018_800, 2_019_600));
     }
 
     #[test]

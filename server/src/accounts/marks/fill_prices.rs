@@ -1,6 +1,6 @@
 //! Execution-price evidence for cash replay. A range contains every mark that can apply to a fill, never just the
 //! block's final price. Native ranges follow the existing action/fill cuts. HIP-3 uses receipt-backed taker ordering
-//! around a uniquely paired Normal setOracle, including fixed triggers strictly crossed by that write; otherwise it retains every written mark. Ambiguity belongs to the consumer: if both
+//! around a uniquely paired Normal setOracle, including recorded fixed/trailing-market thresholds reached by that write; otherwise it retains every written mark. Ambiguity belongs to the consumer: if both
 //! bounds produce the same integer margin transfer, that transfer is exact even when the mark itself is not pinned.
 
 #[cfg(test)]

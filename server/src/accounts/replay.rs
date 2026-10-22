@@ -1690,7 +1690,14 @@ pub(crate) mod tests {
         account.pools = per_dex_pools(&[(0, 1_000_000_000_000_000_000)]);
         account.cross_exposure_seen.clear();
         let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, default_leverage: leverage };
+        let markets = Markets { perps: FxHashMap::from_iter([(case["coin"].as_str().unwrap().to_string(), market.clone())]),
+            usdc_dexes: vec![true], ..Markets::default() };
         for event in case["events"].as_array().unwrap() {
+            if let Some(funding) = event.get("funding") {
+                apply_funding(account, &markets, funding["coin"].as_str().unwrap(),
+                    usdc_wei(funding["funding_amount"].as_str().unwrap()).unwrap()).unwrap();
+                continue;
+            }
             let prices = if event.get("triggered_status").is_some() {
                 crate::accounts::marks::fill_prices::trigger_golden_prices(event)
             } else {
@@ -1708,6 +1715,12 @@ pub(crate) mod tests {
     #[test]
     fn equality_trigger_marks_reconcile_tsla_open_and_meta_increase_cash() {
         let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/hip3_trigger_boundary_goldens.json")).unwrap();
+        for case in golden["cases"].as_array().unwrap() { check_hip3_execution_cash(case, true); }
+    }
+
+    #[test]
+    fn trailing_stop_marks_reconcile_both_mrna_cash_intervals_with_funding() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/trailing_stop_cash_goldens.json")).unwrap();
         for case in golden["cases"].as_array().unwrap() { check_hip3_execution_cash(case, true); }
     }
 

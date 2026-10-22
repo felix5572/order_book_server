@@ -10,7 +10,7 @@ pub(crate) enum Placement {
     Trigger(u64),
 }
 
-/// Fixed trigger evidence retained from the node status, not inferred from the fill's side.
+/// Trigger threshold retained from the triggered node status, including a trailing stop's realized threshold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TriggerPrice {
     coin: Box<str>,
@@ -20,15 +20,23 @@ pub(crate) struct TriggerPrice {
 
 impl TriggerPrice {
     pub(crate) fn of(status: &crate::types::node_data::NodeDataOrderStatus) -> Option<Self> {
-        use crate::listeners::order_book::triggers::TriggerRule;
+        use crate::listeners::order_book::triggers::{TriggerRule, stop_direction};
         let order = &status.order;
-        if !order.is_trigger || !matches!(order.order_type.as_str(), "Stop Market" | "Stop Limit" | "Take Profit Market" | "Take Profit Limit") { return None; }
-        let TriggerRule::At(direction) = TriggerRule::of(&order.trigger_condition) else { return None; };
-        // Optional attribution evidence: unknown forms or conflicting textual/structured thresholds keep the
-        // full mark range. They must not withdraw the otherwise valid block or become an invented zero price.
+        if !order.is_trigger { return None; }
         let price = super::ExactDecimal::parse(&order.trigger_px).ok()?;
-        let text_price = super::ExactDecimal::parse(order.trigger_condition.rsplit(' ').next()?).ok()?;
-        if price != text_price { return None; }
+        let direction = match (order.order_type.as_str(), TriggerRule::of(&order.trigger_condition)) {
+            ("Stop Market" | "Stop Limit" | "Take Profit Market" | "Take Profit Limit", TriggerRule::At(direction)) => {
+                let text_price = super::ExactDecimal::parse(order.trigger_condition.rsplit(' ').next()?).ok()?;
+                if price != text_price { return None; }
+                direction
+            }
+            // MRNA 1193502103: the triggered status retains 201.8898 (best 206.01, retracement 2%).
+            // Use that observed threshold, not a prediction of the future trailing price. The caller still
+            // requires one Normal write, a strictly ineligible opening mark and a unique taker/status.
+            ("Trailing Stop Market", TriggerRule::Trailing) => stop_direction(order.side),
+            // Optional attribution only: unknown/mismatched forms keep the full range, never stop the block.
+            _ => return None,
+        };
         Some(Self { coin: order.coin.as_str().into(), price: order.trigger_px.as_str().into(), direction })
     }
 
