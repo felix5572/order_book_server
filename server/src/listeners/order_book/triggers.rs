@@ -172,6 +172,24 @@ pub(crate) struct TriggerBand {
     pub(crate) truncated: bool,
 }
 
+/// An order the node triggered that the table held otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerMisread {
+    /// Held waiting for this parent, out of every band.
+    Waiting { parent: Option<u64> },
+    /// Not held although the table was complete.
+    NotHeld,
+}
+
+impl TriggerMisread {
+    pub(crate) const fn kind(self) -> &'static str {
+        match self {
+            Self::Waiting { .. } => "waiting",
+            Self::NotHeld => "notHeld",
+        }
+    }
+}
+
 /// One coin's orders: held once, by direction in trigger-price order, and found by oid through their place.
 #[derive(Debug, Clone, Default)]
 struct CoinTriggers {
@@ -516,6 +534,20 @@ impl TriggerTable {
                 self.versions.insert(Coin::new(coin), 1);
             }
         }
+    }
+
+    /// How the table held an order the node triggers, read before its `triggered` status applies: wrong when it was
+    /// waiting for a parent, or not held at all while the table is complete (forced flow acceptance found each of the
+    /// parent and child cases of 000463-000469 only so). An order held for one status (a successor) opens as it comes.
+    pub(crate) fn misread_triggered(&self, order: &L4Order) -> Option<TriggerMisread> {
+        if !self.tracks(&order.coin) || self.successor.as_ref().is_some_and(|successor| successor.oid == order.oid) {
+            return None;
+        }
+        if self.families.waiting.contains_key(&order.oid) {
+            return Some(TriggerMisread::Waiting { parent: self.families.parent_of.get(&order.oid).copied() });
+        }
+        let indexed = self.coins.get(order.coin.as_str()).is_some_and(|coin| coin.place_of.contains_key(&Oid::new(order.oid)));
+        (!indexed && self.availability == TriggerAvailability::Complete).then_some(TriggerMisread::NotHeld)
     }
 
     /// Whether a trigger order of `coin` is kept: not with the table off, nor for a spot coin under the spot filter.
@@ -1173,6 +1205,28 @@ mod tests {
     /// the node triggered the TP 8 minutes later. The children wait for the successor from the modify on, through its
     /// own modifies (blocks 1192588386 and 1192588523, the second listing the child under its oid), and its `filled`
     /// releases them. A hashed cancel, a successor of another coin, or another line between the two is no modify.
+    #[test]
+    fn a_node_trigger_of_an_order_held_waiting_or_not_held_is_a_misread() {
+        let (child, alone, successor) = (stop("BTC", 11, "105"), stop("BTC", 21, "104"), stop("BTC", 31, "103"));
+        let mut complete = table(TriggerSection::Complete(Vec::new()));
+        complete.on_status(7, USER, "open", HASH, &parent(10, &[&child], Some(10)));
+        complete.on_status(7, USER, "open", HASH, &wire(&child));
+        complete.on_status(7, USER, "open", HASH, &wire(&alone));
+        assert_eq!(complete.misread_triggered(&wire(&child)), Some(TriggerMisread::Waiting { parent: Some(10) }));
+        assert_eq!(complete.misread_triggered(&wire(&alone)), None, "indexed");
+        assert_eq!(complete.misread_triggered(&wire(&stop("BTC", 99, "100"))), Some(TriggerMisread::NotHeld));
+        // held for one status beside the waiting child: it opens as it comes
+        complete.on_status(8, USER, "open", HASH, &wire(&successor));
+        assert_eq!(complete.misread_triggered(&wire(&successor)), None, "a successor held for one status");
+        complete.on_status(8, USER, "filled", None, &parent(10, &[], None));
+        assert_eq!(complete.misread_triggered(&wire(&child)), None, "released by its parent's fill");
+        // a table that knows it is incomplete, a coin it does not keep: no misread
+        let gap = table(TriggerSection::Absent);
+        assert_eq!(gap.misread_triggered(&wire(&stop("BTC", 99, "100"))), None);
+        assert_eq!(complete.misread_triggered(&wire(&stop("@107", 98, "100"))), None);
+        assert_eq!((TriggerMisread::Waiting { parent: None }.kind(), TriggerMisread::NotHeld.kind()), ("waiting", "notHeld"));
+    }
+
     #[test]
     fn a_parents_modify_moves_its_waiting_children_to_the_successor() {
         const OTHER: Address = Address::new([3; 20]);

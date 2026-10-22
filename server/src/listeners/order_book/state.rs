@@ -408,6 +408,23 @@ impl OrderBookState {
         (self.book_time(), self.height(), coins.iter().map(|coin| self.order_book.best_prices(coin)).collect())
     }
 
+    /// A live node trigger of an order the trigger table held otherwise: counted, and logged with what the node's
+    /// status files (kept a few hours) need to trace its parent and modifies.
+    fn note_misread_trigger(&self, height: u64, order_status: &NodeDataOrderStatus) {
+        let Some(misread) = self.triggers.misread_triggered(&order_status.order) else { return };
+        crate::metrics::UNTRIGGERED_MISREAD_TRIGGERS_TOTAL.with_label_values(&[misread.kind()]).inc();
+        let order = &order_status.order;
+        log::warn!(
+            "Trigger table misread a node trigger: {misread:?} block={height} user={} coin={} oid={} orderType={} triggerCondition={} timestamp={}",
+            order_status.user,
+            order.coin,
+            order.oid,
+            order.order_type,
+            order.trigger_condition,
+            order.timestamp
+        );
+    }
+
     /// HFT-specific: Process OrderStatuses independently without block synchronization
     /// Uses bidirectional caching - if diff already arrived, add order immediately
     /// Returns the set of coins that were modified (for selective BBO broadcast)
@@ -423,6 +440,9 @@ impl OrderBookState {
         for order_status in batch.events() {
             let oid = Oid::new(order_status.order.oid);
 
+            if !replayed && order_status.status == "triggered" {
+                self.note_misread_trigger(height, &order_status);
+            }
             // Maintain the untriggered-orders side table. "open" + is_trigger is a pending trigger order (never rests on
             // the book); any other status is terminal for the untriggered phase (canceled / triggered / filled /
             // rejected / ...) and evicts the oid; a parent's statuses also announce and release its children.
@@ -1157,6 +1177,12 @@ mod tests {
         apply(&mut state, &modify);
         assert_eq!(in_band(&state), vec![582_044_725_790, 582_044_725_791]);
         assert_eq!(state.untriggered_snapshot(Some(&btc)).3, TriggerAvailability::Complete);
+        // the node's trigger of 791 at 01:34:24 reads as the node had it (before the fix: held waiting, a misread)
+        let triggered = r#"{"local_time":"2026-10-22T01:34:25.020452563","block_time":"2026-10-22T01:34:24.841702990","block_number":1192583929,"events":[{"time":"2026-10-22T01:34:24.841702990","user":"0x4028d1de7a0f96e89549861e4ce6361132afe926","hash":null,"builder":null,"status":"triggered","order":{"coin":"BTC","side":"B","limitPx":"92478.0","sz":"0.00582","oid":582044725791,"timestamp":1792632361913,"triggerCondition":"Price below 84071","isTrigger":true,"triggerPx":"84071.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Take Profit Market","origSz":"0.00582","tif":null,"cloid":null}}]}"#;
+        let read = |text: &str| -> Batch<NodeDataOrderStatus> { serde_json::from_str(text).unwrap() };
+        assert_eq!(state.triggers.misread_triggered(&read(triggered).events()[0].order), None);
+        state.apply_order_statuses_hft(read(triggered)).unwrap();
+        assert_eq!(in_band(&state), vec![582_044_725_790]);
     }
 
     /// bm 10-21 block 1191902954: a bot's `batchModify` of its PONS limit sale 039 with its take profit 040 and stop
