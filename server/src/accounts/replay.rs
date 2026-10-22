@@ -1700,6 +1700,12 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn liquidation_flip_and_later_reductions_reconcile_the_full_meta_cash_interval() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/liquidation_flip_cash_golden.json")).unwrap();
+        for case in golden["cases"].as_array().unwrap() { check_hip3_execution_cash(case, true); }
+    }
+
+    #[test]
     fn recorded_liquidation_mark_reconciles_five_live_isolated_makers() {
         let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/liquidation_cash_goldens.json")).unwrap();
         let prices = crate::accounts::marks::fill_prices::golden_prices(&golden, &golden["event"]);
