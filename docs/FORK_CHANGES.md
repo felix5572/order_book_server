@@ -655,3 +655,13 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
 - 主站按既有逐动作执行切点提供成交 mark 范围；HIP-3 在缺少动作身份时保留块前及同块所有价格。范围两端算出相同划转额才作为精确值；否则保留已有估算和 `cashEstimated`，不换用块末 mark、不停止整个服务。
 - 成交价证据随账户事件保存，checkpoint 重放复用同一事实；资金费继续使用块前 oracle。未知时只影响估算标记，实际解析错误仍沿原有丢流路径撤回价格。
 - 精选节点金样本位于 `server/src/accounts/replay/isolated_goldens.json`；873 例归档可用 `ISOLATED_MARGIN_REPORT=/absolute/path/isolated_mark_requirement_report.json cargo test -p server --lib full_archived_isolated_margin_corpus -- --ignored --nocapture` 复核。金样本证明给定记录 mark 时的现金规则；不能代替块内执行位置或上线 checkpoint 验收。
+
+
+## 2026-10-22 服务化:启动定义移交 hyperliquid-trade
+
+- 用户定 orderbook_server 不再是核心进程, 编译/上线/修复性重启委托代办; bm 上改为 `orderbook-server.service`。
+- 唯一的 unit 与命令行在 hyperliquid-trade `operations/orderbook_server/ob_ops.py`: 编译 origin/main 到
+  `~/ob_releases/<提交>/`, 上线 = 移动 `~/ob_releases/current` 后重启 unit 并做健康检查, 回滚 = 指回上一版;
+  `~/ob-snapshotter` 保持官方节点程序的换名副本(节点查到第二个 hl-node 进程会 panic), 按 sha 核对。
+- 删掉本仓库的 `orderbook-server.service`(早已过时的示例, 参数与线上不符)和 `start-server.sh`(tmux 手动启动
+  脚本, 参数会与 unit 分叉); 日志改由 journald 保存。

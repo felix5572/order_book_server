@@ -746,21 +746,10 @@ If you must run without a proxy (development, internal-only), at least bind to `
 
 ### Systemd Service
 
-An example service file is included (`orderbook-server.service`):
-
-```bash
-# Copy and edit the service file
-cp orderbook-server.service /etc/systemd/system/
-vim /etc/systemd/system/orderbook-server.service  # adjust paths
-
-# Enable and start
-systemctl daemon-reload
-systemctl enable orderbook-server
-systemctl start orderbook-server
-
-# View logs
-journalctl -u orderbook-server -f
-```
+This fork runs as `orderbook-server.service` on its node host, operated from the hyperliquid-trade repository
+(`operations/orderbook_server/ob_ops.py`): that script holds the only unit definition and command line, builds
+`origin/main` into `~/ob_releases/<commit>/`, goes live by moving `~/ob_releases/current` and restarting the unit, and
+keeps `~/ob-snapshotter` a copy of the official node build. Logs: `journalctl -u orderbook-server -f`.
 
 ## Caveats
 
