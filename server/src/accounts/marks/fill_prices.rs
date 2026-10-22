@@ -1,11 +1,15 @@
 //! Execution-price evidence for cash replay. A range contains every mark that can apply to a fill, never just the
-//! block's final price. Native ranges follow the existing action/fill cuts; HIP-3 has no action identity in its price
-//! stream, so its range includes the opening mark and every written mark. Ambiguity belongs to the consumer: if both
+//! block's final price. Native ranges follow the existing action/fill cuts. HIP-3 uses receipt-backed taker ordering
+//! around a uniquely paired Normal setOracle; otherwise it retains every written mark. Ambiguity belongs to the consumer: if both
 //! bounds produce the same integer margin transfer, that transfer is exact even when the mark itself is not pinned.
+
+#[cfg(test)]
+pub(crate) use hip3::golden_prices;
+mod hip3;
 
 use rustc_hash::FxHashMap;
 
-use super::{Hip3PriceUpdate, execution::BlockFill, native::NativePrices, seed::{Hip3Coin, exact_price_units}};
+use super::{Hip3PriceUpdate, actions::MarkActions, execution::{BlockFill, BlockStatuses}, native::NativePrices, seed::Hip3Coin};
 
 /// Inclusive price bounds, in 10^-(6-size_decimals) units, from the same block as the fill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,26 +84,11 @@ impl FillPriceBuilder {
         }
     }
 
-    pub(super) fn hip3(&mut self, fills: &[BlockFill], coins: &FxHashMap<String, Hip3Coin>, updates: &[Hip3PriceUpdate]) {
-        let mut ranges: FxHashMap<&str, PricesSeen> = FxHashMap::default();
-        for fill in fills {
-            if let Some(coin) = coins.get(fill.coin.as_ref()) {
-                ranges.entry(&fill.coin).or_insert_with(|| {
-                    let mut seen = PricesSeen::default();
-                    seen.observe(coin.mark.map(|mark| (mark.px, coin.size_decimals)));
-                    seen
-                });
-            }
-        }
-        for update in updates.iter().filter(|update| !update.oracle) {
-            if let Some(seen) = ranges.get_mut(update.coin.as_str()) {
-                let coin = &coins[&update.coin];
-                seen.observe(exact_price_units(&update.px, coin.size_decimals).ok().map(|px| (px, coin.size_decimals)));
-            }
-        }
-        for (fill, seen) in fills.iter().zip(&mut self.prices) {
-            if let Some(range) = ranges.get(fill.coin.as_ref()) { seen.clone_from(range); }
-        }
+    pub(super) fn hip3(
+        &mut self, fills: &[BlockFill], coins: &FxHashMap<String, Hip3Coin>, updates: &[Hip3PriceUpdate],
+        actions: Option<&MarkActions>, statuses: &BlockStatuses,
+    ) {
+        hip3::observe(&mut self.prices, fills, coins, updates, actions, statuses);
     }
 
     pub(super) fn finish(self, height: u64, fills: &[BlockFill]) -> FillMarkPrices {

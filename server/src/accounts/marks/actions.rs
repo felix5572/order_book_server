@@ -40,6 +40,8 @@ pub(crate) enum MarkAction {
     VaultWithdraw { vault: Address },
     /// Per main-dex asset, the submitted (oracle, mark); `None` for an asset the publisher does not price.
     SetGlobal(Vec<Option<(String, String)>>),
+    /// Successful HIP-3 setOracle: execution identity only; written prices come from the oracle stream.
+    Hip3Oracle { dex: String },
     /// A validator's submitted oracle and external perp prices, by coin.
     Reference { oracle: Vec<(String, String)>, external: Vec<(String, String)> },
 }
@@ -116,7 +118,7 @@ impl MarkActions {
 }
 
 fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String> {
-    // Vault withdrawals wrapped by multiSig still execute at the outer action's category-3 rank.
+    // Vault withdrawals and setOracle wrapped by multiSig still execute at the outer action's category-3 rank.
     // Other wrapped actions retain their existing unsupported mark-attribution scope.
     let inner;
     let action = if paired.action.action_type == "multiSig" {
@@ -126,11 +128,11 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
             status => return Err(format!("multiSig with status {status:?}")),
         }
         inner = paired.action.multi_sig_action()?;
-        if inner.action_type != "vaultTransfer" { return Ok(None); }
+        if !matches!(inner.action_type, "vaultTransfer" | "perpDeploy") { return Ok(None); }
         &inner
     } else { paired.action };
     let kind = action.action_type;
-    if !matches!(kind, "order" | "modify" | "batchModify" | "cancel" | "cancelByCloid" | "vaultTransfer" | "SetGlobalAction" | "validatorL1UpdateReferenceOracle") {
+    if !matches!(kind, "order" | "modify" | "batchModify" | "cancel" | "cancelByCloid" | "vaultTransfer" | "perpDeploy" | "SetGlobalAction" | "validatorL1UpdateReferenceOracle") {
         return Ok(None);
     }
     match paired.response.res.status {
@@ -138,6 +140,7 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
         "ok" => {}
         status => return Err(format!("{kind} with status {status:?}")),
     }
+    if kind == "perpDeploy" && action.set_oracle.is_none() { return Ok(None); }
     let user = paired.response.user.map(str::parse).transpose().map_err(|err| format!("{kind} user: {err}"))?;
     let statuses = || response_statuses(paired);
     let (category, action) = match kind {
@@ -193,6 +196,9 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
             let vault = action.field(action.vault_address.as_ref(), "vaultAddress")?;
             (3, MarkAction::VaultWithdraw { vault })
         }
+        "perpDeploy" => {
+            (3, hip3_oracle(action)?)
+        }
         "SetGlobalAction" => {
             let pxs: Vec<(Option<String>, Option<String>)> = action.field(action.pxs.as_ref(), "pxs")?;
             let pxs = pxs
@@ -213,6 +219,15 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
         }
     };
     Ok(Some(RankedAction { rank: (paired.bundle, category, paired.position), user, action }))
+}
+
+/// A successful deployer action supplies timing, not a substitute for the written mark.
+fn hip3_oracle(action: &crate::accounts::replica::Action<'_>) -> Result<MarkAction, String> {
+    #[derive(Deserialize)]
+    struct SetOracle { dex: String }
+    let SetOracle { dex } = action.field(action.set_oracle.as_ref(), "setOracle")?;
+    if dex.is_empty() || dex.contains(':') { return Err("setOracle with invalid dex".into()); }
+    Ok(MarkAction::Hip3Oracle { dex })
 }
 
 /// Request/response pairing is optional evidence for no-fill IOC attribution, not a protocol invariant for an
@@ -441,6 +456,24 @@ pub(crate) mod tests {
 
     pub(crate) fn mark_actions(line: &str) -> MarkActions {
         MarkActions::of(&ReplicaLine::parse(line).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn hip3_price_identity_uses_successful_outer_rank_and_ignores_other_deployer_actions() {
+        let action = r#"{"type":"perpDeploy","setOracle":{"dex":"xyz","oraclePxs":[],"markPxs":[]}}"#;
+        let wrapped = format!(r#"{{"type":"multiSig","payload":{{"action":{action}}}}}"#);
+        let accepted = ok(r#"{"type":"default"}"#);
+        let rejected = r#"{"user":null,"res":{"status":"err","response":"business refusal"}}"#;
+        let unrelated = r#"{"type":"perpDeploy","setFundingInterestRate":{"dex":"xyz"}}"#;
+        let line = replica_line(1, &[&[(action, rejected), (unrelated, &accepted)], &[(action, &accepted), (&wrapped, &accepted)]]);
+        let parsed = mark_actions(&line);
+        assert_eq!(parsed.actions.len(), 2);
+        assert_eq!(parsed.actions[0].rank, (1, 3, 0));
+        assert_eq!(parsed.actions[1].rank, (1, 3, 1));
+        for a in parsed.actions {
+            assert_eq!(a.action, MarkAction::Hip3Oracle { dex: "xyz".into() });
+            assert!(!a.action.is_price(), "HIP-3 timing evidence cannot alter native price evaluation");
+        }
     }
 
     #[test]

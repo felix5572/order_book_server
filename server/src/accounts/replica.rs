@@ -74,6 +74,8 @@ pub(crate) struct Action<'a> {
     pub(crate) oid: Option<LazyValue<'a>>,
     #[serde(borrow)]
     pub(crate) order: Option<LazyValue<'a>>,
+    #[serde(borrow, rename = "setOracle")]
+    pub(crate) set_oracle: Option<LazyValue<'a>>,
     #[serde(borrow)]
     pub(crate) pxs: Option<LazyValue<'a>>,
     #[serde(borrow, rename = "oraclePxs")]

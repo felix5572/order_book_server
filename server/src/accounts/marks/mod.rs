@@ -71,6 +71,8 @@ impl CheckpointGrid {
 /// coin's `szDecimals`, which only a seed's universe gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Hip3PriceUpdate {
+    /// Normal updates can pair with a unique successful setOracle; Fallback remains unplaced.
+    normal: bool,
     /// true for stored-oracle slot 0, false for mark slot 1.
     oracle: bool,
     coin: String,
@@ -115,7 +117,7 @@ impl BlockInputs {
                 .chain(event.oracle_pxs.coin_to_oracle_px.into_iter().map(|(coin, px)| (true, coin, px)));
             for (oracle, coin, written) in prices {
                 match node_time_ns(&written.last_update_time) {
-                    Ok(time_ns) => out.hip3.push(Hip3PriceUpdate { oracle, coin, px: written.px, time_ns }),
+                    Ok(time_ns) => out.hip3.push(Hip3PriceUpdate { normal: event.update_class == "Normal", oracle, coin, px: written.px, time_ns }),
                     Err(err) => report.errors.push((Stream::Hip3OracleUpdates, format!("block {height} {coin}: {err}"))),
                 }
             }
@@ -183,7 +185,7 @@ impl MarkState {
     /// does not convert, a diff that does not fit or a price action that contradicts the block breaks the contract.
     fn apply(&mut self, height: u64, inputs: &BlockInputs, report: &mut MarksBlockReport) {
         let mut fill_prices = FillPriceBuilder::new(&inputs.fills);
-        fill_prices.hip3(&inputs.fills, &self.hip3, &inputs.hip3);
+        fill_prices.hip3(&inputs.fills, &self.hip3, &inputs.hip3, inputs.actions.as_ref(), &inputs.statuses);
         self.apply_hip3(height, &inputs.hip3, report);
         if let Some(actions) = &inputs.actions {
             self.prices.begin_block(actions.time_ns);
@@ -1375,7 +1377,7 @@ pub(crate) mod tests {
     fn an_overflowing_log_is_a_loss_and_starts_over() {
         let mut log = InputLog::new(2);
         log.restart(9);
-        let update = Hip3PriceUpdate { oracle: false, coin: "xyz:TSLA".to_string(), px: "1.0".to_string(), time_ns: 1 };
+        let update = Hip3PriceUpdate { normal: false, oracle: false, coin: "xyz:TSLA".to_string(), px: "1.0".to_string(), time_ns: 1 };
         assert!(log.push(10, BlockInputs { hip3: vec![update.clone(); 2], ..BlockInputs::default() }));
         assert!(!log.push(11, BlockInputs { hip3: vec![update], ..BlockInputs::default() }), "one more overflows");
         assert_eq!((log.base, log.inputs, log.reaches(10), log.reaches(11)), (Some(11), 0, false, true));

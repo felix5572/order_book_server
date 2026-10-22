@@ -1621,6 +1621,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn hip3_execution_order_reconciles_isolated_cash_at_both_checkpoint_endpoints() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/hip3_cash_goldens.json")).unwrap();
+        for case in golden["cases"].as_array().unwrap() { check_hip3_execution_cash(case, true); }
+    }
+
+    #[test]
+    #[ignore = "requires HIP3_CASH_CORPUS pointing to the archived 42-position sample"]
+    fn archived_hip3_execution_cash_corpus() {
+        let path = std::env::var("HIP3_CASH_CORPUS").expect("explicit archive path");
+        let golden: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let cases = golden["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 42);
+        for case in cases { check_hip3_execution_cash(case, false); }
+    }
+
+    fn check_hip3_execution_cash(case: &serde_json::Value, require_no_estimate: bool) {
+        let decimals = u32::try_from(case["size_decimals"].as_u64().unwrap()).unwrap();
+        let before = &case["checkpoint_before"];
+        let after = &case["checkpoint_after"];
+        let leverage = u32::try_from(before["l"]["I"]["l"].as_u64().unwrap()).unwrap();
+        let mut states = per_dex();
+        let account = states.accounts.get_mut(&user(ISOLATED)).unwrap();
+        account.isolated.clear();
+        account.isolated.insert((0, 0), before["l"]["I"]["u"].as_i64().unwrap() * WEI_PER_MICRO);
+        account.pools = per_dex_pools(&[(0, 1_000_000_000_000_000_000)]);
+        account.cross_exposure_seen.clear();
+        let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::IsolatedOnly, default_leverage: leverage };
+        for event in case["events"].as_array().unwrap() {
+            let prices = crate::accounts::marks::fill_prices::golden_prices(case, event);
+            let fill: Fill = serde_json::from_value(event["fill"].clone()).unwrap();
+            let event = FillEvent::at_mark(&fill, prices.get(event["height"].as_u64().unwrap(), &fill.coin, fill.tid)).unwrap();
+            let flow = event.cash_wei(decimals, MAX_PERP_DECIMALS - decimals).unwrap();
+            apply_isolated_fill(account, &market, &event, flow, leverage).unwrap();
+        }
+        assert_eq!(account.isolated[&(0, 0)], after["l"]["I"]["u"].as_i64().unwrap() * WEI_PER_MICRO, "{} {}", case["user"], case["coin"]);
+        if require_no_estimate { assert!(!account.estimated, "uniquely ordered marks with ample funds are exact"); }
+    }
+
+    #[test]
     fn default_leverage_caps_high_tiers_without_changing_explicit_settings() {
         for (maximum, expected) in [(3, 3), (20, 20), (21, 20), (50, 20)] {
             let states = states(|checkpoint| {
