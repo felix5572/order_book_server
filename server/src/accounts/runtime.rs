@@ -1036,14 +1036,17 @@ fn log_install(diagnostics: &mut AccountDiagnostics, height: u64, parse_seconds:
 /// The replayed rows at the anchor against its own (design 000437): counts, metrics, and mismatches as evidence.
 fn log_row_check(height: u64, previous: Option<u64>, rows: &RowCheck) {
     info!(
-        "accounts: replayed rows at anchor {height}: {} equal, {} differ, {} classed differently, {} moved after the anchor",
-        rows.equal, rows.differ, rows.class_differs, rows.moved_after
+        "accounts: replayed rows at anchor {height}: {} equal, {} differ, {} estimated, {} classed differently, {} moved after the anchor",
+        rows.equal, rows.differ, rows.estimated, rows.class_differs, rows.moved_after
     );
-    for (result, count) in [("equal", rows.equal), ("differ", rows.differ), ("classDiffers", rows.class_differs)] {
+    for (result, count) in [("equal", rows.equal), ("differ", rows.differ), ("estimated", rows.estimated), ("classDiffers", rows.class_differs)] {
         ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL.with_label_values(&[result]).inc_by(count);
     }
     for mismatch in &rows.samples {
-        record_evidence(&replay_row_mismatch_json(mismatch, previous, height));
+        record_evidence(&replay_row_mismatch_json("replayRowMismatch", mismatch, previous, height));
+    }
+    for estimated in &rows.estimated_samples {
+        record_evidence(&replay_row_mismatch_json("replayRowEstimated", estimated, previous, height));
     }
 }
 

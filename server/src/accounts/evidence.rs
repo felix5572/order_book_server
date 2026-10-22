@@ -149,10 +149,11 @@ pub(crate) fn replay_mismatch_json(kind: &'static str, mismatch: &Mismatch, anch
 }
 
 /// A replayed row the anchor's own row contradicts (design 000437).
-pub(crate) fn replay_row_mismatch_json(mismatch: &RowMismatch, anchor_from: Option<u64>, anchor_to: u64) -> serde_json::Value {
+/// `kind`: `replayRowMismatch`, or `replayRowEstimated` for a row of an account whose cash is modelled.
+pub(crate) fn replay_row_mismatch_json(kind: &'static str, mismatch: &RowMismatch, anchor_from: Option<u64>, anchor_to: u64) -> serde_json::Value {
     let price = |price: &LiquidationPx| format!("{price:?}");
     json!({
-        "kind": "replayRowMismatch",
+        "kind": kind,
         "anchorFrom": anchor_from,
         "anchorTo": anchor_to,
         "coin": mismatch.coin,

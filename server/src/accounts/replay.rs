@@ -849,8 +849,7 @@ impl MarginStates {
                 counts.moved += u64::from(start.accounts.get(user).is_none_or(|before| !same_cash(replayed, before)));
                 continue;
             }
-            // a modelled transfer only splits a pool's cash between cross and isolated: its total must still be exact
-            if replayed.estimated && totals(replayed) == totals(anchored) {
+            if only_split_differs(replayed, anchored) {
                 counts.estimated += 1;
                 if check.estimated_samples.len() < MAX_MISMATCH_SAMPLES {
                     check.estimated_samples.push(Mismatch { user: *user, replayed: replayed.clone(), anchor: anchored.clone() });
@@ -864,6 +863,35 @@ impl MarginStates {
         }
         check
     }
+}
+
+impl MarginStates {
+    /// Whether `user`'s replayed cash is off `anchor`'s only in the split between cross and isolated after a modelled
+    /// transfer (`only_split_differs`): the cash check counts such an account `estimated`, and the row check its rows
+    /// off the anchor's price (review 000468 r1 P2: not every account that used the model).
+    pub(crate) fn split_estimated(&self, anchor: &Self, user: &Address) -> bool {
+        let anchored = anchor.accounts.get(user).filter(|anchored| anchored.stop.is_none());
+        self.accounts.get(user).filter(|replayed| replayed.stop.is_none()).zip(anchored).is_some_and(|(replayed, anchored)| only_split_differs(replayed, anchored))
+    }
+
+    /// Moves `wei` of `user`'s cross cash on `dex` into its isolated cash of `key` (a test's anchor off the replay's split).
+    #[cfg(test)]
+    pub(crate) fn shift_to_isolated(&mut self, user: &Address, dex: usize, key: (usize, usize), wei: i64) {
+        let account = self.accounts.get_mut(user).expect("a tracked account");
+        *account.isolated.get_mut(&key).expect("its isolated cash") += wei;
+        account.add_cross(dex, -wei);
+    }
+
+    /// Adds `wei` to `user`'s cross cash on `dex` (a test's anchor off the replay's total).
+    #[cfg(test)]
+    pub(crate) fn add_cross_cash(&mut self, user: &Address, dex: usize, wei: i64) {
+        self.accounts.get_mut(user).expect("a tracked account").add_cross(dex, wei);
+    }
+}
+
+/// A modelled transfer only splits a pool's cash between cross and isolated: off the anchor, but each pool's total exact.
+fn only_split_differs(replayed: &AccountMargin, anchored: &AccountMargin) -> bool {
+    replayed.estimated && !same_cash(replayed, anchored) && totals(replayed) == totals(anchored)
 }
 
 /// Each pool's cash with its isolated cash added (default / disabled: by dex, a dex without state at 0; unified: one).

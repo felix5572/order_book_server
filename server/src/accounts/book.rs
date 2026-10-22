@@ -716,6 +716,10 @@ pub(crate) struct RowCheck {
     /// table as of the anchor is not kept.
     pub(crate) moved_after: u64,
     pub(crate) samples: Vec<RowMismatch>,
+    /// Rows off the anchor's price whose account's cash is modelled (`ReplayedRow::cash_estimated`): expected, not
+    /// `differ` (review 000466 r1 P2-2, as the cash check), with samples of their own.
+    pub(crate) estimated: u64,
+    pub(crate) estimated_samples: Vec<RowMismatch>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1105,11 +1109,11 @@ impl AccountBook {
             replayed.apply(*block, *user, event);
         }
         let cash = replayed.check_against(anchor, &replay.anchored);
-        ReplayCheck::Checked { cash, rows: self.check_rows(&replayed, anchor_coins, height) }
+        ReplayCheck::Checked { cash, rows: self.check_rows(&replayed, anchor, anchor_coins, height) }
     }
 
     /// See `RowCheck`.
-    fn check_rows(&self, replayed: &MarginStates, anchor_coins: &FxHashMap<String, AnchorCoin>, height: u64) -> RowCheck {
+    fn check_rows(&self, replayed: &MarginStates, anchor: &MarginStates, anchor_coins: &FxHashMap<String, AnchorCoin>, height: u64) -> RowCheck {
         let mut held: FxHashMap<Address, Vec<HeldPosition<'_>>> = FxHashMap::default();
         let mut moved: FxHashSet<Address> = FxHashSet::default();
         for (name, coin) in anchor_coins {
@@ -1138,11 +1142,18 @@ impl AccountBook {
                 let row = record.table_id.and_then(|table_id| {
                     replayed.replayed_row(user, name, position.size_raw, table_id, held[user].iter().copied(), mark_of)
                 });
-                let anchor = &position.row;
+                let anchor_row = &position.row;
                 match &row {
-                    Some(row) if Some(row.pool_positions) != anchor.pool_positions => check.class_differs += 1,
-                    Some(row) if same_price(&row.liquidation_px, &anchor.liquidation_px, mark) => {
+                    Some(row) if Some(row.pool_positions) != anchor_row.pool_positions => check.class_differs += 1,
+                    Some(row) if same_price(&row.liquidation_px, &anchor_row.liquidation_px, mark) => {
                         check.equal += 1;
+                        continue;
+                    }
+                    Some(_) if replayed.split_estimated(anchor, user) => {
+                        check.estimated += 1;
+                        if check.estimated_samples.len() < MAX_ROW_SAMPLES {
+                            check.estimated_samples.push(RowMismatch { coin: name.clone(), user: *user, replayed: row.clone(), anchor: anchor_row.clone() });
+                        }
                         continue;
                     }
                     Some(_) => check.differ += 1,
@@ -1151,11 +1162,11 @@ impl AccountBook {
                         continue;
                     }
                     // a member without a stored mark: neither side has a price
-                    None if anchor.liquidation_px == LiquidationPx::Unsupported(UnsupportedReason::MissingMark) => continue,
+                    None if anchor_row.liquidation_px == LiquidationPx::Unsupported(UnsupportedReason::MissingMark) => continue,
                     None => check.class_differs += 1,
                 }
                 if check.samples.len() < MAX_ROW_SAMPLES {
-                    check.samples.push(RowMismatch { coin: name.clone(), user: *user, replayed: row, anchor: anchor.clone() });
+                    check.samples.push(RowMismatch { coin: name.clone(), user: *user, replayed: row, anchor: anchor_row.clone() });
                 }
             }
         }
@@ -1940,6 +1951,45 @@ mod tests {
         };
         assert_eq!((rows.equal, rows.differ, rows.samples.len()), (0, 1, 1), "the anchor's row says otherwise");
         assert_eq!(rows.samples[0].replayed.as_ref().map(|row| row.liquidation_px.clone()), Some(expected));
+    }
+
+    /// Review 000468 r1 P2: after an isolated open (the modelled transfer), a row off the anchor's price is `estimated`
+    /// only when the account's cash is off the anchor in its split alone; with the cash exact, or a pool total off, the
+    /// row is `differ`.
+    #[test]
+    fn a_rows_price_off_the_anchor_is_estimated_only_for_a_split_off_it() {
+        let isolated = checkpoint_user(ISOLATED);
+        let rows_with = |edit_cash: &dyn Fn(&mut MarginStates)| {
+            let mut book = AccountBook::new(0);
+            book.apply_fills(fills(100, &[]));
+            book.apply_misc_events(misc(100, &[]));
+            book.apply_block_actions(block_actions(1_000, &[]));
+            let mut first = anchor(1_000, &[(PUMP, 0, &[(isolated, -2_000_000)])]);
+            first.margins = per_dex_with_main_cash(-12_000_000_000);
+            book.install_anchor(first);
+            // BTC is set isolated at 5x: an open there makes the account's cash modelled
+            book.apply_block(block_actions(1_001, &[]), vec![fills(1_001, &[(isolated, "BTC", "B", 1, "0.0", "0.001")])], Vec::new(), |_| None);
+            book.apply_block_actions(block_actions(1_002, &[]));
+            let mut second = anchor(1_002, &[(PUMP, 0, &[(isolated, -2_000_000)])]);
+            second.margins = book.replay.as_ref().unwrap().current.clone();
+            edit_cash(&mut second.margins);
+            second.coins.get_mut(PUMP).unwrap().positions.get_mut(&isolated).unwrap().row.liquidation_px = LiquidationPx::Computed(0.5);
+            let ReplayCheck::Checked { cash, rows } = book.install_anchor(second).replay_check else { panic!("checked") };
+            (cash.compared["perDex"], rows)
+        };
+        // the node moved 1 USDC more into the BTC position: the split alone is off
+        let (cash, rows) = rows_with(&|margins| margins.shift_to_isolated(&isolated, 0, (0, 0), 100_000_000));
+        assert_eq!((cash.estimated, cash.mismatched), (1, 0));
+        assert_eq!((rows.differ, rows.estimated, rows.samples.len(), rows.estimated_samples.len()), (0, 1, 0, 1));
+        assert_eq!(rows.estimated_samples[0].coin.as_str(), PUMP);
+        // the cash exact: the row's price is a row error
+        let (cash, rows) = rows_with(&|_| {});
+        assert_eq!((cash.estimated, cash.mismatched), (0, 0));
+        assert_eq!((rows.differ, rows.estimated, rows.samples.len()), (1, 0, 1));
+        // a pool total off: a cash mismatch, and the row no estimate either
+        let (cash, rows) = rows_with(&|margins| margins.add_cross_cash(&isolated, 0, 10_000_000_000));
+        assert_eq!((cash.estimated, cash.mismatched), (0, 1));
+        assert_eq!((rows.differ, rows.estimated), (1, 0));
     }
 
     fn view_at(book: &AccountBook, holder: Address, marks: &ListedMarks) -> PositionView {
