@@ -20,6 +20,7 @@ pub(crate) mod actions;
 pub(crate) mod book;
 pub(crate) mod decimal;
 pub(crate) mod execution;
+pub(crate) mod fill_prices;
 pub(crate) mod native;
 mod orders;
 pub(crate) mod pairing;
@@ -33,6 +34,7 @@ use self::{
     actions::{MarkActions, Rank},
     book::{Applied, BookDiff, BooksCheck, NativeBooks},
     execution::{BlockFill, BlockStatuses, BookCuts},
+    fill_prices::{FillMarkPrices, FillPriceBuilder},
     native::{CoinCut, CoinPriceState, NativePrices, PriceMismatch, PricesCheck},
     rules::wire_units,
     seed::{Hip3Coin, MarkSeed, StoredMark, exact_price_units},
@@ -180,6 +182,8 @@ impl MarkState {
     /// Applies block `height`; coins outside the seed's universe (listed since) are counted and skipped, a value that
     /// does not convert, a diff that does not fit or a price action that contradicts the block breaks the contract.
     fn apply(&mut self, height: u64, inputs: &BlockInputs, report: &mut MarksBlockReport) {
+        let mut fill_prices = FillPriceBuilder::new(&inputs.fills);
+        fill_prices.hip3(&inputs.fills, &self.hip3, &inputs.hip3);
         self.apply_hip3(height, &inputs.hip3, report);
         if let Some(actions) = &inputs.actions {
             self.prices.begin_block(actions.time_ns);
@@ -188,7 +192,7 @@ impl MarkState {
         let cuts = self.apply_diffs(height, &inputs.diffs, report);
         let trades = self.block_trades(height, &inputs.fills, report);
         if let Some(actions) = inputs.actions.as_ref().filter(|_| !self.books_broken && !self.prices_broken)
-            && let Err((stream, err)) = self.apply_prices(actions, inputs, &cuts, &trades, report)
+            && let Err((stream, err)) = self.apply_prices(actions, inputs, &cuts, &trades, report, &mut fill_prices)
         {
             report.errors.push((stream, format!("block {height}: {err}")));
             self.prices_broken = true;
@@ -198,6 +202,7 @@ impl MarkState {
                 self.prices.trade(asset, *px);
             }
         }
+        report.fill_prices = fill_prices.finish(height, &inputs.fills);
         self.height = height;
     }
 
@@ -262,10 +267,14 @@ impl MarkState {
         cuts: &BookCuts,
         trades: &FxHashMap<usize, Vec<(usize, u64)>>,
         report: &mut MarksBlockReport,
+        fill_prices: &mut FillPriceBuilder,
     ) -> Result<(), (Stream, String)> {
         let books = &self.books;
         let system = inputs.system.anchors(actions, &inputs.statuses, self.system_timing, |coin| books.order_asset(coin)).map_err(|err| (Stream::SystemActions, err))?;
+        let mut fills_from = 0;
         for point in execution::price_points_with_system(actions, &inputs.statuses, &inputs.diffs, &inputs.fills, &system, |coin| books.order_asset(coin)).map_err(|err| (Stream::BlockActions, err))? {
+            fill_prices.native_segment(&inputs.fills, &self.prices, fills_from, point.fills_hi);
+            fills_from = point.cut.fills_lo;
             if point.cut.lo < point.cut.hi {
                 report.ambiguous_cuts += 1;
                 report.ambiguous_samples.push(AmbiguousCut { rank: point.action.rank, lo: point.cut.lo, hi: point.cut.hi });
@@ -280,6 +289,7 @@ impl MarkState {
             };
             self.prices.apply(&point.action.action, point.action.user, actions.time_ns, cut_of).map_err(|err| (Stream::BlockActions, err))?;
         }
+        fill_prices.native_segment(&inputs.fills, &self.prices, fills_from, inputs.fills.len());
         Ok(())
     }
 }
@@ -409,6 +419,8 @@ impl MarkStreams {
 /// What one completed block did to the marks.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct MarksBlockReport {
+    /// Per-trade execution mark bounds, withheld if either boundary of this block is untrusted.
+    pub(crate) fill_prices: FillMarkPrices,
     /// HIP-3 updates of coins outside the seed's universe.
     pub(crate) unknown_coin_updates: usize,
     /// Main-dex diffs of coins outside the seed's universe.
@@ -614,6 +626,7 @@ impl NodeMarks {
 
     /// The marks' inputs of completed block `height` (blocks come in height order, each once).
     pub(crate) fn apply_block(&mut self, height: u64, inputs: MarkInputs) -> MarksBlockReport {
+        let trusted_before = self.availability().ok().and_then(|at| at.checked_add(1)) == Some(height);
         let mut report = MarksBlockReport::default();
         self.applied = Some(height);
         self.streams.record_read(height, &inputs);
@@ -631,6 +644,9 @@ impl NodeMarks {
         }
         for (stream, _) in &report.errors {
             self.record_lost_block(*stream, height);
+        }
+        if !trusted_before || self.availability().ok() != Some(height) {
+            report.fill_prices = FillMarkPrices::default();
         }
         if self.grid.contains(height) && self.state.as_ref().is_none_or(|state| state.seed.height < height) {
             self.snapshot = self.trusted_state_at(height).cloned();
@@ -847,7 +863,10 @@ pub(crate) mod tests {
                 inputs.book_diffs = no_op_diffs(height);
                 inputs.hip3_oracle_updates = hip3_oracle_updates;
             }
-            assert_eq!(marks.apply_block(height, inputs), MarksBlockReport::default(), "block {height}");
+            let mut report = marks.apply_block(height, inputs);
+            // The helper checks diagnostics; dedicated execution-price tests inspect the new projection.
+            report.fill_prices = FillMarkPrices::default();
+            assert_eq!(report, MarksBlockReport::default(), "block {height}");
         }
     }
 

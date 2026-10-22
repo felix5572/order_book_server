@@ -195,6 +195,8 @@ pub(crate) struct Cut {
 pub(crate) struct PricePoint<'b> {
     pub(crate) action: &'b RankedAction,
     pub(crate) cut: Cut,
+    /// Fills at or above this index certainly run after the price action. Between `fills_lo` and this bound, either order is possible.
+    pub(crate) fills_hi: usize,
 }
 
 /// The price actions of a block in execution order, each with its cut; `order_asset` gives a coin's asset id as an
@@ -245,8 +247,8 @@ pub(crate) fn price_points_with_system<'b>(
             anchors.created[1].extend(&system.after.created);
             anchors.cancelled[0].extend(&system.before.cancelled);
             anchors.cancelled[1].extend(&system.after.cancelled);
-            let cut = anchors.cut(diffs, fills).map_err(|err| format!("block {} action at {:?}: {err}", actions.height, action.rank))?;
-            Ok(PricePoint { action, cut })
+            let (cut, fills_hi) = anchors.cut(diffs, fills).map_err(|err| format!("block {} action at {:?}: {err}", actions.height, action.rank))?;
+            Ok(PricePoint { action, cut, fills_hi })
         })
         .collect()
 }
@@ -384,7 +386,7 @@ impl<'s> Anchors<'s> {
         Self::sides_of(&self.created, taker.oid)
     }
 
-    fn cut(&self, diffs: &[BookDiff], fills: &[BlockFill]) -> Result<Cut, String> {
+    fn cut(&self, diffs: &[BookDiff], fills: &[BlockFill]) -> Result<(Cut, usize), String> {
         let (lo, hi) = interval(self.line_sides(diffs, fills).into_iter().enumerate())
             .map_err(|(lo, hi)| format!("diff anchors contradict the line order: before up to {lo}, after from {hi}"))?;
         let takers: FxHashMap<u64, Option<Side>> = fills
@@ -392,9 +394,9 @@ impl<'s> Anchors<'s> {
             .filter(|fill| fill.crossed)
             .map(|fill| (fill.tid, single(self.taker_sides(fill))))
             .collect();
-        let (fills_lo, _) = interval(fills.iter().map(|fill| takers.get(&fill.tid).copied().flatten()).enumerate())
+        let (fills_lo, fills_hi) = interval(fills.iter().map(|fill| takers.get(&fill.tid).copied().flatten()).enumerate())
             .map_err(|(lo, hi)| format!("fill anchors contradict the fill order: before up to {lo}, after from {hi}"))?;
-        Ok(Cut { lo, hi, fills_lo })
+        Ok((Cut { lo, hi, fills_lo }, fills_hi))
     }
 
     /// The side of each diff line, `None` when nothing places it.

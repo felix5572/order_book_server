@@ -810,8 +810,9 @@ impl AccountBook {
         fills: Vec<Batch<NodeDataFill>>,
         mut misc_events: Vec<Batch<MiscEvent>>,
         oracle: impl Fn(&str) -> Option<(u64, u32)>,
+        fill_prices: &super::marks::fill_prices::FillMarkPrices,
     ) -> BlockReport {
-        // Funding settles before this block's user actions/fills and before marks consume SGA/updates.
+        // Funding settles before this block's user actions/fills, using the oracle captured before its price updates.
         let mut funding_reports = Vec::new();
         for batch in &mut misc_events {
             let height = batch.block_number();
@@ -837,7 +838,7 @@ impl AccountBook {
         self.liquidations.record_block(time_ms, fills.iter().flat_map(Batch::events_ref), size_fill);
         BlockReport {
             block_actions,
-            fills: fills.into_iter().map(|batch| self.apply_fills(batch)).collect(),
+            fills: fills.into_iter().map(|batch| self.apply_fills_at_marks(batch, fill_prices)).collect(),
             misc_events: {
                 funding_reports.extend(misc_events.into_iter().map(|batch| self.apply_misc_events(batch)));
                 funding_reports
@@ -845,7 +846,12 @@ impl AccountBook {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_fills(&mut self, batch: Batch<NodeDataFill>) -> FillsReport {
+        self.apply_fills_at_marks(batch, &super::marks::fill_prices::FillMarkPrices::default())
+    }
+
+    fn apply_fills_at_marks(&mut self, batch: Batch<NodeDataFill>, prices: &super::marks::fill_prices::FillMarkPrices) -> FillsReport {
         let block = batch.block_number();
         raise(&mut self.fills.height, block);
         let mut report = FillsReport::default();
@@ -854,7 +860,7 @@ impl AccountBook {
             return report;
         }
         for NodeDataFill(user, fill) in batch.events() {
-            let event = FillEvent::of(&fill).map_or_else(
+            let event = FillEvent::at_mark(&fill, prices.get(block, &fill.coin, fill.tid)).map_or_else(
                 |err| {
                     report.errors.push(format!("block {block} {user}: {err}"));
                     raise(&mut self.fills.lost_block, block);
@@ -1968,7 +1974,7 @@ mod tests {
             first.margins = per_dex_with_main_cash(-12_000_000_000);
             book.install_anchor(first);
             // BTC is set isolated at 5x: an open there makes the account's cash modelled
-            book.apply_block(block_actions(1_001, &[]), vec![fills(1_001, &[(isolated, "BTC", "B", 1, "0.0", "0.001")])], Vec::new(), |_| None);
+            book.apply_block(block_actions(1_001, &[]), vec![fills(1_001, &[(isolated, "BTC", "B", 1, "0.0", "0.001")])], Vec::new(), |_| None, &crate::accounts::marks::fill_prices::FillMarkPrices::default());
             book.apply_block_actions(block_actions(1_002, &[]));
             let mut second = anchor(1_002, &[(PUMP, 0, &[(isolated, -2_000_000)])]);
             second.margins = book.replay.as_ref().unwrap().current.clone();
@@ -2080,7 +2086,7 @@ mod tests {
     fn a_fill_in_the_block_that_switched_its_asset_stops_the_replay() {
         let isolated = checkpoint_user(ISOLATED);
         let apply = |book: &mut AccountBook, height, actions: &[(BlockAction, Address)], fills_specs: &[FillSpec<'_>]| {
-            book.apply_block(block_actions(height, actions), vec![fills(height, fills_specs)], Vec::new(), |_| None)
+            book.apply_block(block_actions(height, actions), vec![fills(height, fills_specs)], Vec::new(), |_| None, &crate::accounts::marks::fill_prices::FillMarkPrices::default())
         };
         let mut book = AccountBook::new(0);
         book.apply_fills(fills(100, &[]));
@@ -2319,7 +2325,7 @@ mod tests {
         let wire = funding_inner(&[(holder, "BTC", "1"), (outside, "BTC", "-0.999999")]);
         let oracle = |_: &str| Some((828_908, 5));
         // Same sizes: lower address HOLDER wins. A leverage change later in the block cannot affect selection.
-        let report = book.apply_block(block_actions(1_001, &[]), Vec::new(), vec![misc(1_001, &[&wire])], oracle);
+        let report = book.apply_block(block_actions(1_001, &[]), Vec::new(), vec![misc(1_001, &[&wire])], oracle, &crate::accounts::marks::fill_prices::FillMarkPrices::default());
         assert!(report.misc_events.iter().all(|r| r.funding_errors.is_empty()));
         let balances: Vec<_> = book.events.iter().filter_map(|event| match &event.event {
             AccountEvent::FundingBalance { coin, amount_wei } => Some((event.user, coin.as_str(), *amount_wei)),
@@ -2336,7 +2342,7 @@ mod tests {
         let replayed = &book.replay.as_ref().unwrap().current;
         assert_eq!(replayed.check_against(&expected, &expected).compared["perDex"].mismatched, 0);
         let before = book.events.len();
-        book.apply_block(block_actions(1_000, &[]), Vec::new(), vec![misc(1_000, &[&wire])], |_| panic!("covered by seed"));
+        book.apply_block(block_actions(1_000, &[]), Vec::new(), vec![misc(1_000, &[&wire])], |_| panic!("covered by seed"), &crate::accounts::marks::fill_prices::FillMarkPrices::default());
         assert_eq!(book.events.len(), before, "covered funding is not reapplied");
     }
 
@@ -2349,16 +2355,38 @@ mod tests {
         let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000), (isolated, -2_000_000)]);
         // PUMP has greater notional under this synthetic oracle; the view does not track its outside owner.
         book.apply_block(block_actions(1_001, &[]), Vec::new(), vec![misc(1_001, &[&wire])],
-            |coin| Some(if coin == "BTC" { (1, 5) } else { (200_000, 0) }));
+            |coin| Some(if coin == "BTC" { (1, 5) } else { (200_000, 0) }), &crate::accounts::marks::fill_prices::FillMarkPrices::default());
         assert!(book.events.iter().any(|event| event.user == outside && matches!(event.event, AccountEvent::FundingBalance { .. })));
         let expected = per_dex_with_main_cash(-11_999_000_000);
         assert_eq!(book.replay.as_ref().unwrap().current.check_against(&expected, &expected).compared["perDex"].mismatched, 0);
-        let report = book.apply_block(block_actions(1_002, &[]), Vec::new(), vec![misc(1_002, &[&wire])], |_| None);
+        let report = book.apply_block(block_actions(1_002, &[]), Vec::new(), vec![misc(1_002, &[&wire])], |_| None, &crate::accounts::marks::fill_prices::FillMarkPrices::default());
         assert_eq!(report.misc_events.iter().map(|r| r.funding_errors.len()).sum::<usize>(), 1);
         let current = &book.replay.as_ref().unwrap().current;
         assert_eq!(current.stop_reason(&holder), Some(&StopReason::FundingBalanceUnknown));
         assert_eq!(current.stop_reason(&isolated), None);
         assert!(book.availability().is_ok(), "does not stop the account view or mark service");
+    }
+
+
+    #[test]
+    fn execution_marks_are_retained_in_the_event_log_when_a_new_anchor_replays_fills() {
+        use crate::accounts::test_support::fills_line;
+        use crate::accounts::marks::{MarkInputs, execution::BlockFill, tests::trusted_marks};
+        let isolated = checkpoint_user(ISOLATED);
+        let mut book = replay_book(1_000, 1_001, &[(isolated, -2_000_000)]);
+        let mut marks = trusted_marks();
+        let raw = fills_line(1_002, &[(isolated, "BTC", "A", 5, "0.0", "0.001")]).replace("\"px\":\"1.0\"", "\"px\":\"82850.0\"");
+        let batch: Batch<NodeDataFill> = sonic_rs::from_str(&raw).unwrap();
+        let report = marks.apply_block(1_002, MarkInputs { fills: batch.events_ref().iter().map(BlockFill::of).collect(), ..MarkInputs::default() });
+        assert!(report.fill_prices.get(1_002, "BTC", 5).is_some());
+        book.apply_block(block_actions(1_002, &[]), vec![batch], Vec::new(), |_| None, &report.fill_prices);
+        let replayed = book.replay.as_ref().unwrap().current.clone();
+        let mut next = anchor(1_001, &[(PUMP, 0, &[(isolated, -2_000_000)])]);
+        next.margins = per_dex_with_main_cash(-12_000_000_000);
+        book.install_anchor(next);
+        let check = book.replay.as_ref().unwrap().current.check_against(&replayed, &replayed);
+        assert!(check.compared.values().all(|counts| counts.mismatched == 0 && counts.estimated == 0));
+        assert_eq!(check.samples, []);
     }
 
 }

@@ -1,0 +1,71 @@
+//! Initial isolated margin includes the immediate loss at mark, with fill-notional/leverage as a floor.
+//! Checkpoints 1192420000→1192440000: 815/815 opens/increases and 58/58 flips explained by recorded marks.
+//! These are measured client rules, not a claim that its closed-source implementation was recovered instruction by
+//! instruction. See the golden's provenance. Missing/ambiguous execution marks retain the explicit old estimate.
+
+use crate::{accounts::marks::fill_prices::FillMarkRange, order_book::Side};
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Transfer {
+    pub(super) micro_usdc: i64,
+    pub(super) estimated: bool,
+}
+
+/// `size_raw` is only the newly opened exposure (the residual position on a flip). Price and size scales add to six,
+/// so their integer product is micro USDC. Keep the entire numerator integral; floor exactly once after dividing.
+pub(super) fn transfer(
+    size_raw: i64, fill_px_raw: i64, side: Side, leverage: u32, size_decimals: u32, mark: Option<FillMarkRange>,
+) -> Result<Transfer, String> {
+    if size_raw < 0 || fill_px_raw <= 0 || leverage == 0 { return Err("invalid isolated transfer size, price or leverage".into()); }
+    let quantity = i128::from(size_raw);
+    let price = i128::from(fill_px_raw);
+    let lev = i128::from(leverage);
+    let baseline = quantity * price / lev;
+    let amount = |mark_raw: u64| -> Result<i128, String> {
+        let mark = i128::from(mark_raw);
+        let signed_loss = if side == Side::Bid { price - mark } else { mark - price };
+        let requirement = price.max(mark + lev * signed_loss);
+        quantity.checked_mul(requirement).map(|total| total / lev).ok_or_else(|| "isolated margin product overflows".into())
+    };
+    let exact = match mark {
+        Some(mark) => {
+            if mark.size_decimals != size_decimals || mark.min_px_raw == 0 || mark.min_px_raw > mark.max_px_raw {
+                return Err("invalid isolated execution mark units or bounds".into());
+            }
+            let first = amount(mark.min_px_raw)?;
+            let last = amount(mark.max_px_raw)?;
+            // The requirement is monotone in mark for each side, including the flat fill-notional floor.
+            (first == last).then_some(first)
+        }
+        None => None,
+    };
+    let micro_usdc = i64::try_from(exact.unwrap_or(baseline)).map_err(|err| format!("isolated transfer overflows: {err}"))?;
+    Ok(Transfer { micro_usdc, estimated: exact.is_none() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range(low: u64, high: u64) -> FillMarkRange {
+        FillMarkRange { min_px_raw: low, max_px_raw: high, size_decimals: 0 }
+    }
+
+    #[test]
+    fn adverse_execution_is_funded_in_both_directions_and_ambiguity_is_explicit() {
+        assert_eq!(transfer(10, 100, Side::Bid, 5, 0, Some(range(90, 90))).unwrap(), Transfer { micro_usdc: 280, estimated: false });
+        assert_eq!(transfer(10, 90, Side::Ask, 5, 0, Some(range(100, 100))).unwrap(), Transfer { micro_usdc: 300, estimated: false });
+        assert_eq!(transfer(10, 100, Side::Bid, 5, 0, Some(range(100, 110))).unwrap(), Transfer { micro_usdc: 200, estimated: false });
+        assert_eq!(transfer(10, 100, Side::Bid, 5, 0, Some(range(90, 110))).unwrap(), Transfer { micro_usdc: 200, estimated: true });
+        assert_eq!(transfer(10, 100, Side::Bid, 5, 0, None).unwrap(), Transfer { micro_usdc: 200, estimated: true });
+        assert_eq!(transfer(10, 100, Side::Bid, 1, 0, Some(range(90, 110))).unwrap(), Transfer { micro_usdc: 1_000, estimated: false });
+    }
+
+    #[test]
+    fn one_floor_and_invalid_inputs() {
+        assert_eq!(transfer(9, 10, Side::Bid, 3, 0, Some(range(9, 9))).unwrap().micro_usdc, 36);
+        assert!(transfer(1, 10, Side::Bid, 0, 0, Some(range(9, 9))).is_err());
+        assert!(transfer(1, 10, Side::Bid, 1, 2, Some(range(9, 9))).is_err());
+        assert!(transfer(i64::MAX, i64::MAX, Side::Ask, u32::MAX, 0, Some(range(u64::MAX, u64::MAX))).is_err());
+    }
+}

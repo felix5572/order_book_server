@@ -647,3 +647,11 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
 - 金样本 `native_mark_liquidation_goldens.json`：ALT 四个块的清算 mark 来自节点成交，输入来自归档逐动作回放。
   块 1192114308 的正确中位数 0.011112 被旧逻辑截为 0.011085；块 1192112978 的正确中位数
   0.010917 被旧逻辑截为 0.010820。后续正常更新能覆盖这类中间错误，checkpoint 终点全等不等于逐步全等。
+
+
+## 2026-10-22 逐仓成交按 mark 补足初始保证金
+
+- 修正开仓、加仓和反手的全仓→逐仓划转：取成交名义/杠杆与 mark 初始保证金加即时浮亏的较大者，最后一次整数向下取整。反手只为余量开新仓，手续费归旧仓。
+- 主站按既有逐动作执行切点提供成交 mark 范围；HIP-3 在缺少动作身份时保留块前及同块所有价格。范围两端算出相同划转额才作为精确值；否则保留已有估算和 `cashEstimated`，不换用块末 mark、不停止整个服务。
+- 成交价证据随账户事件保存，checkpoint 重放复用同一事实；资金费继续使用块前 oracle。未知时只影响估算标记，实际解析错误仍沿原有丢流路径撤回价格。
+- 精选节点金样本位于 `server/src/accounts/replay/isolated_goldens.json`；873 例归档可用 `ISOLATED_MARGIN_REPORT=/absolute/path/isolated_mark_requirement_report.json cargo test -p server --lib full_archived_isolated_margin_corpus -- --ignored --nocapture` 复核。金样本证明给定记录 mark 时的现金规则；不能代替块内执行位置或上线 checkpoint 验收。

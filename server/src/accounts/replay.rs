@@ -5,11 +5,13 @@
 //! USDC plus the cross cash of every USDC dex), and isolated cash per position. Each rule below is measured (research
 //! `hl_account_state_verify_20261019` sections 5, "全仓与逐仓之间的现金划分" and "逐仓成交的划转"); an event no measured
 //! rule covers stops the account's replay with a reason, and the next anchor resumes it. Amounts are 10^-8 USDC
-//! (`usdc.rs`). One rule is known short of exact: an isolated open, increase or flip moves floor(|size| x px / leverage)
-//! from cross, the node's own amount in about three of five fills and more in the others. Such an account's rows say so
-//! (`ReplayedRow::cash_estimated`: its isolated cash may be short and its cross pool long of the node's by the same
-//! amount) until the next anchor, which counts it apart when only the split between its pools differs
-//! (`Compared::estimated`) and as a mismatch when a pool's total does (review 000466 r1).
+//! (`usdc.rs`). Isolated opens/increases/flips fund the larger of fill-notional/leverage and mark-notional/leverage
+//! plus immediate execution loss (see `isolated`). Execution mark bounds come from the node mark owner; if the bounds
+//! yield different transfers, or no mark is available, the old fill-notional estimate remains explicitly tagged on
+//! both isolated and cross rows until the next anchor. Only a split difference with exact pool totals is counted
+//! `estimated`; a pool-total difference is still a mismatch (review 000466 r1).
+
+mod isolated;
 
 use std::collections::BTreeMap;
 
@@ -21,6 +23,7 @@ use super::{
     actions::BlockAction,
     liquidation::{HeldAtMark, LiquidationPx, solve, solve_held},
     margin::MarginTable,
+    marks::fill_prices::FillMarkRange,
     checkpoint::{
         Account, AccountMode, AssetMarginMode, CheckpointAccounts, MAX_PERP_DECIMALS, MAX_SPOT_DECIMALS, PDI_ASSET_STRIDE,
         PositionMargin, SpotPair, base_size, spot_pair_of_coin,
@@ -126,10 +129,15 @@ pub(crate) struct FillEvent {
     usdc_fee_wei: i64,
     /// A backstop liquidation other than ADL.
     backstop: bool,
+    /// Execution-time evidence, retained with the event across checkpoint replay; never a later HTTP price.
+    mark: Option<FillMarkRange>,
 }
 
 impl FillEvent {
-    pub(crate) fn of(fill: &Fill) -> Result<Self, String> {
+    #[cfg(test)]
+    pub(crate) fn of(fill: &Fill) -> Result<Self, String> { Self::at_mark(fill, None) }
+
+    pub(crate) fn at_mark(fill: &Fill, mark: Option<FillMarkRange>) -> Result<Self, String> {
         let usdc_fee_wei = if fill.fee_token == USDC_NAME {
             usdc_wei(&fill.fee).map_err(|err| format!("{} tid {} fee: {err}", fill.coin, fill.tid))?
         } else {
@@ -145,6 +153,7 @@ impl FillEvent {
             start_position: fill.start_position.clone(),
             usdc_fee_wei,
             backstop,
+            mark,
         })
     }
 
@@ -257,7 +266,7 @@ pub(crate) struct AccountMargin {
     /// The assets whose isolated setting or leverage changed in a block, with that block: a fill of the same block may
     /// come before or after the change (review 000435 r1 P2).
     switched: Option<(u64, Vec<(usize, usize)>)>,
-    /// Whether an isolated open, increase or flip moved margin since the anchor (the rule short of exact).
+    /// A transfer since the anchor lacked a mark bound determining one exact micro-USDC amount.
     estimated: bool,
     stop: Option<Stop>,
 }
@@ -478,9 +487,11 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
 /// 1192440000, every single-fill isolated position): the fee leaves the position's cash first;
 /// - a partial reduction then moves the reduced share of the rest to cross, truncated toward zero (488 of 488 exact);
 /// - a close moves all of it (768 of 768);
-/// - an open or increase takes floor(|size| x px / leverage) from cross (522 of 822 exact; in the others the node moved
-///   more, a liquidation price p50 0.4 / p90 5.2 bp nearer the mark here than the node's);
-/// - a flip closes the old position and opens the rest at the fill price, the fee left with the old one (30 of 58).
+/// - an open or increase takes mark-based initial margin plus immediate loss, with fill-notional/leverage as a floor;
+/// - a flip closes the old position and funds only the residual new position, leaving the whole fee with the old one.
+///
+/// The supplemented rule explains 815/815 opens/increases and 58/58 flips with recorded mark evidence; unknown
+/// execution prices still use the explicitly estimated floor (`isolated::transfer`).
 ///
 /// `cash_wei` is the fill's whole cash flow (`FillEvent::cash_wei`); cross takes what the position does not.
 fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &FillEvent, cash_wei: i64, leverage: u32) -> Result<(), String> {
@@ -508,11 +519,13 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
         let notional = notional(size_raw)?;
         Ok(if fill.side == Side::Bid { -notional } else { notional })
     };
-    let margin = |size_raw: i64| -> Result<i64, String> { Ok(notional(size_raw)? / i64::from(leverage)) };
+    let margin = |size_raw: i64| isolated::transfer(size_raw.abs(), price_raw, fill.side, leverage, market.size_decimals, fill.mark)
+        .map_err(|err| context(&err));
     let same_side = (start > 0) == (end > 0);
     let cash_after = if start == 0 || same_side && end.abs() > start.abs() {
-        account.estimated = true;
-        cash_before + flow(size)? - fee + margin(size)?
+        let transfer = margin(size)?;
+        account.estimated |= transfer.estimated;
+        cash_before + flow(size)? - fee + transfer.micro_usdc
     } else if end == 0 {
         0
     } else if same_side {
@@ -520,8 +533,9 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
         let moved = i128::from(size) * i128::from(cash_before - fee) / i128::from(start.abs());
         cash_before - fee - i64::try_from(moved).map_err(|err| context(&err.to_string()))?
     } else {
-        account.estimated = true;
-        flow(end)? + margin(end)?
+        let transfer = margin(end)?;
+        account.estimated |= transfer.estimated;
+        flow(end)? + transfer.micro_usdc
     };
     if end == 0 {
         account.isolated.remove(&key);
@@ -1491,6 +1505,63 @@ pub(crate) mod tests {
         unified.apply(6, user(HOLDER), &AccountEvent::FundingBalanceUnknown);
         assert_eq!(stop(&unified, HOLDER), Some(StopReason::FundingBalanceUnknown));
         assert_eq!(stop(&unified, ISOLATED), None, "only potential recipients stop");
+    }
+
+
+    #[test]
+    fn recorded_isolated_opens_increases_and_flips_match_checkpoint_cash_at_the_recorded_mark() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("replay/isolated_goldens.json")).unwrap();
+        for sample in golden["samples"].as_array().unwrap() { check_isolated_cash_sample(sample); }
+    }
+
+    /// Large recordings remain outside Git. This checks the actual Rust cash replay against every checkpoint cash
+    /// sample conditional on a matching recorded mark; it does not establish intra-block timing from polling.
+    #[test]
+    #[ignore = "requires ISOLATED_MARGIN_REPORT pointing to the archived full report"]
+    fn full_archived_isolated_margin_corpus() {
+        let path = std::env::var("ISOLATED_MARGIN_REPORT").expect("explicit archive path");
+        let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut checked = 0;
+        for sample in report["results"].as_array().unwrap() {
+            let Some(mark) = sample["observations"].as_array().unwrap().iter().find(|mark| mark["exact"] == true) else { continue };
+            check_isolated_cash_sample(&json!({"case": sample["case"], "mark_evidence": mark}));
+            checked += 1;
+        }
+        assert_eq!(checked, 873, "the archived corpus must be complete");
+        println!("{checked} checkpoint cash samples matched through the Rust isolated-fill implementation");
+    }
+
+    fn check_isolated_cash_sample(sample: &serde_json::Value) {
+        let case = &sample["case"];
+        let fill: Fill = serde_json::from_value(case["fill"].clone()).unwrap();
+        let decimals = u32::try_from(case["size_decimals"].as_u64().unwrap()).unwrap();
+        let mark = parse_size_raw(sample["mark_evidence"]["mark_px"].as_str().unwrap(), MAX_PERP_DECIMALS - decimals).unwrap().cast_unsigned();
+        let event = FillEvent::at_mark(&fill, Some(FillMarkRange { min_px_raw: mark, max_px_raw: mark, size_decimals: decimals })).unwrap();
+        let mut states = per_dex();
+        let account = states.accounts.get_mut(&user(ISOLATED)).unwrap();
+        account.isolated.clear();
+        if case["before"][0].as_i64().unwrap() != 0 {
+            account.isolated.insert((0, 0), case["before"][1].as_i64().unwrap() * WEI_PER_MICRO);
+        }
+        let before_total = totals(account).get(&0).copied().unwrap_or(0);
+        let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::IsolatedOnly, default_leverage: 1 };
+        let cash_flow = event.cash_wei(decimals, MAX_PERP_DECIMALS - decimals).unwrap();
+        let leverage = u32::try_from(case["before"][2].as_u64().unwrap()).unwrap();
+        apply_isolated_fill(account, &market, &event, cash_flow, leverage).unwrap();
+        assert_eq!(account.isolated[&(0, 0)], case["after"][1].as_i64().unwrap() * WEI_PER_MICRO, "{} {}", fill.coin, case["block"]);
+        assert_eq!(totals(account)[&0], before_total + cash_flow, "a transfer conserves the pool total");
+        assert!(!account.estimated, "{} {}", fill.coin, case["block"]);
+    }
+
+    #[test]
+    fn exact_fills_do_not_clear_an_earlier_estimated_transfer() {
+        let mut states = per_dex();
+        let event = fill_from("BTC", "B", "82857.6", "0.01", "0.0", "0.0", None);
+        states.apply(5, user(ISOLATED), &event);
+        let AccountEvent::Fill(mut next) = fill_from("BTC", "B", "82857.6", "0.01", "0.0", "0.01", None) else { unreachable!() };
+        next.mark = Some(FillMarkRange { min_px_raw: 828_500, max_px_raw: 828_500, size_decimals: 5 });
+        states.apply(6, user(ISOLATED), &AccountEvent::Fill(next));
+        assert!(states.accounts[&user(ISOLATED)].estimated, "only a new checkpoint resets the earlier uncertainty");
     }
 
 }

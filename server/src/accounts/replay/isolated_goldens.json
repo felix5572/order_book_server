@@ -1,0 +1,485 @@
+{
+  "provenance": {
+    "checkpoints": [
+      1192420000,
+      1192430000,
+      1192440000
+    ],
+    "source_sha256": "5b35acb801f9bab8f6d89de8c55182f624b3280f4d14c8d77594f0f66793bf39",
+    "note": "Node checkpoint cash and single-fill records; neighboring recorded marks validate the transfer conditional on that execution price, not the position of an update inside a block. ETH next-block-only observation excluded. Full archives remain outside Git in isolated_transfer_codex_20261021."
+  },
+  "samples": [
+    {
+      "case": {
+        "user": "0x427be6261f0a724bf23e5af8a621a8ebdc58d1d9",
+        "dex": 1,
+        "asset": 47,
+        "size_decimals": 3,
+        "block": 1192420149,
+        "before": [
+          24944,
+          -3438090863,
+          9,
+          3869313280
+        ],
+        "after": [
+          -3653,
+          628397177,
+          9,
+          565447870
+        ],
+        "fill": {
+          "coin": "xyz:EWY",
+          "px": "154.79",
+          "sz": "28.597",
+          "side": "A",
+          "time": 1792621028253,
+          "startPosition": "24.944",
+          "dir": "Long > Short",
+          "closedPnl": "-8.23152",
+          "hash": "0x7022a4bc94bb5768719c044712e33502059200a22fbe763a13eb500f53bf3153",
+          "oid": 581918349167,
+          "crossed": true,
+          "fee": "0.161125",
+          "tid": 193324189398743,
+          "cloid": "0x00000000000004710184769250603850",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.080562",
+          "priorityGas": "0.00059847"
+        }
+      },
+      "mark_evidence": {
+        "height": 1192420112,
+        "mark_px": "154.82",
+        "source": "node_hip3_stream",
+        "received_time": "2026-10-21T22:17:05.878116734",
+        "block_time": "2026-10-21T22:17:05.693532999",
+        "relation": "before",
+        "predicted_transfer_micro": 62949307,
+        "exact": true,
+        "height_delta": -37
+      },
+      "observed_transfer_micro": 62949307
+    },
+    {
+      "case": {
+        "user": "0x53136b4a7c432585f28903b77c7816a723e0271f",
+        "dex": 1,
+        "asset": 47,
+        "size_decimals": 3,
+        "block": 1192420149,
+        "before": [
+          -27267,
+          4456902203,
+          20,
+          4244627669
+        ],
+        "after": [
+          -30470,
+          4977566048,
+          20,
+          4740420039
+        ],
+        "fill": {
+          "coin": "xyz:EWY",
+          "px": "154.79",
+          "sz": "3.203",
+          "side": "A",
+          "time": 1792621028253,
+          "startPosition": "-27.267",
+          "dir": "Open Short",
+          "closedPnl": "0.0",
+          "hash": "0x889d088de16f1edb8a16044712e33502059500737c623dad2c65b3e0a062f8c6",
+          "oid": 581918349170,
+          "crossed": true,
+          "fee": "0.019038",
+          "tid": 808004176586047,
+          "cloid": "0x00000000000000007ca5bdcce8972709",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.009519",
+          "priorityGas": "0.00000506"
+        }
+      },
+      "mark_evidence": {
+        "height": 1192420112,
+        "mark_px": "154.82",
+        "source": "node_hip3_stream",
+        "received_time": "2026-10-21T22:17:05.878116734",
+        "block_time": "2026-10-21T22:17:05.693532999",
+        "relation": "before",
+        "predicted_transfer_micro": 24890513,
+        "exact": true,
+        "height_delta": -37
+      },
+      "observed_transfer_micro": 24890513
+    },
+    {
+      "case": {
+        "user": "0xd842ac3fe223fc514c6ca3f928a3c980d1b5100e",
+        "dex": 1,
+        "asset": 16,
+        "size_decimals": 3,
+        "block": 1192420254,
+        "before": [
+          -131,
+          197836242,
+          10,
+          179851117
+        ],
+        "after": [
+          60,
+          -73391400,
+          10,
+          81618000
+        ],
+        "fill": {
+          "coin": "xyz:SNDK",
+          "px": "1360.3",
+          "sz": "0.191",
+          "side": "B",
+          "time": 1792621035936,
+          "startPosition": "-0.131",
+          "dir": "Short > Long",
+          "closedPnl": "1.651779",
+          "hash": "0x66216d08c0522dc1679b044712e39e02048f00ee5b554c9309ea185b7f5607ac",
+          "oid": 581918317451,
+          "crossed": false,
+          "fee": "0.003741",
+          "tid": 296843151865518,
+          "cloid": "0x000001a15524e0530000000000000000",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.00187"
+        }
+      },
+      "mark_evidence": {
+        "height": 1192420234,
+        "mark_px": "1359.1",
+        "source": "node_hip3_stream",
+        "received_time": "2026-10-21T22:17:14.757015764",
+        "block_time": "2026-10-21T22:17:14.594769807",
+        "relation": "before",
+        "predicted_transfer_micro": 8226600,
+        "exact": true,
+        "height_delta": -20
+      },
+      "observed_transfer_micro": 8226600
+    },
+    {
+      "case": {
+        "user": "0xca4c8c1790c8b3eed3d53dc610a365f31ae2253e",
+        "dex": 1,
+        "asset": 76,
+        "size_decimals": 2,
+        "block": 1192420479,
+        "before": [
+          331,
+          -415732117,
+          5,
+          519339509
+        ],
+        "after": [
+          340,
+          -427045875,
+          5,
+          533483009
+        ],
+        "fill": {
+          "coin": "xyz:SPCX",
+          "px": "157.15",
+          "sz": "0.09",
+          "side": "B",
+          "time": 1792621052723,
+          "startPosition": "3.31",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0x40c3048456638731423c044712e47f0201730069f166a603e48bafd71567611b",
+          "oid": 581754195017,
+          "crossed": false,
+          "fee": "0.001838",
+          "builderFee": "0.001414",
+          "tid": 257050064199950,
+          "cloid": "0x6419c0d1000011f5af5d29b380232100",
+          "feeToken": "USDC",
+          "builder": "0x2c16eb19bad6ad82bac68862b06b30c56f9ea22a",
+          "twapId": null,
+          "deployerFee": "0.000212"
+        }
+      },
+      "mark_evidence": {
+        "height": 1192420479,
+        "mark_px": "157.11",
+        "source": "node_hip3_stream",
+        "received_time": "2026-10-21T22:17:32.879516631",
+        "block_time": "2026-10-21T22:17:32.723758442",
+        "relation": "at_or_after",
+        "predicted_transfer_micro": 2831580,
+        "exact": true,
+        "height_delta": 0
+      },
+      "observed_transfer_micro": 2831580
+    },
+    {
+      "case": {
+        "user": "0x48739cd1be5d47768030e917eb5d8acfc8003aca",
+        "dex": 1,
+        "asset": 104,
+        "size_decimals": 2,
+        "block": 1192422443,
+        "before": [
+          -34,
+          30141685,
+          6,
+          25843060
+        ],
+        "after": [
+          -79,
+          70379502,
+          6,
+          60347710
+        ],
+        "fill": {
+          "coin": "xyz:UNITREE",
+          "px": "76.677",
+          "sz": "0.45",
+          "side": "A",
+          "time": 1792621191920,
+          "startPosition": "-0.34",
+          "dir": "Open Short",
+          "closedPnl": "0.0",
+          "hash": "0x2035794d1822fac121af044712ec2b0204930032b3261993c3fe249fd726d4ab",
+          "oid": 581920517093,
+          "crossed": true,
+          "fee": "0.020233",
+          "builderFee": "0.017252",
+          "tid": 371756597618327,
+          "cloid": "0x01a1608c9c867895a7ec0645b7f77d1f",
+          "feeToken": "USDC",
+          "builder": "0x7cc0fd2b76835ab96aa4a3501a9f65e75677e781",
+          "twapId": null,
+          "deployerFee": "0.001341"
+        }
+      },
+      "mark_evidence": {
+        "height": 1192422427,
+        "mark_px": "76.682",
+        "source": "node_hip3_stream",
+        "received_time": "2026-10-21T22:19:50.802537474",
+        "block_time": "2026-10-21T22:19:50.626545392",
+        "relation": "before",
+        "predicted_transfer_micro": 5753400,
+        "exact": true,
+        "height_delta": -16
+      },
+      "observed_transfer_micro": 5753400
+    },
+    {
+      "case": {
+        "user": "0xaf2ac71f62f341e5823d6985492409e92c940447",
+        "dex": 0,
+        "asset": 14,
+        "size_decimals": 1,
+        "block": 1192422933,
+        "before": [
+          4485,
+          -420006692,
+          10,
+          466704999
+        ],
+        "after": [
+          -2200,
+          250881400,
+          10,
+          228030000
+        ],
+        "fill": {
+          "coin": "SUI",
+          "px": "1.0365",
+          "sz": "668.5",
+          "side": "A",
+          "time": 1792621227576,
+          "startPosition": "448.5",
+          "dir": "Long > Short",
+          "closedPnl": "-1.834365",
+          "hash": "0x25c2bb40246ba38c273c044712ee15020ae50025bf6ec25ec98b6692e36f7d76",
+          "oid": 581920949662,
+          "crossed": false,
+          "fee": "-0.020787",
+          "tid": 304473221735516,
+          "cloid": "0x000000000002ab5a000031245bc91ca9",
+          "feeToken": "USDC",
+          "twapId": null
+        }
+      },
+      "mark_evidence": {
+        "height": 1192422931,
+        "mark_px": "1.0367",
+        "source": "ob_node_poll",
+        "received_time": "1792621227800",
+        "block_time": "1792621227441",
+        "relation": "before",
+        "predicted_transfer_micro": 22851400,
+        "exact": true,
+        "height_delta": -2
+      },
+      "observed_transfer_micro": 22851400
+    },
+    {
+      "case": {
+        "user": "0x6cced731739f1458fd48c8d0e64fa426247d06a9",
+        "dex": 1,
+        "asset": 104,
+        "size_decimals": 2,
+        "block": 1192426803,
+        "before": [
+          -8803,
+          9906267330,
+          5,
+          6785074395
+        ],
+        "after": [
+          -8871,
+          9968835966,
+          5,
+          6837218835
+        ],
+        "fill": {
+          "coin": "xyz:UNITREE",
+          "px": "76.683",
+          "sz": "0.68",
+          "side": "A",
+          "time": 1792621502649,
+          "startPosition": "-88.03",
+          "dir": "Open Short",
+          "closedPnl": "0.0",
+          "hash": "0x2682e25cb796483927fc044712fd3302037a00425299670bca4b8daf769a2223",
+          "oid": 581924283952,
+          "crossed": true,
+          "fee": "0.004692",
+          "tid": 747426670255187,
+          "cloid": "0xa211d62f3b83420f854781f8335139d6",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.002346"
+        }
+      },
+      "mark_evidence": {
+        "height": 1192426762,
+        "mark_px": "76.683",
+        "source": "node_hip3_stream",
+        "received_time": "2026-10-21T22:24:59.978812087",
+        "block_time": "2026-10-21T22:24:59.794221149",
+        "relation": "before",
+        "predicted_transfer_micro": 10428888,
+        "exact": true,
+        "height_delta": -41
+      },
+      "observed_transfer_micro": 10428888
+    },
+    {
+      "case": {
+        "user": "0x05e6ffff89d05b7ed820dfedb665e430252c8132",
+        "dex": 1,
+        "asset": 81,
+        "size_decimals": 2,
+        "block": 1192427883,
+        "before": [
+          0,
+          0,
+          3,
+          0
+        ],
+        "after": [
+          48,
+          -12419346,
+          3,
+          18642240
+        ],
+        "fill": {
+          "coin": "xyz:QNT",
+          "px": "38.838",
+          "sz": "0.48",
+          "side": "B",
+          "time": 1792621581971,
+          "startPosition": "0.0",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xafb8dcb43a2f3c8ab132044713016b0201730099d5225b5c53818806f9231675",
+          "oid": 581925141420,
+          "crossed": true,
+          "fee": "0.001426",
+          "tid": 902688159493389,
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.000642"
+        }
+      },
+      "mark_evidence": {
+        "height": 1192427865,
+        "mark_px": "38.806",
+        "source": "node_hip3_stream",
+        "received_time": "2026-10-21T22:26:20.927044316",
+        "block_time": "2026-10-21T22:26:20.748662140",
+        "relation": "before",
+        "predicted_transfer_micro": 6224320,
+        "exact": true,
+        "height_delta": -18
+      },
+      "observed_transfer_micro": 6224320
+    },
+    {
+      "case": {
+        "user": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+        "dex": 1,
+        "asset": 90,
+        "size_decimals": 2,
+        "block": 1192434989,
+        "before": [
+          -281,
+          731423330,
+          10,
+          664930300
+        ],
+        "after": [
+          411,
+          -874887480,
+          10,
+          973700100
+        ],
+        "fill": {
+          "coin": "xyz:BE",
+          "px": "236.91",
+          "sz": "6.92",
+          "side": "B",
+          "time": 1792622099734,
+          "startPosition": "-2.81",
+          "dir": "Short > Long",
+          "closedPnl": "-0.7868",
+          "hash": "0xb42993769101b2b3b5a30447131d2d0204c7005c2c04d18557f23ec950058c9e",
+          "oid": 581930470885,
+          "crossed": true,
+          "fee": "0.131153",
+          "tid": 502983972728249,
+          "cloid": "0x000000000000000000d7176c97057e2f",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.065576"
+        }
+      },
+      "mark_evidence": {
+        "height": 1192434989,
+        "mark_px": "236.52",
+        "source": "node_hip3_stream",
+        "received_time": "2026-10-21T22:34:59.905700334",
+        "block_time": "2026-10-21T22:34:59.734044524",
+        "relation": "at_or_after",
+        "predicted_transfer_micro": 98812620,
+        "exact": true,
+        "height_delta": 0
+      },
+      "observed_transfer_micro": 98812620
+    }
+  ]
+}

@@ -736,8 +736,21 @@ fn apply_assembly(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, 
         let height = actions.height;
         let mark_fills = fills.iter().flat_map(Batch::events_ref).map(BlockFill::of).collect();
         let inputs = MarkInputs { hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions, fills: mark_fills };
-        let accounts = book.apply_block(actions, fills, misc_events, |coin| marks.funding_oracle(height, coin));
-        report_marks_block(diagnostics, height, marks.apply_block(height, inputs));
+        // Preserve the pre-block oracle for funding before advancing prices to obtain execution marks for fills.
+        let mut funding_oracles = rustc_hash::FxHashMap::default();
+        for event in misc_events.iter().flat_map(Batch::events_ref) {
+            if let MiscEvent::Funding(deltas) = event {
+                for delta in deltas {
+                    if !funding_oracles.contains_key(&delta.coin) {
+                        funding_oracles.insert(delta.coin.clone(), marks.funding_oracle(height, &delta.coin));
+                    }
+                }
+            }
+        }
+        let mark_report = marks.apply_block(height, inputs);
+        let accounts = book.apply_block(actions, fills, misc_events,
+            |coin| funding_oracles.get(coin).copied().flatten(), &mark_report.fill_prices);
+        report_marks_block(diagnostics, height, mark_report);
         touched.absorb(report_block(diagnostics, height, accounts));
         ACCOUNTS_APPLIED_HEIGHT.set(height.cast_signed());
     }
@@ -788,7 +801,7 @@ fn record_lost_block(book: &mut AccountBook, marks: &mut NodeMarks, stream: Stre
 }
 
 fn report_marks_block(diagnostics: &mut AccountDiagnostics, height: u64, report: MarksBlockReport) {
-    let MarksBlockReport { unknown_coin_updates, unknown_coin_diffs, errors, log_overflowed, ambiguous_cuts, ambiguous_samples } =
+    let MarksBlockReport { unknown_coin_updates, unknown_coin_diffs, errors, log_overflowed, ambiguous_cuts, ambiguous_samples, fill_prices: _ } =
         report;
     NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label()]).inc_by(unknown_coin_updates as u64);
     NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.with_label_values(&[Stream::BookDiffs.label()]).inc_by(unknown_coin_diffs as u64);
