@@ -533,7 +533,7 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
         return Err(StopReason::IsolatedFill);
     }
     let isolated = match &market.margin_mode {
-        AssetMarginMode::IsolatedOnly => true,
+        AssetMarginMode::NoCross | AssetMarginMode::StrictIsolated => true,
         AssetMarginMode::Normal => account.isolated_leverage.contains_key(&key),
         AssetMarginMode::Unknown(mode) => return Err(StopReason::UnknownMarket(format!("{} marginMode {mode:?}", fill.coin))),
     };
@@ -1167,6 +1167,22 @@ pub(crate) mod tests {
         assert!(matches!(stop(&states, ISOLATED), Some(StopReason::Contradiction(text)) if text.contains("isolated PUMP fill")));
     }
 
+    #[test]
+    fn distinct_isolated_market_modes_keep_the_same_fill_cash_routing() {
+        let mut results = Vec::new();
+        for mode in ["noCross", "strictIsolated"] {
+            let mut replay = states(|value| {
+                value["exchange"]["locus"]["cls"][1]["meta"]["universe"][0]["marginMode"] = json!(mode);
+            });
+            replay.accounts.get_mut(&user(ISOLATED)).unwrap().add_cross(1, 100_000_000_000);
+            replay.apply(5, user(ISOLATED), &fill_from("xyz:TSLA", "B", "358.32", "2.0", "0.0", "0.0", None));
+            assert_eq!(stop(&replay, ISOLATED), None, "{mode}");
+            assert_eq!(isolated_cash(&replay, ISOLATED, (1, 0)), Some(-64_497_600_000));
+            results.push(replay.accounts[&user(ISOLATED)].json());
+        }
+        assert_eq!(results[0], results[1], "preserve wire mode without changing existing fill transfers");
+    }
+
     /// Research "新开仓位是全仓还是逐仓": the asset's margin mode, then the account's setting.
     #[test]
     fn other_collateral_and_unknown_markets_stop_the_replay() {
@@ -1635,7 +1651,7 @@ pub(crate) mod tests {
             account.isolated.insert((0, 0), case["before"][1].as_i64().unwrap() * WEI_PER_MICRO);
         }
         let before_total = totals(account).get(&0).copied().unwrap_or(0);
-        let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::IsolatedOnly, default_leverage: 1 };
+        let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, default_leverage: 1 };
         let cash_flow = event.cash_wei(decimals, MAX_PERP_DECIMALS - decimals).unwrap();
         let leverage = u32::try_from(case["before"][2].as_u64().unwrap()).unwrap();
         apply_isolated_fill(account, &market, &event, cash_flow, leverage).unwrap();
@@ -1671,7 +1687,7 @@ pub(crate) mod tests {
         account.isolated.insert((0, 0), before["l"]["I"]["u"].as_i64().unwrap() * WEI_PER_MICRO);
         account.pools = per_dex_pools(&[(0, 1_000_000_000_000_000_000)]);
         account.cross_exposure_seen.clear();
-        let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::IsolatedOnly, default_leverage: leverage };
+        let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, default_leverage: leverage };
         for event in case["events"].as_array().unwrap() {
             let prices = crate::accounts::marks::fill_prices::golden_prices(case, event);
             let fill: Fill = serde_json::from_value(event["fill"].clone()).unwrap();
@@ -1773,7 +1789,7 @@ pub(crate) mod tests {
                 let meta = &golden["markets"][&fill.coin];
                 let asset = meta["asset"].as_u64().unwrap() as usize;
                 let decimals = u32::try_from(meta["size_decimals"].as_u64().unwrap()).unwrap();
-                let market = PerpMarket { dex: 0, asset, size_decimals: decimals, margin_mode: AssetMarginMode::IsolatedOnly, default_leverage: 1 };
+                let market = PerpMarket { dex: 0, asset, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, default_leverage: 1 };
                 let event = FillEvent::of(&fill).unwrap(); // No fabricated execution mark in these samples.
                 let cash_flow = event.cash_wei(decimals, MAX_PERP_DECIMALS - decimals).unwrap();
                 let before_total = totals(&account)[&0];

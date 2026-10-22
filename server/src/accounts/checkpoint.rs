@@ -193,8 +193,11 @@ pub(crate) struct AssetMeta {
 pub(crate) enum AssetMarginMode {
     /// `normal`: the account's setting for the asset, cross unless it was set isolated.
     Normal,
-    /// `noCross`, `strictIsolated`: always isolated.
-    IsolatedOnly,
+    /// `noCross`: new positions are isolated.
+    NoCross,
+    /// `strictIsolated`: isolated with the client's additional margin restrictions. Unlike `noCross`,
+    /// this mode permits `topUpIsolatedOnlyMargin` (client 6911b792, 0x3c941ec).
+    StrictIsolated,
     Unknown(String),
 }
 
@@ -202,7 +205,8 @@ impl AssetMarginMode {
     fn of(code: &str) -> Self {
         match code {
             "normal" => Self::Normal,
-            "noCross" | "strictIsolated" => Self::IsolatedOnly,
+            "noCross" => Self::NoCross,
+            "strictIsolated" => Self::StrictIsolated,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -1229,9 +1233,21 @@ pub(crate) mod tests {
         assert_eq!(settings(HOLDER, 0), Vec::<(usize, u32)>::new(), "a cross entry is no isolated setting");
         assert_eq!(settings(HOLDER, 1), [(0, 3)], "a cash-only state keeps its setting");
         assert_eq!(parsed.dexes[0].assets[0].margin_mode, AssetMarginMode::Normal);
-        assert_eq!(parsed.dexes[1].assets[0].margin_mode, AssetMarginMode::IsolatedOnly);
+        assert_eq!(parsed.dexes[1].assets[0].margin_mode, AssetMarginMode::NoCross);
         let pair = |size_decimals, quote_token| SpotPair { size_decimals, quote_token, quote_wei_decimals: 8 };
         assert_eq!(parsed.spot_pairs, [pair(2, 0), pair(2, 0), pair(2, 360)], "@0 T1/USDC, @1 HYPE/USDC, @2 HYPE/USDH");
+    }
+
+    /// Both are isolated for fills, but top-up authorization differs. The checkpoint owner must not erase it.
+    #[test]
+    fn strict_isolated_and_no_cross_remain_distinct_through_checkpoint_parsing() {
+        let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        for (wire, expected) in [("strictIsolated", AssetMarginMode::StrictIsolated), ("noCross", AssetMarginMode::NoCross)] {
+            checkpoint["exchange"]["locus"]["cls"][0]["meta"]["universe"][0]["marginMode"] = json!(wire);
+            let parsed = parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap();
+            assert_eq!(parsed.dexes[0].assets[0].margin_mode, expected);
+            assert_eq!(parsed.dexes[1].assets[0].margin_mode, AssetMarginMode::NoCross);
+        }
     }
 
     #[test]
