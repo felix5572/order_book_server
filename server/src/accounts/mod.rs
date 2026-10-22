@@ -28,6 +28,7 @@ mod liquidation;
 mod margin;
 pub(crate) mod marks;
 mod misc;
+mod owner_thread;
 mod portfolio;
 pub(crate) mod probe;
 pub(crate) mod publish;

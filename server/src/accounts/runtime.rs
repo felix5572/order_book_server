@@ -1,6 +1,7 @@
 //! Process wiring of the account view (design 000419 r2 3.1 / 3.4, 000429 r2, 000433 r3) and the node marks (design
 //! 000439 r2): the fills, misc events, HIP-3 oracle updates and block actions line watchers, the checkpoint poller
-//! thread and the owner task holding the `AccountBook` and the `NodeMarks`. Every input reaches the owner through a
+//! thread and a dedicated owner thread holding the `AccountBook` and the `NodeMarks`. Its private executor keeps
+//! synchronous reconstruction/candidate work off network workers. Every input reaches the owner through a
 //! bounded channel whose full state blocks the producer, so a backlog stays in the node's files. Lines are parsed on the
 //! watcher threads; the owner hands them to the block assembly and applies the complete blocks it releases, in height
 //! order, to the marks and then to the account view. The other watchers also send read-through proofs, in line with
@@ -26,6 +27,7 @@ use super::{
     diagnostics::{AccountDiagnostics, Cause},
     replica::{ReplicaLine, line_height},
     anchor::Anchor,
+    owner_thread::spawn_owner,
     blocks::{Assembly, BlockAssembler, CompletedBlock, LineKey},
     book::{
         AccountBook, BlockActionsReport, BlockReport, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport,
@@ -56,7 +58,7 @@ use crate::{
         utils::{checkpoint_grid, list_checkpoints},
     },
     metrics::{
-        ACCOUNTS_ANCHOR_HEIGHT, ACCOUNTS_ANCHOR_PARSE_SECONDS, ACCOUNTS_ANCHOR_SKIPPED_TOTAL, ACCOUNTS_EVIDENCE_TOTAL, NODE_MARKS_IOC_PAIRINGS_TOTAL,
+        ACCOUNTS_ANCHOR_HEIGHT, ACCOUNTS_ANCHOR_PARSE_SECONDS, ACCOUNTS_CHECKPOINT_INSTALL_SECONDS, ACCOUNTS_ANCHOR_SKIPPED_TOTAL, ACCOUNTS_EVIDENCE_TOTAL, NODE_MARKS_IOC_PAIRINGS_TOTAL,
         ACCOUNTS_APPLIED_HEIGHT, ACCOUNTS_CHECKPOINT_FAILURES_TOTAL, ACCOUNTS_DATA_LOSS_TOTAL, ACCOUNTS_DUPLICATE_INPUTS_TOTAL,
         ACCOUNTS_HELD_FILLS, ACCOUNTS_OPEN_POSITIONS, ACCOUNTS_PENDING_BLOCKS, ACCOUNTS_REPLAY_CHECKED_TOTAL,
         ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL, ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL, ACCOUNTS_REPLAY_STOPPED_TOTAL, ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL,
@@ -383,7 +385,8 @@ pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Resul
     let marks = NodeMarks::new(CheckpointGrid { anchor, interval }, started_ms);
     let feed = CandidateFeed::start(book.as_ref());
     let flow = FlowFeed::start(book.as_ref(), flow_demand);
-    let owner = tokio::spawn(run_owner(AccountBook::new(started_ms), marks, publisher, inputs, anchors, queries, threads, feed, flow));
+    let owner = spawn_owner(run_owner(AccountBook::new(started_ms), marks, publisher, inputs, anchors, queries, threads, feed, flow))?;
+    info!("accounts: owner running on dedicated accounts-owner thread; network executor isolated");
     Ok((handle, owner))
 }
 
@@ -934,8 +937,10 @@ fn install_seed_ready(diagnostics: &mut AccountDiagnostics, book: &mut AccountBo
         return Touched::default();
     };
     let height = seed.height;
+    let started = Instant::now();
     let report = marks.install(*seed);
     let touched = book.restore_execution_marks(&report.fill_prices);
+    record_checkpoint_work("marks", height, started);
     if !touched.accounts.is_empty() {
         info!("accounts: seed {height} restored execution marks across {} blocks for {} accounts", report.fill_prices.len(), touched.accounts.len());
     }
@@ -1022,13 +1027,22 @@ fn install_ready(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, h
     };
     let ParsedAnchor { anchor, parse_seconds, skipped } = *parsed;
     let height = anchor.height;
+    let started = Instant::now();
     let report = book.install_anchor(anchor);
+    record_checkpoint_work("cash", height, started);
     log_install(diagnostics, height, parse_seconds, skipped, &report);
     ACCOUNTS_ANCHOR_HEIGHT.set(height.cast_signed());
     ACCOUNTS_ANCHOR_PARSE_SECONDS.set(parse_seconds);
     ACCOUNTS_ANCHOR_SKIPPED_TOTAL.inc_by(skipped as u64);
     ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL.inc_by(report.silent_position_changes);
     true
+}
+
+/// Rare checkpoint phases only: no per-input metric work or high-cardinality labels.
+fn record_checkpoint_work(phase: &'static str, height: u64, started: Instant) {
+    let elapsed = started.elapsed();
+    ACCOUNTS_CHECKPOINT_INSTALL_SECONDS.with_label_values(&[phase]).observe(elapsed.as_secs_f64());
+    info!("accounts: checkpoint owner work phase={phase} seed={height} elapsed_ms={}", elapsed.as_millis());
 }
 
 fn log_install(diagnostics: &mut AccountDiagnostics, height: u64, parse_seconds: f64, skipped: usize, report: &InstallReport) {
@@ -1189,7 +1203,7 @@ pub(crate) struct TestOwner {
 
 #[cfg(test)]
 impl TestOwner {
-    /// Spawns the owner on the current tokio runtime (its marks get no seed: unavailable throughout).
+    /// Uses the production owner thread (its marks get no seed: unavailable throughout).
     pub(crate) fn start(book: AccountBook) -> Self {
         let (inputs, input_rx) = mpsc::channel(16);
         let (anchors, anchor_rx) = mpsc::channel(1);
@@ -1200,7 +1214,7 @@ impl TestOwner {
         let publisher = Publisher::new(subscriptions.clone(), frames);
         let handle = AccountsHandle { queries, subscriptions, frames: frames_handle, node_prices: publisher.subscribe_prices(), flow_demand: FlowDemand::default() };
         let marks = NodeMarks::new(tests::TEST_GRID, 0);
-        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None), FlowFeed::start(None, FlowDemand::default())));
+        let owner = spawn_owner(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None), FlowFeed::start(None, FlowDemand::default()))).unwrap();
         Self { handle, inputs, anchors, owner }
     }
 
@@ -1554,7 +1568,7 @@ mod tests {
         publisher.track(&book);
         publisher.track_marks(&mut book, &marks);
         let _guard = subscriptions.acquire(PUMP);
-        let owner = tokio::spawn(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None), FlowFeed::start(None, FlowDemand::default())));
+        let owner = spawn_owner(run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None), FlowFeed::start(None, FlowDemand::default()))).unwrap();
         let query = || async {
             let (reply, answer) = oneshot::channel();
             query_tx.send(Query::CoinPositions { coin: PUMP.to_string(), reply }).await.unwrap();

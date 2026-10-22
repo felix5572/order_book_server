@@ -428,6 +428,13 @@ lazy_static! {
         "Seconds to parse the last installed account anchor"
     ).expect("metric can be created");
 
+    /// Synchronous checkpoint work on the dedicated account owner, excluding file parsing.
+    pub static ref ACCOUNTS_CHECKPOINT_INSTALL_SECONDS: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("orderbook_accounts_checkpoint_install_seconds", "Account owner checkpoint install wall time")
+            .buckets(vec![0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]),
+        &["phase"]
+    ).expect("metric can be created");
+
     /// Checkpoints that appeared while another was parsing and were never parsed (only the newest is).
     pub static ref ACCOUNTS_ANCHOR_SKIPPED_TOTAL: IntCounter = IntCounter::new(
         "orderbook_accounts_anchor_skipped_total",
@@ -751,6 +758,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ACCOUNTS_TRUSTED.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_ANCHOR_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_ANCHOR_PARSE_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_CHECKPOINT_INSTALL_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_ANCHOR_SKIPPED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_CHECKPOINT_FAILURES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_OPEN_POSITIONS.clone())).ok();

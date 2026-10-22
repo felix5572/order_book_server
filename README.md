@@ -641,6 +641,23 @@ curl http://localhost:9090/metrics
 
 ### WebSocket broadcast continuity
 
+Account and node-mark reconstruction, checkpoint reconciliation and liquidation-candidate computation run
+on one dedicated `accounts-owner` thread with a private current-thread executor. File readers still feed
+its existing bounded channels; the owner still applies blocks serially. The order-book listener, WebSocket
+sessions and venue feeds stay on the network executor. Owner panic/abort still closes its publishers and
+queries through the same supervised Tokio task; its private executor exits after the task is dropped.
+Cancellation waits for an in-progress synchronous step, as before.
+
+BM incidents on 2026-10-22 paused BBO reception 1.54–1.86 s around checkpoint installation, despite socket
+writes below 4 ms. A two-network-worker reproduction with the production 16,384-message ring demonstrated
+Tokio's unstealable LIFO wake slot: synchronous work could hold a woken receiver even while another worker
+was free. Three controls skipped 7,617 of 24,001 messages; all three isolated-thread runs received every
+message. This removes the reproduced scheduler coupling, not a guarantee against slow clients or all
+future overload. Live acceptance must check BBO gaps across checkpoint installs and candidate refreshes.
+`orderbook_accounts_checkpoint_install_seconds{phase="marks"|"cash"}` and one INFO timing per phase record
+owner-side install work separately from the checkpoint poller's parsing time. Existing candidate-refresh
+and socket/queue wait metrics remain independent.
+
 BBO has a dedicated 16,384-message ring, joined only by BBO subscribers. Public trades/L4/L2 and
 private `userFills` use separate rings. This prevents per-book-event BBO traffic (measured at 13.4k
 messages/s on BM) from evicting trades or making account-only clients drain BBO messages.
