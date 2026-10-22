@@ -119,6 +119,13 @@ impl SystemBlock {
 
     pub(crate) fn len(&self) -> usize { self.requests.len() + self.observed.len() + self.cancels.len() + self.cancelled.len() + self.vault_withdrawals.len() }
 
+    /// Possible system ownership does not require knowing the execution phase. Cash attribution must
+    /// exclude these oids even on HIP-3-only price blocks or when the checkpoint timing is unavailable.
+    pub(crate) fn competing_orders(&self, time_ns: u64, asset: &impl Fn(&str) -> Option<u32>) -> FxHashSet<u64> {
+        self.observed.iter().filter(|o| !o.rejected && o.timestamp_ms == time_ns / 1_000_000
+            && self.requests.iter().any(|r| Self::matches(r, o, asset))).map(|o| o.oid).collect()
+    }
+
     pub(crate) fn anchors(&self, actions: &MarkActions, statuses: &BlockStatuses, timing: Option<(f64, f64)>,
         asset: impl Fn(&str) -> Option<u32>) -> Result<SystemAnchors, String> {
         let mut out = SystemAnchors { unplaced_vault_withdrawals: self.vault_withdrawals.clone(), ..SystemAnchors::default() };
@@ -127,9 +134,8 @@ impl SystemBlock {
             MarkAction::Book(book) => Some((a.user, book)), _ => None,
         }).collect();
         let claimed: FxHashSet<_> = books.iter().flat_map(|(_, b)| b.created.iter().copied()).collect();
+        out.competing_orders = self.competing_orders(actions.time_ns, &asset);
         for request in &self.requests {
-            out.competing_orders.extend(self.observed.iter().filter(|o| !o.rejected && Self::matches(request, o, &asset)
-                && o.timestamp_ms == actions.time_ns / 1_000_000).map(|o| o.oid));
             for observed in self.observed.iter().filter(|o| o.rejected && Self::matches(request, o, &asset)
                 && o.timestamp_ms == actions.time_ns / 1_000_000) {
                 out.competing_ioc_cancels.extend(statuses.system_ioc_cancels(observed.oid));

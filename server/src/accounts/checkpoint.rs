@@ -111,6 +111,14 @@ pub(crate) struct DexMeta {
 }
 
 impl DexMeta {
+    /// Exchange-action identity from this checkpoint's dex and universe, shared by cash and mark replay.
+    pub(crate) fn action_asset(&self, index: usize) -> Option<u32> {
+        if index >= self.assets.len() { return None; }
+        let index = u32::try_from(index).ok().filter(|i| *i < PDI_ASSET_STRIDE)?;
+        if self.pdi == 0 { return Some(index); }
+        100_000_u32.checked_add(PDI_ASSET_STRIDE.checked_mul(self.pdi)?)?.checked_add(index)
+    }
+
     /// Every table a parsed position refers to resolves here (checked at parse time).
     pub(crate) fn table(&self, table_id: u32) -> &MarginTable {
         &self.tables[&table_id]
@@ -998,6 +1006,16 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::accounts::marks::seed::tests::VALIDATOR;
+
+    #[test]
+    fn exchange_asset_ids_use_the_checkpoint_dex_and_stay_in_its_universe() {
+        let mut cp = parse_checkpoint_bytes(&fixture()).unwrap();
+        assert_eq!(cp.dexes[0].action_asset(1), Some(1));
+        assert_eq!(cp.dexes[1].action_asset(0), Some(110_000));
+        assert_eq!(cp.dexes[1].action_asset(cp.dexes[1].assets.len()), None);
+        cp.dexes[1].pdi = u32::MAX;
+        assert_eq!(cp.dexes[1].action_asset(0), None);
+    }
 
     pub(crate) const HOLDER: &str = "0x00000000000000000000000000000000000000aa";
     const CASH_ONLY: &str = "0x00000000000000000000000000000000000000bb";

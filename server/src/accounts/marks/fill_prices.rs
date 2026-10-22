@@ -10,7 +10,7 @@ mod liquidation;
 
 use rustc_hash::FxHashMap;
 
-use super::{Hip3PriceUpdate, actions::MarkActions, execution::{BlockFill, BlockStatuses}, native::NativePrices, seed::Hip3Coin};
+use super::{BlockInputs, Hip3PriceUpdate, actions::MarkActions, execution::{BlockFill, BlockStatuses}, native::NativePrices, seed::Hip3Coin};
 
 /// Inclusive price bounds, in 10^-(6-size_decimals) units, from the same block as the fill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,11 +87,8 @@ impl FillPriceBuilder {
         }
     }
 
-    pub(super) fn hip3(
-        &mut self, fills: &[BlockFill], coins: &FxHashMap<String, Hip3Coin>, updates: &[Hip3PriceUpdate],
-        actions: Option<&MarkActions>, statuses: &BlockStatuses,
-    ) {
-        hip3::observe(&mut self.prices, fills, coins, updates, actions, statuses);
+    pub(super) fn hip3(&mut self, coins: &FxHashMap<String, Hip3Coin>, inputs: &BlockInputs) {
+        hip3::observe(&mut self.prices, coins, inputs);
     }
 
     pub(super) fn finish(self, height: u64, fills: &[BlockFill]) -> FillMarkPrices {

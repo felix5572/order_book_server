@@ -185,7 +185,7 @@ impl MarkState {
     /// does not convert, a diff that does not fit or a price action that contradicts the block breaks the contract.
     fn apply(&mut self, height: u64, inputs: &BlockInputs, report: &mut MarksBlockReport) {
         let mut fill_prices = FillPriceBuilder::new(&inputs.fills);
-        fill_prices.hip3(&inputs.fills, &self.hip3, &inputs.hip3, inputs.actions.as_ref(), &inputs.statuses);
+        fill_prices.hip3(&self.hip3, inputs);
         self.apply_hip3(height, &inputs.hip3, report);
         if let Some(actions) = &inputs.actions {
             self.prices.begin_block(actions.time_ns);
@@ -1041,14 +1041,14 @@ pub(crate) mod tests {
         assert_eq!(marks.apply_block(1_001, hip3_only(vec![line(1_001, &[("xyz:NEW", "2.5")])])).unknown_coin_updates, 1);
         assert_eq!(marks.apply_block(1_002, hip3_only(vec![line(1_002, &[("xyz:NEW", "2.75")])])).unknown_coin_updates, 1);
         let mut listing = seed(1_000);
-        listing.hip3.insert("xyz:NEW".to_string(), Hip3Coin { size_decimals: 4, mark: None, oracle: None });
+        listing.hip3.insert("xyz:NEW".to_string(), Hip3Coin { order_asset: 110_001, size_decimals: 4, mark: None, oracle: None });
         let report = marks.install(listing);
         assert_eq!((report.rebuild, report.errors.as_slice()), (Rebuild::Replayed { blocks: 2 }, [].as_slice()));
         assert_eq!(marks.state.as_ref().unwrap().hip3["xyz:NEW"].mark, Some(written(275)), "block 1002, at 2 decimals");
         run(&mut marks, 1_003..=1_100, &[]);
         marks.apply_block(1_101, hip3_only(vec![line(1_101, &[("xyz:NEW", "2.75")])]));
         let mut coarser = seed(1_100);
-        coarser.hip3.insert("xyz:NEW".to_string(), Hip3Coin { size_decimals: 5, mark: None, oracle: None });
+        coarser.hip3.insert("xyz:NEW".to_string(), Hip3Coin { order_asset: 110_001, size_decimals: 5, mark: None, oracle: None });
         let report = marks.install(coarser);
         assert_eq!(report.errors.len(), 1, "2.75 has more than one decimal at szDecimals 5");
         let lost = Unavailable::DataLoss { stream: Stream::Hip3OracleUpdates, bound: LossBound::Block(1_101) };

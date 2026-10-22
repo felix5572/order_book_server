@@ -4,7 +4,7 @@
 //! request/pair match. Oids already claimed by an ordinary receipt or `CoreWriter` remain with that owner.
 //! A missing/ambiguous pair contributes no anchor, without turning a normal default receipt into an error.
 
-use super::super::{actions::{MarkAction, MarkActions, OrderRef, Rank, ReplacementRequest}, orders::OrderKey, system::SystemAnchors};
+use super::super::{actions::{MarkAction, MarkActions, OrderRef, Rank, ReplacementRequest}, orders::OrderKey};
 use crate::types::node_data::NodeDataOrderStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +34,7 @@ impl Replacements {
 
     pub(super) fn len(&self) -> usize { self.pairs.len() + usize::from(self.pending.is_some()) }
 
-    pub(super) fn attributed(&self, actions: &MarkActions, asset: &impl Fn(&str) -> Option<u32>, system: &SystemAnchors) -> Vec<(Rank, u64)> {
+    pub(super) fn attributed(&self, actions: &MarkActions, asset: &impl Fn(&str) -> Option<u32>, system_claims: &impl Fn(u64) -> bool) -> Vec<(Rank, u64)> {
         if self.pairs.is_empty() { return Vec::new(); }
         let books: Vec<_> = actions.actions.iter().filter_map(|a| match &a.action {
             MarkAction::Book(book) => Some((a.rank, book)), _ => None,
@@ -45,8 +45,7 @@ impl Replacements {
         for pair in &self.pairs {
             if pair.new.timestamp_ms != actions.time_ns / 1_000_000
                 || books.iter().any(|(_, b)| b.created.contains(&pair.new.oid))
-                || system.competing_orders.contains(&pair.new.oid)
-                || system.before.created.contains(&pair.new.oid) || system.after.created.contains(&pair.new.oid) { continue; }
+                || system_claims(pair.new.oid) { continue; }
             let matches = |request: &ReplacementRequest, pair: &Pair| {
                 request.key == pair.new.key && asset(&pair.new.coin) == Some(request.asset)
                     && match &request.old { OrderRef::Oid(oid) => *oid == pair.old_oid,

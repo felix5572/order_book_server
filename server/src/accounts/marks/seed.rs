@@ -332,6 +332,8 @@ pub(crate) struct RestingOrder {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Hip3Coin {
+    /// Exchange-action asset id projected from the checkpoint universe, not inferred from order requests.
+    pub(crate) order_asset: u32,
     pub(crate) oracle: Option<u64>,
     pub(crate) size_decimals: u32,
     /// `None` when the asset stores no price.
@@ -349,13 +351,14 @@ impl MarkSeed {
         let native = NativeSeed::from_wire(native_prices, main, &spot_pairs).map_err(|err| format!("main dex: {err}"))?;
         let mut hip3 = FxHashMap::default();
         for dex in hip3_dexes {
-            for asset in &dex.assets {
+            for (asset_index, asset) in dex.assets.iter().enumerate() {
                 let mark = match (asset.mark_raw, asset.mark_time_ns) {
                     (None, _) => None,
                     (Some(px), Some(time_ns)) => Some(StoredMark { px, time_ns }),
                     (Some(_), None) => return Err(format!("{}: a stored mark without its time", asset.name)),
                 };
-                hip3.insert(asset.name.clone(), Hip3Coin { size_decimals: asset.size_decimals, mark, oracle: asset.oracle_raw.map(price_units).transpose().map_err(|err| format!("{}: stored oracle {err}", asset.name))? });
+                let order_asset = dex.action_asset(asset_index).ok_or_else(|| format!("{}: no exchange action asset id", asset.name))?;
+                hip3.insert(asset.name.clone(), Hip3Coin { order_asset, size_decimals: asset.size_decimals, mark, oracle: asset.oracle_raw.map(price_units).transpose().map_err(|err| format!("{}: stored oracle {err}", asset.name))? });
             }
         }
         Ok(Self { height, time_ms, native, hip3 })
@@ -615,6 +618,7 @@ pub(crate) mod tests {
         );
         assert_eq!((pump.emas.as_ref(), pump.references.spot.median, pump.orders.len()), (None, None, 0), "an unpriced coin");
         assert_eq!(seed.hip3["xyz:TSLA"], Hip3Coin {
+            order_asset: 110_000,
             oracle: Some(357_970),
             size_decimals: 3,
             mark: Some(StoredMark { px: 358_320, time_ns: 1_792_391_842_000_000_000 })

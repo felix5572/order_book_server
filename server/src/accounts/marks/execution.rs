@@ -176,6 +176,11 @@ impl BlockStatuses {
         Ok(out)
     }
 
+    pub(crate) fn replacement_orders(&self, actions: &MarkActions, asset: &impl Fn(&str) -> Option<u32>,
+        system_claims: &impl Fn(u64) -> bool) -> Vec<(Rank, u64)> {
+        self.replacements.attributed(actions, asset, system_claims)
+    }
+
     pub(crate) fn system_ioc_cancels(&self, oid: u64) -> Vec<u64> {
         self.rejected_iocs.cancels_for(oid)
     }
@@ -243,7 +248,8 @@ pub(crate) fn price_points_with_system<'b>(
         .map(|order| order.oid).collect();
     let cancelled = cancelled_by_action(actions, statuses, fills, &order_asset, system);
     let vault_closes = statuses.vault_closes.attributed(actions, &system.unplaced_vault_withdrawals);
-    let replacements = statuses.replacements.attributed(actions, &order_asset, system);
+    let replacements = statuses.replacement_orders(actions, &order_asset, &|oid|
+        system.competing_orders.contains(&oid) || system.before.created.contains(&oid) || system.after.created.contains(&oid));
     points
         .into_iter()
         .map(|action| {

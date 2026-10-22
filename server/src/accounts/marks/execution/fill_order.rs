@@ -56,7 +56,7 @@ impl TriggerPrice {
 
 /// A receipt identifies a taker's creation, not an old order's later trigger. Both legs use the same taker.
 /// Duplicate identities stay unknown, as do `CoreWriter` and vault-close orders without ordinary book receipts.
-pub(crate) fn takers<'a>(fills: &'a [BlockFill], actions: &MarkActions, triggered: &FxHashSet<u64>) -> FxHashMap<(&'a str, u64), Option<Placement>> {
+pub(crate) fn takers<'a>(fills: &'a [BlockFill], actions: &MarkActions, triggered: &FxHashSet<u64>, replacements: &[(Rank, u64)]) -> FxHashMap<(&'a str, u64), Option<Placement>> {
     let mut created = FxHashMap::default();
     for action in &actions.actions {
         if let MarkAction::Book(book) = &action.action {
@@ -64,6 +64,9 @@ pub(crate) fn takers<'a>(fills: &'a [BlockFill], actions: &MarkActions, triggere
                 created.entry(*oid).and_modify(|rank| *rank = None).or_insert(Some(action.rank));
             }
         }
+    }
+    for (rank, oid) in replacements {
+        created.entry(*oid).and_modify(|rank| *rank = None).or_insert(Some(*rank));
     }
     let mut out = FxHashMap::default();
     for fill in fills.iter().filter(|fill| fill.crossed) {

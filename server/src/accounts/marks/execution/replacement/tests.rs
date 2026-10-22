@@ -16,7 +16,7 @@ fn actions(g: &Golden) -> MarkActions {
 }
 fn asset(coin: &str) -> Option<u32> { (coin == "ZEC").then_some(214) }
 fn attributed(g: &Golden, a: &MarkActions) -> Vec<(Rank, u64)> {
-    BlockStatuses::of(g.statuses.clone()).unwrap().replacements.attributed(a, &asset, &SystemAnchors::default())
+    BlockStatuses::of(g.statuses.clone()).unwrap().replacements.attributed(a, &asset, &|_| false)
 }
 
 #[test]
@@ -104,5 +104,5 @@ fn corewriter_and_default_modify_compete_symmetrically_for_the_same_open() {
     let anchors = system.anchors(&a, &statuses, Some((0.33,1.0)), asset).unwrap();
     assert!(anchors.before.created.is_empty());
     assert!(anchors.after.created.is_empty());
-    assert!(statuses.replacements.attributed(&a, &asset, &anchors).is_empty());
+    assert!(statuses.replacements.attributed(&a, &asset, &|oid| anchors.competing_orders.contains(&oid)).is_empty());
 }

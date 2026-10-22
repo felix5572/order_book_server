@@ -25,7 +25,7 @@ use super::{
     margin::MarginTable,
     marks::fill_prices::FillMarkRange,
     checkpoint::{
-        Account, AccountMode, AssetMarginMode, CheckpointAccounts, MAX_PERP_DECIMALS, MAX_SPOT_DECIMALS, PDI_ASSET_STRIDE,
+        Account, AccountMode, AssetMarginMode, CheckpointAccounts, MAX_PERP_DECIMALS, MAX_SPOT_DECIMALS,
         PositionMargin, SpotPair, base_size, spot_pair_of_coin,
     },
     misc::{Balance, LedgerDelta, USDC_NAME},
@@ -35,8 +35,6 @@ use super::{
 };
 use crate::{order_book::Side, types::Fill};
 
-/// Action asset ids on a dex other than the main one: `ACTION_ASSET_BASE + PDI_ASSET_STRIDE * pdi + index`.
-const ACTION_ASSET_BASE: u32 = 100_000;
 /// The direction of an ADL fill; the other side of the same trade carries the same `backstop` method.
 const ADL_DIR: &str = "Auto-Deleveraging";
 const BACKSTOP_METHOD: &str = "backstop";
@@ -79,10 +77,7 @@ impl Markets {
             markets.usdc_dexes.push(checkpoint.collateral[&dex.collateral_token].name == USDC_NAME);
             markets.tables.push(dex.tables().clone());
             for (asset_index, asset) in dex.assets.iter().enumerate() {
-                let action_id = u32::try_from(asset_index)
-                    .ok()
-                    .filter(|index| *index < PDI_ASSET_STRIDE)
-                    .map(|index| if dex.pdi == 0 { index } else { ACTION_ASSET_BASE + PDI_ASSET_STRIDE * dex.pdi + index })
+                let action_id = dex.action_asset(asset_index)
                     .ok_or_else(|| format!("dex {:?} asset {asset_index} has no action id", dex.name))?;
                 markets.action_assets.insert(action_id, asset.name.clone());
                 let table = dex.tables().get(&asset.margin_table_id)

@@ -1,5 +1,6 @@
 //! Execution marks for isolated HIP-3 fills. BM 1192960000..1192970000: a unique successful setOracle
-//! anchors its sole Normal write, and receipt-backed ordinary takers select the preceding/following mark.
+//! anchors its sole Normal write. Ordinary receipts or uniquely matched default-modify status pairs select
+//! the preceding/following mark (ORCL 1193548256); possible `CoreWriter` ownership prevents that attribution.
 //! A recorded trigger threshold crossed by the sole Normal write consumes that new mark (BM NET1193124226, SPCX1193126889).
 //! Trailing Stop Market uses its realized triggered-status threshold (MRNA1193502103), not a future trailing estimate.
 //! Fallback/multiple writes, already-satisfied or unrecognized triggers and unreceipted effects keep the full range.
@@ -7,7 +8,10 @@
 
 use rustc_hash::FxHashMap;
 
-use super::{BlockFill, BlockStatuses, Hip3Coin, Hip3PriceUpdate, MarkActions, PricesSeen};
+#[cfg(test)]
+use super::BlockFill;
+
+use super::{BlockInputs, BlockStatuses, Hip3Coin, Hip3PriceUpdate, MarkActions, PricesSeen};
 use crate::accounts::marks::{actions::{MarkAction, Rank}, seed::exact_price_units, execution::fill_order::{Placement, takers}};
 
 struct CoinPrices<'a> {
@@ -49,10 +53,9 @@ impl CoinPrices<'_> {
     }
 }
 
-pub(super) fn observe(
-    prices: &mut [PricesSeen], fills: &[BlockFill], coins: &FxHashMap<String, Hip3Coin>, updates: &[Hip3PriceUpdate],
-    actions: Option<&MarkActions>, statuses: &BlockStatuses,
-) {
+pub(super) fn observe(prices: &mut [PricesSeen], coins: &FxHashMap<String, Hip3Coin>, inputs: &BlockInputs) {
+    let BlockInputs { fills, hip3: updates, actions, statuses, system, .. } = inputs;
+    let actions = actions.as_ref();
     let mut ranges: FxHashMap<&str, CoinPrices<'_>> = FxHashMap::default();
     for fill in fills {
         if let Some(coin) = coins.get(fill.coin.as_ref()) {
@@ -73,7 +76,12 @@ pub(super) fn observe(
     }
     let ranks = actions.map(oracle_ranks).unwrap_or_default();
     // No receipt scan/allocation on quiet blocks or blocks with only unplaced fallback writes.
-    let takers = actions.filter(|_| !ranks.is_empty()).map(|a| takers(fills, a, &statuses.triggered)).unwrap_or_default();
+    let takers = actions.filter(|_| !ranks.is_empty()).map(|a| {
+        let asset = |coin: &str| coins.get(coin).map(|c| c.order_asset);
+        let competing = system.competing_orders(a.time_ns, &asset);
+        let replacements = statuses.replacement_orders(a, &asset, &|oid| competing.contains(&oid));
+        takers(fills, a, &statuses.triggered, &replacements)
+    }).unwrap_or_default();
     for (fill, seen) in fills.iter().zip(prices) {
         let Some(range) = ranges.get(fill.coin.as_ref()) else { continue; };
         let rank = fill.coin.split_once(':').and_then(|(dex, _)| ranks.get(dex)).copied().flatten();
@@ -93,7 +101,7 @@ pub(crate) fn golden_prices(case: &serde_json::Value, event: &serde_json::Value)
     let decimals = u32::try_from(case["size_decimals"].as_u64().unwrap()).unwrap();
     let height = event["height"].as_u64().unwrap();
     let px = exact_price_units(event["before_mark"].as_str().unwrap(), decimals).unwrap();
-    let coins = FxHashMap::from_iter([(coin.into(), Hip3Coin { oracle: None, size_decimals: decimals, mark: Some(StoredMark { px, time_ns: 0 }) })]);
+    let coins = FxHashMap::from_iter([(coin.into(), Hip3Coin { order_asset: 110_000, oracle: None, size_decimals: decimals, mark: Some(StoredMark { px, time_ns: 0 }) })]);
     let fills: Vec<_> = event["legs"].as_array().unwrap().iter().map(|leg| BlockFill::of(&serde_json::from_value::<NodeDataFill>(leg.clone()).unwrap())).collect();
     let updates: Vec<_> = event["updates"].as_array().unwrap().iter().map(|u| Hip3PriceUpdate {
         normal: u[1] == "Normal", oracle: false, coin: coin.into(), px: u[0].as_str().unwrap().into(), time_ns: 1,
@@ -111,7 +119,7 @@ pub(crate) fn golden_prices(case: &serde_json::Value, event: &serde_json::Value)
         }
     }
     let mut builder = super::super::FillPriceBuilder::new(&fills);
-    builder.hip3(&fills, &coins, &updates, Some(&actions), &BlockStatuses::default());
+    builder.hip3(&coins, &BlockInputs { fills: fills.clone(), hip3: updates, actions: Some(actions), ..BlockInputs::default() });
     let out = builder.finish(height, &fills);
     for fill in fills {
         let observed = out.get(height, &fill.coin, fill.tid).unwrap();
@@ -145,7 +153,7 @@ impl TriggerFixture {
         Self {
             height,
             fills: case["legs"].as_array().unwrap().iter().map(|leg| BlockFill::of(&serde_json::from_value::<NodeDataFill>(leg.clone()).unwrap())).collect(),
-            coins: FxHashMap::from_iter([(coin.into(), Hip3Coin { oracle: None, size_decimals: decimals,
+            coins: FxHashMap::from_iter([(coin.into(), Hip3Coin { order_asset: 110_000, oracle: None, size_decimals: decimals,
                 mark: Some(StoredMark { px: exact_price_units(case["before_mark"].as_str().unwrap(), decimals).unwrap(), time_ns: time_ns - 1 }) })]),
             updates: vec![Hip3PriceUpdate { normal: case["normal"].as_bool().unwrap(), oracle: false, coin: coin.into(),
                 px: case["after_mark"].as_str().unwrap().into(), time_ns }],
@@ -159,7 +167,8 @@ impl TriggerFixture {
 
     fn prices(&self) -> super::super::FillMarkPrices {
         let mut builder = super::super::FillPriceBuilder::new(&self.fills);
-        builder.hip3(&self.fills, &self.coins, &self.updates, Some(&self.actions), &self.statuses);
+        builder.hip3(&self.coins, &BlockInputs { fills: self.fills.clone(), hip3: self.updates.clone(),
+            actions: Some(self.actions.clone()), statuses: self.statuses.clone(), ..BlockInputs::default() });
         builder.finish(self.height, &self.fills)
     }
 }
@@ -187,12 +196,12 @@ mod tests {
         Hip3PriceUpdate { normal, oracle: false, coin: "xyz:X".into(), px: price.into(), time_ns: 1 }
     }
     fn ranges(fills: &[BlockFill], actions: &[RankedAction], updates: &[Hip3PriceUpdate], triggered: &[u64]) -> Vec<FillMarkRange> {
-        let coins = FxHashMap::from_iter([("xyz:X".into(), Hip3Coin { oracle: None, size_decimals: 6, mark: Some(StoredMark { px: 100, time_ns: 0 }) })]);
+        let coins = FxHashMap::from_iter([("xyz:X".into(), Hip3Coin { order_asset: 110_000, oracle: None, size_decimals: 6, mark: Some(StoredMark { px: 100, time_ns: 0 }) })]);
         let actions = MarkActions { height: 1, time_ns: 1, actions: actions.to_vec() };
         let mut statuses = BlockStatuses::default();
         statuses.triggered.extend(triggered);
         let mut builder = FillPriceBuilder::new(fills);
-        builder.hip3(fills, &coins, updates, Some(&actions), &statuses);
+        builder.hip3(&coins, &BlockInputs { fills: fills.to_vec(), hip3: updates.to_vec(), actions: Some(actions), statuses, ..BlockInputs::default() });
         let out = builder.finish(1, fills);
         fills.iter().map(|f| out.get(1, &f.coin, f.tid).unwrap()).collect()
     }
@@ -389,3 +398,6 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+mod modify_tests;

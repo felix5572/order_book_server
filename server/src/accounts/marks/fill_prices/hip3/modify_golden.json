@@ -1,0 +1,184 @@
+{
+  "provenance": {
+    "block": 1193548256,
+    "source": "BM node streams and replica_cmds, preserved cash_followup_20261022T2135Z/cash_evidence/blocks",
+    "status_indices": [
+      991,
+      992,
+      993
+    ],
+    "scope": "Real modify action/receipt, contiguous status triplet and both trade legs. Price/update/action ranks projected from the same archived block. This fixture verifies execution mark, not the entire account cash ledger.",
+    "sha256_gzip": {
+      "1193548256_hip3_oracle_updates_streaming.jsonl.gz": "836c05d34ccbaf374ae5f57a666bcc994d6679b9963d23dc5a49d2ab5c357dff",
+      "1193548256_node_fills_streaming.jsonl.gz": "d19620db7e577cb9765d0c036819f5042818266b65863daba204002699ac27bd",
+      "1193548256_node_order_statuses_streaming.jsonl.gz": "469dfe07e4cac561ce3dbef248d53da40a957fa04bfdf7bf481c30695d2a1134",
+      "1193548256_replica.jsonl.gz": "7d41ce407a250f4c0b0d4c07d5d442a2382602590891a22e286adf2db78b7a1c",
+      "1193548256_system_and_core_writer_actions_streaming.jsonl.gz": "d0883bca23a68a5d46f572701c57387c122bdf896faf80371d7a0848499f0f1b"
+    }
+  },
+  "height": 1193548256,
+  "time_ns": 1792702256659195286,
+  "coin": "xyz:ORCL",
+  "order_asset": 110011,
+  "size_decimals": 3,
+  "before_mark": "124.52",
+  "after_mark": "124.57",
+  "oracle_rank": [
+    1,
+    3,
+    699
+  ],
+  "modify_rank": [
+    0,
+    3,
+    725
+  ],
+  "action": {
+    "type": "modify",
+    "oid": 582816441727,
+    "order": {
+      "a": 110011,
+      "b": false,
+      "p": "123.93",
+      "s": "0.25",
+      "r": false,
+      "t": {
+        "limit": {
+          "tif": "Gtc"
+        }
+      }
+    },
+    "a": true
+  },
+  "response": {
+    "user": "0x8c14ed4f602ac4d2be8ed9c4716307c73e9a83a8",
+    "res": {
+      "status": "ok",
+      "response": {
+        "type": "default"
+      }
+    }
+  },
+  "statuses": [
+    {
+      "time": "2026-10-22T20:50:56.659195286",
+      "user": "0x8c14ed4f602ac4d2be8ed9c4716307c73e9a83a8",
+      "hash": "0x26aca884cf62b19c282604472419e00202de006a6a65d06eca7553d78e668b86",
+      "builder": null,
+      "status": "open",
+      "order": {
+        "coin": "xyz:ORCL",
+        "side": "A",
+        "limitPx": "123.93",
+        "sz": "0.25",
+        "oid": 582992141819,
+        "timestamp": 1792702256659,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Limit",
+        "origSz": "0.25",
+        "tif": "Gtc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-22T20:50:56.659195286",
+      "user": "0x8c14ed4f602ac4d2be8ed9c4716307c73e9a83a8",
+      "hash": null,
+      "builder": null,
+      "status": "canceled",
+      "order": {
+        "coin": "xyz:ORCL",
+        "side": "A",
+        "limitPx": "126.45",
+        "sz": "0.25",
+        "oid": 582816441727,
+        "timestamp": 1792688977953,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Limit",
+        "origSz": "0.25",
+        "tif": "Gtc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-22T20:50:56.659195286",
+      "user": "0x8c14ed4f602ac4d2be8ed9c4716307c73e9a83a8",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "xyz:ORCL",
+        "side": "A",
+        "limitPx": "123.93",
+        "sz": "0.0",
+        "oid": 582992141819,
+        "timestamp": 1792702256659,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Limit",
+        "origSz": "0.25",
+        "tif": "Gtc",
+        "cloid": null
+      }
+    }
+  ],
+  "legs": [
+    [
+      "0x33ad48ed92e3e91a98278f0f7456eae6eafa516e",
+      {
+        "coin": "xyz:ORCL",
+        "px": "124.54",
+        "sz": "0.25",
+        "side": "B",
+        "time": 1792702256659,
+        "startPosition": "28.227",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0x26aca884cf62b19c282604472419e00202de006a6a65d06eca7553d78e668b86",
+        "oid": 582992102964,
+        "crossed": false,
+        "fee": "-0.000031",
+        "tid": 837847924569426,
+        "cloid": "0x16175721059863000000000036262389",
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "-0.000015"
+      }
+    ],
+    [
+      "0x8c14ed4f602ac4d2be8ed9c4716307c73e9a83a8",
+      {
+        "coin": "xyz:ORCL",
+        "px": "124.54",
+        "sz": "0.25",
+        "side": "A",
+        "time": 1792702256659,
+        "startPosition": "-0.25",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x26aca884cf62b19c282604472419e00202de006a6a65d06eca7553d78e668b86",
+        "oid": 582992141819,
+        "crossed": true,
+        "fee": "0.002521",
+        "tid": 837847924569426,
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.00126"
+      }
+    ]
+  ]
+}

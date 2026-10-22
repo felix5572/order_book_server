@@ -49,7 +49,7 @@ impl MarginOrder {
         }
         let triggered = inputs.order_statuses.iter().flat_map(Batch::events_ref)
             .filter(|status| status.status == "triggered").map(|status| status.order.oid).collect();
-        let takers = takers(&inputs.fills, mark_actions, &triggered);
+        let takers = takers(&inputs.fills, mark_actions, &triggered, &[]);
         for NodeDataFill(user, fill) in fills.iter().flat_map(Batch::events_ref) {
             let Some(state) = accounts.get_mut(user) else { continue; };
             state.has_fill = true;
