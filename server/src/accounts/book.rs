@@ -1972,6 +1972,8 @@ mod tests {
             book.apply_block_actions(block_actions(1_000, &[]));
             let mut first = anchor(1_000, &[(PUMP, 0, &[(isolated, -2_000_000)])]);
             first.margins = per_dex_with_main_cash(-12_000_000_000);
+            // Keep capacity above the fill-notional floor: an empty pool now resolves the transfer exactly to 0.
+            first.margins.add_cross_cash(&isolated, 0, 100_000_000_000);
             book.install_anchor(first);
             // BTC is set isolated at 5x: an open there makes the account's cash modelled
             book.apply_block(block_actions(1_001, &[]), vec![fills(1_001, &[(isolated, "BTC", "B", 1, "0.0", "0.001")])], Vec::new(), |_| None, &crate::accounts::marks::fill_prices::FillMarkPrices::default());

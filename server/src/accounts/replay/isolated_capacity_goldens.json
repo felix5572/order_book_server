@@ -1,0 +1,520 @@
+{
+  "provenance": {
+    "seed_from": 1192650000,
+    "seed_to": 1192660000,
+    "source_dir": "/home/yfb222333/research-data/hyperliquid-trade/ob_hourly_watch_20261021/market_backlog_20261022/margin_docs_followup_20261022",
+    "note": "Five full intervals need no mark to establish capped final cash. BTC 353a has an earlier uncapped missing-mark event, so its estimate tag stays sticky. LTC is a single-event test with prior cash independently reconciled from other coins; final cross is later replenished to 0.065872 USDC.",
+    "sha256": {
+      "system_and_core_writer_actions_streaming_affected_window.jsonl.gz": "27a629c855866311490e55629ad6f166bdc064fe467e467a2c657c340ff3ebd3",
+      "misc_events_streaming_affected_window.jsonl.gz": "3a8ae90fe2db8421a33876549e582ff48d9adb4334d0a5d64da2c9fbe9986b44",
+      "node_fills_streaming_affected_window.jsonl.gz": "250e5d330dcf9da8ab5530139fac289ca8b77cb74f4d237af445bb609d2b66f3",
+      "1192650000_selected_states.json": "40181f27c065191f4cc8faecebcea01045c91f2ffa2710ca9aa7bcb68e32ffb7",
+      "1192660000_selected_states.json": "98e902d3fb2f473c7e92fd405e8caebc5159ab267be94576bd033adafa75b7b5",
+      "replica_cmds_affected_window.jsonl.gz": "764cb60e9c5d3ffbf2a44f730656076a7d30c11b76e060a77d7b080dcc09d328"
+    }
+  },
+  "markets": {
+    "BTC": {
+      "asset": 0,
+      "size_decimals": 5
+    },
+    "GRASS": {
+      "asset": 151,
+      "size_decimals": 1
+    },
+    "LTC": {
+      "asset": 10,
+      "size_decimals": 2
+    },
+    "PUMP": {
+      "asset": 200,
+      "size_decimals": 0
+    },
+    "XMR": {
+      "asset": 224,
+      "size_decimals": 3
+    }
+  },
+  "cases": [
+    {
+      "user": "0x1e6fed545233e790182157c4a513deed05d3c8a3",
+      "before": {
+        "cross_wei": 14378500,
+        "positions": {
+          "10": {
+            "size": 21,
+            "cash_micro": -8641792,
+            "leverage": 3
+          }
+        }
+      },
+      "events": [
+        {
+          "height": 1192655301,
+          "user": "0x1e6fed545233e790182157c4a513deed05d3c8a3",
+          "fill": {
+            "coin": "LTC",
+            "px": "60.836",
+            "sz": "0.42",
+            "side": "A",
+            "time": 1792638002299,
+            "startPosition": "0.21",
+            "dir": "Long > Short",
+            "closedPnl": "-0.18228",
+            "hash": "0x34a317f200d02166361c04471679c50202d400d79bd34038d86bc344bfd3fb50",
+            "oid": 582129420504,
+            "crossed": true,
+            "fee": "0.023813",
+            "builderFee": "0.012775",
+            "tid": 132852036483294,
+            "feeToken": "USDC",
+            "builder": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+            "twapId": null
+          }
+        }
+      ],
+      "after": {
+        "cross_wei": 0,
+        "positions": {
+          "10": {
+            "size": -21,
+            "cash_micro": 17029300,
+            "leverage": 3
+          }
+        }
+      },
+      "expected_estimated": false,
+      "boundary": "LTC fill only; prior cross cash derived independently from ETH/SOL checkpoint cash and funding",
+      "prior_cash_evidence": [
+        {
+          "coin": "ETH",
+          "height": 1192654989,
+          "cash_before_micro": -16065425,
+          "checkpoint_cash_micro": 29300674,
+          "later_funding_micro": 274,
+          "cash_after_fill_micro": 29300400,
+          "fill_cash_flow_micro": 45371436,
+          "cross_change_wei": 561100
+        },
+        {
+          "coin": "SOL",
+          "height": 1192655139,
+          "cash_before_micro": -10082300,
+          "checkpoint_cash_micro": 18286837,
+          "later_funding_micro": 171,
+          "cash_after_fill_micro": 18286666,
+          "fill_cash_flow_micro": 28458453,
+          "cross_change_wei": 8948700
+        }
+      ],
+      "checkpoint_final_cross_wei": 6587200
+    },
+    {
+      "user": "0x353a9b2f99cdd61344e600ec07359ef5dca0db25",
+      "before": {
+        "cross_wei": 0,
+        "positions": {
+          "0": {
+            "size": -16138,
+            "cash_micro": 13824381681,
+            "leverage": 40
+          }
+        }
+      },
+      "events": [
+        {
+          "height": 1192655270,
+          "user": "0x353a9b2f99cdd61344e600ec07359ef5dca0db25",
+          "funding": {
+            "coin": "BTC",
+            "amount_micro": 167272
+          }
+        },
+        {
+          "height": 1192656638,
+          "user": "0x353a9b2f99cdd61344e600ec07359ef5dca0db25",
+          "fill": {
+            "coin": "BTC",
+            "px": "82972.0",
+            "sz": "0.16138",
+            "side": "B",
+            "time": 1792638098149,
+            "startPosition": "-0.16138",
+            "dir": "Close Short",
+            "closedPnl": "109.41564",
+            "hash": "0x9f644a3cf0195d84a0de0447167efe02040b00228b1c7c56432cf58faf1d376f",
+            "oid": 582130932751,
+            "crossed": true,
+            "fee": "12.479499",
+            "builderFee": "6.69501",
+            "tid": 300985043510371,
+            "cloid": "0x604f5b4bdcc69f21091df4bd5d3d3068",
+            "feeToken": "USDC",
+            "builder": "0x2a2b6b093a9813fbd8cddae800c3d17d46460d17",
+            "twapId": null
+          }
+        },
+        {
+          "height": 1192657338,
+          "user": "0x353a9b2f99cdd61344e600ec07359ef5dca0db25",
+          "fill": {
+            "coin": "BTC",
+            "px": "82971.0",
+            "sz": "0.00081",
+            "side": "A",
+            "time": 1792638147160,
+            "startPosition": "0.0",
+            "dir": "Open Short",
+            "closedPnl": "0.0",
+            "hash": "0xc6fd8f85de3ed43cc87704471681ba020491006b7931f30e6ac63ad89d32ae27",
+            "oid": 582131520080,
+            "crossed": true,
+            "fee": "0.062636",
+            "builderFee": "0.033603",
+            "tid": 303234180335753,
+            "cloid": "0x3b71f34abaf388054a78cdb481013a47",
+            "feeToken": "USDC",
+            "builder": "0x2a2b6b093a9813fbd8cddae800c3d17d46460d17",
+            "twapId": null
+          }
+        },
+        {
+          "height": 1192657338,
+          "user": "0x353a9b2f99cdd61344e600ec07359ef5dca0db25",
+          "fill": {
+            "coin": "BTC",
+            "px": "82971.0",
+            "sz": "0.20267",
+            "side": "A",
+            "time": 1792638147160,
+            "startPosition": "-0.00081",
+            "dir": "Open Short",
+            "closedPnl": "0.0",
+            "hash": "0xc6fd8f85de3ed43cc87704471681ba020491006b7931f30e6ac63ad89d32ae27",
+            "oid": 582131520080,
+            "crossed": true,
+            "fee": "15.672262",
+            "builderFee": "8.407866",
+            "tid": 770814432626873,
+            "cloid": "0x3b71f34abaf388054a78cdb481013a47",
+            "feeToken": "USDC",
+            "builder": "0x2a2b6b093a9813fbd8cddae800c3d17d46460d17",
+            "twapId": null
+          }
+        }
+      ],
+      "after": {
+        "cross_wei": 0,
+        "positions": {
+          "0": {
+            "size": -20348,
+            "cash_micro": 17289252276,
+            "leverage": 40
+          }
+        }
+      },
+      "boundary": "full checkpoint interval",
+      "expected_estimated": true
+    },
+    {
+      "user": "0x4b97c60526f284c59528d3982e08a6cd6a260abc",
+      "before": {
+        "cross_wei": 89,
+        "positions": {
+          "151": {
+            "size": -4397,
+            "cash_micro": 398639928,
+            "leverage": 3
+          },
+          "200": {
+            "size": 28146,
+            "cash_micro": -125865669,
+            "leverage": 10
+          }
+        }
+      },
+      "events": [
+        {
+          "height": 1192653081,
+          "user": "0x4b97c60526f284c59528d3982e08a6cd6a260abc",
+          "fill": {
+            "coin": "GRASS",
+            "px": "0.68647",
+            "sz": "345.3",
+            "side": "B",
+            "time": 1792637837608,
+            "startPosition": "-439.7",
+            "dir": "Close Short",
+            "closedPnl": "-2.199561",
+            "hash": "0x529364cd8df62a41540d04471671190201d200b328f94913f65c10204cfa042b",
+            "oid": 582127508830,
+            "crossed": true,
+            "fee": "0.220919",
+            "builderFee": "0.118519",
+            "tid": 28024279254021,
+            "cloid": "0x826a0bba081578603f4e956213a3b880",
+            "feeToken": "USDC",
+            "builder": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+            "twapId": null
+          }
+        },
+        {
+          "height": 1192653081,
+          "user": "0x4b97c60526f284c59528d3982e08a6cd6a260abc",
+          "fill": {
+            "coin": "GRASS",
+            "px": "0.68648",
+            "sz": "515.4",
+            "side": "B",
+            "time": 1792637837608,
+            "startPosition": "-94.4",
+            "dir": "Short > Long",
+            "closedPnl": "-0.603216",
+            "hash": "0x529364cd8df62a41540d04471671190201d200b328f94913f65c10204cfa042b",
+            "oid": 582127508830,
+            "crossed": true,
+            "fee": "0.329751",
+            "builderFee": "0.176905",
+            "tid": 1050629080144523,
+            "cloid": "0x826a0bba081578603f4e956213a3b880",
+            "feeToken": "USDC",
+            "builder": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+            "twapId": null
+          }
+        },
+        {
+          "height": 1192655270,
+          "user": "0x4b97c60526f284c59528d3982e08a6cd6a260abc",
+          "funding": {
+            "coin": "GRASS",
+            "amount_micro": -3622
+          }
+        },
+        {
+          "height": 1192655270,
+          "user": "0x4b97c60526f284c59528d3982e08a6cd6a260abc",
+          "funding": {
+            "coin": "PUMP",
+            "amount_micro": 562
+          }
+        }
+      ],
+      "after": {
+        "cross_wei": 89,
+        "positions": {
+          "151": {
+            "size": 4210,
+            "cash_micro": -192764247,
+            "leverage": 3
+          },
+          "200": {
+            "size": 28146,
+            "cash_micro": -125865107,
+            "leverage": 10
+          }
+        }
+      },
+      "boundary": "full checkpoint interval",
+      "expected_estimated": false
+    },
+    {
+      "user": "0xa7896cab9102f1ead2975a606d2c59af060d5e27",
+      "before": {
+        "cross_wei": 16507621,
+        "positions": {
+          "224": {
+            "size": 330,
+            "cash_micro": -160537923,
+            "leverage": 5
+          }
+        }
+      },
+      "events": [
+        {
+          "height": 1192655270,
+          "user": "0xa7896cab9102f1ead2975a606d2c59af060d5e27",
+          "funding": {
+            "coin": "XMR",
+            "amount_micro": -2499
+          }
+        },
+        {
+          "height": 1192658716,
+          "user": "0xa7896cab9102f1ead2975a606d2c59af060d5e27",
+          "fill": {
+            "coin": "XMR",
+            "px": "608.01",
+            "sz": "0.327",
+            "side": "A",
+            "time": 1792638246541,
+            "startPosition": "0.33",
+            "dir": "Close Long",
+            "closedPnl": "0.07848",
+            "hash": "0xf11ddcda6de49662f297044716871c0201da00c008e7b53594e6882d2ce8704d",
+            "oid": 582132679852,
+            "crossed": true,
+            "fee": "0.284708",
+            "builderFee": "0.198819",
+            "tid": 307682634543050,
+            "feeToken": "USDC",
+            "builder": "0xe95a5e31904e005066614247d309e00d8ad753aa",
+            "twapId": null
+          }
+        },
+        {
+          "height": 1192658716,
+          "user": "0xa7896cab9102f1ead2975a606d2c59af060d5e27",
+          "fill": {
+            "coin": "XMR",
+            "px": "608.01",
+            "sz": "0.331",
+            "side": "A",
+            "time": 1792638246541,
+            "startPosition": "0.003",
+            "dir": "Long > Short",
+            "closedPnl": "0.00072",
+            "hash": "0xf11ddcda6de49662f297044716871c0201da00c008e7b53594e6882d2ce8704d",
+            "oid": 582132679852,
+            "crossed": true,
+            "fee": "0.288191",
+            "builderFee": "0.201251",
+            "tid": 1026382089888252,
+            "feeToken": "USDC",
+            "builder": "0xe95a5e31904e005066614247d309e00d8ad753aa",
+            "twapId": null
+          }
+        }
+      ],
+      "after": {
+        "cross_wei": 21,
+        "positions": {
+          "224": {
+            "size": -328,
+            "cash_micro": 239122335,
+            "leverage": 5
+          }
+        }
+      },
+      "boundary": "full checkpoint interval",
+      "expected_estimated": false
+    },
+    {
+      "user": "0xa9a0890e7e22f30042d66071eb6d3f438932b806",
+      "before": {
+        "cross_wei": 0,
+        "positions": {
+          "0": {
+            "size": -153,
+            "cash_micro": 129885563,
+            "leverage": 40
+          }
+        }
+      },
+      "events": [
+        {
+          "height": 1192655200,
+          "user": "0xa9a0890e7e22f30042d66071eb6d3f438932b806",
+          "fill": {
+            "coin": "BTC",
+            "px": "82906.0",
+            "sz": "0.00293",
+            "side": "B",
+            "time": 1792637995207,
+            "startPosition": "-0.00153",
+            "dir": "Short > Long",
+            "closedPnl": "-0.02601",
+            "hash": "0xd1d27f29feb24d4bd34c044716796002031b000f99b56c1d759b2a7cbdb62736",
+            "oid": 582129308036,
+            "crossed": true,
+            "fee": "0.226396",
+            "builderFee": "0.121457",
+            "tid": 249443899648816,
+            "cloid": "0x5d36b756141d9466acc962812dc1de0b",
+            "feeToken": "USDC",
+            "builder": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+            "twapId": null
+          }
+        },
+        {
+          "height": 1192655270,
+          "user": "0xa9a0890e7e22f30042d66071eb6d3f438932b806",
+          "funding": {
+            "coin": "BTC",
+            "amount_micro": -1451
+          }
+        }
+      ],
+      "after": {
+        "cross_wei": 0,
+        "positions": {
+          "0": {
+            "size": 140,
+            "cash_micro": -113256864,
+            "leverage": 40
+          }
+        }
+      },
+      "boundary": "full checkpoint interval",
+      "expected_estimated": false
+    },
+    {
+      "user": "0xccdf364dd651ab682fdbe5239b28395d6644c780",
+      "before": {
+        "cross_wei": 137377900,
+        "positions": {
+          "200": {
+            "size": 271352,
+            "cash_micro": -1217703575,
+            "leverage": 10
+          }
+        }
+      },
+      "events": [
+        {
+          "height": 1192655270,
+          "user": "0xccdf364dd651ab682fdbe5239b28395d6644c780",
+          "funding": {
+            "coin": "PUMP",
+            "amount_micro": 5422
+          }
+        },
+        {
+          "height": 1192659862,
+          "user": "0xccdf364dd651ab682fdbe5239b28395d6644c780",
+          "fill": {
+            "coin": "PUMP",
+            "px": "0.004989",
+            "sz": "542704.0",
+            "side": "A",
+            "time": 1792638329495,
+            "startPosition": "271352.0",
+            "dir": "Long > Short",
+            "closedPnl": "2.170816",
+            "hash": "0xa73f6085fb341726a8b90447168b96020495006b963735f84b080bd8ba37f111",
+            "oid": 582133650479,
+            "crossed": true,
+            "fee": "2.523436",
+            "builderFee": "1.353775",
+            "tid": 298748712855892,
+            "cloid": "0xa37cac37d7d236aa42c626f1fda47604",
+            "feeToken": "USDC",
+            "builder": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+            "twapId": null
+          }
+        }
+      ],
+      "after": {
+        "cross_wei": 0,
+        "positions": {
+          "200": {
+            "size": -271352,
+            "cash_micro": 1488702446,
+            "leverage": 10
+          }
+        }
+      },
+      "boundary": "full checkpoint interval",
+      "expected_estimated": false
+    }
+  ]
+}

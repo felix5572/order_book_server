@@ -16,7 +16,7 @@ mod isolated;
 use std::collections::BTreeMap;
 
 use alloy::primitives::Address;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::json;
 
 use super::{
@@ -263,10 +263,14 @@ pub(crate) struct AccountMargin {
     /// (dex, asset) on USDC dexes the account set isolated, with the leverage (`l.I.l`, `updateLeverage`): a position
     /// opened there is isolated, and its fills move margin at that leverage.
     isolated_leverage: FxHashMap<(usize, usize), u32>,
+    /// Dexes with cross exposure at the anchor or a cross fill/setting switch since it. This is a conservative
+    /// provenance flag, not a second position book: only a new anchor can clear it. Their transfer capacity needs
+    /// execution-time cross marks, which the isolated fill's own mark cannot establish.
+    cross_exposure_seen: FxHashSet<usize>,
     /// The assets whose isolated setting or leverage changed in a block, with that block: a fill of the same block may
     /// come before or after the change (review 000435 r1 P2).
     switched: Option<(u64, Vec<(usize, usize)>)>,
-    /// A transfer since the anchor lacked a mark bound determining one exact micro-USDC amount.
+    /// A transfer since the anchor lacked execution marks or cross capacity determining one exact micro-USDC amount.
     estimated: bool,
     stop: Option<Stop>,
 }
@@ -277,6 +281,7 @@ impl AccountMargin {
             pools: Pools::Unified(0),
             isolated: FxHashMap::default(),
             isolated_leverage: FxHashMap::default(),
+            cross_exposure_seen: FxHashSet::default(),
             switched: None,
             estimated: false,
             stop: Some(Stop { block: None, reason }),
@@ -287,6 +292,7 @@ impl AccountMargin {
             AccountMode::PortfolioMargin => return stopped(StopReason::PortfolioMargin),
             AccountMode::Unknown(code) => return stopped(StopReason::UnknownAccountMode(code.clone())),
         };
+        let mut cross_exposure_seen = FxHashSet::default();
         let (mut cross, mut isolated, mut isolated_leverage) = (FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
         for state in account.dex_states.iter().filter(|state| markets.usdc_dexes[state.dex]) {
             cross.insert(state.dex, state.cash_micro * WEI_PER_MICRO);
@@ -294,6 +300,8 @@ impl AccountMargin {
                 if let PositionMargin::Isolated { cash_micro, leverage } = position.margin {
                     isolated.insert((state.dex, position.asset), cash_micro * WEI_PER_MICRO);
                     isolated_leverage.insert((state.dex, position.asset), leverage);
+                } else if position.size_raw != 0 {
+                    cross_exposure_seen.insert(state.dex);
                 }
             }
             isolated_leverage.extend(state.isolated_settings.iter().map(|(asset, leverage)| ((state.dex, *asset), *leverage)));
@@ -304,7 +312,7 @@ impl AccountMargin {
         } else {
             Pools::PerDex(cross)
         };
-        Self { pools, isolated, isolated_leverage, switched: None, estimated: false, stop: None }
+        Self { pools, isolated, isolated_leverage, cross_exposure_seen, switched: None, estimated: false, stop: None }
     }
 
     /// Evidence text: pools by dex index (or the unified pool), isolated cash by "dex:asset", in USDC.
@@ -347,6 +355,18 @@ impl AccountMargin {
             Pools::PerDex(cross) => *cross.entry(dex).or_default() += wei,
             Pools::Unified(pool) => *pool += wei,
         }
+    }
+
+    /// Spendable micro USDC before closing the old isolated leg. With no cross exposure the client's
+    /// `max(cross_equity - cross_initial_margin, 0)` is simply positive cash. Preserve sub-micro spot dust.
+    /// A unified pool shares cross exposure across all USDC dexes; standard pools do not.
+    fn isolated_capacity_micro(&self, dex: usize) -> Option<i64> {
+        let cash = match &self.pools {
+            Pools::PerDex(cross) if !self.cross_exposure_seen.contains(&dex) => cross.get(&dex).copied().unwrap_or(0),
+            Pools::Unified(cash) if self.cross_exposure_seen.is_empty() => *cash,
+            _ => return None,
+        };
+        Some((cash / WEI_PER_MICRO).max(0))
     }
 
     /// Adds to spot USDC: only a unified account's pool counts it.
@@ -476,6 +496,7 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
     };
     let cash = fill.cash_wei(market.size_decimals, MAX_PERP_DECIMALS - market.size_decimals).map_err(StopReason::Contradiction)?;
     if !isolated {
+        account.cross_exposure_seen.insert(market.dex);
         account.add_cross(market.dex, cash);
         return Ok(());
     }
@@ -491,7 +512,9 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
 /// - a flip closes the old position and funds only the residual new position, leaving the whole fee with the old one.
 ///
 /// The supplemented rule explains 815/815 opens/increases and 58/58 flips with recorded mark evidence; unknown
-/// execution prices still use the explicitly estimated floor (`isolated::transfer`).
+/// execution prices still use the explicitly estimated floor. Funding is capped by available cross margin; six
+/// live cases at 1192650000→1192660000 establish the cash-only path, including five zero/dust final balances.
+/// Cross exposure requires other positions' execution marks: preserve an explicit estimate, never clamp raw cash.
 ///
 /// `cash_wei` is the fill's whole cash flow (`FillEvent::cash_wei`); cross takes what the position does not.
 fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &FillEvent, cash_wei: i64, leverage: u32) -> Result<(), String> {
@@ -519,11 +542,16 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
         let notional = notional(size_raw)?;
         Ok(if fill.side == Side::Bid { -notional } else { notional })
     };
-    let margin = |size_raw: i64| isolated::transfer(size_raw.abs(), price_raw, fill.side, leverage, market.size_decimals, fill.mark)
-        .map_err(|err| context(&err));
+    let capacity = account.isolated_capacity_micro(market.dex);
+    let margin = |size_raw: i64, released_micro: i64| {
+        let cap = capacity.map(|available| available.checked_add(released_micro)
+            .ok_or_else(|| context("transfer capacity overflows"))).transpose()?;
+        isolated::transfer(size_raw.abs(), price_raw, fill.side, leverage, market.size_decimals, fill.mark, cap)
+            .map_err(|err| context(&err))
+    };
     let same_side = (start > 0) == (end > 0);
     let cash_after = if start == 0 || same_side && end.abs() > start.abs() {
-        let transfer = margin(size)?;
+        let transfer = margin(size, 0)?;
         account.estimated |= transfer.estimated;
         cash_before + flow(size)? - fee + transfer.micro_usdc
     } else if end == 0 {
@@ -533,7 +561,11 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
         let moved = i128::from(size) * i128::from(cash_before - fee) / i128::from(start.abs());
         cash_before - fee - i64::try_from(moved).map_err(|err| context(&err.to_string()))?
     } else {
-        let transfer = margin(end)?;
+        // Close the OLD leg first and charge the WHOLE fee there. Its release is available for the residual
+        // new leg, including when the pool was empty before the flip. Negative release retains the old deficit.
+        let released = cash_before.checked_add(flow(start)?).and_then(|cash| cash.checked_sub(fee))
+            .ok_or_else(|| context("closing cash overflows"))?;
+        let transfer = margin(end, released)?;
         account.estimated |= transfer.estimated;
         flow(end)? + transfer.micro_usdc
     };
@@ -686,6 +718,7 @@ fn apply_action(account: &mut AccountMargin, markets: &Markets, block: u64, acti
                 account.isolated_leverage.insert(key, *leverage) != Some(*leverage)
             };
             if changed {
+                if *is_cross { account.cross_exposure_seen.insert(market.dex); }
                 account.switch(block, key);
             }
         }
@@ -1031,9 +1064,12 @@ pub(crate) mod tests {
     #[test]
     fn isolated_fills_move_margin_between_cross_and_the_position() {
         let mut states = per_dex();
+        // This test exercises the unconstrained formula; cash-constrained fills have separate real goldens.
+        const FUNDS: i64 = 100_000_000_000_000;
+        states.accounts.get_mut(&user(ISOLATED)).unwrap().add_cross(0, FUNDS);
         let btc = (0, 0);
         let main = |states: &MarginStates| match cross(states, ISOLATED) {
-            Pools::PerDex(cross) => cross[&0],
+            Pools::PerDex(cross) => cross[&0] - FUNDS,
             Pools::Unified(_) => unreachable!("ISOLATED is a default account"),
         };
         // BTC set isolated at 5x: buy 0.01 at 82857.6, fee 0.37 -> notional 828.576, margin 165.7152 from cross
@@ -1066,6 +1102,7 @@ pub(crate) mod tests {
     #[test]
     fn an_isolated_open_without_a_setting_takes_the_tables_leverage() {
         let mut states = per_dex();
+        for holder in [ISOLATED, HOLDER] { states.accounts.get_mut(&user(holder)).unwrap().add_cross(1, 100_000_000_000); }
         // ISOLATED has no xyz state: buy 2 TSLA at 358.32 -> notional 716.64, margin 71.664 at 10x
         states.apply(5, user(ISOLATED), &fill_from("xyz:TSLA", "B", "358.32", "2.0", "0.0", "0.0", None));
         assert_eq!(isolated_cash(&states, ISOLATED, (1, 0)), Some((-716_640_000 + 71_664_000) * 100));
@@ -1436,8 +1473,10 @@ pub(crate) mod tests {
         // (a sample of its own); a pool total off it is a mismatch, as an unread deposit would be
         let open = fill_from("BTC", "B", "82857.6", "0.01", "0.0", "0.0", None);
         let mut opened = per_dex();
+        opened.accounts.get_mut(&user(ISOLATED)).unwrap().add_cross(0, 100_000_000_000_000);
         opened.apply(5, user(ISOLATED), &open);
         let mut split = per_dex();
+        split.accounts.get_mut(&user(ISOLATED)).unwrap().add_cross(0, 100_000_000_000_000);
         split.apply(5, user(ISOLATED), &open);
         let account = split.accounts.get_mut(&user(ISOLATED)).unwrap();
         *account.isolated.get_mut(&(0, 0)).unwrap() += 100_000_000;
@@ -1540,6 +1579,10 @@ pub(crate) mod tests {
         let mut states = per_dex();
         let account = states.accounts.get_mut(&user(ISOLATED)).unwrap();
         account.isolated.clear();
+        // This older corpus did not record cross funding. Its conditional regression isolates the requested
+        // margin formula with explicitly ample funds; the new capacity goldens use recorded pool cash.
+        account.pools = per_dex_pools(&[(0, 1_000_000_000_000_000_000)]);
+        account.cross_exposure_seen.clear();
         if case["before"][0].as_i64().unwrap() != 0 {
             account.isolated.insert((0, 0), case["before"][1].as_i64().unwrap() * WEI_PER_MICRO);
         }
@@ -1556,12 +1599,81 @@ pub(crate) mod tests {
     #[test]
     fn exact_fills_do_not_clear_an_earlier_estimated_transfer() {
         let mut states = per_dex();
+        states.accounts.get_mut(&user(ISOLATED)).unwrap().add_cross(0, 100_000_000_000_000);
         let event = fill_from("BTC", "B", "82857.6", "0.01", "0.0", "0.0", None);
         states.apply(5, user(ISOLATED), &event);
         let AccountEvent::Fill(mut next) = fill_from("BTC", "B", "82857.6", "0.01", "0.0", "0.01", None) else { unreachable!() };
         next.mark = Some(FillMarkRange { min_px_raw: 828_500, max_px_raw: 828_500, size_decimals: 5 });
         states.apply(6, user(ISOLATED), &AccountEvent::Fill(next));
         assert!(states.accounts[&user(ISOLATED)].estimated, "only a new checkpoint resets the earlier uncertainty");
+    }
+
+
+    #[test]
+    fn recorded_cash_capacity_cases_match_micro_cash_and_spot_dust() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("replay/isolated_capacity_goldens.json")).unwrap();
+        assert_eq!(golden["cases"].as_array().unwrap().len(), 6);
+        for case in golden["cases"].as_array().unwrap() {
+            let mut states = per_dex();
+            let mut account = states.accounts.remove(&user(ISOLATED)).unwrap();
+            account.pools = Pools::Unified(case["before"]["cross_wei"].as_i64().unwrap());
+            account.isolated.clear();
+            account.cross_exposure_seen.clear();
+            let mut leverage = FxHashMap::default();
+            for (asset, position) in case["before"]["positions"].as_object().unwrap() {
+                let key = (0, asset.parse::<usize>().unwrap());
+                account.isolated.insert(key, position["cash_micro"].as_i64().unwrap() * WEI_PER_MICRO);
+                leverage.insert(key, u32::try_from(position["leverage"].as_u64().unwrap()).unwrap());
+            }
+            for event in case["events"].as_array().unwrap() {
+                if let Some(funding) = event.get("funding") {
+                    let asset = golden["markets"][funding["coin"].as_str().unwrap()]["asset"].as_u64().unwrap() as usize;
+                    *account.isolated.get_mut(&(0, asset)).unwrap() += funding["amount_micro"].as_i64().unwrap() * WEI_PER_MICRO;
+                    continue;
+                }
+                let fill: Fill = serde_json::from_value(event["fill"].clone()).unwrap();
+                let meta = &golden["markets"][&fill.coin];
+                let asset = meta["asset"].as_u64().unwrap() as usize;
+                let decimals = u32::try_from(meta["size_decimals"].as_u64().unwrap()).unwrap();
+                let market = PerpMarket { dex: 0, asset, size_decimals: decimals, margin_mode: AssetMarginMode::IsolatedOnly, default_leverage: 1 };
+                let event = FillEvent::of(&fill).unwrap(); // No fabricated execution mark in these samples.
+                let cash_flow = event.cash_wei(decimals, MAX_PERP_DECIMALS - decimals).unwrap();
+                let before_total = totals(&account)[&0];
+                apply_isolated_fill(&mut account, &market, &event, cash_flow, leverage[&(0, asset)]).unwrap();
+                assert_eq!(totals(&account)[&0], before_total + cash_flow);
+            }
+            assert_eq!(account.pools, Pools::Unified(case["after"]["cross_wei"].as_i64().unwrap()), "{}", case["user"]);
+            let expected: FxHashMap<_, _> = case["after"]["positions"].as_object().unwrap().iter().map(|(asset, p)|
+                ((0, asset.parse::<usize>().unwrap()), p["cash_micro"].as_i64().unwrap() * WEI_PER_MICRO)).collect();
+            assert_eq!(account.isolated, expected, "{}", case["user"]);
+            assert_eq!(account.estimated, case["expected_estimated"].as_bool().unwrap(), "{}", case["user"]);
+        }
+    }
+
+    #[test]
+    fn capacity_uses_its_own_pool_and_cross_exposure_is_conservative_until_reseed() {
+        let mut states = per_dex();
+        let isolated = user(ISOLATED);
+        let account = states.accounts.get_mut(&isolated).unwrap();
+        account.pools = per_dex_pools(&[(0, 12_345), (1, 99_999)]);
+        assert_eq!(account.isolated_capacity_micro(0), Some(123));
+        account.cross_exposure_seen.insert(1);
+        assert_eq!(account.isolated_capacity_micro(0), Some(123), "other dex's cross positions use another pool");
+        assert_eq!(account.isolated_capacity_micro(1), None);
+        account.pools = Pools::Unified(12_345);
+        assert_eq!(account.isolated_capacity_micro(0), None, "unified collateral sees every USDC dex");
+        account.cross_exposure_seen.clear();
+        account.pools = Pools::Unified(-12_345);
+        assert_eq!(account.isolated_capacity_micro(0), Some(0));
+        // A newly opened cross position invalidates the cash-only proof, even if subsequently closed.
+        account.isolated_leverage.remove(&(0, 0));
+        states.apply(5, isolated, &fill_from("BTC", "B", "82857.6", "0.01", "0.0", "0.0", None));
+        assert_eq!(states.accounts[&isolated].isolated_capacity_micro(0), None);
+        states.apply(6, isolated, &fill_from("BTC", "A", "82857.6", "0.01", "0.0", "0.01", None));
+        assert_eq!(states.accounts[&isolated].isolated_capacity_micro(0), None);
+        assert_eq!(per_dex().accounts[&isolated].isolated_capacity_micro(0), Some(0));
+        // The anchor already records HOLDER's cross positions; negative raw cash is not available margin.
+        assert_eq!(per_dex().accounts[&user(HOLDER)].isolated_capacity_micro(0), None);
     }
 
 }
