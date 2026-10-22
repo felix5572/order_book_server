@@ -1,4 +1,7 @@
 {
+ "perp_gate_upgrade": [
+  "{\"time\":1792652585,\"time_ms\":1792652585209,\"channel\":\"futures.system\",\"event\":\"update\",\"result\":{\"type\":\"upgrade\",\"msg\":\"The connection will soon be closed for a service upgrade. Please reconnect.\"}}"
+ ],
  "spot_binance": [
   "{\"stream\":\"btcusdt@bookTicker\",\"data\":{\"u\":101714809848,\"s\":\"BTCUSDT\",\"b\":\"82806.00000000\",\"B\":\"6.33111000\",\"a\":\"82806.01000000\",\"A\":\"4.42490000\"}}",
   "{\"stream\":\"btcusdt@bookTicker\",\"data\":{\"u\":101714809849,\"s\":\"BTCUSDT\",\"b\":\"82806.00000000\",\"B\":\"6.33111000\",\"a\":\"82806.01000000\",\"A\":\"4.42483000\"}}"

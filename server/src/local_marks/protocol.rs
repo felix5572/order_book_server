@@ -33,6 +33,8 @@ pub(crate) enum Parsed {
     /// Subscription requests (or markets) acknowledged by this frame.
     Acked(usize),
     Pong,
+    /// A documented control message asking this connection to rotate, not a quote or an acknowledgement.
+    ReconnectRequested(String),
     /// A frame the protocol sends that carries nothing for us (status, welcome, the venue's own heartbeat).
     Ignored,
     /// A frame of no type we know: warned with its text, not taken.
@@ -343,6 +345,15 @@ struct GateStatus<'a> {
 }
 
 #[derive(Deserialize)]
+struct GateSystemNotice<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    // Parse the message only for a known type; a future notification can have another payload shape.
+    #[serde(borrow)]
+    msg: Option<LazyValue<'a>>,
+}
+
+#[derive(Deserialize)]
 struct GateTicker<'a> {
     t: u64,
     s: &'a str,
@@ -358,9 +369,21 @@ fn gate(kind: Kind, text: &str, markets: &FeedMarkets) -> Result<Parsed, String>
     if let Some(error) = frame.error.as_ref().filter(|error| error.as_raw_str() != "null") {
         return Err(format!("Gate error: {}", error.as_raw_str()));
     }
-    let (ticker, pong) = if kind == Kind::Spot { ("spot.book_ticker", "spot.pong") } else { ("futures.book_ticker", "futures.pong") };
+    let (ticker, pong, system) = if kind == Kind::Spot {
+        ("spot.book_ticker", "spot.pong", "spot.system")
+    } else {
+        ("futures.book_ticker", "futures.pong", "futures.system")
+    };
     match (frame.channel, frame.event) {
         (channel, _) if channel == pong => Ok(Parsed::Pong),
+        (channel, Some("update")) if channel == system => {
+            let notice: GateSystemNotice<'_> = strict(payload(frame.result.as_ref(), "Gate system notice")?, "Gate system notice")?;
+            if notice.kind != "upgrade" { return Ok(Parsed::Unknown); }
+            let message: String = strict(payload(notice.msg.as_ref(), "Gate upgrade message")?, "Gate upgrade message")?;
+            // Gate's spot/futures service-upgrade contract asks clients to reconnect promptly.
+            // BM 2026-10-22 07:03:05Z: futures.system/upgrade, followed by a close ten seconds later.
+            Ok(Parsed::ReconnectRequested(format!("Gate service upgrade: {}", excerpt(&message))))
+        }
         (channel, Some("subscribe")) if channel == ticker => {
             let status: GateStatus<'_> = strict(payload(frame.result.as_ref(), "Gate subscribe answer")?, "Gate subscribe answer")?;
             if status.status != "success" {
@@ -586,6 +609,7 @@ mod tests {
                 Parsed::Quotes(_) => "quote",
                 Parsed::Acked(_) => "ack",
                 Parsed::Pong => "pong",
+                Parsed::ReconnectRequested(_) => "reconnect",
                 Parsed::Ignored => "ignored",
                 Parsed::Unknown => "unknown",
             })
@@ -624,6 +648,35 @@ mod tests {
         assert_eq!(first_quote(Kind::Spot, Venue::Kraken, "spot_kraken"), ("SHIB/USDT".into(), "0.000005118".into(), "0.000005132".into(), None));
         assert_eq!(first_quote(Kind::Perp, Venue::Mexc, "perp_mexc"), ("BTC_USDT".into(), "82771.8".into(), "82771.9".into(), Some(1_792_556_634_121)));
         assert_eq!(first_quote(Kind::Perp, Venue::Bybit, "perp_bybit").0, "BTCUSDT");
+    }
+
+    #[test]
+    fn gate_upgrade_is_control_and_unknown_notices_remain_visible() {
+        let sources = sources();
+        let recorded = &fixtures()["perp_gate_upgrade"][0];
+        assert_eq!(kinds(&parse_all(Kind::Perp, Venue::Gate, "perp_gate_upgrade")), ["reconnect"]);
+        for kind in [Kind::Spot, Kind::Perp] {
+            let protocol = Protocol { kind, venue: Venue::Gate };
+            let markets = markets(&sources, kind, Venue::Gate);
+            let wire = if kind == Kind::Spot { recorded.replace("futures.system", "spot.system") } else { recorded.clone() };
+            assert!(matches!(protocol.parse(&wire, markets).unwrap(), Parsed::ReconnectRequested(reason) if reason.contains("service upgrade")));
+            let mut notice: serde_json::Value = serde_json::from_str(&wire).unwrap();
+            notice["result"]["msg"] = serde_json::json!("Upgrade \"scheduled\"\nplease reconnect");
+            assert!(matches!(protocol.parse(&notice.to_string(), markets).unwrap(), Parsed::ReconnectRequested(_)));
+            notice["result"]["type"] = serde_json::json!("futureNotice");
+            notice["result"]["msg"] = serde_json::json!({"newShape": true});
+            assert_eq!(protocol.parse(&notice.to_string(), markets), Ok(Parsed::Unknown));
+            notice["result"]["type"] = serde_json::json!("upgrade");
+            for message in [serde_json::Value::Null, serde_json::json!(23), serde_json::json!({})] {
+                notice["result"]["msg"] = message;
+                assert!(protocol.parse(&notice.to_string(), markets).is_err());
+            }
+            notice["result"].as_object_mut().unwrap().remove("msg");
+            assert!(protocol.parse(&notice.to_string(), markets).is_err());
+            notice["result"]["msg"] = serde_json::json!("restart");
+            notice["error"] = serde_json::json!({"code": 2, "message": "refused"});
+            assert!(protocol.parse(&notice.to_string(), markets).is_err(), "a notice never hides an error");
+        }
     }
 
     #[test]

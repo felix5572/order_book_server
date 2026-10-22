@@ -53,6 +53,8 @@ const TRANSIENT_CLOSE: [u16; 6] = [1000, 1001, 1006, 1011, 1012, 1013];
 pub(crate) enum FeedError {
     /// Lost or not answering: reconnected after a backoff.
     Transient(String),
+    /// The venue requested a planned rotation; the caller withdraws quotes and reconnects with an info log.
+    ReconnectRequested(String),
     /// Refused or unusable: the feed stops until restart.
     Contract(String),
 }
@@ -138,6 +140,7 @@ pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets
                 }
             }
             Ok(Parsed::Pong) => pong_deadline = None,
+            Ok(Parsed::ReconnectRequested(reason)) => return FeedError::ReconnectRequested(format!("{label}: {reason}")),
             Ok(Parsed::Ignored) => {}
             Ok(Parsed::Unknown) => {
                 LOCAL_MARKS_FEED_UNKNOWN_FRAMES_TOTAL.with_label_values(&[label]).inc();
@@ -279,6 +282,38 @@ mod tests {
         assert_eq!(entry.and_then(|entry| entry.quote).map(|quote| quote.bid.to_string()), Some("82803.9".to_string()));
         slot.disconnected(format!("{error:?}"), now_ms());
         assert_eq!(slot.read(now_ms()).entries[btc].1, Validity::NotConnected);
+    }
+
+    #[tokio::test]
+    async fn a_gate_upgrade_requests_rotation_before_the_server_closes() {
+        let fixtures: std::collections::BTreeMap<String, Vec<String>> = serde_json::from_str(include_str!("wire_fixtures.json")).unwrap();
+        let frames = vec![fixtures["perp_gate"][0].clone(), fixtures["perp_gate"][1].clone(), fixtures["perp_gate_upgrade"][0].clone()];
+        let script: Script = Arc::new(move |mut ws, _| {
+            let frames = frames.clone();
+            Box::pin(async move {
+                next_text(&mut ws).await.unwrap();
+                for text in frames { ws.send(Frame::text(text)).await.unwrap(); }
+                // The server stays open: the upgrade notification, not EOF or a timeout, must end the client.
+                while next_text(&mut ws).await.is_some() {}
+            })
+        });
+        let (url, _) = venue(script).await;
+        let sources = MarkSources::embedded().unwrap();
+        let feed = Feed { kind: Kind::Perp, venue: Venue::Gate };
+        let markets = sources.markets(feed).unwrap();
+        let slot = FeedSlot::new(feed, markets.symbols.len(), None);
+        let protocol = Protocol { kind: feed.kind, venue: feed.venue };
+        let session = Session { url, ..protocol.session(&markets.symbols, 1, None) };
+        let error = run_connection(protocol, session, markets, &slot, QUICK).await;
+        let FeedError::ReconnectRequested(reason) = error else { panic!("{error:?}") };
+        assert!(reason.contains("Gate service upgrade"));
+        let index = markets.index("PEPE_USDT").unwrap();
+        assert_eq!(slot.read(now_ms()).entries[index].1, Validity::Valid);
+        // Both requested and failed connections use the same withdrawal/reconnect path in run_feed.
+        slot.disconnected(reason, now_ms());
+        assert_eq!(slot.read(now_ms()).entries[index].1, Validity::NotConnected);
+        slot.connected(now_ms());
+        assert_ne!(slot.read(now_ms()).entries[index].1, Validity::Valid, "rotation does not revive the old quote");
     }
 
     #[tokio::test]

@@ -149,25 +149,29 @@ async fn run_feed(part: &Subscription) {
                 run_connection(protocol, session, markets, slot, Timeouts::FEEDS).await
             }
         };
-        match error {
+        let (reason, requested) = match error {
             FeedError::Contract(reason) => {
                 error!("local marks {label} shard {shard} stopped until restart (this partition's quotes withdrawn): {reason}");
                 LOCAL_MARKS_FEED_STOPPED.with_label_values(&[label]).set(1);
                 slot.stopped(reason, now_ms());
                 return;
             }
-            FeedError::Transient(reason) => {
-                LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.with_label_values(&[label]).inc();
-                LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL.with_label_values(&[label, &shard_label]).inc();
-                if started.elapsed() >= HEALTHY_FOR {
-                    backoff = BACKOFF_MIN;
-                }
-                warn!("local marks {label} shard {shard} lost (this partition's quotes withdrawn until quoted anew), retrying in {backoff:?}: {reason}");
-                slot.disconnected(reason, now_ms());
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(BACKOFF_MAX);
-            }
+            FeedError::Transient(reason) => (reason, false),
+            FeedError::ReconnectRequested(reason) => (reason, true),
+        };
+        LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.with_label_values(&[label]).inc();
+        LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL.with_label_values(&[label, &shard_label]).inc();
+        if started.elapsed() >= HEALTHY_FOR {
+            backoff = BACKOFF_MIN;
         }
+        if requested {
+            info!("local marks {label} shard {shard} reconnect requested by venue (this partition's quotes withdrawn until quoted anew), retrying in {backoff:?}: {reason}");
+        } else {
+            warn!("local marks {label} shard {shard} lost (this partition's quotes withdrawn until quoted anew), retrying in {backoff:?}: {reason}");
+        }
+        slot.disconnected(reason, now_ms());
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(BACKOFF_MAX);
     }
 }
 
