@@ -47,6 +47,24 @@ pub(super) fn transfer(
     Ok(Transfer { micro_usdc, estimated: cap_micro.is_none() || exact.is_none() })
 }
 
+/// The client 6911b792, 0x44cd549..0x44cd697, evaluates `cash * (closed / held)` in f64 before
+/// truncating, not as an exact rational. PUMP 1192669509 differs by one micro on that boundary.
+/// At negative equity at fill (0x44cd531..0x44cd540 -> 0x44cd7e0), it keeps the trade cash isolated.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub(super) fn reduced_cash(cash_after_fee: i64, start_size: i64, closed_size: i64, price_raw: i64) -> Result<i64, String> {
+    if start_size == 0 || closed_size < 0 || closed_size.unsigned_abs() > start_size.unsigned_abs() || price_raw <= 0 {
+        return Err("invalid isolated reduction size or price".into());
+    }
+    let equity = i128::from(cash_after_fee) + i128::from(start_size) * i128::from(price_raw);
+    if equity < 0 {
+        let cash = i128::from(cash_after_fee) + i128::from(start_size.signum()) * i128::from(closed_size) * i128::from(price_raw);
+        return i64::try_from(cash).map_err(|err| format!("isolated reduction cash overflows: {err}"));
+    }
+    let fraction = closed_size as f64 / start_size.unsigned_abs() as f64;
+    let moved = (cash_after_fee as f64 * fraction) as i64;
+    cash_after_fee.checked_sub(moved).ok_or_else(|| "isolated reduction cash overflows".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +100,21 @@ mod tests {
         assert_eq!(capped(Some(range(90, 90)), None), Transfer { micro_usdc: 280, estimated: true });
         assert_eq!(capped(None, Some(-5)), Transfer { micro_usdc: -5, estimated: false }, "old deficit stays isolated");
         assert!(transfer(10, 100, Side::Bid, 5, 0, Some(range(0, 90)), Some(0)).is_err(), "a cap never hides invalid input");
+    }
+
+
+    #[test]
+    fn reduction_matches_client_float_boundary_and_negative_equity_branch() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("isolated_cash_edge_goldens.json")).unwrap();
+        let pump = &golden["pump"];
+        let value = |key: &str| pump[key].as_i64().unwrap();
+        assert_eq!(reduced_cash(value("cash_after_fee_micro"), value("held_size_raw"), value("closed_size_raw"), value("fill_price_raw")).unwrap(),
+            value("checkpoint_cash_after_micro"), "PUMP H1192669509: float fraction matches the checkpoint, integer ratio does not");
+        assert_eq!(reduced_cash(-1_000, 10, 2, 90).unwrap(), -820, "underwater long retains closing proceeds");
+        assert_eq!(reduced_cash(800, -10, 2, 90).unwrap(), 620, "underwater short pays its own closing notional");
+        assert_eq!(reduced_cash(-900, 10, 2, 90).unwrap(), -720, "zero equity takes the proportional branch");
+        assert!(reduced_cash(1, 0, 1, 90).is_err());
+        assert!(reduced_cash(1, 2, 3, 90).is_err());
     }
 
 }

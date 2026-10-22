@@ -270,6 +270,9 @@ pub(crate) struct AccountMargin {
     /// The assets whose isolated setting or leverage changed in a block, with that block: a fill of the same block may
     /// come before or after the change (review 000435 r1 P2).
     switched: Option<(u64, Vec<(usize, usize)>)>,
+    /// Manual isolated transfers are applied before fills by this stream adapter. Within that same block their
+    /// true position relative to fills is unavailable; remember affected collateral pools, not a guessed order.
+    margin_updates: Option<(u64, Vec<usize>)>,
     /// A transfer since the anchor lacked execution marks or cross capacity determining one exact micro-USDC amount.
     estimated: bool,
     stop: Option<Stop>,
@@ -283,6 +286,7 @@ impl AccountMargin {
             isolated_leverage: FxHashMap::default(),
             cross_exposure_seen: FxHashSet::default(),
             switched: None,
+            margin_updates: None,
             estimated: false,
             stop: Some(Stop { block: None, reason }),
         };
@@ -312,7 +316,7 @@ impl AccountMargin {
         } else {
             Pools::PerDex(cross)
         };
-        Self { pools, isolated, isolated_leverage, cross_exposure_seen, switched: None, estimated: false, stop: None }
+        Self { pools, isolated, isolated_leverage, cross_exposure_seen, switched: None, margin_updates: None, estimated: false, stop: None }
     }
 
     /// Evidence text: pools by dex index (or the unified pool), isolated cash by "dex:asset", in USDC.
@@ -343,6 +347,17 @@ impl AccountMargin {
 
     fn switched_in(&self, block: u64, key: (usize, usize)) -> bool {
         self.switched.as_ref().is_some_and(|(switched_block, keys)| *switched_block == block && keys.contains(&key))
+    }
+
+    fn note_margin_update(&mut self, block: u64, dex: usize) {
+        match &mut self.margin_updates {
+            Some((height, dexes)) if *height == block => { if !dexes.contains(&dex) { dexes.push(dex); } }
+            updates => *updates = Some((block, vec![dex])),
+        }
+    }
+
+    fn margin_updated_in(&self, block: u64, dex: usize) -> bool {
+        self.margin_updates.as_ref().is_some_and(|(height, dexes)| *height == block && (self.unified() || dexes.contains(&dex)))
     }
 
     const fn unified(&self) -> bool {
@@ -500,6 +515,9 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
         account.add_cross(market.dex, cash);
         return Ok(());
     }
+    // Same-block updateIsolatedMargin and a fill do not commute: reduction shares and opening capacity change.
+    // This is an ordering/estimation gap, not a failed action or a reason to stop the account's replay.
+    account.estimated |= account.margin_updated_in(block, market.dex);
     let leverage = account.isolated_leverage.get(&key).copied().unwrap_or(market.default_leverage);
     apply_isolated_fill(account, market, fill, cash, leverage).map_err(StopReason::Contradiction)
 }
@@ -557,9 +575,8 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
     } else if end == 0 {
         0
     } else if same_side {
-        // truncated toward zero, as i128 division does
-        let moved = i128::from(size) * i128::from(cash_before - fee) / i128::from(start.abs());
-        cash_before - fee - i64::try_from(moved).map_err(|err| context(&err.to_string()))?
+        let after_fee = cash_before.checked_sub(fee).ok_or_else(|| context("cash after fee overflows"))?;
+        isolated::reduced_cash(after_fee, start, size, price_raw).map_err(|err| context(&err))?
     } else {
         // Close the OLD leg first and charge the WHOLE fee there. Its release is available for the residual
         // new leg, including when the pool was empty before the flip. Negative release retains the old deficit.
@@ -707,6 +724,7 @@ fn apply_action(account: &mut AccountMargin, markets: &Markets, block: u64, acti
             })?;
             *isolated += ntli;
             account.add_cross(market.dex, -ntli);
+            account.note_margin_update(block, market.dex);
         }
         BlockAction::Leverage { asset, is_cross, leverage } => {
             let market = market_of(*asset)?;
@@ -1674,6 +1692,28 @@ pub(crate) mod tests {
         assert_eq!(per_dex().accounts[&isolated].isolated_capacity_micro(0), Some(0));
         // The anchor already records HOLDER's cross positions; negative raw cash is not available margin.
         assert_eq!(per_dex().accounts[&user(HOLDER)].isolated_capacity_micro(0), None);
+    }
+
+
+    #[test]
+    fn same_block_manual_margin_and_isolated_fill_are_estimated_without_stopping() {
+        let holder = user(ISOLATED);
+        let mut states = per_dex();
+        let action = AccountEvent::Action(BlockAction::IsolatedMargin { asset: 1, ntli_micro: 1_974_298_274 });
+        states.apply(5, holder, &action);
+        assert!(!states.accounts[&holder].estimated, "an isolated transfer alone has exact amounts");
+        states.apply(5, holder, &fill_from(PUMP_COIN, "B", "0.004", "950000.0", "0.0", "-2000000.0", None));
+        assert!(states.accounts[&holder].estimated, "MRVL 1192678957: taking a share of newly added margin assumes action order");
+        assert_eq!(stop(&states, ISOLATED), None);
+        let mut later = per_dex();
+        later.apply(5, holder, &action);
+        later.apply(6, holder, &fill_from(PUMP_COIN, "B", "0.004", "950000.0", "0.0", "-2000000.0", None));
+        assert!(!later.accounts[&holder].estimated, "separate blocks establish the order");
+        let account = later.accounts.get_mut(&holder).unwrap();
+        account.note_margin_update(7, 1);
+        assert!(!account.margin_updated_in(7, 0), "another standard dex has separate cash");
+        account.pools = Pools::Unified(0);
+        assert!(account.margin_updated_in(7, 0), "unified capacity is shared");
     }
 
 }

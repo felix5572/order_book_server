@@ -1,0 +1,97 @@
+{
+  "client_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+  "source_sha256": {
+    "replica_actions_selected.jsonl.gz": "2b21c3d68862ec3db0d9b2359ab23d63b886766335d66a8d6cf8a0d21442fb2c",
+    "system_and_core_writer_actions_streaming_affected_window.jsonl.gz": "382b9906c01b1868c76708e9280d5721cac6d75b5f8f2b823853fe89cd3082e4",
+    "misc_events_streaming_affected_window.jsonl.gz": "6a56b47ff8098dd2a321f908dfb86f00db07fca460a4a3f5a96672fef0c0b3bd",
+    "node_fills_streaming_affected_window.jsonl.gz": "8a00bea66163854c0a3c815ad70bad2bf48687bea25836a803b683dcd83148d0"
+  },
+  "pump": {
+    "height": 1192669509,
+    "user": "0x5e03d2adc2f9dd88ae70be825dc5d1421cf7eaf5",
+    "fill": {
+      "coin": "PUMP",
+      "px": "0.004964",
+      "sz": "26086.0",
+      "side": "A",
+      "time": 1792639030267,
+      "startPosition": "2556428.0",
+      "dir": "Close Long",
+      "closedPnl": "-2.817288",
+      "hash": "0xcbfee6ff2751904acd78044716b1450203fc00e4c254af1c6fc79251e6556a35",
+      "oid": 582141560742,
+      "crossed": true,
+      "fee": "0.04953",
+      "tid": 593470857153635,
+      "cloid": "0x0d16734a1d0d213a00ced3c3524cd3a9",
+      "feeToken": "USDC",
+      "twapId": null
+    },
+    "cash_before_reduction_micro": -10378499644,
+    "cash_after_fee_micro": -10378549174,
+    "held_size_raw": 2556428,
+    "closed_size_raw": 26086,
+    "fill_price_raw": 4964,
+    "checkpoint_cash_after_micro": -10272645612,
+    "integer_result_micro": -10272645611,
+    "input_note": "Starting cash derived from checkpoint1192660000 and four preceding buys at the fill-notional floor; observed prior replay differs only at the final reduction. Expected after is checkpoint1192670000 (no subsequent PUMP fill)."
+  },
+  "mrvl": {
+    "height": 1192678957,
+    "user": "0x91d03a68665676485f3d12f2c6b018d69b14e312",
+    "fill": {
+      "coin": "xyz:MRVL",
+      "px": "235.69",
+      "sz": "0.95",
+      "side": "B",
+      "time": 1792639702217,
+      "startPosition": "-16.66",
+      "dir": "Close Short",
+      "closedPnl": "0.10336",
+      "hash": "0x690d9b8133bb8e956a87044716d62d02042a0066cebead670cd646d3f2bf6880",
+      "oid": 582149805700,
+      "crossed": true,
+      "fee": "0.006448",
+      "tid": 956166210131430,
+      "cloid": "0xd620581084ba61fce26f4a3df86a28ed",
+      "feeToken": "USDC",
+      "twapId": null,
+      "deployerFee": "0.003224"
+    },
+    "margin_action": {
+      "bundle_index": 0,
+      "bundle_id": "0xd5a06b955e830d19057da6a26726285789d644fa4db9f5048a9245e4260d029b",
+      "action_index": 1049,
+      "signed_action": {
+        "signature": {
+          "r": "0x306bc5dc651100885564d63e0e257ae38f4353219260fda5fffbf2e45b9eb2c3",
+          "s": "0x68d1334e8923287f6c58ede426eff33dca85e3b33762aa5ecfa5d4b3cf8be3d6",
+          "v": 27
+        },
+        "vaultAddress": "0x91d03a68665676485f3d12f2c6b018d69b14e312",
+        "action": {
+          "type": "updateIsolatedMargin",
+          "asset": 110061,
+          "isBuy": true,
+          "ntli": 1974298274
+        },
+        "nonce": 1792619332882
+      },
+      "receipt": {
+        "user": "0x91d03a68665676485f3d12f2c6b018d69b14e312",
+        "res": {
+          "status": "ok",
+          "response": {
+            "type": "default"
+          }
+        }
+      }
+    },
+    "anchor_from": 1192670000,
+    "anchor_to": 1192680000,
+    "checkpoint_isolated_cash_micro": 17331306514,
+    "replayed_isolated_cash_micro": 17218726480,
+    "split_error_micro": 112580034,
+    "note": "The action adapter applied the margin transfer first. Taking 0.95/16.66 of the newly added 1974.298274 USDC explains the observed final split error. Same-block execution order is not carried into cash replay."
+  }
+}
