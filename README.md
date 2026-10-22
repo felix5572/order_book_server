@@ -596,7 +596,7 @@ curl http://localhost:9090/metrics
 | **Connections** | `ws_connections_active` | Current WebSocket connections |
 | | `ws_connections_total` | Total connections since startup |
 | | `ws_subscriptions_active{type}` | Active subscriptions by type (bbo/l2Book/l4Book/trades/bookDiffs/orderUpdates/userFills) |
-| | `ws_broadcast_skipped_messages_total{lane}` | Messages overwritten in `market` or `user_fills` rings, summed over lagging receivers |
+| | `ws_broadcast_skipped_messages_total{lane}` | Messages overwritten in `market`, `bbo` or `user_fills` rings, summed over lagging receivers |
 | | `ws_delivery_wait_seconds{stage}` | `outbound_queue`: waits on a full send queue; `socket_write`: each socket write, including failures/timeouts |
 | | `broadcast_receivers` | Number of broadcast channel receivers |
 | **Throughput** | `events_processed_total{type}` | Events by type (orders/diffs/fills) |
@@ -629,9 +629,29 @@ curl http://localhost:9090/metrics
 | | `file_lines_parsed_total{source}` | Lines parsed from files by source |
 | **Errors** | `parse_errors_total{type}` | JSON parse errors by source |
 | | `ws_send_errors_total` | WebSocket send errors |
-| | `channel_drops_total` | Messages dropped due to lag |
-| | `broadcast_channel_lag` | Broadcast channel lag (receivers behind) |
+| | `channel_drops_total` | Receiver lag occurrences (not message or trade count) |
+| | `broadcast_channel_lag` | Messages skipped in the most recent receiver lag occurrence |
 | | `orderbook_desyncs_total{reason}` | Times the book was marked out-of-sync (each triggers an automatic background snapshot re-fetch). Alert on a sustained rate; occasional self-heals are benign |
+
+### WebSocket broadcast continuity
+
+BBO has a dedicated 16,384-message ring, joined only by BBO subscribers. Public trades/L4/L2 and
+private `userFills` use separate rings. This prevents per-book-event BBO traffic (measured at 13.4k
+messages/s on BM) from evicting trades or making account-only clients drain BBO messages.
+
+A `market` gap forces a fresh L2 evaluation. Event subscriptions (`trades`, `l4Book`, `bookDiffs`,
+`orderUpdates`, `oracle`) are withdrawn: the server sends an `unsubscribe` subscription response for
+each and then an `error` explaining the gap. A `bbo` gap withdraws BBO subscriptions and clears their
+heartbeat cache. Clients must resubscribe and reconcile any missing events; a new trade cannot repair
+an earlier missing trade. Other subscriptions on the same socket continue. A private-fill gap still
+closes the connection under its existing recovery contract.
+
+Gap WARN logs include the process-local connection ID, socket peer, lane, skipped/pending message
+counts, receive interval, outbound queue depth and send-wait maxima. Completed session branches taking
+at least 10ms retain one `last_slow_stage` sample with duration and age; elapsed time includes scheduling
+and awaited work, so it is not itself a root-cause verdict. Detail logs are limited to one per connection
+per 30s; gap counters always increment. Counts are internal messages/batches, not lost trades. Historical
+versions logged market details at DEBUG; INFO-only captures cannot identify the affected old connection.
 
 ### Disable Metrics
 

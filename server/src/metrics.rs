@@ -165,7 +165,7 @@ lazy_static! {
     /// Broadcast channel lag (receivers behind)
     pub static ref CHANNEL_LAG: IntGauge = IntGauge::new(
         "broadcast_channel_lag",
-        "Broadcast channel lag"
+        "Messages skipped in the most recent receiver lag occurrence"
     ).expect("metric can be created");
 
     // ==================== ERROR METRICS ====================
@@ -234,7 +234,7 @@ lazy_static! {
     /// Messages dropped due to channel lag
     pub static ref CHANNEL_DROPS_TOTAL: IntCounter = IntCounter::new(
         "channel_drops_total",
-        "Messages dropped due to channel lag"
+        "Receiver lag occurrences, not skipped message count"
     ).expect("metric can be created");
 
     /// New diffs whose insertBefore anchor was not resting at the level; the

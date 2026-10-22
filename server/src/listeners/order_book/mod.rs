@@ -509,6 +509,7 @@ pub(crate) struct OrderBookListener {
     last_diff_height: u64,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
     user_fills_tx: Sender<Arc<Vec<NodeDataFill>>>,
+    bbo_tx: Sender<Arc<BboUpdate>>,
     // Pairs fill legs into public-schema trades; holds at most the one leg
     // awaiting its counterpart across Fills batches (single-event batches in
     // --stream-with-block-info mode).
@@ -573,6 +574,7 @@ impl OrderBookListener {
             last_diff_height: 0,
             internal_message_tx,
             user_fills_tx: tokio::sync::broadcast::channel(USER_FILLS_BROADCAST_CAPACITY).0,
+            bbo_tx: tokio::sync::broadcast::channel(16_384).0,
             trade_pairer: TradePairer::default(),
             l2_snapshot_cache: HashMap::new(),
             l2_conflation: l2_conflation::L2Conflation::default(),
@@ -598,6 +600,12 @@ impl OrderBookListener {
     /// Private fill events have their own bounded ring: public book bursts must not evict them.
     pub(crate) fn user_fills_sender(&self) -> Sender<Arc<Vec<NodeDataFill>>> {
         self.user_fills_tx.clone()
+    }
+
+    /// BBO is emitted per book event (measured >13k/s). It must not evict public
+    /// trades/L4 events, or make clients without BBO subscriptions drain that traffic.
+    pub(crate) fn bbo_sender(&self) -> Sender<Arc<BboUpdate>> {
+        self.bbo_tx.clone()
     }
 
     /// Opt out of snapshot re-fetch on data loss. The book keeps applying live
@@ -1015,11 +1023,11 @@ pub(crate) struct TriggerBandAt {
 #[cfg(test)]
 impl OrderBookListener {
     /// The bbo broadcast the listener would send for `coin` right now.
-    pub(crate) fn bbo_update_for_test(&self, coin: &str) -> InternalMessage {
+    pub(crate) fn bbo_update_for_test(&self, coin: &str) -> BboUpdate {
         let state = self.order_book_state.as_ref().expect("an installed book");
         let (time, raw) = state.get_bbos_for_coins(&HashSet::from([Coin::new(coin)]));
         let bbos = raw.into_iter().map(|(coin, raw)| (coin, CoinBbo { raw, frame: SharedFrame::new() })).collect();
-        InternalMessage::BboUpdate { bbos, time, withheld_period: self.book_trust.withheld_periods() }
+        BboUpdate { bbos, time, withheld_period: self.book_trust.withheld_periods() }
     }
 }
 
@@ -1656,7 +1664,7 @@ impl OrderBookListener {
         // Withheld while the book is known to miss orders (see `book_trusted`).
         if !changed_coins.is_empty() && self.book_trusted() {
             if let Some(state) = &self.order_book_state {
-                if let Some(tx) = &self.internal_message_tx {
+                if self.bbo_tx.receiver_count() > 0 {
                     if self.active_subs.wants(BroadcastKind::Bbo) {
                         let bbo_start = Instant::now();
                         let (time, bbos) = state.get_bbos_for_coins(&changed_coins);
@@ -1672,8 +1680,8 @@ impl OrderBookListener {
                             .map(|(coin, raw)| (coin, CoinBbo { raw, frame: SharedFrame::new() }))
                             .collect();
                         let withheld_period = self.book_trust.withheld_periods();
-                        let msg = Arc::new(InternalMessage::BboUpdate { bbos, time, withheld_period });
-                        drop(tx.send(msg));
+                        let msg = Arc::new(BboUpdate { bbos, time, withheld_period });
+                        drop(self.bbo_tx.send(msg));
                         BBO_BROADCAST_LATENCY.observe(bbo_start.elapsed().as_secs_f64());
                     }
                 }
@@ -1800,6 +1808,13 @@ impl L2Snapshots {
     }
 }
 
+/// A complete best bid/ask update; separate from the public event ring.
+pub(crate) struct BboUpdate {
+    pub(crate) bbos: HashMap<Coin, CoinBbo>,
+    pub(crate) time: u64,
+    pub(crate) withheld_period: u64,
+}
+
 /// Independent private-fill capacity, in batches (not trades or per-user fills). Same bounded
 /// budget as the public ring, without eviction by unrelated book/status updates.
 pub(crate) const USER_FILLS_BROADCAST_CAPACITY: usize = 16_384;
@@ -1828,14 +1843,6 @@ pub(crate) enum InternalMessage {
     /// Public trades grouped once; private fill legs travel on `user_fills_tx` instead.
     Trades {
         trades_by_coin: HashMap<String, CoinTrades>,
-    },
-    /// Fast BBO-only broadcast path - bypasses expensive L2 snapshot computation.
-    /// Connections dedup on the raw values and share the per-coin wire frame.
-    BboUpdate {
-        bbos: HashMap<Coin, CoinBbo>,
-        time: u64,
-        /// As on `Snapshot`.
-        withheld_period: u64,
     },
     /// HFT L4 streaming - order diffs without waiting for status pairing,
     /// grouped per coin once (shared by l4Book and bookDiffs subscribers).
@@ -3180,7 +3187,6 @@ mod tests {
         let mut kinds = Vec::new();
         while let Ok(msg) = rx.try_recv() {
             kinds.push(match msg.as_ref() {
-                InternalMessage::BboUpdate { .. } => "bbo",
                 InternalMessage::Snapshot { .. } => "l2",
                 InternalMessage::L4OrderDiffs { .. } => "l4_diffs",
                 InternalMessage::L4OrderStatuses { .. } => "l4_statuses",
@@ -3202,18 +3208,20 @@ mod tests {
         ];
         let _l2 = listener.active_l2_params().acquire(L2SnapshotParams::new(None, None));
         let trust = listener.book_trust();
+        let mut bbo_rx = listener.bbo_sender().subscribe();
 
         apply_booked_order(&mut listener, 1, 5);
         listener.mark_desynced("pending_cache_cleared"); // loss bound 5 + margin
         assert!(!listener.book_trusted() && !trust.is_trusted(), "the mirror follows the mark");
         drain_kinds(&mut rx);
+        while bbo_rx.try_recv().is_ok() {}
 
         apply_booked_order(&mut listener, 2, 6);
         listener.apply_event_batch(6, EventBatch::Fills(make_fills_batch(&["BTC"], 6)), EventSource::Fills);
         listener.l2_conflation.age_for_test(l2_conflation::MAX_DELAY);
         listener.flush_l2_if_due();
         let withheld = drain_kinds(&mut rx);
-        assert!(!withheld.contains(&"bbo") && !withheld.contains(&"l2"), "{withheld:?}");
+        assert!(bbo_rx.try_recv().is_err() && !withheld.contains(&"l2"), "{withheld:?}");
         assert!(withheld.contains(&"l4_diffs") && withheld.contains(&"trades"), "raw streams continue: {withheld:?}");
         assert!(!listener.l2_conflation.is_empty(), "dirty coins keep accumulating");
 
@@ -3223,7 +3231,7 @@ mod tests {
         listener.l2_conflation.age_for_test(l2_conflation::MAX_DELAY);
         listener.flush_l2_if_due();
         let resumed = drain_kinds(&mut rx);
-        assert!(resumed.contains(&"bbo") && resumed.contains(&"l2"), "{resumed:?}");
+        assert!(bbo_rx.try_recv().is_ok() && resumed.contains(&"l2"), "{resumed:?}");
     }
 
     #[test]

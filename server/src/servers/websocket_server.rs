@@ -5,7 +5,7 @@ mod liquidation_candidates;
 mod mark_inputs;
 mod mark_prices;
 
-use delivery::{ConnectionDiagnostics, UserFillsDelivery, record_lag};
+use delivery::{BboDelivery, ConnectionDiagnostics, UserFillsDelivery, record_lag};
 use coin_positions::{AccountsSession, coin_positions_handler};
 use mark_prices::{MarkPricesSession, mark_prices_handler};
 
@@ -491,11 +491,12 @@ async fn handle_socket(
     // One lock hold for all setup state (previously four separate acquisitions:
     // during a reconnect storm every new connection queued four times behind
     // the FIFO-fair listener lock, exactly when it was most contended).
-    let (is_ready, mut universe, active_l2_params, active_subs, fills_sender) = {
+    let (is_ready, mut universe, active_l2_params, active_subs, fills_sender, bbo_sender) = {
         let listener_state = listener.lock().await;
-        (listener_state.is_ready(), listener_state.universe(), listener_state.active_l2_params(), listener_state.active_subs(), listener_state.user_fills_sender())
+        (listener_state.is_ready(), listener_state.universe(), listener_state.active_l2_params(), listener_state.active_subs(), listener_state.user_fills_sender(), listener_state.bbo_sender())
     };
     let mut user_fills = UserFillsDelivery::new(fills_sender);
+    let mut bbo_delivery = BboDelivery::new(bbo_sender);
     let mut manager = SubscriptionManager::default();
     // `universe` above: market-filtered universe for subscription validation.
     // Refreshed from Snapshot broadcasts (Arc-shared, built once in the
@@ -540,6 +541,7 @@ async fn handle_socket(
             &outbound,
             &mut internal_message_rx,
             &mut user_fills,
+            &mut bbo_delivery,
             &mut manager,
             &mut universe,
             &mut last_l2,
@@ -604,6 +606,7 @@ async fn run_session(
     outbound: &Outbound,
     internal_message_rx: &mut tokio::sync::broadcast::Receiver<Arc<InternalMessage>>,
     user_fills: &mut UserFillsDelivery,
+    bbo_delivery: &mut BboDelivery,
     manager: &mut SubscriptionManager,
     universe: &mut Arc<HashSet<String>>,
     last_l2: &mut HashMap<String, L2Entry>,
@@ -642,6 +645,7 @@ async fn run_session(
     while alive {
         select! {
             recv_result = internal_message_rx.recv() => {
+                let _activity = outbound.diagnostics.activity("market");
                 match recv_result {
                     Ok(msg) => {
                         last_market_receive = Instant::now();
@@ -662,18 +666,6 @@ async fn run_session(
                                         }
                                     }
                                     force_full_l2 = false;
-                                }
-                            },
-                            InternalMessage::BboUpdate{ bbos, time, withheld_period } => {
-                                force_full_l2 |= forget_pre_withholding_frames(book_trust, &mut withheld_seen, last_l2, last_bbo);
-                                // Fast path for BBO subscribers only; a pre-withholding build is dropped as above.
-                                if *withheld_period == withheld_seen {
-                                    for sub in manager.subscriptions() {
-                                        if !alive { break; }
-                                        if let Subscription::Bbo { coin } = sub {
-                                            alive &= send_ws_data_from_bbo(outbound, coin, bbos, *time, last_bbo, bbo_hb.is_some()).await;
-                                        }
-                                    }
                                 }
                             },
                             InternalMessage::OracleUpdates{ updates_by_coin } => {
@@ -775,8 +767,21 @@ async fn run_session(
                         // saw - process the next one in full (hash dedup still
                         // suppresses sends whose payload didn't actually change).
                         force_full_l2 = true;
-                        log::debug!("Market broadcast lag: {} skipped_messages={n} pending_messages={} since_last_receive_ms={} outbound_pending={}",
-                            outbound.diagnostics, internal_message_rx.len(), last_market_receive.elapsed().as_millis(), outbound.pending());
+                        // The count is mixed internal messages, not lost trades. A snapshot can
+                        // refresh L2; missing incremental events require an explicit withdrawal.
+                        let affected: Vec<_> = manager.subscriptions().iter().filter(|s| matches!(s,
+                            Subscription::Trades { .. } | Subscription::L4Book { .. } | Subscription::BookDiffs { .. }
+                            | Subscription::OrderUpdates { .. } | Subscription::Oracle { .. })).cloned().collect();
+                        if outbound.diagnostics.report_gap() {
+                        log::warn!("Market broadcast gap: {} skipped_messages={n} pending_messages={} since_last_receive_ms={} outbound_pending={} subscriptions={} withdrawn_event_subscriptions={}",
+                            outbound.diagnostics, internal_message_rx.len(), last_market_receive.elapsed().as_millis(), outbound.pending(), manager.subscriptions().len(), affected.len());
+                        }
+                        for sub in affected.iter().cloned() {
+                            alive &= receive_client_message(outbound, manager, ClientMessage::Unsubscribe { subscription: sub }, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, user_fills, bbo_delivery).await;
+                        }
+                        if !affected.is_empty() {
+                            alive &= outbound.send_message(ServerResponse::Error("Market event subscriptions withdrawn after a broadcast gap; resubscribe and reconcile missing events".to_string())).await;
+                        }
                     }
                     Err(err) => {
                         error!("Receiver error: {err}");
@@ -785,7 +790,37 @@ async fn run_session(
                 }
             }
 
+            received = bbo_delivery.next() => {
+                let _activity = outbound.diagnostics.activity("bbo");
+                match received {
+                    Ok(update) => {
+                        force_full_l2 |= forget_pre_withholding_frames(book_trust, &mut withheld_seen, last_l2, last_bbo);
+                        if update.withheld_period == withheld_seen {
+                            for sub in manager.subscriptions() {
+                                if !alive { break; }
+                                if let Subscription::Bbo { coin } = sub {
+                                    alive &= send_ws_data_from_bbo(outbound, coin, &update.bbos, update.time, last_bbo, bbo_hb.is_some()).await;
+                                }
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        bbo_delivery.lagged(n, outbound);
+                        let affected: Vec<_> = manager.subscriptions().iter().filter(|s| matches!(s, Subscription::Bbo { .. })).cloned().collect();
+                        for sub in affected {
+                            alive &= receive_client_message(outbound, manager, ClientMessage::Unsubscribe { subscription: sub }, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, user_fills, bbo_delivery).await;
+                        }
+                        alive &= outbound.send_message(ServerResponse::Error("BBO subscriptions withdrawn after a broadcast gap; resubscribe for current prices".to_string())).await;
+                    }
+                    Err(err) => {
+                        error!("BBO broadcast closed: {} error={err}", outbound.diagnostics);
+                        return;
+                    }
+                }
+            }
+
             received = user_fills.next() => {
+                let _activity = outbound.diagnostics.activity("user_fills");
                 match received {
                     Ok(fills) => {
                         for sub in manager.subscriptions() {
@@ -807,18 +842,21 @@ async fn run_session(
             }
 
             frame = next_coin_positions_frame(coin_positions) => {
+                let _activity = outbound.diagnostics.activity("accounts");
                 if let Some(session) = coin_positions.as_mut() {
                     alive &= session.on_frame(outbound, manager, frame).await;
                 }
             }
 
             snapshot = next_mark_prices(mark_prices) => {
+                let _activity = outbound.diagnostics.activity("local_marks");
                 if let Some(session) = mark_prices.as_mut() {
                     alive &= session.on_snapshot(outbound, manager, snapshot).await;
                 }
             }
 
             _ = heartbeat_tick(&mut heartbeat_ticker) => {
+                let _activity = outbound.diagnostics.activity("heartbeat");
                 let now = Instant::now();
                 let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
                 // A heartbeat re-stamps the last frame with the current time:
@@ -867,6 +905,7 @@ async fn run_session(
             }
 
             msg = ws_read.next() => {
+                let _activity = outbound.diagnostics.activity("client_message");
                 if let Some(frame) = msg {
                     match frame.opcode() {
                         OpCode::Text => {
@@ -889,7 +928,7 @@ async fn run_session(
                                         alive &= outbound.send_pong();
                                     }
                                     _ => {
-                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, user_fills).await;
+                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, user_fills, bbo_delivery).await;
                                     }
                                 }
                             }
@@ -940,6 +979,7 @@ async fn receive_client_message(
     coin_positions: &mut Option<AccountsSession>,
     mark_prices: &mut Option<MarkPricesSession>,
     user_fills: &mut UserFillsDelivery,
+    bbo_delivery: &mut BboDelivery,
 ) -> bool {
     let subscription = match &client_message {
         ClientMessage::Unsubscribe { subscription } | ClientMessage::Subscribe { subscription } => subscription.clone(),
@@ -1007,6 +1047,7 @@ async fn receive_client_message(
                 // the stream.
                 if inserted {
                     user_fills.sync_subscriptions(manager);
+                    bbo_delivery.sync_subscriptions(manager);
                     let guards = active_subs.acquire_for(&subscription);
                     if !guards.is_empty() {
                         sub_guards.insert(subscription.clone(), guards);
@@ -1026,6 +1067,7 @@ async fn receive_client_message(
             if removed {
                 sub_guards.remove(&subscription);
                 user_fills.sync_subscriptions(manager);
+                    bbo_delivery.sync_subscriptions(manager);
                 match &subscription {
                     Subscription::L2Book { coin, n_sig_figs, mantissa, n_levels } => {
                         last_l2.remove(&l2_cache_key(coin, *n_sig_figs, *mantissa, *n_levels));
@@ -1061,6 +1103,7 @@ async fn receive_client_message(
                     manager.unsubscribe(subscription.clone());
                     sub_guards.remove(subscription);
                     user_fills.sync_subscriptions(manager);
+                    bbo_delivery.sync_subscriptions(manager);
                     return outbound.send_message(
                         ServerResponse::Error(format!("Unable to grab order book snapshot: {err}"))).await;
                 }
@@ -2156,6 +2199,7 @@ mod tests {
     struct BboSession {
         listener: Arc<Mutex<OrderBookListener>>,
         tx: Sender<Arc<InternalMessage>>,
+        bbo_tx: Sender<Arc<crate::listeners::order_book::BboUpdate>>,
         ws: yawc::TcpWebSocket,
         server: tokio::task::JoinHandle<()>,
     }
@@ -2326,7 +2370,8 @@ mod tests {
                 .await
                 .unwrap();
             tokio::time::timeout(Duration::from_secs(1), ws.next()).await.unwrap().unwrap(); // subscription ack
-            let mut session = Self { listener, tx, ws, server };
+            let bbo_tx = listener.lock().await.bbo_sender();
+            let mut session = Self { listener, tx, bbo_tx, ws, server };
             session.send(session.current_bbo().await);
             assert_eq!(session.next_bid_px(Duration::from_secs(1)).await.as_deref(), Some("100"));
             session
@@ -2334,12 +2379,12 @@ mod tests {
 
         /// The bbo broadcast the listener would send now (stamped with the
         /// current withheld-period count).
-        async fn current_bbo(&self) -> InternalMessage {
+        async fn current_bbo(&self) -> crate::listeners::order_book::BboUpdate {
             self.listener.lock().await.bbo_update_for_test("BTC")
         }
 
-        fn send(&self, msg: InternalMessage) {
-            assert!(self.tx.send(Arc::new(msg)).is_ok());
+        fn send(&self, msg: crate::listeners::order_book::BboUpdate) {
+            assert!(self.bbo_tx.send(Arc::new(msg)).is_ok());
         }
 
         async fn next_bid_px(&mut self, within: Duration) -> Option<String> {
@@ -2424,6 +2469,60 @@ mod tests {
                     }
                 }
             }).await.unwrap();
+            session.server.abort();
+        }
+    }
+
+    /// A burst at the observed production scale cannot evict other lanes. A real
+    /// event gap withdraws that subscription explicitly; private fills and ping survive.
+    #[tokio::test]
+    #[allow(clippy::future_not_send)]
+    async fn bbo_and_market_gaps_withdraw_only_the_affected_subscriptions() {
+        for bbo_gap in [false, true] {
+            let mut session = BboSession::with_capacity(16_384).await;
+            subscribe_private_fills(&mut session, true).await;
+            let trades = r#"{"method":"subscribe","subscription":{"type":"trades","coin":"BTC"}}"#;
+            session.ws.send(Frame::text(trades.as_bytes().to_vec())).await.unwrap();
+            assert_eq!(next_json(&mut session.ws).await["channel"], "subscriptionResponse");
+            let fills_tx = session.listener.lock().await.user_fills_sender();
+            let bbo = Arc::new(session.current_bbo().await);
+            let event = Arc::new(InternalMessage::Trades { trades_by_coin: HashMap::new() });
+            for _ in 0..16_385 {
+                if bbo_gap { assert!(session.bbo_tx.send(Arc::clone(&bbo)).is_ok()); }
+                else { assert!(session.tx.send(Arc::clone(&event)).is_ok()); }
+            }
+            fills_tx.send(private_fill_batch(789)).unwrap();
+            session.ws.send(Frame::text(br#"{"method":"ping"}"#.to_vec())).await.unwrap();
+            let (mut error, mut withdrawn, mut fill, mut pong) = (false, false, false, false);
+            while !(error && withdrawn && fill && pong) {
+                let msg = next_json(&mut session.ws).await;
+                match msg["channel"].as_str() {
+                    Some("error") => {
+                        assert!(msg["data"].as_str().unwrap().contains("withdrawn"));
+                        error = true;
+                    }
+                    Some("subscriptionResponse") => {
+                        assert_eq!(msg["data"]["method"], "unsubscribe");
+                        assert_eq!(msg["data"]["subscription"]["type"], if bbo_gap { "bbo" } else { "trades" });
+                        withdrawn = true;
+                    }
+                    Some("userFills") => { assert_eq!(msg["data"]["fills"][0]["tid"], 789); fill = true; }
+                    Some("pong") => pong = true,
+                    Some("bbo") if !bbo_gap => {},
+                    other => panic!("unexpected after gap: {other:?}: {msg}"),
+                }
+            }
+            assert_eq!(session.bbo_tx.receiver_count(), usize::from(!bbo_gap));
+            let request = if bbo_gap { r#"{"method":"subscribe","subscription":{"type":"bbo","coin":"BTC"}}"# } else { trades };
+            session.ws.send(Frame::text(request.as_bytes().to_vec())).await.unwrap();
+            loop {
+                let msg = next_json(&mut session.ws).await;
+                if msg["channel"] == "subscriptionResponse" {
+                    assert_eq!(msg["data"]["method"], "subscribe");
+                    break;
+                }
+            }
+            assert_eq!(session.bbo_tx.receiver_count(), 1);
             session.server.abort();
         }
     }
