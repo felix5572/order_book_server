@@ -1,0 +1,227 @@
+{
+  "provenance": {
+    "height": 1193395698,
+    "node_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+    "scope": "Selected CoreWriter cancel and ensuing IOC effects in original stream order; other native actions, statuses and book changes omitted. Phase expectation comes from node ABI decoder and delay selector, not checkpoint-end equality.",
+    "source_archives": [
+      {
+        "kind": "system_and_core_writer_actions_streaming",
+        "source": "/home/ubuntu/hl/data/system_and_core_writer_actions_streaming/hourly/20261022/17",
+        "lines": 2,
+        "raw_bytes": 800,
+        "sha256": "21e05a92852d9819b0a0df9ce32458df6db5089aef117e0e6d6fa90ad8676ca4"
+      },
+      {
+        "kind": "node_order_statuses_streaming",
+        "source": "/home/ubuntu/hl/data/node_order_statuses_streaming/hourly/20261022/17",
+        "lines": 685,
+        "raw_bytes": 421579,
+        "sha256": "22b6718219464474a9659d0bdb8f5436835c38cbd9300a382a2555266f578303"
+      },
+      {
+        "kind": "node_raw_book_diffs_streaming",
+        "source": "/home/ubuntu/hl/data/node_raw_book_diffs_streaming/hourly/20261022/17",
+        "lines": 411,
+        "raw_bytes": 114291,
+        "sha256": "f1bd545e90199e5591c43c693d17b0b88856ed74e4b5f12004d4c390f390cf02"
+      },
+      {
+        "kind": "node_fills_streaming",
+        "source": "/home/ubuntu/hl/data/node_fills_streaming/hourly/20261022/17",
+        "lines": 6,
+        "raw_bytes": 3131,
+        "sha256": "0301ccbb40de09cb1870be14328c9ea00b7e18a38c1072ab4eb1f55a44ec13fd"
+      },
+      {
+        "kind": "replica",
+        "source": "/home/ubuntu/hl/data/replica_cmds/2026-10-22T08:20:18Z/20261022/1193390000",
+        "lines": 1,
+        "raw_bytes": 299121,
+        "sha256": "45ffa2f53147db2fd2a678241d3f6a84c8699e567c67daee76ae2734fa0eb6c5"
+      }
+    ]
+  },
+  "time_ns": 1792691221392527999,
+  "system": [
+    {
+      "user": "0x1e1678cf413ea48520b3d45128d64aa26b7f0e52",
+      "nonce": 4429372,
+      "evm_tx_hash": "0xfea371f9b31dd1f40102a8f0125e3c6a8d63dbb3b7be65e16548aa3ee365ec17",
+      "action": {
+        "type": "cancelByCloid",
+        "cancels": [
+          {
+            "asset": 0,
+            "cloid": "0x54494d454c4f434b54414b4550524f46"
+          }
+        ]
+      }
+    },
+    {
+      "user": "0x1e1678cf413ea48520b3d45128d64aa26b7f0e52",
+      "nonce": 4429373,
+      "evm_tx_hash": "0xfea371f9b31dd1f40102a8f0125e3c6a8d63dbb3b7be65e16548aa3ee365ec17",
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 0,
+            "b": false,
+            "p": "80532",
+            "s": "0.0004",
+            "r": true,
+            "t": {
+              "limit": {
+                "tif": "Ioc"
+              }
+            }
+          }
+        ],
+        "grouping": "na"
+      }
+    }
+  ],
+  "statuses": [
+    {
+      "time": "2026-10-22T17:47:01.392527999",
+      "user": "0x1e1678cf413ea48520b3d45128d64aa26b7f0e52",
+      "hash": null,
+      "builder": null,
+      "status": "canceled",
+      "order": {
+        "coin": "BTC",
+        "side": "A",
+        "limitPx": "86000.0",
+        "sz": "0.0004",
+        "oid": 581429565034,
+        "timestamp": 1792586726471,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Limit",
+        "origSz": "0.0004",
+        "tif": "Gtc",
+        "cloid": "0x54494d454c4f434b54414b4550524f46"
+      }
+    },
+    {
+      "time": "2026-10-22T17:47:01.392527999",
+      "user": "0x1e1678cf413ea48520b3d45128d64aa26b7f0e52",
+      "hash": "0x14989b8d92b3d52b1612044721c5f2010100b3732db6f3fdb86146e051b7af15",
+      "builder": null,
+      "status": "open",
+      "order": {
+        "coin": "BTC",
+        "side": "A",
+        "limitPx": "80532.0",
+        "sz": "0.0004",
+        "oid": 582848552400,
+        "timestamp": 1792691221392,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Limit",
+        "origSz": "0.0004",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-22T17:47:01.392527999",
+      "user": "0x1e1678cf413ea48520b3d45128d64aa26b7f0e52",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "BTC",
+        "side": "A",
+        "limitPx": "80532.0",
+        "sz": "0.0",
+        "oid": 582848552400,
+        "timestamp": 1792691221392,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Limit",
+        "origSz": "0.0004",
+        "tif": "Ioc",
+        "cloid": null
+      }
+    }
+  ],
+  "fills": [
+    [
+      "0xc179e03922afe8fa9533d3f896338b9fb87ce0c8",
+      {
+        "coin": "BTC",
+        "px": "81345.0",
+        "sz": "0.0004",
+        "side": "B",
+        "time": 1792691221392,
+        "startPosition": "74.30104",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0x14989b8d92b3d52b1612044721c5f2010100b3732db6f3fdb86146e051b7af15",
+        "oid": 582848165681,
+        "crossed": false,
+        "fee": "-0.000325",
+        "tid": 682037178354351,
+        "cloid": "0x91540ac48ff7da193c0b799d7fb87eee",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x1e1678cf413ea48520b3d45128d64aa26b7f0e52",
+      {
+        "coin": "BTC",
+        "px": "81345.0",
+        "sz": "0.0004",
+        "side": "A",
+        "time": 1792691221392,
+        "startPosition": "0.0004",
+        "dir": "Close Long",
+        "closedPnl": "-0.8704",
+        "hash": "0x14989b8d92b3d52b1612044721c5f2010100b3732db6f3fdb86146e051b7af15",
+        "oid": 582848552400,
+        "crossed": true,
+        "fee": "0.014642",
+        "tid": 682037178354351,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ]
+  ],
+  "diffs": [
+    {
+      "user": "0x1e1678cf413ea48520b3d45128d64aa26b7f0e52",
+      "oid": 581429565034,
+      "coin": "BTC",
+      "side": "A",
+      "px": "86000.0",
+      "raw_book_diff": "remove"
+    },
+    {
+      "user": "0xc179e03922afe8fa9533d3f896338b9fb87ce0c8",
+      "oid": 582848165681,
+      "coin": "BTC",
+      "side": "B",
+      "px": "81345.0",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "0.08525",
+          "newSz": "0.08485"
+        }
+      }
+    }
+  ]
+}

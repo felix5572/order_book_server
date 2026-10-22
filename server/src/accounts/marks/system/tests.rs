@@ -96,14 +96,14 @@ fn cancels_require_success_status_and_follow_their_delay_flag() {
     let user = g.statuses[0].user;
     let oid = g.statuses[0].order.oid;
     for flag in [true, false] {
-        g.system[0].action = Action::Cancel { cancels: vec![Cancel { a: 1, o: oid }], f: Some(flag) };
+        g.system[0].action = Action::Cancel { cancels: vec![Cancel { a: 1, o: oid }], f: flag };
         let s = SystemBlock::of(g.system.clone(), &g.statuses).unwrap();
         let anchors = s.anchors(&actions(g.time_ns), &BlockStatuses::default(), TIMING, asset).unwrap();
         assert_eq!(if flag { anchors.after.cancelled } else { anchors.before.cancelled }, [oid]);
         let s = SystemBlock::of(g.system.clone(), &[]).unwrap();
         assert_eq!(s.anchors(&actions(g.time_ns), &BlockStatuses::default(), TIMING, asset).unwrap().after.cancelled, Vec::<u64>::new());
     }
-    g.system[0].action = Action::CancelByCloid { cancels: vec![CancelByCloid { asset: 1, cloid: g.statuses[0].order.cloid.clone().unwrap() }], f: Some(true) };
+    g.system[0].action = Action::CancelByCloid { cancels: vec![CancelByCloid { asset: 1, cloid: g.statuses[0].order.cloid.clone().unwrap() }], f: true };
     let s = SystemBlock::of(g.system, &g.statuses).unwrap();
     let mut a = actions(g.time_ns);
     a.actions.push(RankedAction { rank: (1, 2, 0), user: Some(user), action: MarkAction::Book(BookAnchors { cancelled: vec![oid], ..BookAnchors::default() }) });
@@ -152,7 +152,7 @@ fn a_cloid_cancel_with_two_possible_outcomes_remains_ambiguous() {
     g.statuses.push(second);
     g.system[0].action = Action::CancelByCloid { cancels: vec![CancelByCloid {
         asset: 1, cloid: g.statuses[0].order.cloid.clone().unwrap(),
-    }], f: Some(true) };
+    }], f: true };
     let s = SystemBlock::of(g.system, &g.statuses).unwrap();
     assert_eq!(s.anchors(&actions(g.time_ns), &BlockStatuses::default(), TIMING, asset).unwrap().after.cancelled, Vec::<u64>::new());
 }
@@ -202,4 +202,48 @@ fn unused_nonce_is_not_required_but_order_fields_remain_strict() {
     assert!(serde_json::from_value::<SystemAction>(event.clone()).is_ok());
     event["action"]["orders"][0].as_object_mut().unwrap().remove("p");
     assert!(serde_json::from_value::<SystemAction>(event.clone()).is_err());
+}
+
+#[test]
+fn archived_corewriter_cancel_without_flag_precedes_the_price_action() {
+    let g: Golden = serde_json::from_str(include_str!("core_writer_cancel_golden.json")).unwrap();
+    let system = SystemBlock::of(g.system, &g.statuses).unwrap();
+    let statuses = BlockStatuses::of(g.statuses).unwrap();
+    let actions = actions(g.time_ns);
+    let asset = |coin: &str| (coin == "BTC").then_some(0);
+    let anchors = system.anchors(&actions, &statuses, TIMING, asset).unwrap();
+    assert_eq!(anchors.before.cancelled, [581_429_565_034]);
+    assert_eq!(anchors.before.created, [582_848_552_400]);
+    assert!(anchors.after.cancelled.is_empty() && anchors.after.created.is_empty());
+    let diffs: Vec<_> = g.diffs.iter().map(|d| BookDiff::of(d).unwrap()).collect();
+    let fills: Vec<_> = g.fills.iter().map(BlockFill::of).collect();
+    let points = price_points_with_system(&actions, &statuses, &diffs, &fills, &anchors, asset).unwrap();
+    assert_eq!((points[0].cut.lo, points[0].cut.hi, points[0].cut.fills_lo), (2, 2, 2));
+}
+
+#[test]
+fn cancel_wire_omission_means_delayed_but_invalid_flags_are_rejected() {
+    let original: serde_json::Value = serde_json::from_str(include_str!("core_writer_cancel_golden.json")).unwrap();
+    let g: Golden = serde_json::from_value(original.clone()).unwrap();
+    let asset = |coin: &str| (coin == "BTC").then_some(0);
+    for kind in ["cancel", "cancelByCloid"] {
+        for flag in [None, Some(false), Some(true)] {
+            let mut wire = original["system"][0].clone();
+            if kind == "cancel" {
+                wire["action"] = serde_json::json!({"type":"cancel","cancels":[{"a":0,"o":581_429_565_034_u64}]});
+            }
+            if let Some(flag) = flag { wire["action"]["f"] = serde_json::json!(flag); }
+            let event = serde_json::from_value::<SystemAction>(wire.clone()).unwrap();
+            let system = SystemBlock::of([event], &g.statuses).unwrap();
+            let anchors = system.anchors(&actions(g.time_ns), &BlockStatuses::default(), TIMING, asset).unwrap();
+            assert_eq!(if flag == Some(true) { anchors.after.cancelled } else { anchors.before.cancelled }, [581_429_565_034]);
+            if flag != Some(true) {
+                assert!(system.anchors(&actions(g.time_ns), &BlockStatuses::default(), None, asset).is_err(), "ordinary cancel still requires verified delay");
+            }
+            for invalid in [serde_json::Value::Null, serde_json::json!(0), serde_json::json!("false")] {
+                wire["action"]["f"] = invalid;
+                assert!(serde_json::from_value::<SystemAction>(wire.clone()).is_err(), "{kind}: invalid flag is not omission");
+            }
+        }
+    }
 }

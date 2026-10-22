@@ -2,8 +2,11 @@
 //! Orders are anchored only through unique, full-field status matches; EVM tx hashes are provenance, never fill IDs.
 //! Archived client 6911b792: block 0x297e530 drains `ActionDelayer` before signed bundles. `CoreWriter` 0x2dc24c0
 //! executes zero-delay operations at the EVM tail. The normal order rule 0x4672d60 delays IOC/GTC by pt.prp.D
-//! times `action_delayer.delay_scale`, while all-ALO orders have zero delay. Cancels use their f flag (true: zero; false: D). Timing is read
-//! from the checkpoint; an unknown/zero ordinary order delay cannot prove the pre-bundle phase.
+//! times `action_delayer.delay_scale`, while all-ALO orders have zero delay. Cancels use their f flag (true: zero; false: D).
+//! `CoreWriter` ABI decoders 0x374c1e2 (cancel) / 0x374bc26 (cloid) construct f=false at 0x374c25d;
+//! 0x42ab565 reads that byte. Normal node output omits f, as in block 1193395698: omission means false,
+//! not an unknown phase. Explicit null/non-bools remain invalid. This is a versioned client rule.
+//! Timing is read from the checkpoint; an unknown/zero ordinary order delay cannot prove the pre-bundle phase.
 
 use alloy::primitives::{Address, B256};
 use rustc_hash::FxHashSet;
@@ -25,9 +28,9 @@ enum Action {
     #[serde(rename = "order")]
     Order { orders: Vec<WireOrder>, grouping: serde_json::Value },
     #[serde(rename = "cancel")]
-    Cancel { cancels: Vec<Cancel>, f: Option<bool> },
+    Cancel { cancels: Vec<Cancel>, #[serde(default)] f: bool },
     #[serde(rename = "cancelByCloid")]
-    CancelByCloid { cancels: Vec<CancelByCloid>, f: Option<bool> },
+    CancelByCloid { cancels: Vec<CancelByCloid>, #[serde(default)] f: bool },
     #[serde(rename = "vaultTransfer")]
     VaultTransfer { #[serde(rename = "vaultAddress")] vault: Address, #[serde(rename = "isDeposit")] is_deposit: bool },
     #[serde(other)]
@@ -93,8 +96,8 @@ impl SystemBlock {
                         out.requests.push(Request { asset: order.a, delayed, key });
                     }
                 }
-                Action::Cancel { cancels, f } => out.cancels.extend(cancels.into_iter().map(|c| CancelRequest { user: event.user, asset: c.a, oid: Some(c.o), cloid: None, delayed: f.map(|flag| !flag) })),
-                Action::CancelByCloid { cancels, f } => out.cancels.extend(cancels.into_iter().map(|c| CancelRequest { user: event.user, asset: c.asset, oid: None, cloid: Some(c.cloid), delayed: f.map(|flag| !flag) })),
+                Action::Cancel { cancels, f } => out.cancels.extend(cancels.into_iter().map(|c| CancelRequest { user: event.user, asset: c.a, oid: Some(c.o), cloid: None, delayed: Some(!f) })),
+                Action::CancelByCloid { cancels, f } => out.cancels.extend(cancels.into_iter().map(|c| CancelRequest { user: event.user, asset: c.asset, oid: None, cloid: Some(c.cloid), delayed: Some(!f) })),
                 Action::Other | Action::VaultTransfer { .. } => {}
             }
         }
@@ -184,7 +187,7 @@ impl SystemAnchors {
                 }
                 Ok(&mut self.before)
             }
-            None => Err("CoreWriter phase is unverified for this grouping or cancel flag".into()),
+            None => Err("CoreWriter phase is unverified for this order grouping".into()),
         }
     }
 }
