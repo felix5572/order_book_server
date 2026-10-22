@@ -50,6 +50,7 @@
 //! 000444 r1 P2-2), so an update is a fill's only when every order-preserving size match puts that fill on it; any other
 //! update anchors nothing.
 
+pub(crate) mod fill_order;
 mod self_trade;
 mod filled_ioc;
 mod vault;

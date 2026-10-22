@@ -111,6 +111,8 @@ pub(crate) struct BlockActions {
     /// The block's time (`abci_block.time`), unix ms.
     pub(crate) time_ms: u64,
     pub(crate) actions: Vec<KeptAction>,
+    /// Execution ranks paired with actions; absent on unranked synthetic inputs, never inferred from arrival time.
+    pub(crate) ranks: Option<Vec<super::marks::actions::Rank>>,
 }
 
 /// Parses one line; an error names the height once the structure read (a response that does not pair with its action,
@@ -126,6 +128,7 @@ pub(crate) fn block_actions(replica: &ReplicaLine<'_>) -> Result<BlockActions, S
     let time = replica.time().ok_or_else(|| format!("block {height} without abci_block.time"))?;
     let time_ms = node_time_ns(time).map_err(|err| format!("block {height}: {err}"))? / 1_000_000;
     let mut kept = Vec::new();
+    let mut ranks = Vec::new();
     for paired in replica.paired().map_err(|err| format!("block {height}: {err}"))? {
         let read = || -> Result<Option<KeptAction>, String> {
             if paired.action.action_type != "multiSig" {
@@ -142,9 +145,10 @@ pub(crate) fn block_actions(replica: &ReplicaLine<'_>) -> Result<BlockActions, S
         };
         if let Some(action) = read().map_err(|err| format!("block {height}: bundle {}: {err}", paired.bundle_hash))? {
             kept.push(action);
+            ranks.push((paired.bundle, 3, paired.position));
         }
     }
-    Ok(BlockActions { height, time_ms, actions: kept })
+    Ok(BlockActions { height, time_ms, actions: kept, ranks: Some(ranks) })
 }
 
 fn kept_action(action: &Action<'_>, response: &Response<'_>) -> Result<Option<KeptAction>, String> {
@@ -192,7 +196,7 @@ pub(crate) mod tests {
     fn keeps_the_successful_actions_with_the_responses_user() {
         let parsed = parse_block_actions(REAL_LINE).unwrap();
         let leverage = (BlockAction::Leverage { asset: 99, is_cross: true, leverage: 3 }, address(LEVERAGE_VAULT));
-        assert_eq!(parsed, BlockActions { height: 1_189_931_524, time_ms: 1_792_442_115_736, actions: vec![leverage] });
+        assert_eq!(parsed, BlockActions { height: 1_189_931_524, time_ms: 1_792_442_115_736, actions: vec![leverage], ranks: Some(vec![(0, 3, 2)]) });
     }
 
     /// Payloads of real successful actions (bm `replica_cmds`, 2026-10-19), put in the place of the kept one.
@@ -304,7 +308,7 @@ pub(crate) mod tests {
     #[test]
     fn a_block_without_kept_actions_still_reads_its_height() {
         let line = REAL_LINE.replace(r#""type":"updateLeverage""#, r#""type":"order""#);
-        let empty = BlockActions { height: 1_189_931_524, time_ms: 1_792_442_115_736, actions: Vec::new() };
+        let empty = BlockActions { height: 1_189_931_524, time_ms: 1_792_442_115_736, actions: Vec::new(), ranks: Some(Vec::new()) };
         assert_eq!(parse_block_actions(&line).unwrap(), empty);
     }
 

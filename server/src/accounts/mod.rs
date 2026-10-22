@@ -9,6 +9,7 @@
 //! - `probe` (one checkpoint) and `follow` (live, standalone): acceptance tools. The API comes in batch 3.
 
 mod actions;
+mod cash_order;
 mod anchor;
 mod blocks;
 pub(crate) mod candidates;

@@ -117,4 +117,19 @@ mod tests {
         assert!(reduced_cash(1, 2, 3, 90).is_err());
     }
 
+    #[test]
+    fn recorded_mrvl_transfer_order_explains_the_cross_isolated_split() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("isolated_cash_edge_goldens.json")).unwrap();
+        let mrvl = &golden["mrvl"];
+        let transfer = mrvl["margin_action"]["signed_action"]["action"]["ntli"].as_i64().unwrap();
+        // Synthetic pre-fill cash isolates the ordering effect. It is NOT an observed execution-time balance.
+        // Real fill: short 16.66, buy 0.95 @235.69, fee0.006448; the checkpoint split differs by this effect.
+        let cash_after_fee = 12_000_000_000 - 6_448;
+        let transfer_first = reduced_cash(cash_after_fee + transfer, -1_666, 95, 2_356_900).unwrap();
+        let fill_first = reduced_cash(cash_after_fee, -1_666, 95, 2_356_900).unwrap() + transfer;
+        assert_eq!(fill_first - transfer_first, mrvl["split_error_micro"].as_i64().unwrap());
+        assert_eq!(mrvl["replayed_isolated_cash_micro"].as_i64().unwrap() + fill_first - transfer_first,
+            mrvl["checkpoint_isolated_cash_micro"].as_i64().unwrap());
+    }
+
 }

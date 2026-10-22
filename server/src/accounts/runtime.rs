@@ -735,7 +735,7 @@ fn apply_assembly(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, 
     }
     let mut touched = Touched::default();
     for block in completed {
-        let CompletedBlock { actions, fills, misc_events, hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions } = block;
+        let CompletedBlock { mut actions, fills, misc_events, hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions } = block;
         let height = actions.height;
         let mark_fills = fills.iter().flat_map(Batch::events_ref).map(BlockFill::of).collect();
         let inputs = MarkInputs { hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions, fills: mark_fills };
@@ -750,9 +750,11 @@ fn apply_assembly(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, 
                 }
             }
         }
+        let cash_order = super::cash_order::MarginOrder::of(&actions, &fills, &inputs);
         let mark_report = marks.apply_block(height, inputs);
+        let after_fills = cash_order.defer(&mut actions, marks.availability().is_ok());
         let accounts = book.apply_block(actions, fills, misc_events,
-            |coin| funding_oracles.get(coin).copied().flatten(), &mark_report.fill_prices);
+            |coin| funding_oracles.get(coin).copied().flatten(), &mark_report.fill_prices, after_fills);
         report_marks_block(diagnostics, height, mark_report);
         touched.absorb(report_block(diagnostics, height, accounts));
         ACCOUNTS_APPLIED_HEIGHT.set(height.cast_signed());
@@ -1233,7 +1235,7 @@ impl TestOwner {
             self.inputs.send(fills_input(line.clone())).await.unwrap();
         }
         for block in [height, height + 1] {
-            let line = Ok((BlockActions { height: block, time_ms: block * 1_000, actions: Vec::new() }, Err("an account test line".to_string())));
+            let line = Ok((BlockActions { height: block, time_ms: block * 1_000, actions: Vec::new(), ranks: None }, Err("an account test line".to_string())));
             self.inputs.send(Input::BlockActions(line, Instant::now(), PairingDiagnostics::default())).await.unwrap();
         }
         let after = Instant::now() + Duration::from_micros(1);
@@ -1321,7 +1323,7 @@ mod tests {
         blocks: std::ops::RangeInclusive<u64>,
     ) {
         for height in blocks {
-            let parsed = (BlockActions { height, time_ms: height * 1_000, actions: Vec::new() }, Err("an account test line".to_string()));
+            let parsed = (BlockActions { height, time_ms: height * 1_000, actions: Vec::new(), ranks: None }, Err("an account test line".to_string()));
             let line = Input::BlockActions(Ok(parsed), Instant::now(), PairingDiagnostics::default());
             apply_input(&mut AccountDiagnostics::default(), book, marks, assembler, line);
         }
@@ -1459,7 +1461,7 @@ mod tests {
     fn a_block_actions_line_breaking_the_contract_keeps_its_height() {
         let empty = r#"{"abci_block":{"time":"2026-10-19T06:00:00.0","signed_action_bundles":[]},"resps":{"Full":[]},"height":8}"#;
         let Input::BlockActions(Ok((block, _)), _, _) = block_actions_input(empty.to_string()) else { panic!("an empty block reads") };
-        assert_eq!(block, BlockActions { height: 8, time_ms: 1_792_389_600_000, actions: Vec::new() });
+        assert_eq!(block, BlockActions { height: 8, time_ms: 1_792_389_600_000, actions: Vec::new(), ranks: Some(Vec::new()) });
         let unpaired = r#"{"abci_block":{"time":"2026-10-19T06:00:00.0","signed_action_bundles":[["0x01",{"signed_actions":[]}]]},"resps":{"Full":[]},"height":7}"#;
         let Input::BlockActions(Err(err), _, _) = block_actions_input(unpaired.to_string()) else { panic!("no responses") };
         assert_eq!(err.block, Some(7));

@@ -811,6 +811,7 @@ impl AccountBook {
         mut misc_events: Vec<Batch<MiscEvent>>,
         oracle: impl Fn(&str) -> Option<(u64, u32)>,
         fill_prices: &super::marks::fill_prices::FillMarkPrices,
+        after_fills: Vec<super::actions::KeptAction>,
     ) -> BlockReport {
         // Funding settles before this block's user actions/fills, using the oracle captured before its price updates.
         let mut funding_reports = Vec::new();
@@ -827,8 +828,8 @@ impl AccountBook {
             batch.retain_events(|event| !matches!(event, MiscEvent::Funding(_)));
             funding_reports.push(report);
         }
-        let time_ms = actions.time_ms;
-        let block_actions = self.apply_block_actions(actions);
+        let (height, time_ms) = (actions.height, actions.time_ms);
+        let mut block_actions = self.apply_block_actions(actions);
         // the cooldown evidence follows every block, the ones an anchor covers included, and takes the block whole
         let coins = &self.coins;
         let size_fill = |fill: &Fill| {
@@ -836,9 +837,14 @@ impl AccountBook {
             Ok((parse_size_raw(&fill.start_position, coin.size_decimals)?, parse_size_raw(&fill.sz, coin.size_decimals)?))
         };
         self.liquidations.record_block(time_ms, fills.iter().flat_map(Batch::events_ref), size_fill);
+        let fills = fills.into_iter().map(|batch| self.apply_fills_at_marks(batch, fill_prices)).collect();
+        if !self.covered(height) {
+            let events = after_fills.into_iter().map(|(action, user)| (user, AccountEvent::Action(action)));
+            self.record_all(events, height, &mut block_actions.touched, &mut block_actions.marks_dropped);
+        }
         BlockReport {
             block_actions,
-            fills: fills.into_iter().map(|batch| self.apply_fills_at_marks(batch, fill_prices)).collect(),
+            fills,
             misc_events: {
                 funding_reports.extend(misc_events.into_iter().map(|batch| self.apply_misc_events(batch)));
                 funding_reports
@@ -999,7 +1005,7 @@ impl AccountBook {
 
     /// Every block has a line, so a height past the next one is a loss of the blocks between.
     pub(crate) fn apply_block_actions(&mut self, block: BlockActions) -> BlockActionsReport {
-        let BlockActions { height, time_ms, actions } = block;
+        let BlockActions { height, time_ms, actions, .. } = block;
         let mut report = BlockActionsReport::default();
         if let Some(previous) = self.block_actions.height
             && height > previous + 1
@@ -2000,7 +2006,7 @@ mod tests {
             first.margins.add_cross_cash(&isolated, 0, 100_000_000_000);
             book.install_anchor(first);
             // BTC is set isolated at 5x: an open there makes the account's cash modelled
-            book.apply_block(block_actions(1_001, &[]), vec![fills(1_001, &[(isolated, "BTC", "B", 1, "0.0", "0.001")])], Vec::new(), |_| None, &crate::accounts::marks::fill_prices::FillMarkPrices::default());
+            book.apply_block(block_actions(1_001, &[]), vec![fills(1_001, &[(isolated, "BTC", "B", 1, "0.0", "0.001")])], Vec::new(), |_| None, &crate::accounts::marks::fill_prices::FillMarkPrices::default(), Vec::new());
             book.apply_block_actions(block_actions(1_002, &[]));
             let mut second = anchor(1_002, &[(PUMP, 0, &[(isolated, -2_000_000)])]);
             second.margins = book.replay.as_ref().unwrap().current.clone();
@@ -2112,7 +2118,7 @@ mod tests {
     fn a_fill_in_the_block_that_switched_its_asset_stops_the_replay() {
         let isolated = checkpoint_user(ISOLATED);
         let apply = |book: &mut AccountBook, height, actions: &[(BlockAction, Address)], fills_specs: &[FillSpec<'_>]| {
-            book.apply_block(block_actions(height, actions), vec![fills(height, fills_specs)], Vec::new(), |_| None, &crate::accounts::marks::fill_prices::FillMarkPrices::default())
+            book.apply_block(block_actions(height, actions), vec![fills(height, fills_specs)], Vec::new(), |_| None, &crate::accounts::marks::fill_prices::FillMarkPrices::default(), Vec::new())
         };
         let mut book = AccountBook::new(0);
         book.apply_fills(fills(100, &[]));
@@ -2351,7 +2357,7 @@ mod tests {
         let wire = funding_inner(&[(holder, "BTC", "1"), (outside, "BTC", "-0.999999")]);
         let oracle = |_: &str| Some((828_908, 5));
         // Same sizes: lower address HOLDER wins. A leverage change later in the block cannot affect selection.
-        let report = book.apply_block(block_actions(1_001, &[]), Vec::new(), vec![misc(1_001, &[&wire])], oracle, &crate::accounts::marks::fill_prices::FillMarkPrices::default());
+        let report = book.apply_block(block_actions(1_001, &[]), Vec::new(), vec![misc(1_001, &[&wire])], oracle, &crate::accounts::marks::fill_prices::FillMarkPrices::default(), Vec::new());
         assert!(report.misc_events.iter().all(|r| r.funding_errors.is_empty()));
         let balances: Vec<_> = book.events.iter().filter_map(|event| match &event.event {
             AccountEvent::FundingBalance { coin, amount_wei } => Some((event.user, coin.as_str(), *amount_wei)),
@@ -2368,7 +2374,7 @@ mod tests {
         let replayed = &book.replay.as_ref().unwrap().current;
         assert_eq!(replayed.check_against(&expected, &expected).compared["perDex"].mismatched, 0);
         let before = book.events.len();
-        book.apply_block(block_actions(1_000, &[]), Vec::new(), vec![misc(1_000, &[&wire])], |_| panic!("covered by seed"), &crate::accounts::marks::fill_prices::FillMarkPrices::default());
+        book.apply_block(block_actions(1_000, &[]), Vec::new(), vec![misc(1_000, &[&wire])], |_| panic!("covered by seed"), &crate::accounts::marks::fill_prices::FillMarkPrices::default(), Vec::new());
         assert_eq!(book.events.len(), before, "covered funding is not reapplied");
     }
 
@@ -2381,11 +2387,11 @@ mod tests {
         let mut book = replay_book(1_000, 1_000, &[(holder, 1_000_000), (isolated, -2_000_000)]);
         // PUMP has greater notional under this synthetic oracle; the view does not track its outside owner.
         book.apply_block(block_actions(1_001, &[]), Vec::new(), vec![misc(1_001, &[&wire])],
-            |coin| Some(if coin == "BTC" { (1, 5) } else { (200_000, 0) }), &crate::accounts::marks::fill_prices::FillMarkPrices::default());
+            |coin| Some(if coin == "BTC" { (1, 5) } else { (200_000, 0) }), &crate::accounts::marks::fill_prices::FillMarkPrices::default(), Vec::new());
         assert!(book.events.iter().any(|event| event.user == outside && matches!(event.event, AccountEvent::FundingBalance { .. })));
         let expected = per_dex_with_main_cash(-11_999_000_000);
         assert_eq!(book.replay.as_ref().unwrap().current.check_against(&expected, &expected).compared["perDex"].mismatched, 0);
-        let report = book.apply_block(block_actions(1_002, &[]), Vec::new(), vec![misc(1_002, &[&wire])], |_| None, &crate::accounts::marks::fill_prices::FillMarkPrices::default());
+        let report = book.apply_block(block_actions(1_002, &[]), Vec::new(), vec![misc(1_002, &[&wire])], |_| None, &crate::accounts::marks::fill_prices::FillMarkPrices::default(), Vec::new());
         assert_eq!(report.misc_events.iter().map(|r| r.funding_errors.len()).sum::<usize>(), 1);
         let current = &book.replay.as_ref().unwrap().current;
         assert_eq!(current.stop_reason(&holder), Some(&StopReason::FundingBalanceUnknown));
@@ -2410,8 +2416,8 @@ mod tests {
         let batch: Batch<NodeDataFill> = sonic_rs::from_str(&raw).unwrap();
         let mut marks = trusted_marks();
         let prices = marks.apply_block(1_002, MarkInputs { fills: batch.events_ref().iter().map(BlockFill::of).collect(), ..MarkInputs::default() }).fill_prices;
-        actual.apply_block(block_actions(1_002, &[]), vec![batch.clone()], Vec::new(), |_| None, &FillMarkPrices::default());
-        expected.apply_block(block_actions(1_002, &[]), vec![batch], Vec::new(), |_| None, &prices);
+        actual.apply_block(block_actions(1_002, &[]), vec![batch.clone()], Vec::new(), |_| None, &FillMarkPrices::default(), Vec::new());
+        expected.apply_block(block_actions(1_002, &[]), vec![batch], Vec::new(), |_| None, &prices, Vec::new());
         let wanted = &expected.replay.as_ref().unwrap().current;
         assert!(actual.replay.as_ref().unwrap().current.check_against(wanted, wanted).compared.values().any(|c| c.estimated > 0), "missing mark must change this fixture's cash");
         actual.events_dropped = true;
@@ -2440,7 +2446,7 @@ mod tests {
         let batch: Batch<NodeDataFill> = sonic_rs::from_str(&raw).unwrap();
         let report = marks.apply_block(1_002, MarkInputs { fills: batch.events_ref().iter().map(BlockFill::of).collect(), ..MarkInputs::default() });
         assert!(report.fill_prices.get(1_002, "BTC", 5).is_some());
-        book.apply_block(block_actions(1_002, &[]), vec![batch], Vec::new(), |_| None, &report.fill_prices);
+        book.apply_block(block_actions(1_002, &[]), vec![batch], Vec::new(), |_| None, &report.fill_prices, Vec::new());
         let replayed = book.replay.as_ref().unwrap().current.clone();
         let mut next = anchor(1_001, &[(PUMP, 0, &[(isolated, -2_000_000)])]);
         next.margins = per_dex_with_main_cash(-12_000_000_000);
@@ -2448,6 +2454,51 @@ mod tests {
         let check = book.replay.as_ref().unwrap().current.check_against(&replayed, &replayed);
         assert!(check.compared.values().all(|counts| counts.mismatched == 0 && counts.estimated == 0));
         assert_eq!(check.samples, []);
+    }
+
+    #[test]
+    fn ordered_margin_after_fill_survives_late_seed_and_does_not_reapply_covered_actions() {
+        use crate::accounts::{cash_order::tests::defer_margin_after_fills,
+            marks::{MarkInputs, actions::{MarkActions, MarkAction, RankedAction, BookAnchors}, execution::BlockFill}};
+        let holder = checkpoint_user(ISOLATED);
+        let action = BlockAction::IsolatedMargin { asset: 1, ntli_micro: 1_974_298_274 };
+        let seed = || {
+            let mut seed = anchor(1_000, &[(PUMP, 0, &[(holder, -1_666)])]);
+            seed.margins = per_dex_with_main_cash(-12_000_000_000);
+            seed
+        };
+        for seed_before_fill in [true, false] {
+            let mut book = AccountBook::new(0);
+            book.apply_fills(fills(100, &[]));
+            book.apply_misc_events(misc(100, &[]));
+            book.apply_block_actions(block_actions(1_000, &[]));
+            if seed_before_fill { book.install_anchor(seed()); }
+            let batch = fills(1_001, &[(holder, PUMP, "B", 1, "-1666", "95")]);
+            let mut expected = seed().margins;
+            expected.apply(1_001, holder, &AccountEvent::Fill(FillEvent::of(&batch.events_ref()[0].1).unwrap()));
+            expected.apply(1_001, holder, &AccountEvent::Action(action.clone()));
+            let mut actions = block_actions(1_001, &[(action.clone(), holder)]);
+            actions.ranks = Some(vec![(0, 3, 5)]);
+            let inputs = MarkInputs { fills: batch.events_ref().iter().map(BlockFill::of).collect(),
+                mark_actions: Ok(MarkActions { height: 1_001, time_ns: actions.time_ms * 1_000_000, actions: vec![RankedAction {
+                    rank: (0, 3, 4), user: Some(holder), action: MarkAction::Book(BookAnchors { created: vec![7], ..BookAnchors::default() }),
+                }] }), ..MarkInputs::default() };
+            let after = defer_margin_after_fills(&mut actions, std::slice::from_ref(&batch), &inputs);
+            assert_eq!(after.len(), 1);
+            book.apply_block(actions, vec![batch], Vec::new(), |_| None, &crate::accounts::marks::fill_prices::FillMarkPrices::default(), after);
+            assert!(matches!(book.events[0].event, AccountEvent::Fill(_)));
+            assert!(matches!(book.events[1].event, AccountEvent::Action(_)));
+            if !seed_before_fill { book.install_anchor(seed()); }
+            let check = book.replay.as_ref().unwrap().current.check_against(&expected, &expected);
+            assert!(check.compared.values().all(|v| v.mismatched == 0 && v.estimated == 0));
+            // A delayed duplicate covered by a checkpoint cannot replay the deferred cash a second time.
+            let before = book.events.len();
+            book.apply_block(block_actions(1_000, &[]), Vec::new(), Vec::new(), |_| None,
+                &crate::accounts::marks::fill_prices::FillMarkPrices::default(), vec![(action.clone(), holder)]);
+            assert_eq!(book.events.len(), before);
+            let check = book.replay.as_ref().unwrap().current.check_against(&expected, &expected);
+            assert!(check.compared.values().all(|v| v.mismatched == 0 && v.estimated == 0));
+        }
     }
 
 }

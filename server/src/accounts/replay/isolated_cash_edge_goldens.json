@@ -92,6 +92,62 @@
     "checkpoint_isolated_cash_micro": 17331306514,
     "replayed_isolated_cash_micro": 17218726480,
     "split_error_micro": 112580034,
-    "note": "The action adapter applied the margin transfer first. Taking 0.95/16.66 of the newly added 1974.298274 USDC explains the observed final split error. Same-block execution order is not carried into cash replay."
+    "note": "IOC rank (0,3,1040) precedes margin rank (0,3,1049); nonce order is reversed. Applying the transfer first moves an extra 112.580034 USDC back to cross cash. Recorded endpoint difference identifies the allocation error, not the execution-time cash before this fill.",
+    "order_action": {
+      "bundle_index": 0,
+      "bundle_id": "0xd5a06b955e830d19057da6a26726285789d644fa4db9f5048a9245e4260d029b",
+      "action_index": 1040,
+      "signed_action": {
+        "signature": {
+          "r": "0x8a02250959cac27c0edee72913b2fc64b8d7fb2b0f76f23aebadfde001bbc16f",
+          "s": "0x1d75fafc67ce7dc73b5b46a579a1efeb4ea1a1f46a2499cab404212527d872e9",
+          "v": 28
+        },
+        "vaultAddress": "0x91d03a68665676485f3d12f2c6b018d69b14e312",
+        "action": {
+          "type": "order",
+          "orders": [
+            {
+              "a": 110061,
+              "b": true,
+              "p": "235.69",
+              "s": "10.89",
+              "r": false,
+              "t": {
+                "limit": {
+                  "tif": "Ioc"
+                }
+              },
+              "c": "0xd620581084ba61fce26f4a3df86a28ed"
+            }
+          ],
+          "grouping": "na"
+        },
+        "nonce": 1792619332883,
+        "expiresAfter": 1792639704681
+      },
+      "receipt": {
+        "user": "0x91d03a68665676485f3d12f2c6b018d69b14e312",
+        "res": {
+          "status": "ok",
+          "response": {
+            "type": "order",
+            "data": {
+              "statuses": [
+                {
+                  "filled": {
+                    "totalSz": "0.95",
+                    "avgPx": "235.69",
+                    "oid": 582149805700,
+                    "cloid": "0xd620581084ba61fce26f4a3df86a28ed"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "source_replica_line_sha256": "05a407cf10e7ef707ce6b6ca7c6d9aa0f624f1c56e4630000625f5b8ed8575b6"
   }
 }

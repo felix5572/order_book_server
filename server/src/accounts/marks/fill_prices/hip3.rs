@@ -6,43 +6,12 @@
 use rustc_hash::FxHashMap;
 
 use super::{BlockFill, BlockStatuses, Hip3Coin, Hip3PriceUpdate, MarkActions, PricesSeen};
-use crate::accounts::marks::{actions::{MarkAction, Rank}, seed::exact_price_units};
+use crate::accounts::marks::{actions::{MarkAction, Rank}, seed::exact_price_units, execution::fill_order::{Placement, takers}};
 
 struct CoinPrices<'a> {
     opening: Option<(u64, u32)>,
     all: PricesSeen,
     writes: Vec<&'a Hip3PriceUpdate>,
-}
-
-#[derive(Clone, Copy)]
-enum Placement {
-    BeforeActions,
-    Action(Rank),
-}
-
-/// A receipt identifies a taker's creation, not an old order's later trigger. Both legs use the same taker.
-/// Duplicate identities stay unknown, as do `CoreWriter` and vault-close orders without ordinary book receipts.
-fn takers<'a>(fills: &'a [BlockFill], actions: &MarkActions, statuses: &BlockStatuses) -> FxHashMap<(&'a str, u64), Option<Placement>> {
-    let mut created = FxHashMap::default();
-    for action in &actions.actions {
-        if let MarkAction::Book(book) = &action.action {
-            for oid in &book.created {
-                created.entry(*oid).and_modify(|rank| *rank = None).or_insert(Some(action.rank));
-            }
-        }
-    }
-    let mut out = FxHashMap::default();
-    for fill in fills.iter().filter(|fill| fill.crossed) {
-        let placement = if fill.twap {
-            Some(Placement::BeforeActions)
-        } else if statuses.triggered.contains(&fill.oid) {
-            None
-        } else {
-            created.get(&fill.oid).copied().flatten().map(Placement::Action)
-        };
-        out.entry((fill.coin.as_ref(), fill.tid)).and_modify(|old| *old = None).or_insert(placement);
-    }
-    out
 }
 
 fn oracle_ranks(actions: &MarkActions) -> FxHashMap<&str, Option<Rank>> {
@@ -95,7 +64,7 @@ pub(super) fn observe(
     }
     let ranks = actions.map(oracle_ranks).unwrap_or_default();
     // No receipt scan/allocation on quiet blocks or blocks with only unplaced fallback writes.
-    let takers = actions.filter(|_| !ranks.is_empty()).map(|a| takers(fills, a, statuses)).unwrap_or_default();
+    let takers = actions.filter(|_| !ranks.is_empty()).map(|a| takers(fills, a, &statuses.triggered)).unwrap_or_default();
     for (fill, seen) in fills.iter().zip(prices) {
         let Some(range) = ranges.get(fill.coin.as_ref()) else { continue; };
         let rank = fill.coin.split_once(':').and_then(|(dex, _)| ranks.get(dex)).copied().flatten();
