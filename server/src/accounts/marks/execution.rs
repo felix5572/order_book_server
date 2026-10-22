@@ -107,6 +107,8 @@ pub(crate) struct BlockStatuses {
     pub(crate) triggered: FxHashSet<u64>,
     /// The `triggered` statuses' orders: a possible cause of a self-trade cancel.
     pub(crate) triggered_orders: Vec<StatusOrder>,
+    /// Fixed thresholds for price attribution; duplicate or unknown statuses retain no proof.
+    pub(crate) trigger_prices: FxHashMap<u64, Option<fill_order::TriggerPrice>>,
     /// `selfTradeCanceled` statuses.
     pub(crate) self_trade_cancelled: Vec<StatusOrder>,
     /// No-fill IOC statuses and their contiguous self-trade cancellations, in stream order.
@@ -159,6 +161,8 @@ impl BlockStatuses {
                 }
                 ("triggered", _) => {
                     out.triggered.insert(status.order.oid);
+                    out.trigger_prices.entry(status.order.oid).and_modify(|price| *price = None)
+                        .or_insert_with(|| fill_order::TriggerPrice::of(&status));
                     out.triggered_orders.push(StatusOrder::of(&status)?);
                 }
                 ("selfTradeCanceled", _) => out.self_trade_cancelled.push(StatusOrder::of(&status)?),

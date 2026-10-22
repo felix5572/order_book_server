@@ -132,4 +132,24 @@ mod tests {
             mrvl["checkpoint_isolated_cash_micro"].as_i64().unwrap());
     }
 
+
+    #[test]
+    fn live_trigger_marks_supply_the_missing_isolated_margin() {
+        use crate::accounts::marks::{fill_prices::trigger_golden_prices, seed::exact_price_units};
+        let golden: serde_json::Value = serde_json::from_str(include_str!("../marks/fill_prices/hip3_trigger_cash_goldens.json")).unwrap();
+        for case in golden["cases"].as_array().unwrap() {
+            let prices = trigger_golden_prices(case);
+            let maker = case["legs"].as_array().unwrap().iter().find(|leg| leg[0] == case["maker_user"]).unwrap();
+            let fill: crate::types::Fill = serde_json::from_value(maker[1].clone()).unwrap();
+            let decimals = u32::try_from(case["size_decimals"].as_u64().unwrap()).unwrap();
+            let quantity = crate::accounts::size::parse_size_raw(&fill.sz, decimals).unwrap();
+            let px = i64::try_from(exact_price_units(&fill.px, decimals).unwrap()).unwrap();
+            let lev = u32::try_from(case["leverage"].as_u64().unwrap()).unwrap();
+            let mark = prices.get(case["height"].as_u64().unwrap(), &fill.coin, fill.tid);
+            let result = transfer(quantity, px, Side::Bid, lev, decimals, mark, Some(i64::MAX)).unwrap();
+            assert!(!result.estimated);
+            assert_eq!(result.micro_usdc - quantity * px / i64::from(lev), case["extra_micro_usdc"].as_i64().unwrap());
+        }
+    }
+
 }

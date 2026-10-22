@@ -1,6 +1,7 @@
 //! Execution marks for isolated HIP-3 fills. BM 1192960000..1192970000: a unique successful setOracle
 //! anchors its sole Normal write, and receipt-backed ordinary takers select the preceding/following mark.
-//! Fallback writes, multiple writes/actions, triggered orders and unreceipted system effects keep the full range.
+//! A fixed trigger crossed by the sole Normal write consumes that new mark (BM NET1193124226, SPCX1193126889).
+//! Fallback/multiple writes, already-satisfied or unrecognized triggers and unreceipted effects keep the full range.
 //! This refines cash inputs only: the node-mark owner still consumes every written price unchanged.
 
 use rustc_hash::FxHashMap;
@@ -25,7 +26,7 @@ fn oracle_ranks(actions: &MarkActions) -> FxHashMap<&str, Option<Rank>> {
 }
 
 impl CoinPrices<'_> {
-    fn at(&self, rank: Option<Rank>, taker: Option<Placement>, size_decimals: u32, time_ns: Option<u64>) -> Option<(u64, u32)> {
+    fn at(&self, rank: Option<Rank>, taker: Option<Placement>, size_decimals: u32, time_ns: Option<u64>, coin: &str, statuses: &BlockStatuses) -> Option<(u64, u32)> {
         // Invalid/missing evidence cannot be repaired by selecting one side of the update.
         self.all.value()?;
         let [update] = self.writes.as_slice() else { return None; };
@@ -35,6 +36,13 @@ impl CoinPrices<'_> {
             Placement::BeforeActions => true,
             Placement::Action(taker) if taker != rank => taker < rank,
             Placement::Action(_) => return None,
+            Placement::Trigger(oid) => {
+                let (opening, decimals) = self.opening?;
+                let closing = exact_price_units(&update.px, size_decimals).ok()?;
+                let trigger = statuses.trigger_prices.get(&oid)?.as_ref()?;
+                if decimals != size_decimals || !trigger.crossed_by(coin, opening, closing, decimals) { return None; }
+                false
+            }
         };
         if before { self.opening } else { exact_price_units(&update.px, size_decimals).ok().map(|px| (px, size_decimals)) }
     }
@@ -69,7 +77,7 @@ pub(super) fn observe(
         let Some(range) = ranges.get(fill.coin.as_ref()) else { continue; };
         let rank = fill.coin.split_once(':').and_then(|(dex, _)| ranks.get(dex)).copied().flatten();
         let taker = takers.get(&(fill.coin.as_ref(), fill.tid)).copied().flatten();
-        match range.at(rank, taker, coins[fill.coin.as_ref()].size_decimals, actions.map(|a| a.time_ns)) {
+        match range.at(rank, taker, coins[fill.coin.as_ref()].size_decimals, actions.map(|a| a.time_ns), &fill.coin, statuses) {
             Some(px) => seen.observe(Some(px)),
             None => seen.clone_from(&range.all),
         }
@@ -114,6 +122,51 @@ pub(crate) fn golden_prices(case: &serde_json::Value, event: &serde_json::Value)
     out
 }
 
+
+#[cfg(test)]
+struct TriggerFixture {
+    height: u64,
+    fills: Vec<BlockFill>,
+    coins: FxHashMap<String, Hip3Coin>,
+    updates: Vec<Hip3PriceUpdate>,
+    actions: MarkActions,
+    statuses: BlockStatuses,
+}
+
+#[cfg(test)]
+impl TriggerFixture {
+    fn of(case: &serde_json::Value) -> Self {
+        use crate::{accounts::marks::{actions::RankedAction, seed::StoredMark}, types::node_data::NodeDataFill};
+        let coin = case["coin"].as_str().unwrap();
+        let decimals = u32::try_from(case["size_decimals"].as_u64().unwrap()).unwrap();
+        let height = case["height"].as_u64().unwrap();
+        let time_ns = case["time_ns"].as_u64().unwrap();
+        Self {
+            height,
+            fills: case["legs"].as_array().unwrap().iter().map(|leg| BlockFill::of(&serde_json::from_value::<NodeDataFill>(leg.clone()).unwrap())).collect(),
+            coins: FxHashMap::from_iter([(coin.into(), Hip3Coin { oracle: None, size_decimals: decimals,
+                mark: Some(StoredMark { px: exact_price_units(case["before_mark"].as_str().unwrap(), decimals).unwrap(), time_ns: time_ns - 1 }) })]),
+            updates: vec![Hip3PriceUpdate { normal: case["normal"].as_bool().unwrap(), oracle: false, coin: coin.into(),
+                px: case["after_mark"].as_str().unwrap().into(), time_ns }],
+            actions: MarkActions { height, time_ns, actions: vec![RankedAction {
+                rank: serde_json::from_value(case["oracle_rank"].clone()).unwrap(), user: None,
+                action: MarkAction::Hip3Oracle { dex: coin.split_once(':').unwrap().0.into() },
+            }] },
+            statuses: BlockStatuses::of([serde_json::from_value(case["triggered_status"].clone()).unwrap()]).unwrap(),
+        }
+    }
+
+    fn prices(&self) -> super::super::FillMarkPrices {
+        let mut builder = super::super::FillPriceBuilder::new(&self.fills);
+        builder.hip3(&self.fills, &self.coins, &self.updates, Some(&self.actions), &self.statuses);
+        builder.finish(self.height, &self.fills)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn trigger_golden_prices(case: &serde_json::Value) -> super::super::FillMarkPrices {
+    TriggerFixture::of(case).prices()
+}
 
 #[cfg(test)]
 mod tests {
@@ -173,4 +226,87 @@ mod tests {
         assert_eq!(ranges(&[fill(99, 1, false, false)], &actions, &[update(true, "110")], &[]), [range(100, 110)], "maker alone proves no execution rank");
         assert_eq!(ranges(&[fill(10, 1, true, false), fill(10, 1, true, false)], &actions, &[update(true, "110")], &[]), [range(100, 110); 2]);
     }
+
+    fn trigger_cases() -> serde_json::Value {
+        serde_json::from_str(include_str!("hip3_trigger_cash_goldens.json")).unwrap()
+    }
+
+    #[test]
+    fn recorded_triggered_takers_give_both_legs_the_new_mark() {
+        for case in trigger_cases()["cases"].as_array().unwrap() {
+            let input = TriggerFixture::of(case);
+            let prices = input.prices();
+            let decimals = input.coins[case["coin"].as_str().unwrap()].size_decimals;
+            let expected = exact_price_units(case["after_mark"].as_str().unwrap(), decimals).unwrap();
+            for fill in &input.fills {
+                let price = prices.get(input.height, &fill.coin, fill.tid).unwrap();
+                assert_eq!((price.min_px_raw, price.max_px_raw), (expected, expected));
+            }
+        }
+    }
+
+    #[test]
+    fn trigger_price_proof_requires_unique_write_status_and_taker() {
+        let cases = trigger_cases();
+        let case = &cases["cases"][0];
+        let changes: [fn(&mut TriggerFixture); 10] = [
+            |v| v.updates[0].normal = false,
+            |v| v.updates[0].time_ns += 1,
+            |v| v.updates.push(v.updates[0].clone()),
+            |v| v.actions.actions.push(v.actions.actions[0].clone()),
+            |v| v.actions.actions.clear(),
+            |v| v.statuses.trigger_prices.clear(),
+            |v| { for value in v.statuses.trigger_prices.values_mut() { *value = None; } },
+            |v| v.statuses.triggered.clear(),
+            |v| v.fills.push(v.fills.iter().find(|f| f.crossed).unwrap().clone()),
+            |v| v.fills.retain(|f| !f.crossed),
+        ];
+        for change in changes {
+            let mut input = TriggerFixture::of(case); change(&mut input);
+            let prices = input.prices();
+            let fill = &input.fills[0];
+            let range = prices.get(input.height, &fill.coin, fill.tid).unwrap();
+            assert_eq!((range.min_px_raw, range.max_px_raw), (3_153_500, 3_156_700));
+        }
+    }
+
+    #[test]
+    fn trigger_thresholds_do_not_promote_unsupported_or_already_satisfied_conditions() {
+        let cases = trigger_cases();
+        let changes: [fn(&mut serde_json::Value); 6] = [
+            |v| v["triggered_status"]["order"]["isTrigger"] = false.into(),
+            |v| v["triggered_status"]["order"]["triggerCondition"] = "Activation below 315.61, retracement 1%".into(),
+            |v| v["triggered_status"]["order"]["triggerCondition"] = "Price below 315.62".into(),
+            |v| v["triggered_status"]["order"]["triggerPx"] = "bad".into(),
+            |v| v["triggered_status"]["order"]["orderType"] = "Trailing Stop Market".into(),
+            |v| v["triggered_status"]["order"]["coin"] = "xyz:OTHER".into(),
+        ];
+        for change in changes {
+            let mut case = cases["cases"][0].clone(); change(&mut case);
+            let input = TriggerFixture::of(&case);
+            let fill = &input.fills[0];
+            let range = input.prices().get(input.height, &fill.coin, fill.tid).unwrap();
+            assert_eq!((range.min_px_raw, range.max_px_raw), (3_153_500, 3_156_700));
+        }
+        for opening in ["315.61", "315.50"] {
+            let mut case = cases["cases"][0].clone(); case["before_mark"] = opening.into();
+            let input = TriggerFixture::of(&case); let fill = &input.fills[0];
+            let range = input.prices().get(input.height, &fill.coin, fill.tid).unwrap();
+            assert_ne!(range.min_px_raw, range.max_px_raw, "an already-met or equal boundary has no crossing proof");
+        }
+    }
+
+    #[test]
+    fn rising_trigger_and_duplicate_status_boundary() {
+        let mut case = trigger_cases()["cases"][0].clone();
+        case["before_mark"] = "315.35".into(); case["after_mark"] = "315.67".into();
+        case["triggered_status"]["order"]["triggerCondition"] = "Price above 315.61".into();
+        let mut input = TriggerFixture::of(&case); let fill = input.fills[0].clone();
+        assert_eq!(input.prices().get(input.height, &fill.coin, fill.tid).unwrap().min_px_raw, 3_156_700);
+        let status: crate::types::node_data::NodeDataOrderStatus = serde_json::from_value(case["triggered_status"].clone()).unwrap();
+        input.statuses = BlockStatuses::of([status.clone(), status]).unwrap();
+        let range = input.prices().get(input.height, &fill.coin, fill.tid).unwrap();
+        assert_ne!(range.min_px_raw, range.max_px_raw, "duplicate trigger observations cannot supply unique proof");
+    }
+
 }

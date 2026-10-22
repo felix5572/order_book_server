@@ -56,7 +56,7 @@ impl MarginOrder {
             state.eligible &= match takers.get(&(fill.coin.as_str(), fill.tid)).copied().flatten() {
                 Some(Placement::BeforeActions) => true,
                 Some(Placement::Action(rank)) => rank < state.earliest,
-                None => false,
+                Some(Placement::Trigger(_)) | None => false,
             };
         }
         Self { after_fills: accounts.into_iter().filter_map(|(user, state)|

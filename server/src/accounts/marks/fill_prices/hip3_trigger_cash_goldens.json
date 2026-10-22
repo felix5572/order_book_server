@@ -1,0 +1,218 @@
+{
+  "source": "BM live29629f2, checkpoint1193120000..1193130000,2026-10-22",
+  "scope": "Observed node statuses,fills,write and projected rank; whole cash pools independently recomputed with all fills; no intermediate node cash claimed.",
+  "cases": [
+    {
+      "height": 1193124226,
+      "coin": "xyz:NET",
+      "size_decimals": 2,
+      "time_ns": 1792671632739398057,
+      "before_mark": "315.67",
+      "after_mark": "315.35",
+      "oracle_rank": [
+        0,
+        3,
+        1215
+      ],
+      "normal": true,
+      "triggered_status": {
+        "time": "2026-10-22T12:20:32.739398057",
+        "user": "0xbe7b750e1d6bcc1d67523c20b125161ff7d119ee",
+        "hash": null,
+        "builder": null,
+        "status": "triggered",
+        "order": {
+          "coin": "xyz:NET",
+          "side": "A",
+          "limitPx": "290.36",
+          "sz": "0.0",
+          "oid": 582503373203,
+          "timestamp": 1792671197998,
+          "triggerCondition": "Price below 315.61",
+          "isTrigger": true,
+          "triggerPx": "315.61",
+          "children": [],
+          "isPositionTpsl": true,
+          "reduceOnly": true,
+          "orderType": "Stop Market",
+          "origSz": "0.0",
+          "tif": null,
+          "cloid": null
+        }
+      },
+      "legs": [
+        [
+          "0x718cc7ee2ae2493ebf7d454316df6b61f4e1a868",
+          {
+            "coin": "xyz:NET",
+            "px": "315.88",
+            "sz": "0.42",
+            "side": "B",
+            "time": 1792671632739,
+            "startPosition": "613.97",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x6dde5b95ace682146f5804471da1820204cc007b47e9a0e611a706e86bea5bff",
+            "oid": 582499260718,
+            "crossed": false,
+            "fee": "0.00398",
+            "tid": 176246953157902,
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.00199"
+          }
+        ],
+        [
+          "0xbe7b750e1d6bcc1d67523c20b125161ff7d119ee",
+          {
+            "coin": "xyz:NET",
+            "px": "315.88",
+            "sz": "0.42",
+            "side": "A",
+            "time": 1792671632739,
+            "startPosition": "0.42",
+            "dir": "Close Long",
+            "closedPnl": "3.741612",
+            "hash": "0x6dde5b95ace682146f5804471da1820204cc007b47e9a0e611a706e86bea5bff",
+            "oid": 582503373203,
+            "crossed": true,
+            "fee": "0.011462",
+            "tid": 176246953157902,
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.005158"
+          }
+        ]
+      ],
+      "maker_user": "0x718cc7ee2ae2493ebf7d454316df6b61f4e1a868",
+      "leverage": 5,
+      "extra_micro_usdc": 178080,
+      "provenance": {
+        "replica_sha256": "ce1eb3512ba29f8f30600afc048a51839d5f470c9667d756094f4889915c9d9d",
+        "status_sha256": "cf95e0931161d9fb6848bbb602fd718359320133a6630b0c73fb7ae6fa1f7aa2",
+        "oracle_sha256": "c5fb12d310add05fa05090bba0a2b994730a47e6fc3f37e16baee5f6d6ce3b80",
+        "archive": "/home/ubuntu/research_data/ob_hourly_watch_20261021/cash_inputs_1193120000_1193130000",
+        "cash_validation": {
+          "user": "0x718cc7ee2ae2493ebf7d454316df6b61f4e1a868",
+          "coin": "xyz:NET",
+          "fills": 199,
+          "all_adds": true,
+          "min_cross_usdc": "775145.9035418",
+          "computed_isolated_micro": -160287544577,
+          "node_isolated_micro": -160287544577,
+          "computed_cross_wei": 77514590354180,
+          "node_cross_wei": 77514590354180,
+          "position_equal": true,
+          "isolated_equal": true,
+          "cross_equal": true
+        }
+      }
+    },
+    {
+      "height": 1193126889,
+      "coin": "xyz:SPCX",
+      "size_decimals": 2,
+      "time_ns": 1792671824741660378,
+      "before_mark": "154.02",
+      "after_mark": "153.97",
+      "oracle_rank": [
+        0,
+        3,
+        1565
+      ],
+      "normal": true,
+      "triggered_status": {
+        "time": "2026-10-22T12:23:44.741660378",
+        "user": "0xa7643e42a0fc1ca71e36cda48f2706a191263ea9",
+        "hash": null,
+        "builder": null,
+        "status": "triggered",
+        "order": {
+          "coin": "xyz:SPCX",
+          "side": "A",
+          "limitPx": "138.59",
+          "sz": "0.0",
+          "oid": 582509712597,
+          "timestamp": 1792671809801,
+          "triggerCondition": "Price below 153.99",
+          "isTrigger": true,
+          "triggerPx": "153.99",
+          "children": [],
+          "isPositionTpsl": true,
+          "reduceOnly": true,
+          "orderType": "Stop Market",
+          "origSz": "0.0",
+          "tif": null,
+          "cloid": null
+        }
+      },
+      "legs": [
+        [
+          "0xbbccd85a830845225a00da331ec23b9e3825fd85",
+          {
+            "coin": "xyz:SPCX",
+            "px": "154.0",
+            "sz": "8.68",
+            "side": "B",
+            "time": 1792671824741,
+            "startPosition": "4188.44",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x6e8c1eb08398d1de700504471dabe902062c00961e9bf0b01254ca03429cabc9",
+            "oid": 582363762936,
+            "crossed": false,
+            "fee": "0.034647",
+            "tid": 611370192655533,
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.015591"
+          }
+        ],
+        [
+          "0xa7643e42a0fc1ca71e36cda48f2706a191263ea9",
+          {
+            "coin": "xyz:SPCX",
+            "px": "154.0",
+            "sz": "8.68",
+            "side": "A",
+            "time": 1792671824741,
+            "startPosition": "8.68",
+            "dir": "Close Long",
+            "closedPnl": "-1.3888",
+            "hash": "0x6e8c1eb08398d1de700504471dabe902062c00961e9bf0b01254ca03429cabc9",
+            "oid": 582509712597,
+            "crossed": true,
+            "fee": "0.120304",
+            "tid": 611370192655533,
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.060152"
+          }
+        ]
+      ],
+      "maker_user": "0xbbccd85a830845225a00da331ec23b9e3825fd85",
+      "leverage": 11,
+      "extra_micro_usdc": 236727,
+      "provenance": {
+        "replica_sha256": "881527895af3eb8844ddec5675fd9c44632b8305ce2c64d3e858cb513f3f41bf",
+        "status_sha256": "ae13de58b6fed0830f1cdca84ce9be81b88fc85950fd983becc58a3d60ea1128",
+        "oracle_sha256": "12f60e2156d656bb87d224917931a28cd208d8deeae5f3810182faf4f583abc6",
+        "archive": "/home/ubuntu/research_data/ob_hourly_watch_20261021/cash_inputs_1193120000_1193130000",
+        "cash_validation": {
+          "user": "0xbbccd85a830845225a00da331ec23b9e3825fd85",
+          "coin": "xyz:SPCX",
+          "fills": 86,
+          "all_adds": true,
+          "min_cross_usdc": "20725.000621",
+          "computed_isolated_micro": -795032278085,
+          "node_isolated_micro": -795032278085,
+          "computed_cross_wei": 2072500062100,
+          "node_cross_wei": 2072500062100,
+          "position_equal": true,
+          "isolated_equal": true,
+          "cross_equal": true
+        }
+      }
+    }
+  ]
+}
