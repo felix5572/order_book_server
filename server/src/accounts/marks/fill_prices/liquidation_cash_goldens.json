@@ -1,0 +1,734 @@
+{
+  "source": "BM checkpoint1193180000..1193190000,2026-10-22; node fills in block1193180450",
+  "scope": "Five maker isolated balances and all their LRCX fills in the interval; no manual cash/leverage actions found for these users. Golden tests supply ample cross cash to isolate the measured mark selection; they do not claim to replay every other coin in these accounts.",
+  "coin": "para:LRCX",
+  "size_decimals": 2,
+  "event": {
+    "height": 1193180450,
+    "before_mark": "233.52",
+    "updates": [
+      [
+        "232.7792",
+        "Normal"
+      ]
+    ],
+    "chosen_mark": "232.7792",
+    "legs": [
+      [
+        "0x7684d0c6d84d22b481ef3d2587c475f878836e51",
+        {
+          "coin": "para:LRCX",
+          "px": "233.08",
+          "sz": "0.14",
+          "side": "B",
+          "time": 1792675670910,
+          "startPosition": "-0.22",
+          "dir": "Close Short",
+          "closedPnl": "0.550578",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555699619,
+          "crossed": false,
+          "fee": "-0.000097",
+          "tid": 250993471443816,
+          "cloid": "0x000000000000000080025e7a1744f6cd",
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000048"
+        }
+      ],
+      [
+        "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+        {
+          "coin": "para:LRCX",
+          "px": "233.08",
+          "sz": "0.14",
+          "side": "A",
+          "time": 1792675670910,
+          "startPosition": "1.37",
+          "dir": "Close Long",
+          "closedPnl": "-2.044238",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555731125,
+          "crossed": true,
+          "fee": "0.00261",
+          "tid": 250993471443816,
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.001305"
+        }
+      ],
+      [
+        "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+        {
+          "coin": "para:LRCX",
+          "px": "233.08",
+          "sz": "0.14",
+          "side": "B",
+          "time": 1792675670910,
+          "startPosition": "0.21",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555704140,
+          "crossed": false,
+          "fee": "-0.000097",
+          "tid": 158371683110074,
+          "cloid": "0x0000000000000000800250016ee875ed",
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000048"
+        }
+      ],
+      [
+        "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+        {
+          "coin": "para:LRCX",
+          "px": "233.08",
+          "sz": "0.14",
+          "side": "A",
+          "time": 1792675670910,
+          "startPosition": "1.23",
+          "dir": "Close Long",
+          "closedPnl": "-2.044238",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555731125,
+          "crossed": true,
+          "fee": "0.00261",
+          "tid": 158371683110074,
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.001305"
+        }
+      ],
+      [
+        "0x5b52403396a365f9f7e33e87488564017e1f97a8",
+        {
+          "coin": "para:LRCX",
+          "px": "233.05",
+          "sz": "0.14",
+          "side": "B",
+          "time": 1792675670910,
+          "startPosition": "-0.35",
+          "dir": "Close Short",
+          "closedPnl": "0.867272",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555699601,
+          "crossed": false,
+          "fee": "-0.000097",
+          "tid": 709354424264442,
+          "cloid": "0x00000000000000008002549b83c80c71",
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000048"
+        }
+      ],
+      [
+        "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+        {
+          "coin": "para:LRCX",
+          "px": "233.05",
+          "sz": "0.14",
+          "side": "A",
+          "time": 1792675670910,
+          "startPosition": "1.09",
+          "dir": "Close Long",
+          "closedPnl": "-2.048438",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555731125,
+          "crossed": true,
+          "fee": "0.00261",
+          "tid": 709354424264442,
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.001305"
+        }
+      ],
+      [
+        "0x1db0a25e24de6a69f466fd04a9963c41fe60182e",
+        {
+          "coin": "para:LRCX",
+          "px": "233.02",
+          "sz": "0.14",
+          "side": "B",
+          "time": 1792675670910,
+          "startPosition": "0.0",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555699595,
+          "crossed": false,
+          "fee": "-0.000097",
+          "tid": 449939260302431,
+          "cloid": "0x0000000000000000800259b21375185b",
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000048"
+        }
+      ],
+      [
+        "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+        {
+          "coin": "para:LRCX",
+          "px": "233.02",
+          "sz": "0.14",
+          "side": "A",
+          "time": 1792675670910,
+          "startPosition": "0.95",
+          "dir": "Close Long",
+          "closedPnl": "-2.052638",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555731125,
+          "crossed": true,
+          "fee": "0.002609",
+          "tid": 449939260302431,
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.001304"
+        }
+      ],
+      [
+        "0x5b52403396a365f9f7e33e87488564017e1f97a8",
+        {
+          "coin": "para:LRCX",
+          "px": "232.99",
+          "sz": "0.14",
+          "side": "B",
+          "time": 1792675670910,
+          "startPosition": "-0.21",
+          "dir": "Close Short",
+          "closedPnl": "0.875672",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555696815,
+          "crossed": false,
+          "fee": "-0.000097",
+          "tid": 367283830396708,
+          "cloid": "0x000000000000000080025a034e62c24e",
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000048"
+        }
+      ],
+      [
+        "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+        {
+          "coin": "para:LRCX",
+          "px": "232.99",
+          "sz": "0.14",
+          "side": "A",
+          "time": 1792675670910,
+          "startPosition": "0.81",
+          "dir": "Close Long",
+          "closedPnl": "-2.056838",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555731125,
+          "crossed": true,
+          "fee": "0.002609",
+          "tid": 367283830396708,
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.001304"
+        }
+      ],
+      [
+        "0x7684d0c6d84d22b481ef3d2587c475f878836e51",
+        {
+          "coin": "para:LRCX",
+          "px": "232.96",
+          "sz": "0.14",
+          "side": "B",
+          "time": 1792675670910,
+          "startPosition": "-0.08",
+          "dir": "Short > Long",
+          "closedPnl": "0.324216",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555696801,
+          "crossed": false,
+          "fee": "-0.000097",
+          "tid": 1121382045420375,
+          "cloid": "0x000000000000000080025f0b493ed8b3",
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000048"
+        }
+      ],
+      [
+        "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+        {
+          "coin": "para:LRCX",
+          "px": "232.96",
+          "sz": "0.14",
+          "side": "A",
+          "time": 1792675670910,
+          "startPosition": "0.67",
+          "dir": "Close Long",
+          "closedPnl": "-2.061038",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555731125,
+          "crossed": true,
+          "fee": "0.002609",
+          "tid": 1121382045420375,
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.001304"
+        }
+      ],
+      [
+        "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+        {
+          "coin": "para:LRCX",
+          "px": "232.93",
+          "sz": "0.14",
+          "side": "B",
+          "time": 1792675670910,
+          "startPosition": "0.35",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555699295,
+          "crossed": false,
+          "fee": "-0.000097",
+          "tid": 809000394386070,
+          "cloid": "0x000000000000000080025de378ac20b2",
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000048"
+        }
+      ],
+      [
+        "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+        {
+          "coin": "para:LRCX",
+          "px": "232.93",
+          "sz": "0.14",
+          "side": "A",
+          "time": 1792675670910,
+          "startPosition": "0.53",
+          "dir": "Close Long",
+          "closedPnl": "-2.065238",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555731125,
+          "crossed": true,
+          "fee": "0.002608",
+          "tid": 809000394386070,
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.001304"
+        }
+      ],
+      [
+        "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+        {
+          "coin": "para:LRCX",
+          "px": "232.9",
+          "sz": "0.14",
+          "side": "B",
+          "time": 1792675670910,
+          "startPosition": "0.18",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555696769,
+          "crossed": false,
+          "fee": "-0.000097",
+          "tid": 1124306703446688,
+          "cloid": "0x000000000000000080025228443df4c9",
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000048"
+        }
+      ],
+      [
+        "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+        {
+          "coin": "para:LRCX",
+          "px": "232.9",
+          "sz": "0.14",
+          "side": "A",
+          "time": 1792675670910,
+          "startPosition": "0.39",
+          "dir": "Close Long",
+          "closedPnl": "-2.069438",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555731125,
+          "crossed": true,
+          "fee": "0.002608",
+          "tid": 1124306703446688,
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.001304"
+        }
+      ],
+      [
+        "0x1db0a25e24de6a69f466fd04a9963c41fe60182e",
+        {
+          "coin": "para:LRCX",
+          "px": "232.87",
+          "sz": "0.14",
+          "side": "B",
+          "time": 1792675670910,
+          "startPosition": "0.14",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555696520,
+          "crossed": false,
+          "fee": "-0.000097",
+          "tid": 217867589975250,
+          "cloid": "0x00000000000000008002515f1cf8ca58",
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000048"
+        }
+      ],
+      [
+        "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+        {
+          "coin": "para:LRCX",
+          "px": "232.87",
+          "sz": "0.14",
+          "side": "A",
+          "time": 1792675670910,
+          "startPosition": "0.25",
+          "dir": "Close Long",
+          "closedPnl": "-2.073638",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555731125,
+          "crossed": true,
+          "fee": "0.002608",
+          "tid": 217867589975250,
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.001304"
+        }
+      ],
+      [
+        "0x5b52403396a365f9f7e33e87488564017e1f97a8",
+        {
+          "coin": "para:LRCX",
+          "px": "232.84",
+          "sz": "0.11",
+          "side": "B",
+          "time": 1792675670910,
+          "startPosition": "-0.07",
+          "dir": "Short > Long",
+          "closedPnl": "0.448336",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555696626,
+          "crossed": false,
+          "fee": "-0.000076",
+          "tid": 137092544147466,
+          "cloid": "0x0000000000000000800251d81bfff944",
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000038"
+        }
+      ],
+      [
+        "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+        {
+          "coin": "para:LRCX",
+          "px": "232.84",
+          "sz": "0.11",
+          "side": "A",
+          "time": 1792675670910,
+          "startPosition": "0.11",
+          "dir": "Close Long",
+          "closedPnl": "-1.632587",
+          "hash": "0xa7d0c676d7d67802a94a04471e7d22020633005c72d996d44b9971c996da51ed",
+          "oid": 582555731125,
+          "crossed": true,
+          "fee": "0.002048",
+          "tid": 137092544147466,
+          "liquidation": {
+            "liquidatedUser": "0xb4f1d3e5153599cd9f59c686dbee4262ac87d75c",
+            "markPx": "232.7792",
+            "method": "market"
+          },
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.001024"
+        }
+      ]
+    ]
+  },
+  "cases": [
+    {
+      "user": "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+      "leverage": 10,
+      "before": {
+        "s": 21,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -44927319
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -2400617,
+          "o": 8395
+        },
+        "e": 49913070
+      },
+      "after": {
+        "s": 49,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -103587485
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -2400617,
+          "o": 8395
+        },
+        "e": 115154470
+      }
+    },
+    {
+      "user": "0x1db0a25e24de6a69f466fd04a9963c41fe60182e",
+      "leverage": 10,
+      "before": null,
+      "after": {
+        "s": 28,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -58660166
+          }
+        },
+        "M": 10,
+        "e": 65224600
+      }
+    },
+    {
+      "user": "0x5b52403396a365f9f7e33e87488564017e1f97a8",
+      "leverage": 10,
+      "before": {
+        "s": -35,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": 92122004
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -4435791,
+          "o": -13591,
+          "c": -2388
+        },
+        "e": 83735699
+      },
+      "after": {
+        "s": 4,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -8380052
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -4435791
+        },
+        "e": 9313600
+      }
+    },
+    {
+      "user": "0x7684d0c6d84d22b481ef3d2587c475f878836e51",
+      "leverage": 10,
+      "before": {
+        "s": -22,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": 57376934
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -1501,
+          "o": -1501,
+          "c": -1501
+        },
+        "e": 52142800
+      },
+      "after": {
+        "s": 6,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -12570077
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -1501
+        },
+        "e": 13977600
+      }
+    },
+    {
+      "user": "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+      "leverage": 10,
+      "before": {
+        "s": 18,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -38545710
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -3998938,
+          "o": 2959,
+          "c": 1228
+        },
+        "e": 42826200
+      },
+      "after": {
+        "s": 32,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -67875793
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -3998938,
+          "o": 2959
+        },
+        "e": 75432200
+      }
+    }
+  ],
+  "provenance": {
+    "archive": "/home/yfb222333/research-data/hyperliquid-trade/ob_hourly_watch_20261021/cash_inputs_1193180000_1193190000",
+    "wire_gzip_sha256": "073bb50175afcb0f34e192a771950783bacf6f7f88ba3ff6ad8717fe48b2d429",
+    "wire_line_sha256": [
+      "043df00d1736c839294e45dda70c992d8382355a684f8a7490ca85ee70ee82ef",
+      "1d7b9da882d4246349fe092830d2f0e422dde48ccd4113c8972e9b0c27241296",
+      "227a509f82a70c62b887a38876cefdd4ec94bcb8921cb88ee5e0fcfe57b5e37c",
+      "27e5d475ee6b5b32f01e03a869b7d26dc30a784a487cb9c2f638478c075cd4af",
+      "2da37d6d9fed052f273f513d005979bb5b534f0acc90f17100ca1b89641bf73e",
+      "338e4437b8e6ff96596dceaf9c11d6ad5b9773bdb5cdb87f37ad08f0527a0dfa",
+      "357315e51a0896ec62f5318a6357adbbfe2e8128bdcde42a2385156266484abc",
+      "3f0885006087b904dabacb6e347e26017131c87c4b19a3e3b3d4a68f0f737b3b",
+      "5ebb4e14b1077fd41387a9e3fb9fde47ea1174e291682709d2b428dbd77c04da",
+      "67b6ee2e7b13af1daeb57771ce31b356e7591858fc8151c80d3837d7cd2c49ef",
+      "8eb3d83c8053b92c87d2c52f68edf6a5048b81a63b303987f865e77a95f6cf8b",
+      "9ad5d38065160e25636608b4ed4b79a25a0d28b1f40d9a03a17b8eedbfb222bd",
+      "a077df351f31ea71243c93404d62459d2a3c4806a2d841ad5822d375a5ddd18f",
+      "a41f0b69dced8930019321d56ffb4c511421aa80bddee487f4b73d4b27c667df",
+      "a915fd823e913e1ef87717eeb7c4e80f916cea0ab9cb78f32e0c1bb768e6feec",
+      "c120e446dfef02634274c50a9510ab6592e2b403c1ed4279fef0e04841ce634a",
+      "c4d5797efd9aa2ebdfc59c3e133d9020706c7b95330e7a9a9c3cec5a313f6ce6",
+      "ce7196bdc66b67fd19cd0351246c43b3d5bc31bc027010ae4569f51b2626558c",
+      "e426e52f8d156919d340c262b15c44a64f98cc94da462bd5a718a0342570bb1c",
+      "f4a356f2cab5ac2073cabe3deb7f38232a8c78b62802326ddc1b49272055af28"
+    ],
+    "selected_checkpoints_sha256": {
+      "1193190000_selected_states.json": "13a624798a37046c218125dba5c69ba60659089fae5e742c18c382ce2a7d62a7",
+      "1193180000_selected_states.json": "5ebacbf507fb92697d867f496b6f17c8705a34deb0bfeef7a918d0879c44b8c4"
+    }
+  }
+}

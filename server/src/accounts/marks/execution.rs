@@ -82,6 +82,8 @@ pub(crate) struct BlockFill {
     pub(crate) tid: u64,
     /// A TWAP slice: it runs at the start of the block.
     pub(crate) twap: bool,
+    /// Node-reported mark for this market liquidation, shared by its maker and taker legs.
+    pub(crate) liquidation_mark_px: Option<Box<str>>,
 }
 
 impl BlockFill {
@@ -94,6 +96,8 @@ impl BlockFill {
             oid: fill.oid,
             tid: fill.tid,
             twap: fill.twap_id.is_some(),
+            liquidation_mark_px: fill.liquidation.as_ref().filter(|v| v.method == "market")
+                .map(|v| v.mark_px.as_str().into()),
         }
     }
 }
@@ -565,7 +569,7 @@ mod tests {
     }
 
     pub(super) fn fill(tid: u64, oid: u64, crossed: bool) -> BlockFill {
-        BlockFill { coin: "BTC".into(), px: "82850.0".into(), sz: "0.002".into(), crossed, oid, tid, twap: false }
+        BlockFill { coin: "BTC".into(), px: "82850.0".into(), sz: "0.002".into(), crossed, oid, tid, twap: false, liquidation_mark_px: None }
     }
 
     /// No coin named: the blocks of these tests carry no self-trade cancel.
@@ -638,7 +642,7 @@ mod tests {
         let maker_diff = BookDiff::of(&diff_line(1, coin, maker, "A", "7737.3",
             r#"{"update":{"origSz":"0.635","newSz":"0.624"}}"#).events()[0]).unwrap();
         let fills = [true, false].map(|crossed| BlockFill { coin: coin.into(), px: "7737.3".into(), sz: "0.011".into(),
-            crossed, oid: if crossed { trigger } else { maker }, tid: 948_392_423_242_106, twap: false });
+            crossed, oid: if crossed { trigger } else { maker }, tid: 948_392_423_242_106, twap: false, liquidation_mark_px: None });
         let diffs = [diff(earlier, NEW), diff(later, NEW), maker_diff];
         let points = price_points(&actions, &statuses, &diffs, &fills, no_asset).unwrap();
         assert_eq!(points[0].cut, Cut { lo: 1, hi: 1, fills_lo: 0 }, "ordinary orders fix the reference cut; the triggered fill is unplaced");

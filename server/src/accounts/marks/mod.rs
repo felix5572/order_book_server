@@ -836,7 +836,7 @@ pub(crate) mod tests {
 
     /// A fill and a status that touch nothing the tests check: the fills and statuses streams are read.
     fn quiet_fill_and_status(height: u64) -> (Vec<BlockFill>, Vec<Batch<NodeDataOrderStatus>>) {
-        let fill = BlockFill { coin: "PUMP".into(), px: "0.004".into(), sz: "1".into(), crossed: true, oid: 1, tid: height, twap: false };
+        let fill = BlockFill { coin: "PUMP".into(), px: "0.004".into(), sz: "1".into(), crossed: true, oid: 1, tid: height, twap: false, liquidation_mark_px: None };
         (vec![fill], vec![status_line(height, "triggered", Address::repeat_byte(1), 1, None)])
     }
 

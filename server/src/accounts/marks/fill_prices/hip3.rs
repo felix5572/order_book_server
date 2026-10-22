@@ -180,7 +180,7 @@ mod tests {
         RankedAction { rank, user: None, action: MarkAction::Hip3Oracle { dex: dex.into() } }
     }
     fn fill(oid: u64, tid: u64, crossed: bool, twap: bool) -> BlockFill {
-        BlockFill { coin: "xyz:X".into(), px: "1".into(), sz: "1".into(), oid, tid, crossed, twap }
+        BlockFill { coin: "xyz:X".into(), px: "1".into(), sz: "1".into(), oid, tid, crossed, twap, liquidation_mark_px: None }
     }
     fn update(normal: bool, price: &str) -> Hip3PriceUpdate {
         Hip3PriceUpdate { normal, oracle: false, coin: "xyz:X".into(), px: price.into(), time_ns: 1 }

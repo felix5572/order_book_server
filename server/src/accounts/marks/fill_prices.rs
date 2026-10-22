@@ -6,6 +6,7 @@
 #[cfg(test)]
 pub(crate) use hip3::{golden_prices, trigger_golden_prices};
 mod hip3;
+mod liquidation;
 
 use rustc_hash::FxHashMap;
 
@@ -101,6 +102,7 @@ impl FillPriceBuilder {
                 .and_modify(|old| *old = old.and_then(|old| seen.value().and_then(|next| old.include(next))))
                 .or_insert_with(|| seen.value());
         }
+        liquidation::refine(&mut out, fills);
         out
     }
 }
@@ -123,7 +125,7 @@ mod tests {
 
     #[test]
     fn paired_legs_share_bounds_and_evidence_cannot_cross_blocks() {
-        let fill = |crossed| BlockFill { coin: "X".into(), px: "1".into(), sz: "1".into(), crossed, oid: 1, tid: 7, twap: false };
+        let fill = |crossed| BlockFill { coin: "X".into(), px: "1".into(), sz: "1".into(), crossed, oid: 1, tid: 7, twap: false, liquidation_mark_px: None };
         let fills = [fill(false), fill(true)];
         let mut builder = FillPriceBuilder::new(&fills);
         builder.prices[0].observe(Some((99, 0)));
@@ -144,7 +146,7 @@ mod execution_tests {
         test_support::hip3_line};
 
     fn fill(coin: &str, oid: u64, twap: bool) -> BlockFill {
-        BlockFill { coin: coin.into(), px: "82850.0".into(), sz: "0.001".into(), crossed: true, oid, tid: oid, twap }
+        BlockFill { coin: coin.into(), px: "82850.0".into(), sz: "0.001".into(), crossed: true, oid, tid: oid, twap, liquidation_mark_px: None }
     }
 
     #[test]

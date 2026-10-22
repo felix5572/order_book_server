@@ -1700,6 +1700,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn recorded_liquidation_mark_reconciles_five_live_isolated_makers() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/liquidation_cash_goldens.json")).unwrap();
+        let prices = crate::accounts::marks::fill_prices::golden_prices(&golden, &golden["event"]);
+        let height = golden["event"]["height"].as_u64().unwrap();
+        let decimals = u32::try_from(golden["size_decimals"].as_u64().unwrap()).unwrap();
+        for case in golden["cases"].as_array().unwrap() {
+            let leverage = u32::try_from(case["leverage"].as_u64().unwrap()).unwrap();
+            let mut states = per_dex();
+            let account = states.accounts.get_mut(&user(ISOLATED)).unwrap();
+            account.isolated.clear();
+            if let Some(cash) = case["before"]["l"]["I"]["u"].as_i64() {
+                account.isolated.insert((0, 0), cash * WEI_PER_MICRO);
+            }
+            // The corpus verifies this isolated position, not other coin flows in the same cross pool.
+            account.pools = per_dex_pools(&[(0, 1_000_000_000_000_000_000)]);
+            account.cross_exposure_seen.clear();
+            let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals,
+                margin_mode: AssetMarginMode::NoCross, default_leverage: leverage };
+            let mut fills = 0;
+            for leg in golden["event"]["legs"].as_array().unwrap().iter().filter(|leg| leg[0] == case["user"]) {
+                let fill: Fill = serde_json::from_value(leg[1].clone()).unwrap();
+                let mut event = FillEvent::of(&fill).unwrap();
+                assert!(event.restore_mark(height, &prices), "seed backfill must use the same evidence");
+                let flow = event.cash_wei(decimals, MAX_PERP_DECIMALS - decimals).unwrap();
+                let total = totals(account)[&0];
+                apply_isolated_fill(account, &market, &event, flow, leverage).unwrap();
+                assert_eq!(totals(account)[&0], total + flow);
+                fills += 1;
+            }
+            assert!(fills > 0);
+            assert_eq!(account.isolated[&(0, 0)], case["after"]["l"]["I"]["u"].as_i64().unwrap() * WEI_PER_MICRO, "{}", case["user"]);
+            assert!(!account.estimated, "a proven liquidation mark with ample funding is exact");
+        }
+    }
+
+    #[test]
     fn default_leverage_caps_high_tiers_without_changing_explicit_settings() {
         for (maximum, expected) in [(3, 3), (20, 20), (21, 20), (50, 20)] {
             let states = states(|checkpoint| {
