@@ -203,11 +203,12 @@ pub(crate) mod tests {
 
     /// Real request/receipt pairs, padded with inert noops to preserve the original bundle positions. The padding
     /// is a test envelope, not archived block contents. Both nonces and fill data remain unchanged.
-    pub(crate) fn mrvl_case() -> (BlockActions, Vec<Batch<NodeDataFill>>, MarkInputs) {
+    fn recorded_case(name: &str) -> (BlockActions, Vec<Batch<NodeDataFill>>, MarkInputs) {
         let golden: serde_json::Value = serde_json::from_str(include_str!("replay/isolated_cash_edge_goldens.json")).unwrap();
-        let case = &golden["mrvl"];
+        let case = &golden[name];
         let height = case["height"].as_u64().unwrap();
-        let mut signed = vec![json!({"action":{"type":"noop"}}); 1050];
+        let last = usize::try_from(case["margin_action"]["action_index"].as_u64().unwrap()).unwrap();
+        let mut signed = vec![json!({"action":{"type":"noop"}}); last + 1];
         let mut responses = vec![json!({"user":null,"res":{"status":"ok","response":{"type":"default"}}}); signed.len()];
         for key in ["order_action", "margin_action"] {
             let item = &case[key];
@@ -216,7 +217,7 @@ pub(crate) mod tests {
             responses[index] = item["receipt"].clone();
         }
         let hash = &case["margin_action"]["bundle_id"];
-        let raw = json!({"height":height,"abci_block":{"time":"2026-10-22T03:28:22.217919048",
+        let raw = json!({"height":height,"abci_block":{"time":case["block_time"],
             "signed_action_bundles":[[hash,{"signed_actions":signed}]]}, "resps":{"Full":[[hash,responses]]}}).to_string();
         let actions = parse_block_actions(&raw).unwrap();
         let replica = ReplicaLine::parse(&raw).unwrap();
@@ -229,7 +230,7 @@ pub(crate) mod tests {
 
     #[test]
     fn mrvl_real_receipt_places_margin_after_reduction_despite_earlier_nonce() {
-        let (mut actions, fills, inputs) = mrvl_case();
+        let (mut actions, fills, inputs) = recorded_case("mrvl");
         assert_eq!(actions.ranks, Some(vec![(0, 3, 1049)]));
         assert_eq!(inputs.mark_actions.as_ref().unwrap().actions[0].rank, (0, 3, 1040));
         let expected = actions.actions.clone();
@@ -237,4 +238,14 @@ pub(crate) mod tests {
         assert!(actions.actions.is_empty());
         assert_eq!(actions.ranks, Some(Vec::new()));
     }
+    #[test]
+    fn live_ewy_estimated_split_has_the_same_receipt_backed_order() {
+        let (mut actions, fills, inputs) = recorded_case("ewy");
+        assert_eq!(actions.ranks, Some(vec![(0, 3, 827)]));
+        assert_eq!(inputs.mark_actions.as_ref().unwrap().actions[0].rank, (0, 3, 765));
+        let expected = actions.actions.clone();
+        assert_eq!(defer_margin_after_fills(&mut actions, &fills, &inputs), expected);
+        assert!(actions.actions.is_empty());
+    }
+
 }

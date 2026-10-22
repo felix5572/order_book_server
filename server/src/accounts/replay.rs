@@ -520,8 +520,9 @@ impl Market {
 
 /// A cross fill moves its dex's cross cash, an isolated one the position's cash and its dex's cross cash
 /// (`apply_isolated_fill`). Whether the position is isolated: the asset's `marginMode`, then the account's setting
-/// (research "新开仓位是全仓还是逐仓"). A block applies its actions before its fills, but a setting or leverage changed
-/// in the fill's block leaves the fill's pool or leverage unknown: a stop.
+/// (research "新开仓位是全仓还是逐仓"). Settings and leverage actions still precede fills in this replay; a setting
+/// changed in the fill's block leaves its pool or leverage unknown: a stop. Proven post-fill manual margin transfers
+/// are ordered separately by the block owner.
 fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, fill: &FillEvent) -> Applied {
     let market = perp(markets, &fill.coin)?;
     if fill.backstop {

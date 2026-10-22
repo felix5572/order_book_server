@@ -148,6 +148,122 @@
         }
       }
     },
-    "source_replica_line_sha256": "05a407cf10e7ef707ce6b6ca7c6d9aa0f624f1c56e4630000625f5b8ed8575b6"
+    "source_replica_line_sha256": "05a407cf10e7ef707ce6b6ca7c6d9aa0f624f1c56e4630000625f5b8ed8575b6",
+    "block_time": "2026-10-22T03:28:22.217919048"
+  },
+  "ewy": {
+    "height": 1193068518,
+    "user": "0x84d5f2468cf1e5a50276f6af61c1518eb632dd44",
+    "block_time": "2026-10-22T11:14:04.021921265",
+    "fill": {
+      "coin": "xyz:EWY",
+      "px": "152.25",
+      "sz": "4.935",
+      "side": "A",
+      "time": 1792667644021,
+      "startPosition": "7.829",
+      "dir": "Close Long",
+      "closedPnl": "-0.0987",
+      "hash": "0xfa90ec0894cf4047fc0a04471cc7e602030600ee2fc25f1a9e59975b53c31a32",
+      "oid": 582464910674,
+      "crossed": true,
+      "fee": "0.021638",
+      "tid": 347369182490875,
+      "cloid": "0xc18b0be580a0d6944c2662f64df7cdce",
+      "feeToken": "USDC",
+      "twapId": null,
+      "deployerFee": "0.010819"
+    },
+    "order_action": {
+      "bundle_index": 0,
+      "bundle_id": "0xee32887423b94e6806f40420f14a430f9ecffc136836bde61e705f17d50a8463",
+      "action_index": 765,
+      "signed_action": {
+        "signature": {
+          "r": "0x99a667522daaccee3c2e6c7f27b7b059739306a7abf45f44988ddc1c9ae83e42",
+          "s": "0x688ad2b6814ff7b84578d1dddd1c788c1f389c5b1e1ff681847e1b2754caa461",
+          "v": 27
+        },
+        "vaultAddress": "0x84d5f2468cf1e5a50276f6af61c1518eb632dd44",
+        "action": {
+          "type": "order",
+          "orders": [
+            {
+              "a": 110047,
+              "b": false,
+              "p": "152.25",
+              "s": "4.935",
+              "r": false,
+              "t": {
+                "limit": {
+                  "tif": "Ioc"
+                }
+              },
+              "c": "0xc18b0be580a0d6944c2662f64df7cdce"
+            }
+          ],
+          "grouping": "na"
+        },
+        "nonce": 1792619363172,
+        "expiresAfter": 1792667646470
+      },
+      "receipt": {
+        "user": "0x84d5f2468cf1e5a50276f6af61c1518eb632dd44",
+        "res": {
+          "status": "ok",
+          "response": {
+            "type": "order",
+            "data": {
+              "statuses": [
+                {
+                  "filled": {
+                    "totalSz": "4.935",
+                    "avgPx": "152.25",
+                    "oid": 582464910674,
+                    "cloid": "0xc18b0be580a0d6944c2662f64df7cdce"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "margin_action": {
+      "bundle_index": 0,
+      "bundle_id": "0xee32887423b94e6806f40420f14a430f9ecffc136836bde61e705f17d50a8463",
+      "action_index": 827,
+      "signed_action": {
+        "signature": {
+          "r": "0x186df340ea30e8d3b7a17fa0a39431765cf2d51ed61a144c383199e3bb85bac5",
+          "s": "0x6c686a259e502f7c87a48508a51271a47795fe756b0243a57e4308e29c069f34",
+          "v": 27
+        },
+        "vaultAddress": "0x84d5f2468cf1e5a50276f6af61c1518eb632dd44",
+        "action": {
+          "type": "updateIsolatedMargin",
+          "asset": 110047,
+          "isBuy": true,
+          "ntli": 11000022147
+        },
+        "nonce": 1792619363173
+      },
+      "receipt": {
+        "user": "0x84d5f2468cf1e5a50276f6af61c1518eb632dd44",
+        "res": {
+          "status": "ok",
+          "response": {
+            "type": "default"
+          }
+        }
+      }
+    },
+    "source_replica_line_sha256": "a01a11c36b7756229befa4bed4fa0209dbd5ce1c86c430a271ee03e94eed9c5c",
+    "anchor_from": 1193060000,
+    "anchor_to": 1193070000,
+    "checkpoint_isolated_cash_usdc": "5012.906981",
+    "replayed_isolated_cash_usdc": "-1920.942718",
+    "split_error_usdc": "6933.849699",
+    "note": "Live 29629f2 first complete check. IOC position765 precedes margin827. 11000.022147 USDC x4.935/7.829 explains the recorded split to micro precision. This fixture verifies execution attribution; it is not a claim that the full cash interval was rerun in production."
   }
 }
