@@ -13,9 +13,13 @@
 
 mod isolated;
 mod cross_capacity;
+#[cfg(test)]
+mod capacity_tests;
 pub(crate) mod dust;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::sync::Arc;
 
 use alloy::primitives::Address;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -25,7 +29,7 @@ use super::{
     actions::BlockAction,
     liquidation::{HeldAtMark, LiquidationPx, solve, solve_held},
     margin::MarginTable,
-    marks::fill_prices::FillMarkRange,
+    marks::fill_prices::{CollateralPrices, FillMarkRange},
     checkpoint::{
         Account, AccountMode, AssetMarginMode, CheckpointAccounts, MAX_PERP_DECIMALS, MAX_SPOT_DECIMALS,
         PositionMargin, SpotPair, base_size, spot_pair_of_coin,
@@ -122,6 +126,8 @@ pub(crate) enum AccountEvent {
 pub(crate) struct FillEvent {
     /// Retained wire identity for execution marks rebuilt after checkpoint loading.
     tid: u64,
+    /// Maker execution can skip Unified prefunding even when aggregate collateral is sufficient.
+    crossed: bool,
     coin: String,
     side: Side,
     px: String,
@@ -137,7 +143,7 @@ pub(crate) struct FillEvent {
     dust_share: Option<dust::DustShare>,
     /// Execution-time evidence, retained with the event across checkpoint replay; never a later HTTP price.
     mark: Option<FillMarkRange>,
-    collateral_marks: Option<Arc<FxHashMap<String, FillMarkRange>>>,
+    collateral_marks: Option<CollateralPrices>,
 }
 
 impl FillEvent {
@@ -154,6 +160,7 @@ impl FillEvent {
             && fill.dir != ADL_DIR;
         Ok(Self {
             tid: fill.tid,
+            crossed: fill.crossed,
             coin: fill.coin.clone(),
             side: fill.side,
             px: fill.px.clone(),
@@ -173,7 +180,7 @@ impl FillEvent {
     /// Replace only this block/trade's projection using a completed trusted seed replay, never a current mark.
     pub(crate) fn restore_mark(&mut self, block: u64, prices: &super::marks::fill_prices::FillMarkPrices) -> bool {
         let mark = prices.get(block, &self.coin, self.tid);
-        let collateral = prices.collateral(block);
+        let collateral = prices.collateral_for_fill(block, &self.coin, self.tid);
         if self.mark == mark && self.collateral_marks == collateral { return false; }
         self.mark = mark;
         self.collateral_marks = collateral;
@@ -296,10 +303,14 @@ pub(crate) struct AccountMargin {
     /// provenance flag, not a second position book: only a new anchor can clear it. Their transfer capacity needs
     /// execution-time cross marks, which the isolated fill's own mark cannot establish.
     cross_exposure_seen: FxHashSet<usize>,
-    /// Frozen cross holdings from the checkpoint, not another live position book. Any cross fill or leverage
-    /// action removes that pool's proof until reseeding. A Unified account may consume a single-dex
-    /// proof only while all USDC cash and positions stay in that dex; spot/foreign-dex movement clears it.
-    cross_capacity: FxHashMap<usize, cross_capacity::CrossCapacitySnapshot>,
+    /// Capacity projection owned and advanced by this cash replay from checkpoint holdings and fill start sizes.
+    /// Known holdings retain their leverage through close/reopen; an unknown holding or leverage action removes
+    /// the projection until reseeding. Unified capacity uses one dex; physical routing confidence is separate.
+    /// Explicit spot/foreign-dex movement clears the projection.
+    cross_capacity: FxHashMap<usize, cross_capacity::CrossCapacityProjection>,
+    /// Positive spot USDC can be frozen or remain outside the executing dex. A single-dex portfolio still
+    /// gives an aggregate capacity estimate, but only the no-spot anchor proof may mark routing exact.
+    unified_routing_known: bool,
     /// The assets whose isolated setting or leverage changed in a block, with that block: a fill of the same block may
     /// come before or after the change (review 000435 r1 P2).
     switched: Option<(u64, Vec<(usize, usize)>)>,
@@ -319,6 +330,7 @@ impl AccountMargin {
             isolated_leverage: FxHashMap::default(),
             cross_exposure_seen: FxHashSet::default(),
             cross_capacity: FxHashMap::default(),
+            unified_routing_known: false,
             switched: None,
             margin_updates: None,
             estimated: false,
@@ -330,9 +342,10 @@ impl AccountMargin {
             AccountMode::PortfolioMargin => return stopped(StopReason::PortfolioMargin),
             AccountMode::Unknown(code) => return stopped(StopReason::UnknownAccountMode(code.clone())),
         };
-        // Native capacity is per clearinghouse. Unified routing is equivalent only when there is no
-        // USDC cash or position outside one dex; do not substitute the summed pool in the general case.
+        // Native capacity is per clearinghouse. One-dex holdings can price aggregate collateral even with
+        // spot cash, but execution routing remains estimated when the anchor has funds outside that dex.
         let single_dex = unified.then(|| Self::single_usdc_dex(account, markets)).flatten();
+        let unified_routing_known = single_dex.is_some() && !account.spot.iter().any(|(token, cash)| *token == USDC && *cash != 0);
         let mut cross_exposure_seen = FxHashSet::default();
         let mut cross_capacity = FxHashMap::default();
         let (mut cross, mut isolated, mut isolated_leverage) = (FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
@@ -346,7 +359,7 @@ impl AccountMargin {
                     let market = &markets.perps[coin];
                     Some(cross_capacity::Holding { coin: coin.clone(), size_raw: position.size_raw, leverage, size_decimals: market.size_decimals })
                 }).collect();
-                cross_capacity.insert(state.dex, cross_capacity::CrossCapacitySnapshot { holdings });
+                cross_capacity.insert(state.dex, cross_capacity::CrossCapacityProjection { holdings, advanced: false });
             }
             for position in &state.positions {
                 if let PositionMargin::Isolated { cash_micro, leverage } = position.margin {
@@ -364,12 +377,11 @@ impl AccountMargin {
         } else {
             Pools::PerDex(cross)
         };
-        Self { pools, isolated, isolated_leverage, cross_exposure_seen, cross_capacity, switched: None, margin_updates: None, estimated: false, stop: None }
+        Self { pools, isolated, isolated_leverage, cross_exposure_seen, cross_capacity, unified_routing_known, switched: None, margin_updates: None, estimated: false, stop: None }
     }
 
-    /// A proof of no external USDC funding route at the anchor, not a second cash ledger.
+    /// Identify one USDC dex portfolio. Spot funds do not prove physical execution funding; that is tracked separately.
     fn single_usdc_dex(account: &Account, markets: &Markets) -> Option<usize> {
-        if account.spot.iter().any(|(token, cash)| *token == USDC && *cash != 0) { return None; }
         let mut active = account.dex_states.iter().filter(|state| markets.usdc_dexes[state.dex]).filter(|state|
             state.cash_micro != 0 || state.positions.iter().any(|position| position.size_raw != 0 ||
                 matches!(position.margin, PositionMargin::Isolated { cash_micro, .. } if cash_micro != 0)));
@@ -494,6 +506,7 @@ impl MarginStates {
             if matches!(market.margin_mode, AssetMarginMode::Normal) && !account.isolated_leverage.contains_key(&(market.dex, market.asset)) { continue; }
             if !pools.insert((*user, market.dex)) { continue; }
             if let Some(snapshot) = account.cross_capacity.get(&market.dex) {
+                // Include closed entries: an earlier fill in this same block may reopen one before the isolated fill.
                 coins.extend(snapshot.holdings.iter().map(|held| held.coin.clone()));
             }
         }
@@ -602,7 +615,14 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
     let cash = fill.cash_wei(market.size_decimals, MAX_PERP_DECIMALS - market.size_decimals).map_err(StopReason::Contradiction)?;
     if !isolated {
         account.cross_exposure_seen.insert(market.dex);
-        account.cross_capacity.remove(&market.dex);
+        if let Some(projection) = account.cross_capacity.get_mut(&market.dex) {
+            let start = parse_size_raw(&fill.start_position, market.size_decimals).map_err(StopReason::Contradiction)?;
+            let size = parse_size_raw(&fill.sz, market.size_decimals).map_err(StopReason::Contradiction)?;
+            let delta = if fill.side == Side::Bid { size } else { -size };
+            if !projection.advance(&fill.coin, start, delta).map_err(StopReason::Contradiction)? {
+                account.cross_capacity.remove(&market.dex);
+            }
+        }
         account.add_cross(market.dex, cash);
         return Ok(());
     }
@@ -623,8 +643,8 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
 /// The supplemented rule explains 815/815 opens/increases and 58/58 flips with recorded mark evidence; unknown
 /// execution prices still use the explicitly estimated floor. Funding is capped by available cross margin; six
 /// live cases at 1192650000→1192660000 establish the cash-only path, including five zero/dust final balances.
-/// Static per-dex cross holdings use their complete block mark envelopes for exact capacity. Moving holdings or
-/// ambiguous prices preserve an explicit estimate; raw cash alone is not free margin.
+/// Known cross holdings advance with fills and use execution collateral prices for capacity (EWY1194244100:
+/// free71.006925 caps71.007410). Unknown holdings or ambiguous prices preserve an estimate; raw cash is not free margin.
 ///
 /// `cash_wei` is the fill's whole cash flow (`FillEvent::cash_wei`); cross takes what the position does not.
 fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &FillEvent, cash_wei: i64, leverage: u32) -> Result<(), String> {
@@ -664,7 +684,8 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
     // Native sweeps retain 101% of order reserves; a maker may execute without replenishing from spot.
     // ANTH 1193540000..1193550000 leaves a 665-micro split despite exact fill marks and conserved total.
     // Keep the numerical estimate, but only the existing single-dex proof can establish exact routing.
-    let unified_routing_unknown = account.unified() && !account.cross_capacity.contains_key(&market.dex);
+    let unified_routing_unknown = account.unified() && (!account.unified_routing_known || account.cross_capacity.get(&market.dex)
+        .is_none_or(|projection| projection.advanced && !fill.crossed));
     let margin = |size_raw: i64, released_micro: i64| {
         let cap = capacity.map(|available| available.checked_add(released_micro)
             .ok_or_else(|| context("transfer capacity overflows"))).transpose()?;
@@ -2085,7 +2106,7 @@ pub(crate) mod tests {
                 isolated_settings: vec![] }],
         };
         let mut account = AccountMargin::of(&source(&golden["before"]), &markets);
-        assert!(account.cross_capacity.is_empty(), "spot cash prevents a single-dex proof");
+        assert!(!account.unified_routing_known, "spot cash prevents an exact physical funding proof");
         for (index, row) in golden["fills"].as_array().unwrap().iter().enumerate() {
             let fill: Fill = serde_json::from_value(row["fill"].clone()).unwrap();
             let mark = row["mark_raw"].as_u64().unwrap();
@@ -2127,6 +2148,7 @@ pub(crate) mod tests {
             let mut states = per_dex();
             let mut account = states.accounts.remove(&user(ISOLATED)).unwrap();
             account.pools = Pools::Unified(case["before"]["cross_wei"].as_i64().unwrap());
+            account.unified_routing_known = true; // This arithmetic fixture supplies the available cash, not a multi-dex route.
             account.isolated.clear();
             account.cross_exposure_seen.clear();
             let mut leverage = FxHashMap::default();
@@ -2238,7 +2260,9 @@ pub(crate) mod tests {
                 2 => source.dex_states[1].cash_micro = -1,
                 _ => { let position = source.dex_states[0].positions[0].clone(); source.dex_states[1].positions.push(position); }
             }
-            assert!(AccountMargin::of(&source, &markets).cross_capacity.is_empty());
+            let account = AccountMargin::of(&source, &markets);
+            assert!(!account.unified_routing_known);
+            assert_eq!(account.cross_capacity.is_empty(), variant != 0, "spot preserves only an aggregate capacity estimate");
         }
         let (source, markets, _) = unified_capacity_fixture();
         let seeded = AccountMargin::of(&source, &markets);
@@ -2275,7 +2299,7 @@ pub(crate) mod tests {
             leverage: v["position"].get("l").map_or(20, |l| u32::try_from(l["C"].as_u64().unwrap()).unwrap()),
             size_decimals: u32::try_from(v["size_decimals"].as_u64().unwrap()).unwrap(),
         }).collect();
-        account.cross_capacity.insert(0, cross_capacity::CrossCapacitySnapshot { holdings });
+        account.cross_capacity.insert(0, cross_capacity::CrossCapacityProjection { holdings, advanced: false });
         account.cross_exposure_seen.insert(0);
         let market = PerpMarket { dex: 0, asset: 0, size_decimals: 2, margin_mode: AssetMarginMode::NoCross, default_leverage: 1 };
         for e in golden["events"].as_array().unwrap() {
@@ -2329,7 +2353,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cross_snapshot_proof_is_invalidated_by_cross_fills_or_any_leverage_action() {
+    fn cross_capacity_advances_known_fills_but_withdraws_unknown_holdings_and_leverage_changes() {
         let holder = user(HOLDER);
         for action in [BlockAction::Leverage { asset: 0, is_cross: true, leverage: 20 },
                        BlockAction::Leverage { asset: 0, is_cross: false, leverage: 3 }] {
@@ -2340,6 +2364,10 @@ pub(crate) mod tests {
         }
         let mut states = per_dex();
         states.apply(5, holder, &fill_from("BTC", "B", "82857.6", "0.01", "0.0", "0.1", None));
+        let projection = &states.accounts[&holder].cross_capacity[&0];
+        assert_eq!(projection.holdings.iter().find(|held| held.coin == "BTC").unwrap().size_raw, 11_000);
+        // Repeated/out-of-order startPosition cannot advance the projection a second time.
+        states.apply(6, holder, &fill_from("BTC", "B", "82857.6", "0.01", "0.0", "0.1", None));
         assert!(!states.accounts[&holder].cross_capacity.contains_key(&0));
         assert!(per_dex().accounts[&holder].cross_capacity.contains_key(&0), "fresh anchor restores proof");
         let mut states = self::states(|_| {});

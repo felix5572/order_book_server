@@ -32,10 +32,13 @@ impl FillMarkRange {
     }
 }
 
+pub(crate) type CollateralPrices = Arc<FxHashMap<String, FillMarkRange>>;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct FillMarkPrices {
     height: u64,
-    collateral: Arc<FxHashMap<String, FillMarkRange>>,
+    collateral: CollateralPrices,
+    collateral_by_trade: FxHashMap<Box<str>, FxHashMap<u64, CollateralPrices>>,
     // Both legs must see the union of their possible prices; missing evidence for either leg poisons the trade.
     coins: FxHashMap<Box<str>, FxHashMap<u64, Option<FillMarkRange>>>,
 }
@@ -44,8 +47,16 @@ impl FillMarkPrices {
     pub(super) fn is_empty(&self) -> bool { self.coins.is_empty() }
 
     /// Shared block envelope, containing every observed price, including intermediate round trips.
-    pub(crate) fn collateral(&self, height: u64) -> Option<Arc<FxHashMap<String, FillMarkRange>>> {
+    pub(crate) fn collateral(&self, height: u64) -> Option<CollateralPrices> {
         (height == self.height && !self.collateral.is_empty()).then(|| Arc::clone(&self.collateral))
+    }
+
+    /// Ordinary HIP-3 taker receipts may select one side of the unique oracle write for the entire
+    /// same-dex collateral portfolio. Unknown timing keeps the shared block envelope.
+    pub(crate) fn collateral_for_fill(&self, height: u64, coin: &str, tid: u64) -> Option<CollateralPrices> {
+        if height != self.height { return None; }
+        self.collateral_by_trade.get(coin).and_then(|trades| trades.get(&tid)).map(Arc::clone)
+            .or_else(|| self.collateral(height))
     }
 
     pub(crate) fn get(&self, height: u64, coin: &str, tid: u64) -> Option<FillMarkRange> {
@@ -79,11 +90,12 @@ impl PricesSeen {
 pub(super) struct FillPriceBuilder {
     prices: Vec<PricesSeen>,
     collateral: FxHashMap<String, PricesSeen>,
+    collateral_refinements: Vec<hip3::CollateralRefinement>,
 }
 
 impl FillPriceBuilder {
     pub(super) fn new(fills: &[BlockFill]) -> Self {
-        Self { prices: vec![PricesSeen::default(); fills.len()], collateral: FxHashMap::default() }
+        Self { prices: vec![PricesSeen::default(); fills.len()], collateral: FxHashMap::default(), collateral_refinements: Vec::new() }
     }
 
     pub(super) fn collateral(&mut self, hip3: &FxHashMap<String, Hip3Coin>, native: &NativePrices, inputs: &BlockInputs) {
@@ -120,13 +132,22 @@ impl FillPriceBuilder {
     }
 
     pub(super) fn hip3(&mut self, coins: &FxHashMap<String, Hip3Coin>, inputs: &BlockInputs) {
-        hip3::observe(&mut self.prices, coins, inputs);
+        self.collateral_refinements = hip3::observe(&mut self.prices, coins, inputs);
     }
 
     pub(super) fn finish(self, height: u64, fills: &[BlockFill]) -> FillMarkPrices {
         if fills.is_empty() { return FillMarkPrices::default(); }
         let collateral = self.collateral.into_iter().filter_map(|(coin, seen)| seen.value().map(|price| (coin, price))).collect();
         let mut out = FillMarkPrices { height, collateral: Arc::new(collateral), ..FillMarkPrices::default() };
+        // At most two shared maps per updated dex, never a full portfolio clone per fill/leg.
+        for refinement in self.collateral_refinements {
+            let mut prices = (*out.collateral).clone();
+            prices.extend(refinement.prices);
+            let prices = Arc::new(prices);
+            for (coin, tid) in refinement.trades {
+                out.collateral_by_trade.entry(coin).or_default().insert(tid, Arc::clone(&prices));
+            }
+        }
         for (fill, seen) in fills.iter().zip(self.prices) {
             out.coins.entry(fill.coin.clone()).or_default().entry(fill.tid)
                 .and_modify(|old| *old = old.and_then(|old| seen.value().and_then(|next| old.include(next))))

@@ -40,10 +40,7 @@ enum FillTiming {
 
 impl CoinPrices<'_> {
     fn at(&self, rank: Option<Rank>, taker: Option<FillTiming>, size_decimals: u32, time_ns: Option<u64>, coin: &str, statuses: &BlockStatuses) -> Option<(u64, u32)> {
-        // Invalid/missing evidence cannot be repaired by selecting one side of the update.
-        self.all.value()?;
-        let [update] = self.writes.as_slice() else { return None; };
-        if !update.normal || Some(update.time_ns) != time_ns { return None; }
+        let update = self.unique_write(time_ns)?;
         let rank = rank?;
         let before = match taker? {
             FillTiming::Placed(Placement::BeforeActions) => true,
@@ -58,17 +55,36 @@ impl CoinPrices<'_> {
                 false
             }
         };
+        self.on_side(before, size_decimals, time_ns)
+    }
+
+    fn unique_write(&self, time_ns: Option<u64>) -> Option<&Hip3PriceUpdate> {
+        self.all.value()?;
+        let [update] = self.writes.as_slice() else { return None; };
+        (update.normal && Some(update.time_ns) == time_ns).then_some(*update)
+    }
+
+    fn on_side(&self, before: bool, size_decimals: u32, time_ns: Option<u64>) -> Option<(u64, u32)> {
+        let update = self.unique_write(time_ns)?;
         if before { self.opening } else { exact_price_units(&update.px, size_decimals).ok().map(|px| (px, size_decimals)) }
     }
 }
 
-pub(super) fn observe(prices: &mut [PricesSeen], coins: &FxHashMap<String, Hip3Coin>, inputs: &BlockInputs) {
+/// A phase shares one immutable collateral map across all eligible trades and both legs.
+/// Only already-requested same-dex collateral prices are refined; triggers and multiple/fallback writes retain bounds.
+#[derive(Default)]
+pub(super) struct CollateralRefinement {
+    pub(super) prices: FxHashMap<String, super::FillMarkRange>,
+    pub(super) trades: Vec<(Box<str>, u64)>,
+}
+
+pub(super) fn observe(prices: &mut [PricesSeen], coins: &FxHashMap<String, Hip3Coin>, inputs: &BlockInputs) -> Vec<CollateralRefinement> {
     let BlockInputs { fills, hip3: updates, actions, statuses, system, .. } = inputs;
     let actions = actions.as_ref();
     let mut ranges: FxHashMap<&str, CoinPrices<'_>> = FxHashMap::default();
-    for fill in fills {
-        if let Some(coin) = coins.get(fill.coin.as_ref()) {
-            ranges.entry(&fill.coin).or_insert_with(|| {
+    for name in fills.iter().map(|fill| fill.coin.as_ref()).chain(inputs.collateral_coins.iter().map(String::as_str)) {
+        if let Some(coin) = coins.get(name) {
+            ranges.entry(name).or_insert_with(|| {
                 let opening = coin.mark.map(|mark| (mark.px, coin.size_decimals));
                 let mut all = PricesSeen::default();
                 all.observe(opening);
@@ -113,6 +129,42 @@ pub(super) fn observe(prices: &mut [PricesSeen], coins: &FxHashMap<String, Hip3C
             None => seen.clone_from(&range.all),
         }
     }
+    collateral_refinements(&ranges, &ranks, &takers, coins, inputs)
+}
+
+fn collateral_refinements(
+    ranges: &FxHashMap<&str, CoinPrices<'_>>,
+    ranks: &FxHashMap<&str, Option<(Rank, Option<usize>)>>,
+    takers: &FxHashMap<(&str, u64), Option<Placement>>,
+    coins: &FxHashMap<String, Hip3Coin>,
+    inputs: &BlockInputs,
+) -> Vec<CollateralRefinement> {
+    if inputs.collateral_coins.is_empty() { return Vec::new(); }
+    let mut refinements = Vec::new();
+    for (dex, oracle) in ranks {
+        let Some((rank, _)) = oracle else { continue; };
+        for before in [true, false] {
+            let trades: Vec<_> = takers.iter().filter_map(|((coin, tid), placement)| {
+                if coin.split_once(':').map(|(prefix, _)| prefix) != Some(*dex) { return None; }
+                let on_before = match (*placement)? {
+                    Placement::BeforeActions => true,
+                    Placement::Action(action) if action != *rank => action < *rank,
+                    _ => return None,
+                };
+                (on_before == before).then(|| ((*coin).into(), *tid))
+            }).collect();
+            if trades.is_empty() { continue; }
+            let prices = inputs.collateral_coins.iter().filter_map(|coin| {
+                if coin.split_once(':').map(|(prefix, _)| prefix) != Some(*dex) { return None; }
+                let range = ranges.get(coin.as_str())?;
+                let (px, size_decimals) = range.on_side(before, coins[coin].size_decimals, inputs.actions.as_ref().map(|a| a.time_ns))?;
+                let price = super::FillMarkRange { min_px_raw: px, max_px_raw: px, size_decimals };
+                (range.all.value() != Some(price)).then(|| (coin.clone(), price))
+            }).collect::<FxHashMap<_, _>>();
+            if !prices.is_empty() { refinements.push(CollateralRefinement { prices, trades }); }
+        }
+    }
+    refinements
 }
 
 /// Reconcile the price implied by each source, not an exact action identity. NBIS 1194139926 carries
@@ -268,6 +320,85 @@ mod tests {
         let actions = [book((0, 3, 1), 10), oracle((0, 3, 2), "xyz")];
         assert_eq!(ranges(&[fill(99, 1, false, false)], &actions, &[update(true, "110")], &[]), [range(100, 110)], "maker alone proves no execution rank");
         assert_eq!(ranges(&[fill(10, 1, true, false), fill(10, 1, true, false)], &actions, &[update(true, "110")], &[]), [range(100, 110); 2]);
+    }
+
+    #[test]
+    fn collateral_uses_the_takers_oracle_phase_and_retains_ambiguous_bounds() {
+        let mut coins = FxHashMap::default();
+        for (name, px) in [("xyz:X", 100), ("xyz:A", 200)] {
+            coins.insert(name.into(), Hip3Coin { order_asset: 110_000, oracle: None, size_decimals: 6,
+                mark: Some(StoredMark { px, time_ns: 0 }) });
+        }
+        let fills = vec![fill(10, 1, true, false), fill(99, 1, false, false),
+            fill(20, 2, true, false), fill(30, 3, true, false)];
+        for normal in [true, false] {
+            let actions = MarkActions { height: 1, time_ns: 1,
+                actions: vec![book((0, 3, 1), 10), oracle((0, 3, 2), "xyz"), book((0, 3, 3), 20)] };
+            let updates = vec![update(normal, "110"), Hip3PriceUpdate { normal, oracle: false,
+                coin: "xyz:A".into(), px: "220".into(), time_ns: 1 }];
+            let mut builder = FillPriceBuilder::new(&fills);
+            let mut collateral = PricesSeen::default();
+            collateral.observe(Some((200, 6))); collateral.observe(Some((220, 6)));
+            builder.collateral.insert("xyz:A".into(), collateral);
+            builder.hip3(&coins, &BlockInputs { fills: fills.clone(), hip3: updates, actions: Some(actions),
+                collateral_coins: vec!["xyz:A".into()], ..BlockInputs::default() });
+            let out = builder.finish(1, &fills);
+            let before = out.collateral_for_fill(1, "xyz:X", 1).unwrap();
+            let after = out.collateral_for_fill(1, "xyz:X", 2).unwrap();
+            assert_eq!(before["xyz:A"], if normal { range(200, 200) } else { range(200, 220) });
+            assert_eq!(after["xyz:A"], if normal { range(220, 220) } else { range(200, 220) });
+            assert_eq!(out.collateral_for_fill(1, "xyz:X", 3).unwrap()["xyz:A"], range(200, 220), "unplaced taker");
+            assert!(out.collateral_for_fill(2, "xyz:X", 1).is_none(), "cannot carry prices to another block");
+        }
+    }
+
+    #[test]
+    fn ewy_and_be_recorded_orders_use_pre_write_collateral_in_the_same_block() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../../replay/cross_capacity_windows.json")).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let golden = &case["price_order_golden"];
+            let height = golden["height"].as_u64().unwrap();
+            let time_ns = golden["time_ns"].as_u64().unwrap();
+            let mut coins = FxHashMap::default();
+            let mut updates = Vec::new();
+            for (name, before) in golden["before"].as_object().unwrap() {
+                let decimals = u32::try_from(case["markets"][name]["size_decimals"].as_u64().unwrap()).unwrap();
+                coins.insert(name.clone(), Hip3Coin { order_asset: 110_000, oracle: None, size_decimals: decimals,
+                    mark: Some(StoredMark { px: before.as_u64().unwrap(), time_ns: time_ns - 1 }) });
+                updates.push(Hip3PriceUpdate { normal: true, oracle: false, coin: name.clone(), time_ns,
+                    px: crate::accounts::size::format_size_raw(golden["after"][name].as_i64().unwrap(), 6 - decimals) });
+            }
+            let owner = case["user"].as_str().unwrap().parse().unwrap();
+            let fills: Vec<_> = golden["fills"].as_array().unwrap().iter().map(|fill| {
+                let wire = crate::types::node_data::NodeDataFill(owner, serde_json::from_value(fill.clone()).unwrap());
+                BlockFill::of(&wire)
+            }).collect();
+            let oracle_rank: Rank = serde_json::from_value(golden["ranks"]["oracle"][0].clone()).unwrap();
+            let mut actions = vec![oracle(oracle_rank, "xyz")];
+            for (oid, rank) in golden["ranks"]["orders"].as_object().unwrap() {
+                actions.push(book(serde_json::from_value(rank.clone()).unwrap(), oid.parse().unwrap()));
+            }
+            let mut builder = FillPriceBuilder::new(&fills);
+            for name in coins.keys() {
+                let mut seen = PricesSeen::default();
+                seen.observe(Some((golden["before"][name].as_u64().unwrap(), coins[name].size_decimals)));
+                seen.observe(Some((golden["after"][name].as_u64().unwrap(), coins[name].size_decimals)));
+                builder.collateral.insert(name.clone(), seen);
+            }
+            builder.hip3(&coins, &BlockInputs { fills: fills.clone(), hip3: updates,
+                actions: Some(MarkActions { height, time_ns, actions }), collateral_coins: coins.keys().cloned().collect(),
+                ..BlockInputs::default() });
+            let prices = builder.finish(height, &fills);
+            for fill in &fills {
+                let rank: Rank = serde_json::from_value(golden["ranks"]["orders"][fill.oid.to_string()].clone()).unwrap();
+                assert!(rank < oracle_rank, "both raw examples execute before their price update");
+                let collateral = prices.collateral_for_fill(height, &fill.coin, fill.tid).unwrap();
+                for (coin, before) in golden["before"].as_object().unwrap() {
+                    assert_eq!(collateral[coin].min_px_raw, before.as_u64().unwrap(), "{height} {coin}");
+                    assert_eq!(collateral[coin].max_px_raw, before.as_u64().unwrap(), "{height} {coin}");
+                }
+            }
+        }
     }
 
     fn trigger_cases() -> serde_json::Value {
