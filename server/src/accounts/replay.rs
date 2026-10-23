@@ -1770,7 +1770,9 @@ pub(crate) mod tests {
                     usdc_wei(funding["funding_amount"].as_str().unwrap()).unwrap()).unwrap();
                 continue;
             }
-            let prices = if event.get("triggered_status").is_some() {
+            let prices = if let Some(interleaved) = event.get("interleaved_statuses") {
+                crate::accounts::marks::fill_prices::interleaved_golden_prices(interleaved)
+            } else if event.get("triggered_status").is_some() {
                 crate::accounts::marks::fill_prices::trigger_golden_prices(event)
             } else {
                 crate::accounts::marks::fill_prices::golden_prices(case, event)
@@ -1794,6 +1796,12 @@ pub(crate) mod tests {
     fn trailing_stop_marks_reconcile_mrna_and_crcl_cash_intervals() {
         let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/trailing_stop_cash_goldens.json")).unwrap();
         for case in golden["cases"].as_array().unwrap() { check_hip3_execution_cash(case, true); }
+    }
+
+    #[test]
+    fn interleaved_stop_reconciles_the_full_dram_cash_interval() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/hip3/interleaved_golden.json")).unwrap();
+        check_hip3_execution_cash(&golden["case"], true);
     }
 
     #[test]

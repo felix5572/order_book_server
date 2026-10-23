@@ -81,3 +81,65 @@ pub(crate) fn takers<'a>(fills: &'a [BlockFill], actions: &MarkActions, triggere
     }
     out
 }
+
+
+/// A triggered order can execute between two ordinary orders of one batch (DRAM 1193759676).
+/// The open/triggered/filled stream brackets its entire execution. Receipt-backed opens from the
+/// same action prove an action rank even when the trigger was already eligible before setOracle.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct InterleavedTriggers {
+    // Every open is a boundary; None prevents crossing an unrecognized/trigger order.
+    opens: Vec<Option<(u64, alloy::primitives::Address, u64)>>,
+    spans: FxHashMap<u64, Option<(usize, bool)>>,
+}
+
+impl InterleavedTriggers {
+    pub(super) fn observe(&mut self, status: &crate::types::node_data::NodeDataOrderStatus) {
+        let order = &status.order;
+        match status.status.as_str() {
+            "open" => self.opens.push((order.order_type == "Limit" && !order.is_trigger)
+                .then_some((order.oid, status.user, order.timestamp))),
+            "triggered" => {
+                self.spans.entry(order.oid).and_modify(|span| *span = None)
+                    .or_insert(Some((self.opens.len(), false)));
+            }
+            "filled" => {
+                if let Some(span) = self.spans.get_mut(&order.oid) {
+                    *span = span.and_then(|(index, filled)| (!filled && index == self.opens.len())
+                        .then_some((index, true)));
+                }
+            }
+            _ => {},
+        }
+    }
+
+    pub(super) fn len(&self) -> usize { self.opens.len() + self.spans.len() }
+
+    pub(super) fn attributed(&self, actions: &MarkActions, triggered: &FxHashSet<u64>) -> FxHashMap<u64, Rank> {
+        if self.spans.is_empty() { return FxHashMap::default(); }
+        let mut created = FxHashMap::default();
+        for action in &actions.actions {
+            if let MarkAction::Book(book) = &action.action {
+                for oid in &book.created {
+                    created.entry(*oid).and_modify(|owner| *owner = None)
+                        .or_insert_with(|| action.user.map(|user| (action.rank, user)));
+                }
+            }
+        }
+        let mut counts = FxHashMap::default();
+        for (oid, _, _) in self.opens.iter().flatten() { *counts.entry(*oid).or_insert(0_usize) += 1; }
+        let rank = |open: &Option<(u64, alloy::primitives::Address, u64)>| {
+            let (oid, user, time_ms) = (*open)?;
+            if time_ms != actions.time_ns / 1_000_000 || triggered.contains(&oid) || counts[&oid] != 1 { return None; }
+            let (rank, owner) = created.get(&oid).copied().flatten()?;
+            (owner == user).then_some(rank)
+        };
+        self.spans.iter().filter_map(|(oid, span)| {
+            let (index, complete) = (*span)?;
+            if !complete || index == 0 { return None; }
+            let before = rank(&self.opens[index - 1])?;
+            let after = rank(self.opens.get(index)?)?;
+            (before == after).then_some((*oid, before))
+        }).collect()
+    }
+}

@@ -122,6 +122,7 @@ pub(crate) struct BlockStatuses {
     /// Automatic close orders produced by vault withdrawals, not ordinary order receipts.
     vault_closes: vault::VaultCloses,
     replacements: replacement::Replacements,
+    interleaved_triggers: fill_order::InterleavedTriggers,
 }
 
 /// An order as a status names it.
@@ -159,6 +160,7 @@ impl BlockStatuses {
             out.filled_iocs.observe(&status)?;
             out.vault_closes.observe(&status);
             out.replacements.observe(&status)?;
+            out.interleaved_triggers.observe(&status);
             match (status.status.as_str(), &status.order.cloid) {
                 ("canceled", Some(cloid)) => {
                     out.cancelled_cloids.entry((status.user, cloid.clone())).or_insert(status.order.oid);
@@ -181,12 +183,16 @@ impl BlockStatuses {
         self.replacements.attributed(actions, asset, system_claims)
     }
 
+    pub(crate) fn interleaved_trigger_ranks(&self, actions: &MarkActions) -> FxHashMap<u64, Rank> {
+        self.interleaved_triggers.attributed(actions, &self.triggered)
+    }
+
     pub(crate) fn system_ioc_cancels(&self, oid: u64) -> Vec<u64> {
         self.rejected_iocs.cancels_for(oid)
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len() + self.vault_closes.len() + self.replacements.len() + self.filled_iocs.len()
+        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len() + self.vault_closes.len() + self.replacements.len() + self.filled_iocs.len() + self.interleaved_triggers.len()
     }
 }
 

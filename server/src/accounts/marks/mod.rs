@@ -1063,13 +1063,13 @@ pub(crate) mod tests {
         run(&mut marks, 990..=999, &[(992, "359.0")]);
         assert_eq!((marks.log.base, marks.log.inputs), (None, 0), "nothing before the first grid height");
         run(&mut marks, 1_000..=1_003, &[(1_002, "359.5")]);
-        let logged = "the times of 1001 to 1003; at 1002 an update, two diffs, a fill, a status";
-        assert_eq!((marks.log.base, marks.log.inputs), (Some(1_000), 8), "{logged}");
+        let logged = "the times of 1001 to 1003; at 1002 an update, two diffs, a fill, a status and its trigger-bracket boundary";
+        assert_eq!((marks.log.base, marks.log.inputs), (Some(1_000), 9), "{logged}");
         marks.install(seed(1_000));
         run(&mut marks, 1_004..=1_099, &[(1_050, "360.0")]);
         assert_eq!((marks.log.base, marks.log.inputs), (None, 0), "the installed seed covers what a later one needs");
         run(&mut marks, 1_100..=1_101, &[(1_101, "360.5")]);
-        assert_eq!((marks.log.base, marks.log.inputs), (Some(1_100), 6), "1101: its time and five inputs");
+        assert_eq!((marks.log.base, marks.log.inputs), (Some(1_100), 7), "1101: its time and six retained input projections");
         let mut ahead = NodeMarks::new(GRID, STARTED_MS);
         run(&mut ahead, 1_098..=1_098, &[]);
         assert_eq!(ahead.install(seed(1_100)).rebuild, Rebuild::Ahead);
@@ -1345,11 +1345,11 @@ pub(crate) mod tests {
         run(&mut marks, 995..=995, &[]);
         marks.install(seed(995));
         run(&mut marks, 996..=996, &[(996, "359.0")]);
-        marks.log = InputLog::new(6);
+        marks.log = InputLog::new(7);
         marks.log.restart(996);
         run(&mut marks, 997..=997, &[(997, "359.5")]);
         let report = marks.apply_block(998, MarkInputs { book_diffs: no_op_diffs(998), ..MarkInputs::default() });
-        assert!(report.log_overflowed, "6 inputs at 997 (its time included), 3 more at 998");
+        assert!(report.log_overflowed, "7 retained inputs at 997 (time and status projections included), 3 more at 998");
         let seed_at = AnchorInfo { height: 995, time_ms: SEED_TIME_MS + 995 };
         for stream in [Stream::Hip3OracleUpdates, Stream::BookDiffs] {
             let lost = Unavailable::DataLoss { stream, bound: LossBound::Block(998) };

@@ -907,3 +907,17 @@ Reach out to us at [hyperpc.app](https://hyperpc.app) to discuss what you need.
 ## License
 
 MIT
+
+
+HIP-3 条件单的成交 mark 另有一条实际时序证据（BM `1193759676`，`io:DRAM`）：
+同一个普通批量下单动作的两张订单先后产生 `open`，中间夹着旧条件单的完整
+`triggered` → 成交 → `filled`。两个 `open` 的 oid 必须由同一成功动作的回执唯一确认，
+用户及本块时间一致，订单不能本身是条件单；重复、缺尾、跨动作和中途另一张 `open`
+都会保留价格区间。完整夹在该动作内的条件单使用该动作执行时的 mark，不能只靠
+“本次价格更新跨过触发价”判断。此例两次 mark 都已满足止损条件，但 stop 实际在后一个
+bundle 的 ALO 批次内执行，因而使用前一 bundle 已写入的 `46.119`，而非块初 `46.112`。
+该归属只细化逐仓现金回放的取价，不修改节点最终 mark 或主站 EMA 重建。
+金样本 `server/src/accounts/marks/fill_prices/hip3/interleaved_golden.json` 保留真实动作、回执、
+连续状态和成交双腿；`1193750000→1193760000` 的 83 条成交/资金费事件逐仓现金回归由
+`-3702.801675` 修正为 checkpoint 的 `-3701.998545` USDC。现金测试显式提供充足全仓资金，
+验证的是取价和该逐仓账本，不声称已重放此账户其他币种的全部现金及可用额度。

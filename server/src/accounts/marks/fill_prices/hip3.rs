@@ -3,7 +3,9 @@
 //! the preceding/following mark (ORCL 1193548256); possible `CoreWriter` ownership prevents that attribution.
 //! A recorded trigger threshold crossed by the sole Normal write consumes that new mark (BM NET1193124226, SPCX1193126889).
 //! Trailing Stop Market uses its realized triggered-status threshold (MRNA1193502103), not a future trailing estimate.
-//! Fallback/multiple writes, already-satisfied or unrecognized triggers and unreceipted effects keep the full range.
+//! A complete triggered-to-filled run bracketed by receipt-backed opens of one ordinary action proves that action
+//! rank (DRAM1193759676), including already-eligible triggers executed in a later bundle. Other already-satisfied
+//! triggers, fallback/multiple writes and unreceipted effects keep the full range.
 //! This refines cash inputs only: the node-mark owner still consumes every written price unchanged.
 
 use rustc_hash::FxHashMap;
@@ -75,6 +77,8 @@ pub(super) fn observe(prices: &mut [PricesSeen], coins: &FxHashMap<String, Hip3C
         }
     }
     let ranks = actions.map(oracle_ranks).unwrap_or_default();
+    let trigger_ranks = actions.filter(|_| !ranks.is_empty())
+        .map(|a| statuses.interleaved_trigger_ranks(a)).unwrap_or_default();
     // No receipt scan/allocation on quiet blocks or blocks with only unplaced fallback writes.
     let takers = actions.filter(|_| !ranks.is_empty()).map(|a| {
         let asset = |coin: &str| coins.get(coin).map(|c| c.order_asset);
@@ -85,7 +89,10 @@ pub(super) fn observe(prices: &mut [PricesSeen], coins: &FxHashMap<String, Hip3C
     for (fill, seen) in fills.iter().zip(prices) {
         let Some(range) = ranges.get(fill.coin.as_ref()) else { continue; };
         let rank = fill.coin.split_once(':').and_then(|(dex, _)| ranks.get(dex)).copied().flatten();
-        let taker = takers.get(&(fill.coin.as_ref(), fill.tid)).copied().flatten();
+        let taker = takers.get(&(fill.coin.as_ref(), fill.tid)).copied().flatten().map(|placement| match placement {
+            Placement::Trigger(oid) => trigger_ranks.get(&oid).copied().map_or(placement, Placement::Action),
+            other => other,
+        });
         match range.at(rank, taker, coins[fill.coin.as_ref()].size_decimals, actions.map(|a| a.time_ns), &fill.coin, statuses) {
             Some(px) => seen.observe(Some(px)),
             None => seen.clone_from(&range.all),
@@ -401,3 +408,9 @@ mod tests {
 
 #[cfg(test)]
 mod modify_tests;
+
+
+#[cfg(test)]
+mod interleaved_tests;
+#[cfg(test)]
+pub(crate) use interleaved_tests::interleaved_golden_prices;

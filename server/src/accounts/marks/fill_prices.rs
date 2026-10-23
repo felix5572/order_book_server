@@ -4,7 +4,7 @@
 //! bounds produce the same integer margin transfer, that transfer is exact even when the mark itself is not pinned.
 
 #[cfg(test)]
-pub(crate) use hip3::{golden_prices, trigger_golden_prices};
+pub(crate) use hip3::{golden_prices, trigger_golden_prices, interleaved_golden_prices};
 mod hip3;
 mod liquidation;
 
