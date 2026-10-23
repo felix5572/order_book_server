@@ -297,7 +297,8 @@ pub(crate) struct AccountMargin {
     /// execution-time cross marks, which the isolated fill's own mark cannot establish.
     cross_exposure_seen: FxHashSet<usize>,
     /// Frozen cross holdings from the checkpoint, not another live position book. Any cross fill or leverage
-    /// action removes that pool's proof until reseeding. Only Standard/Disabled per-dex pools consume it.
+    /// action removes that pool's proof until reseeding. A Unified account may consume a single-dex
+    /// proof only while all USDC cash and positions stay in that dex; spot/foreign-dex movement clears it.
     cross_capacity: FxHashMap<usize, cross_capacity::CrossCapacitySnapshot>,
     /// The assets whose isolated setting or leverage changed in a block, with that block: a fill of the same block may
     /// come before or after the change (review 000435 r1 P2).
@@ -329,12 +330,15 @@ impl AccountMargin {
             AccountMode::PortfolioMargin => return stopped(StopReason::PortfolioMargin),
             AccountMode::Unknown(code) => return stopped(StopReason::UnknownAccountMode(code.clone())),
         };
+        // Native capacity is per clearinghouse. Unified routing is equivalent only when there is no
+        // USDC cash or position outside one dex; do not substitute the summed pool in the general case.
+        let single_dex = unified.then(|| Self::single_usdc_dex(account, markets)).flatten();
         let mut cross_exposure_seen = FxHashSet::default();
         let mut cross_capacity = FxHashMap::default();
         let (mut cross, mut isolated, mut isolated_leverage) = (FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
         for state in account.dex_states.iter().filter(|state| markets.usdc_dexes[state.dex]) {
             cross.insert(state.dex, state.cash_micro * WEI_PER_MICRO);
-            if !unified {
+            if !unified || single_dex == Some(state.dex) {
                 let holdings = state.positions.iter().filter_map(|position| {
                     let PositionMargin::Cross { leverage } = position.margin else { return None; };
                     if position.size_raw == 0 { return None; }
@@ -361,6 +365,16 @@ impl AccountMargin {
             Pools::PerDex(cross)
         };
         Self { pools, isolated, isolated_leverage, cross_exposure_seen, cross_capacity, switched: None, margin_updates: None, estimated: false, stop: None }
+    }
+
+    /// A proof of no external USDC funding route at the anchor, not a second cash ledger.
+    fn single_usdc_dex(account: &Account, markets: &Markets) -> Option<usize> {
+        if account.spot.iter().any(|(token, cash)| *token == USDC && *cash != 0) { return None; }
+        let mut active = account.dex_states.iter().filter(|state| markets.usdc_dexes[state.dex]).filter(|state|
+            state.cash_micro != 0 || state.positions.iter().any(|position| position.size_raw != 0 ||
+                matches!(position.margin, PositionMargin::Isolated { cash_micro, .. } if cash_micro != 0)));
+        let dex = active.next()?.dex;
+        active.next().is_none().then_some(dex)
     }
 
     /// Evidence text: pools by dex index (or the unified pool), isolated cash by "dex:asset", in USDC.
@@ -410,6 +424,9 @@ impl AccountMargin {
 
     /// Adds to a USDC dex's cross cash (a unified account's pool).
     fn add_cross(&mut self, dex: usize, wei: i64) {
+        if self.unified() && !self.cross_capacity.contains_key(&dex) {
+            self.cross_capacity.clear();
+        }
         match &mut self.pools {
             Pools::PerDex(cross) => *cross.entry(dex).or_default() += wei,
             Pools::Unified(pool) => *pool += wei,
@@ -429,8 +446,9 @@ impl AccountMargin {
     }
 
     /// Adds to spot USDC: only a unified account's pool counts it.
-    const fn add_spot(&mut self, wei: i64) {
+    fn add_spot(&mut self, wei: i64) {
         if let Pools::Unified(pool) = &mut self.pools {
+            if wei != 0 { self.cross_capacity.clear(); }
             *pool += wei;
         }
     }
@@ -471,7 +489,7 @@ impl MarginStates {
         let mut pools = FxHashSet::default();
         let mut coins = FxHashSet::default();
         for crate::types::node_data::NodeDataFill(user, fill) in fills {
-            let Some(account) = self.accounts.get(user).filter(|account| account.stop.is_none() && !account.unified()) else { continue; };
+            let Some(account) = self.accounts.get(user).filter(|account| account.stop.is_none()) else { continue; };
             let Some(market) = self.markets.perps.get(&fill.coin) else { continue; };
             if matches!(market.margin_mode, AssetMarginMode::Normal) && !account.isolated_leverage.contains_key(&(market.dex, market.asset)) { continue; }
             if !pools.insert((*user, market.dex)) { continue; }
@@ -638,6 +656,7 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
         Some(capacity) => Some(capacity),
         None => match (&account.pools, account.cross_capacity.get(&market.dex), &fill.collateral_marks) {
             (Pools::PerDex(cash), Some(snapshot), Some(prices)) => snapshot.available_micro(cash.get(&market.dex).copied().unwrap_or(0), prices)?,
+            (Pools::Unified(cash), Some(snapshot), Some(prices)) => snapshot.available_micro(*cash, prices)?,
             _ => None,
         },
     };
@@ -2044,6 +2063,104 @@ pub(crate) mod tests {
             assert_eq!(account.isolated, expected, "{}", case["user"]);
             assert_eq!(account.estimated, case["expected_estimated"].as_bool().unwrap(), "{}", case["user"]);
         }
+    }
+
+    fn unified_capacity_fixture() -> (Account, Markets, serde_json::Value) {
+        use crate::accounts::checkpoint::{DexAccount, Position};
+        let golden: serde_json::Value = serde_json::from_str(include_str!("replay/unified_capacity_golden.json")).unwrap();
+        let mut markets = per_dex().markets;
+        markets.usdc_dexes = golden["dex_collateral_names"].as_array().unwrap().iter().map(|name| name.as_str().unwrap() == "USDC").collect();
+        markets.asset_names.resize_with(markets.usdc_dexes.len(), Vec::new);
+        markets.asset_names[0] = vec![String::new(); 234];
+        for (asset, meta) in golden["markets"].as_object().unwrap() {
+            let asset = asset.parse::<usize>().unwrap();
+            let coin = meta["name"].as_str().unwrap();
+            markets.asset_names[0][asset] = coin.into();
+            markets.action_assets.insert(u32::try_from(asset).unwrap(), coin.into());
+            markets.perps.insert(coin.into(), PerpMarket { dex: 0, asset,
+                size_decimals: u32::try_from(meta["szDecimals"].as_u64().unwrap()).unwrap(),
+                margin_mode: AssetMarginMode::Normal, default_leverage: 10 });
+        }
+        let dex_states = golden["before"].as_array().unwrap().iter().map(|dex| {
+            let mut positions = Vec::new();
+            let mut isolated_settings = Vec::new();
+            for pair in dex["positions"].as_array().unwrap() {
+                let asset = usize::try_from(pair[0].as_u64().unwrap()).unwrap() % 10_000;
+                let raw = &pair[1];
+                let size_raw = raw.get("s").map_or(0, |size| size.as_i64().unwrap());
+                let margin = if let Some(iso) = raw["l"].get("I") {
+                    let leverage = u32::try_from(iso["l"].as_u64().unwrap()).unwrap();
+                    if size_raw == 0 { isolated_settings.push((asset, leverage)); continue; }
+                    PositionMargin::Isolated { cash_micro: iso["u"].as_i64().unwrap(), leverage }
+                } else {
+                    if size_raw == 0 { continue; }
+                    PositionMargin::Cross { leverage: u32::try_from(raw["l"]["C"].as_u64().unwrap()).unwrap() }
+                };
+                positions.push(Position { asset, size_raw, margin, table_id: raw.get("M").map_or(20, |v| u32::try_from(v.as_u64().unwrap()).unwrap()) });
+            }
+            DexAccount { dex: usize::try_from(dex["dex"].as_u64().unwrap()).unwrap(), cash_micro: dex["cash_micro"].as_i64().unwrap(), positions, isolated_settings }
+        }).collect();
+        (Account { mode: AccountMode::Unified, spot: vec![], lending: vec![], dex_states }, markets, golden)
+    }
+
+    #[test]
+    fn unified_single_dex_capacity_closes_the_recorded_pump_xmr_cash_split() {
+        let (source, markets, golden) = unified_capacity_fixture();
+        let mut account = AccountMargin::of(&source, &markets);
+        assert_eq!(account.cross_capacity.len(), 1);
+        assert_eq!(account.cross_capacity[&0].holdings[0].coin, "XMR");
+        let holder = user(golden["provenance"]["user"].as_str().unwrap());
+        let fill: Fill = serde_json::from_value(golden["fill"].clone()).unwrap();
+        let requested = MarginStates { markets: markets.clone(), accounts: [(holder, account.clone())].into_iter().collect() }
+            .collateral_coins([crate::types::node_data::NodeDataFill(holder, fill.clone())].iter());
+        assert_eq!(requested, ["XMR"]);
+        let mut event = FillEvent::at_mark(&fill, Some(FillMarkRange { min_px_raw: 4_679, max_px_raw: 4_679, size_decimals: 0 })).unwrap();
+        event.collateral_marks = Some(Arc::new([("XMR".into(), FillMarkRange { min_px_raw: 611_170, max_px_raw: 611_170, size_decimals: 3 })].into_iter().collect()));
+        let before = totals(&account)[&0];
+        let flow = event.cash_wei(0, 6).unwrap();
+        apply_perp_fill(&mut account, &markets, 1_193_836_595, &event).unwrap();
+        assert_eq!(account.isolated[&(0, 200)], 3_741_528_674 * WEI_PER_MICRO);
+        assert_eq!(account.pools, Pools::Unified(1_035_566_448 * WEI_PER_MICRO));
+        assert_eq!(totals(&account)[&0], before + flow);
+        assert!(!account.estimated);
+        for missing in [true, false] {
+            let mut uncertain = AccountMargin::of(&source, &markets);
+            let mut fill = event.clone();
+            fill.collateral_marks = if missing { None } else { Some(Arc::new([("XMR".into(), FillMarkRange { min_px_raw: 611_170, max_px_raw: 611_171, size_decimals: 3 })].into_iter().collect())) };
+            apply_perp_fill(&mut uncertain, &markets, 1_193_836_595, &fill).unwrap();
+            assert!(uncertain.estimated, "missing or varying collateral prices cannot be declared exact");
+            assert_eq!(uncertain.isolated[&(0, 200)] - account.isolated[&(0, 200)], 388_913 * WEI_PER_MICRO);
+        }
+    }
+
+    #[test]
+    fn unified_capacity_proof_excludes_foreign_funds_and_never_recovers_without_a_seed() {
+        for variant in 0..4 {
+            let (mut source, markets, _) = unified_capacity_fixture();
+            match variant {
+                0 => source.spot.push((USDC, 1)),
+                1 => source.dex_states[1].cash_micro = 1,
+                2 => source.dex_states[1].cash_micro = -1,
+                _ => { let position = source.dex_states[0].positions[0].clone(); source.dex_states[1].positions.push(position); }
+            }
+            assert!(AccountMargin::of(&source, &markets).cross_capacity.is_empty());
+        }
+        let (source, markets, _) = unified_capacity_fixture();
+        let seeded = AccountMargin::of(&source, &markets);
+        let mut local = seeded.clone();
+        local.add_cross(0, 100);
+        assert!(local.cross_capacity.contains_key(&0), "local cash movement preserves the holding proof");
+        for spot in [false, true] {
+            let mut account = seeded.clone();
+            if spot { account.add_spot(1); account.add_spot(-1); }
+            else { account.add_cross(1, 0); }
+            assert!(account.cross_capacity.is_empty(), "foreign exposure is invalid even if net cash movement is zero");
+            account.add_cross(0, 1);
+            assert!(account.cross_capacity.is_empty(), "only a checkpoint rebuild restores this proof");
+        }
+        let mut replay = MarginStates { markets, accounts: [(user(HOLDER), seeded)].into_iter().collect() };
+        replay.apply(10, user(HOLDER), &AccountEvent::Action(BlockAction::Leverage { asset: 224, is_cross: true, leverage: 4 }));
+        assert!(replay.accounts[&user(HOLDER)].cross_capacity.is_empty());
     }
 
     #[test]
