@@ -803,6 +803,10 @@ impl AccountBook {
         }
     }
 
+    pub(crate) fn routing_users(&self) -> impl Iterator<Item = Address> + '_ {
+        self.replay.iter().flat_map(|replay| replay.anchored.routing_users())
+    }
+
     pub(crate) fn routing_coin(&self, user: &Address) -> Option<&str> {
         self.replay.as_ref()?.anchored.routing_coin(user)
     }

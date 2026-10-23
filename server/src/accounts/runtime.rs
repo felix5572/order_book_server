@@ -754,7 +754,7 @@ fn apply_assembly(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, 
         let mut routing = super::cash_routing::RoutingBlock::of(book, &inputs, &fills, marks, &actions, &misc_events);
         let cash_order = super::cash_order::MarginOrder::of(&actions, &fills, &inputs);
         let mark_report = marks.apply_block(height, inputs);
-        routing.require_trusted(marks.availability().is_ok());
+        routing.require_trusted(marks.availability().is_ok(), book);
         let (changed, dropped) = book.apply_routing(height, routing.before);
         touched.absorb(changed);
         report_dropped_marks(diagnostics, height, dropped);

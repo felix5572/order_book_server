@@ -1001,3 +1001,26 @@ contains 50 native reserve and 90 native maker-size cases against archived binar
 last-ALO tracker condition, the ANTH nine-fill regression ends at 7.210095 USDC rather than 7.210760, removing
 the 665-micro allocation residual while conserving total cash at every fill. The older raw-history regression
 remains estimated because the complete historical tracker was not archived; no fixed 665-micro adjustment exists.
+
+
+Unified other-dex order-reserve capacity (GOLD)
+----------------------------------------------
+
+A receipt-backed single ordinary IOC may now use a tighter aggregate capacity bound when another USDC dex's
+cash is retained for resting orders. The replay excludes `min(dex cash, trunc(f64(aggregate order reserve) * 1.01))`
+for those other dexes. It verifies the checkpoint tracker against every per-asset reservation and requires zero
+positions on its reserved assets, so intervening mark changes cannot change that requirement. Other held positions
+must be isolated; lending, frozen spot USDC, cross exposure and ambiguous execution-market selection are excluded.
+
+The bound is retained only with continuous account-input coverage. A foreign-market order/fill, funding, cash or
+leverage action, mixed or missing IOC evidence, or untrusted mark history discards it until reseeding. The IOC
+needs one original request, one placed receipt, open/terminal IOC statuses and only that order's fills; a batch
+with one successful order and another rejected order is not equivalent. Later blocks need a new IOC boundary.
+This is an available-collateral bound and stays `cashEstimated`; it is not a general Unified sweep scheduler.
+
+`replay/gold_other_dex_golden.json` preserves the recorded 1194470000→1194480000 endpoints, tracker, request,
+receipt, statuses and six fills at block 1194477717, plus archived-client `6911b792` intermediate results.
+Main-dex cash 456.515934 USDC is entirely retained by order reserve 451.995975 USDC. Excluding it leaves
+171.163023 USDC from spot. All six steps match the native supplied-capacity arithmetic, ending at isolated cash
+11479.565555 USDC rather than 11494.025270, correcting the 14.459715 USDC split while conserving total cash.
+The golden regression is offline; live rollout and generic routing confidence are separate acceptance steps.

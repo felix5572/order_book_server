@@ -37,11 +37,13 @@ impl Reserve {
         i64::try_from(requirement / u64::from(self.leverage)).ok()
     }
 
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-    pub(crate) fn retained_micro(&self) -> Option<i64> {
-        // The client multiplies the aggregate reserve by f64(1.01), then truncates. Exact rational 101/100 can
-        // differ by a micro at floating-point boundaries. Restrict to the measured signed finite-money domain.
-        let value = self.required_micro()? as f64 * 1.01;
-        (value >= 0.0 && value < i64::MAX as f64).then_some(value as i64)
-    }
+    pub(crate) fn retained_micro(&self) -> Option<i64> { retained_micro(self.required_micro()?) }
+}
+
+/// Native 0x3c92a80 retains 101% of the aggregate reserve, not a rounded sum of per-asset retention.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub(crate) fn retained_micro(reserve_micro: i64) -> Option<i64> {
+    // f64 multiply then truncate: rational 101/100 differs at floating-point boundaries.
+    let value = reserve_micro as f64 * 1.01;
+    (value >= 0.0 && value < i64::MAX as f64).then_some(value as i64)
 }

@@ -1,4 +1,5 @@
-//! Narrow physical-funding projection for an isolated-only, single-market Unified account.
+//! Scoped Unified funding: an isolated-only maker balance, or an ordinary IOC capacity bound excluding
+//! unchanged zero-position order reservations on other dexes. Both paths preserve the estimated boundary.
 //! The aggregate pool remains the cash authority. This projection distinguishes a resting order's retained cash
 //! from spot cash. Native 6911b792: 0x44c9000 reserve, 0x3c92a80 101% retention, 0x5b370f0 order prefund/sweep.
 //! Maker admission uses the observed fee as a rate estimate; its caller's encoding and deferred sweep sets are
@@ -12,10 +13,14 @@ use crate::{accounts::{checkpoint::{AccountMode, CheckpointAccounts, PositionMar
     usdc::WEI_PER_MICRO}, order_book::Side};
 use super::{AccountMargin, FillEvent, Markets, Pools};
 
+mod other_dex;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RoutingUpdate {
     /// A whole block with only receipt-backed resting/cancel updates for this account and no cash event/fill.
     Orders { changes: Vec<OrderChange>, mark_raw: Option<u64>, prefund: bool },
+    /// Receipt/status-backed ordinary IOC; only the other-dex reservation bound survives this boundary.
+    OrdinaryIoc,
     /// Competing cash/order events or missing attribution: forget capacity and tracker until the next anchor.
     Unavailable,
 }
@@ -30,6 +35,13 @@ pub(crate) struct OrderChange {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum FundingPath {
+    RestingMaker,
+    /// Known locked funds bound available collateral; they do not establish physical prefunding/sweep order.
+    OtherDexReserve { locked_micro: i64, ioc_block: Option<u64> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RoutingProjection {
     coin: String,
     decimals: u32,
@@ -38,6 +50,7 @@ pub(super) struct RoutingProjection {
     cash_micro: Option<i64>,
     last_fill_block: Option<u64>,
     tracker_trusted: bool,
+    path: FundingPath,
 }
 
 impl RoutingProjection {
@@ -47,6 +60,10 @@ impl RoutingProjection {
         if checkpoint.order_trackers.iter().any(Option::is_none) { return result; }
         for (user, account) in &checkpoint.accounts {
             if account.mode != AccountMode::Unified || checkpoint.spot_usdc_holds.get(user).copied().unwrap_or(0) != 0 { continue; }
+            if let Some(route) = Self::other_dex_seed(checkpoint, markets, user, account) {
+                result.insert(*user, route);
+                continue;
+            }
             let Some(dex) = AccountMargin::single_usdc_dex(account, markets) else { continue; };
             let Some(state) = account.dex_states.iter().find(|state| state.dex == dex) else { continue; };
             if state.positions.len() != 1 || state.cash_micro < 0 { continue; }
@@ -78,7 +95,7 @@ impl RoutingProjection {
                 _ => continue,
             };
             result.insert(*user, Self { coin: coin.clone(), decimals: markets.perps[coin].size_decimals,
-                reserve, cash_micro: Some(state.cash_micro), last_fill_block: None, tracker_trusted: true });
+                reserve, cash_micro: Some(state.cash_micro), last_fill_block: None, tracker_trusted: true, path: FundingPath::RestingMaker });
         }
         result
     }
@@ -89,7 +106,7 @@ impl RoutingProjection {
 
     pub(super) fn orders(&mut self, changes: &[OrderChange], mark_raw: Option<u64>, prefund: bool, aggregate_wei: i64) -> Option<()> {
         self.cash_micro = None;
-        if !self.tracker_trusted { return None; }
+        if !self.tracker_trusted || self.path != FundingPath::RestingMaker { return None; }
         for change in changes {
             if change.coin != self.coin { return None; }
             let px = u64::try_from(parse_size_raw(&change.px, 6 - self.decimals).ok()?).ok()?;
@@ -116,7 +133,14 @@ impl RoutingProjection {
     }
 
     pub(super) fn capacity(&mut self, block: u64, fill: &FillEvent, cash_before: i64, aggregate_wei: i64) -> Option<i64> {
-        let capacity = self.tracker_trusted.then(|| self.maker_capacity(block, fill, cash_before, aggregate_wei)).flatten();
+        if !self.tracker_trusted { self.cash_micro = None; return None; }
+        let capacity = match self.path {
+            FundingPath::RestingMaker => self.maker_capacity(block, fill, cash_before, aggregate_wei),
+            FundingPath::OtherDexReserve { locked_micro, ioc_block: Some(height) }
+                if height == block && fill.coin == self.coin && fill.crossed && !fill.backstop =>
+                (aggregate_wei / WEI_PER_MICRO).checked_sub(locked_micro).map(|cash| cash.max(0)),
+            FundingPath::OtherDexReserve { .. } => None,
+        };
         if capacity.is_none() { self.cash_micro = None; }
         capacity
     }
@@ -146,6 +170,9 @@ impl RoutingProjection {
 
     pub(super) fn filled(&mut self, block: u64, fill: &FillEvent, end: i64, cross_delta_wei: i64) -> Option<()> {
         if !self.tracker_trusted || fill.coin != self.coin || cross_delta_wei % WEI_PER_MICRO != 0 { return None; }
+        if let FundingPath::OtherDexReserve { ioc_block, .. } = self.path {
+            return (ioc_block == Some(block) && fill.crossed && !fill.backstop).then_some(());
+        }
         let quantity = u64::try_from(parse_size_raw(&fill.sz, self.decimals).ok()?).ok()?;
         let price = u64::try_from(parse_size_raw(&fill.px, 6 - self.decimals).ok()?).ok()?;
         if !fill.crossed {
@@ -181,10 +208,14 @@ fn maker_size(cross_micro: i64, isolated_micro: i64, position: i64, price: i64, 
     (quantity.is_finite() && quantity >= 0.0 && quantity < i64::MAX as f64).then_some(quantity.floor() as i64)
 }
 
-pub(super) fn apply_update(account: &mut AccountMargin, update: &RoutingUpdate) {
+pub(super) fn apply_update(account: &mut AccountMargin, block: u64, update: &RoutingUpdate) {
     let (Some(route), Pools::Unified(total)) = (&mut account.routing, &account.pools) else { return; };
     let valid = match update {
         RoutingUpdate::Orders { changes, mark_raw, prefund } => route.orders(changes, *mark_raw, *prefund, *total).is_some(),
+        RoutingUpdate::OrdinaryIoc => match &mut route.path {
+            FundingPath::OtherDexReserve { ioc_block, .. } if route.tracker_trusted => { *ioc_block = Some(block); true },
+            _ => false,
+        },
         RoutingUpdate::Unavailable => false,
     };
     if !valid { account.routing = None; }
@@ -234,7 +265,7 @@ pub(crate) mod tests {
     fn anth_route() -> RoutingProjection {
         RoutingProjection { coin: "io:ANTH".into(), decimals: 3,
             reserve: Reserve { notional_micro: [0, 26_881_400], size_raw: [0, 14], position_raw: 1, price_raw: 1_923_200, leverage: 4 },
-            cash_micro: Some(5_816_337), last_fill_block: None, tracker_trusted: true }
+            cash_micro: Some(5_816_337), last_fill_block: None, tracker_trusted: true, path: FundingPath::RestingMaker }
     }
 
     #[test]
@@ -344,7 +375,7 @@ pub(crate) mod tests {
                 route.reserve.size_raw = [0, 0];
                 route.cash_micro = None;
                 account.routing = Some(route);
-                apply_update(&mut account, &RoutingUpdate::Orders { changes: vec![OrderChange {
+                apply_update(&mut account, row["height"].as_u64().unwrap(), &RoutingUpdate::Orders { changes: vec![OrderChange {
                     coin: "io:ANTH".into(), side: Side::Ask, px: "1920.1".into(), size: "0.014".into(), remove: false }],
                     mark_raw: Some(1_923_200), prefund: true });
                 assert_eq!(account.routing.as_ref().unwrap().cash_micro, Some(5_816_337));

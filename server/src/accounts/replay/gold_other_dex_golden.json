@@ -1,0 +1,898 @@
+{
+  "provenance": {
+    "window": [
+      1194470000,
+      1194480000
+    ],
+    "user": "0xb5eecd1b59519deb3669856180ee53bd2a5c7d32",
+    "coin": "xyz:GOLD",
+    "binary_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+    "source_artifact_dir": "/home/yfb222333/research-data/hyperliquid-trade/ob_hourly_watch_20261021/heartbeat_20261023T162233Z/cash_evidence",
+    "files": {
+      "1194470000_selected_states.json": "c35df93dac3d00850e53e177a989013a7d45b3b21c819433b3991b90baa8564c",
+      "1194480000_selected_states.json": "27b5203f9022f6551f2a64ad6159cd07b73698bf79fb5f9c38ce15d1502ec023",
+      "focused_order_actions.jsonl.gz": "cf52a9fba35eb48cad619debcec7fb51eb7c28a74bccba139102e2ee96d9779d",
+      "focused_all_statuses.jsonl.gz": "5721ea06c4ccbf965d447e135f740ffd78dbc6be15956b548a84ec1cd2cdd610",
+      "raw_block_1194477717.json.gz": "a5071e46173025abdb0ca7a33d027ce79f66036ccaae8efca96df74c3d459fae",
+      "node_fills_streaming.jsonl.gz": "33becea7d507d5022b3f7654c8964e7e5c694d8b5ddeb49cf94d669192c97bfa",
+      "hip3_oracle_updates_streaming.jsonl.gz": "ae30d14ed555334a23d90188cd7ee164b134797485d05b43fc1daf111e78257c"
+    }
+  },
+  "before": {
+    "main_state": {
+      "u": 456515934,
+      "p": {
+        "p": [
+          [
+            0,
+            {
+              "l": {
+                "I": {
+                  "l": 20,
+                  "u": 0
+                }
+              },
+              "M": 56
+            }
+          ],
+          [
+            6,
+            {
+              "s": 10868,
+              "l": {
+                "I": {
+                  "l": 4,
+                  "u": -802820396
+                }
+              },
+              "M": 52,
+              "f": {
+                "a": 3323387,
+                "o": 2913458,
+                "c": 2906615
+              },
+              "e": 1195480000
+            }
+          ],
+          [
+            7,
+            {
+              "l": {
+                "I": {
+                  "l": 4,
+                  "u": 0
+                }
+              },
+              "M": 51,
+              "f": {
+                "a": -2154691
+              }
+            }
+          ],
+          [
+            14,
+            {
+              "l": {
+                "I": {
+                  "l": 5,
+                  "u": 0
+                }
+              },
+              "M": 52
+            }
+          ],
+          [
+            18,
+            {
+              "l": {
+                "I": {
+                  "l": 5,
+                  "u": 0
+                }
+              },
+              "M": 52,
+              "f": {
+                "a": 1677445
+              }
+            }
+          ],
+          [
+            48,
+            {
+              "s": 24485,
+              "l": {
+                "I": {
+                  "l": 2,
+                  "u": -1406614550
+                }
+              },
+              "M": 51,
+              "f": {
+                "a": 9519464,
+                "o": 6720308,
+                "c": 6720308
+              },
+              "e": 2796187000
+            }
+          ],
+          [
+            65,
+            {
+              "l": {
+                "I": {
+                  "l": 4,
+                  "u": 0
+                }
+              },
+              "M": 52,
+              "f": {
+                "a": 191841
+              }
+            }
+          ],
+          [
+            72,
+            {
+              "l": {
+                "I": {
+                  "l": 2,
+                  "u": 0
+                }
+              },
+              "M": 5,
+              "f": {
+                "a": 2775398
+              }
+            }
+          ],
+          [
+            127,
+            {
+              "s": 21961,
+              "l": {
+                "I": {
+                  "l": 2,
+                  "u": -793302867
+                }
+              },
+              "M": 5,
+              "f": {
+                "a": 13175963,
+                "o": 13175963,
+                "c": 5524803
+              },
+              "e": 2340013920
+            }
+          ]
+        ],
+        "n": 3
+      },
+      "D": [
+        [
+          "2026-10-07",
+          {
+            "c": 82010
+          }
+        ],
+        [
+          "2026-10-11",
+          {
+            "c": 309675
+          }
+        ],
+        [
+          "2026-10-13",
+          {
+            "a": 19956,
+            "c": 19459
+          }
+        ],
+        [
+          "2026-10-18",
+          {
+            "c": 138911
+          }
+        ]
+      ],
+      "S": {
+        "s": 3148617,
+        "r": 3148617
+      }
+    },
+    "executing_state": {
+      "p": {
+        "p": [
+          [
+            10003,
+            {
+              "s": 37290,
+              "l": {
+                "I": {
+                  "l": 12,
+                  "u": -14181267595
+                }
+              },
+              "M": 25,
+              "f": {
+                "a": 58203379,
+                "o": 58203379,
+                "c": 6656843
+              },
+              "e": 15386109730
+            }
+          ]
+        ],
+        "n": 1
+      },
+      "D": [
+        [
+          "2026-10-07",
+          {
+            "c": 118141
+          }
+        ],
+        [
+          "2026-10-14",
+          {
+            "c": 115071
+          }
+        ],
+        [
+          "2026-10-22",
+          {
+            "c": 118041
+          }
+        ]
+      ],
+      "S": {
+        "s": 1538608,
+        "r": 1538608
+      }
+    },
+    "main_tracker": {
+      "e": 451995975,
+      "a": [
+        [
+          0,
+          {
+            "n": [
+              5059919500,
+              0
+            ],
+            "s": [
+              7213,
+              0
+            ],
+            "p": 812650,
+            "l": 20
+          }
+        ],
+        [
+          18,
+          {
+            "n": [
+              995000000,
+              0
+            ],
+            "s": [
+              995,
+              0
+            ],
+            "p": 1174300,
+            "l": 5
+          }
+        ]
+      ]
+    },
+    "spot": {
+      "b": [
+        [
+          0,
+          {
+            "t": 17116302300
+          }
+        ]
+      ]
+    },
+    "mode": {
+      "R": 111,
+      "C": 523782,
+      "P": 506674,
+      "t": "2026-10-22T05:53:36.374693627",
+      "no": 2,
+      "a": "u",
+      "s": "v"
+    }
+  },
+  "after": {
+    "main_state": {
+      "u": 456515934,
+      "p": {
+        "p": [
+          [
+            0,
+            {
+              "l": {
+                "I": {
+                  "l": 20,
+                  "u": 0
+                }
+              },
+              "M": 56
+            }
+          ],
+          [
+            6,
+            {
+              "s": 10868,
+              "l": {
+                "I": {
+                  "l": 4,
+                  "u": -802820396
+                }
+              },
+              "M": 52,
+              "f": {
+                "a": 3323387,
+                "o": 2913458,
+                "c": 2906615
+              },
+              "e": 1195480000
+            }
+          ],
+          [
+            7,
+            {
+              "l": {
+                "I": {
+                  "l": 4,
+                  "u": 0
+                }
+              },
+              "M": 51,
+              "f": {
+                "a": -2154691
+              }
+            }
+          ],
+          [
+            14,
+            {
+              "l": {
+                "I": {
+                  "l": 5,
+                  "u": 0
+                }
+              },
+              "M": 52
+            }
+          ],
+          [
+            18,
+            {
+              "l": {
+                "I": {
+                  "l": 5,
+                  "u": 0
+                }
+              },
+              "M": 52,
+              "f": {
+                "a": 1677445
+              }
+            }
+          ],
+          [
+            48,
+            {
+              "s": 24485,
+              "l": {
+                "I": {
+                  "l": 2,
+                  "u": -1406614550
+                }
+              },
+              "M": 51,
+              "f": {
+                "a": 9519464,
+                "o": 6720308,
+                "c": 6720308
+              },
+              "e": 2796187000
+            }
+          ],
+          [
+            65,
+            {
+              "l": {
+                "I": {
+                  "l": 4,
+                  "u": 0
+                }
+              },
+              "M": 52,
+              "f": {
+                "a": 191841
+              }
+            }
+          ],
+          [
+            72,
+            {
+              "l": {
+                "I": {
+                  "l": 2,
+                  "u": 0
+                }
+              },
+              "M": 5,
+              "f": {
+                "a": 2775398
+              }
+            }
+          ],
+          [
+            127,
+            {
+              "s": 21961,
+              "l": {
+                "I": {
+                  "l": 2,
+                  "u": -793302867
+                }
+              },
+              "M": 5,
+              "f": {
+                "a": 13175963,
+                "o": 13175963,
+                "c": 5524803
+              },
+              "e": 2340013920
+            }
+          ]
+        ],
+        "n": 3
+      },
+      "D": [
+        [
+          "2026-10-07",
+          {
+            "c": 82010
+          }
+        ],
+        [
+          "2026-10-11",
+          {
+            "c": 309675
+          }
+        ],
+        [
+          "2026-10-13",
+          {
+            "a": 19956,
+            "c": 19459
+          }
+        ],
+        [
+          "2026-10-18",
+          {
+            "c": 138911
+          }
+        ]
+      ],
+      "S": {
+        "s": 3148617,
+        "r": 3148617
+      }
+    },
+    "executing_state": {
+      "p": {
+        "p": [
+          [
+            10003,
+            {
+              "s": -26526,
+              "l": {
+                "I": {
+                  "l": 12,
+                  "u": 11479565555
+                }
+              },
+              "M": 25,
+              "f": {
+                "a": 58203379
+              },
+              "e": 10609604220
+            }
+          ]
+        ],
+        "n": 1
+      },
+      "D": [
+        [
+          "2026-10-07",
+          {
+            "c": 118141
+          }
+        ],
+        [
+          "2026-10-14",
+          {
+            "c": 115071
+          }
+        ],
+        [
+          "2026-10-22",
+          {
+            "c": 118041
+          }
+        ],
+        [
+          "2026-10-23",
+          {
+            "c": 2552445
+          }
+        ]
+      ],
+      "S": {
+        "s": 4091053,
+        "r": 4091053
+      }
+    },
+    "main_tracker": {
+      "e": 451995975,
+      "a": [
+        [
+          0,
+          {
+            "n": [
+              5059919500,
+              0
+            ],
+            "s": [
+              7213,
+              0
+            ],
+            "p": 812650,
+            "l": 20
+          }
+        ],
+        [
+          18,
+          {
+            "n": [
+              995000000,
+              0
+            ],
+            "s": [
+              995,
+              0
+            ],
+            "p": 1174300,
+            "l": 5
+          }
+        ]
+      ]
+    },
+    "spot": {
+      "b": [
+        [
+          0,
+          {}
+        ]
+      ]
+    },
+    "mode": {
+      "R": 112,
+      "C": 523782,
+      "P": 523790,
+      "t": "2026-10-23T15:29:31.829320896",
+      "no": 2,
+      "a": "u",
+      "s": "v"
+    }
+  },
+  "fills": [
+    {
+      "height": 1194477717,
+      "fill": {
+        "coin": "xyz:GOLD",
+        "px": "3999.7",
+        "sz": "0.2122",
+        "side": "A",
+        "time": 1792769371829,
+        "startPosition": "3.729",
+        "dir": "Close Long",
+        "closedPnl": "-26.813592",
+        "hash": "0x20365d0d1bad459721b004473248950201f900f2b6a06469c3ff085fdaa11f81",
+        "oid": 583848141145,
+        "crossed": true,
+        "fee": "1.157676",
+        "builderFee": "0.424368",
+        "tid": 754694393705838,
+        "cloid": "0xdb4feeadf282a9b82758c2b19d306a62",
+        "feeToken": "USDC",
+        "builder": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+        "twapId": null,
+        "deployerFee": "0.329989"
+      }
+    },
+    {
+      "height": 1194477717,
+      "fill": {
+        "coin": "xyz:GOLD",
+        "px": "3999.7",
+        "sz": "0.5795",
+        "side": "A",
+        "time": 1792769371829,
+        "startPosition": "3.5168",
+        "dir": "Close Long",
+        "closedPnl": "-73.22562",
+        "hash": "0x20365d0d1bad459721b004473248950201f900f2b6a06469c3ff085fdaa11f81",
+        "oid": 583848141145,
+        "crossed": true,
+        "fee": "3.161514",
+        "builderFee": "1.158913",
+        "tid": 437263279968058,
+        "cloid": "0xdb4feeadf282a9b82758c2b19d306a62",
+        "feeToken": "USDC",
+        "builder": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+        "twapId": null,
+        "deployerFee": "0.90117"
+      }
+    },
+    {
+      "height": 1194477717,
+      "fill": {
+        "coin": "xyz:GOLD",
+        "px": "3999.7",
+        "sz": "0.5795",
+        "side": "A",
+        "time": 1792769371829,
+        "startPosition": "2.9373",
+        "dir": "Close Long",
+        "closedPnl": "-73.22562",
+        "hash": "0x20365d0d1bad459721b004473248950201f900f2b6a06469c3ff085fdaa11f81",
+        "oid": 583848141145,
+        "crossed": true,
+        "fee": "3.161514",
+        "builderFee": "1.158913",
+        "tid": 924019583326437,
+        "cloid": "0xdb4feeadf282a9b82758c2b19d306a62",
+        "feeToken": "USDC",
+        "builder": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+        "twapId": null,
+        "deployerFee": "0.90117"
+      }
+    },
+    {
+      "height": 1194477717,
+      "fill": {
+        "coin": "xyz:GOLD",
+        "px": "3999.7",
+        "sz": "0.2817",
+        "side": "A",
+        "time": 1792769371829,
+        "startPosition": "2.3578",
+        "dir": "Close Long",
+        "closedPnl": "-35.595612",
+        "hash": "0x20365d0d1bad459721b004473248950201f900f2b6a06469c3ff085fdaa11f81",
+        "oid": 583848141145,
+        "crossed": true,
+        "fee": "1.536839",
+        "builderFee": "0.563357",
+        "tid": 269211552503043,
+        "cloid": "0xdb4feeadf282a9b82758c2b19d306a62",
+        "feeToken": "USDC",
+        "builder": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+        "twapId": null,
+        "deployerFee": "0.438067"
+      }
+    },
+    {
+      "height": 1194477717,
+      "fill": {
+        "coin": "xyz:GOLD",
+        "px": "3999.7",
+        "sz": "0.2817",
+        "side": "A",
+        "time": 1792769371829,
+        "startPosition": "2.0761",
+        "dir": "Close Long",
+        "closedPnl": "-35.595612",
+        "hash": "0x20365d0d1bad459721b004473248950201f900f2b6a06469c3ff085fdaa11f81",
+        "oid": 583848141145,
+        "crossed": true,
+        "fee": "1.536839",
+        "builderFee": "0.563357",
+        "tid": 387340416394577,
+        "cloid": "0xdb4feeadf282a9b82758c2b19d306a62",
+        "feeToken": "USDC",
+        "builder": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+        "twapId": null,
+        "deployerFee": "0.438067"
+      }
+    },
+    {
+      "height": 1194477717,
+      "fill": {
+        "coin": "xyz:GOLD",
+        "px": "3999.7",
+        "sz": "4.447",
+        "side": "A",
+        "time": 1792769371829,
+        "startPosition": "1.7944",
+        "dir": "Long > Short",
+        "closedPnl": "-226.740384",
+        "hash": "0x20365d0d1bad459721b004473248950201f900f2b6a06469c3ff085fdaa11f81",
+        "oid": 583848141145,
+        "crossed": true,
+        "fee": "24.261011",
+        "builderFee": "8.893332",
+        "tid": 536730328963931,
+        "cloid": "0xdb4feeadf282a9b82758c2b19d306a62",
+        "feeToken": "USDC",
+        "builder": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+        "twapId": null,
+        "deployerFee": "6.915456"
+      }
+    }
+  ],
+  "mark_px": "3999.8",
+  "expected_native_spot_route_end_micro": 11479565555,
+  "expected_aggregate_error_micro": 14459715,
+  "actions": [
+    {
+      "height": 1194477717,
+      "time": "2026-10-23T15:29:31.829320896",
+      "selected_actions": [
+        {
+          "bundle": 0,
+          "position": 495,
+          "action": {
+            "type": "order",
+            "orders": [
+              {
+                "a": 110003,
+                "b": false,
+                "p": "3599.8",
+                "s": "7.458",
+                "r": false,
+                "t": {
+                  "limit": {
+                    "tif": "Ioc"
+                  }
+                },
+                "c": "0xdb4feeadf282a9b82758c2b19d306a62"
+              }
+            ],
+            "grouping": "na",
+            "builder": {
+              "b": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+              "f": 50
+            }
+          },
+          "response": {
+            "user": "0xb5eecd1b59519deb3669856180ee53bd2a5c7d32",
+            "res": {
+              "status": "ok",
+              "response": {
+                "type": "order",
+                "data": {
+                  "statuses": [
+                    {
+                      "filled": {
+                        "totalSz": "6.3816",
+                        "avgPx": "3999.7",
+                        "oid": 583848141145,
+                        "cloid": "0xdb4feeadf282a9b82758c2b19d306a62"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ],
+      "source_sha256": "353bd46bc246eb6d59bdf5a8699d444f66a43eb25c829fa7e74ac816606f36e9"
+    }
+  ],
+  "native_steps": [
+    {
+      "tid": 754694393705838,
+      "cash_micro": 212843680,
+      "isolated_micro": -13375369588,
+      "size_raw": 35168
+    },
+    {
+      "tid": 437263279968058,
+      "cash_micro": 326149024,
+      "isolated_micro": -11174010296,
+      "size_raw": 29373
+    },
+    {
+      "tid": 924019583326437,
+      "cash_micro": 438830632,
+      "isolated_micro": -8972027268,
+      "size_raw": 23578
+    },
+    {
+      "tid": 269211552503043,
+      "cash_micro": 493422529,
+      "isolated_micro": -7901440514,
+      "size_raw": 20761
+    },
+    {
+      "tid": 387340416394577,
+      "cash_micro": 547805897,
+      "isolated_micro": -6830645231,
+      "size_raw": 17944
+    },
+    {
+      "tid": 536730328963931,
+      "cash_micro": 0,
+      "isolated_micro": 11479565555,
+      "size_raw": -26526
+    }
+  ],
+  "native_binary_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+  "statuses": [
+    {
+      "time": "2026-10-23T15:29:31.829320896",
+      "user": "0xb5eecd1b59519deb3669856180ee53bd2a5c7d32",
+      "hash": "0x20365d0d1bad459721b004473248950201f900f2b6a06469c3ff085fdaa11f81",
+      "builder": {
+        "b": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+        "f": 50
+      },
+      "status": "open",
+      "order": {
+        "coin": "xyz:GOLD",
+        "side": "A",
+        "limitPx": "3599.8",
+        "sz": "7.458",
+        "oid": 583848141145,
+        "timestamp": 1792769371829,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Limit",
+        "origSz": "7.458",
+        "tif": "Ioc",
+        "cloid": "0xdb4feeadf282a9b82758c2b19d306a62"
+      }
+    },
+    {
+      "time": "2026-10-23T15:29:31.829320896",
+      "user": "0xb5eecd1b59519deb3669856180ee53bd2a5c7d32",
+      "hash": null,
+      "builder": {
+        "b": "0xb84168cf3be63c6b8dad05ff5d755e97432ff80b",
+        "f": 50
+      },
+      "status": "filled",
+      "order": {
+        "coin": "xyz:GOLD",
+        "side": "A",
+        "limitPx": "3599.8",
+        "sz": "1.0764",
+        "oid": 583848141145,
+        "timestamp": 1792769371829,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Limit",
+        "origSz": "7.458",
+        "tif": "Ioc",
+        "cloid": "0xdb4feeadf282a9b82758c2b19d306a62"
+      }
+    }
+  ]
+}

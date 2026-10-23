@@ -1,7 +1,8 @@
 //! Routing inputs for the narrow Unified funding projection. Reuse parsed receipts/statuses; no second replica
 //! parser or guessed action order. Only a single ordinary ALO action, with all its open receipts and no competing
 //! cash/fill event for the account, establishes post-order retained cash. Other proven cancellations update the
-//! tracker but do not invent the pending-set sweep time.
+//! tracker but do not invent the pending-set sweep time. A single ordinary IOC boundary can instead preserve
+//! an unchanged other-dex reservation bound, with all its receipt/status/fill identities accounted for.
 use alloy::primitives::Address;
 use rustc_hash::{FxHashMap, FxHashSet};
 use super::{book::AccountBook, marks::{MarkInputs, NodeMarks, actions::{MarkAction, RankedAction}},
@@ -22,9 +23,9 @@ impl RoutingBlock {
         let mut result = Self::default();
         let mut statuses: FxHashMap<Address, Vec<&NodeDataOrderStatus>> = FxHashMap::default();
         let mut own: FxHashMap<Address, Vec<&RankedAction>> = FxHashMap::default();
-        let mut traders = FxHashSet::default();
-        for NodeDataFill(user, _) in fills.iter().flat_map(Batch::events_ref) {
-            if book.routing_coin(user).is_some() { traders.insert(*user); }
+        let mut executions: FxHashMap<Address, Vec<&crate::types::Fill>> = FxHashMap::default();
+        for NodeDataFill(user, fill) in fills.iter().flat_map(Batch::events_ref) {
+            if book.routing_coin(user).is_some() { executions.entry(*user).or_default().push(fill); }
         }
         for status in inputs.order_statuses.iter().flat_map(Batch::events_ref) {
             if book.routing_coin(&status.user).is_some() { statuses.entry(status.user).or_default().push(status); }
@@ -34,17 +35,22 @@ impl RoutingBlock {
                 own.entry(user).or_default().push(action);
             }
         }
-        let users: FxHashSet<_> = statuses.keys().chain(own.keys()).chain(&traders).copied().collect();
+        let users: FxHashSet<_> = statuses.keys().chain(own.keys()).chain(executions.keys()).copied().collect();
         let mut cash_users: FxHashSet<_> = cash_actions.actions.iter().map(|(_, user)| *user).collect();
         let mut unknown_cash = false;
         for event in misc.iter().flat_map(Batch::events_ref) {
             match event {
                 MiscEvent::Ledger { users, .. } => cash_users.extend(users),
                 MiscEvent::Unknown(_) => unknown_cash = true,
-                MiscEvent::Funding(_) | MiscEvent::Irrelevant => {},
+                MiscEvent::Funding(deltas) => cash_users.extend(deltas.iter().filter(|delta|
+                    book.routing_coin(&delta.user).is_some_and(|coin| coin != delta.coin)).map(|delta| delta.user)),
+                MiscEvent::Irrelevant => {},
             }
         }
         result.participants = users;
+        if unknown_cash || inputs.mark_actions.is_err() {
+            result.participants.extend(book.routing_users());
+        }
         for user in result.participants.iter().copied() {
             if unknown_cash || cash_users.contains(&user) || inputs.mark_actions.is_err() {
                 result.before.push((user, RoutingUpdate::Unavailable));
@@ -52,15 +58,20 @@ impl RoutingBlock {
             }
             let rows = statuses.remove(&user).unwrap_or_default();
             let acts = own.remove(&user).unwrap_or_default();
+            let coin = book.routing_coin(&user).expect("selected routing account remains present during read-only projection");
+            if executions.get(&user).is_some_and(|fills| fills.iter().any(|fill| fill.coin != coin)) {
+                result.before.push((user, RoutingUpdate::Unavailable));
+                continue;
+            }
             // A maker fill consumes its resting quantity, so its terminal filled status is not another cancel.
             let changes: Vec<_> = rows.iter().copied().filter(|row| row.status != "filled").collect();
             if changes.is_empty() && acts.is_empty() { continue; }
-            let coin = book.routing_coin(&user).expect("selected routing account remains present during read-only projection");
-            let update = Self::orders(coin, &changes, &acts, inputs, marks);
-            if traders.contains(&user) {
-                result.before.push((user, RoutingUpdate::Unavailable));
+            if executions.contains_key(&user) {
+                let update = if ordinary_ioc(coin, &rows, &acts, &executions[&user]) { RoutingUpdate::OrdinaryIoc }
+                    else { RoutingUpdate::Unavailable };
+                result.before.push((user, update));
             } else {
-                result.after.push((user, update));
+                result.after.push((user, Self::orders(coin, &changes, &acts, inputs, marks)));
             }
         }
         result
@@ -104,11 +115,28 @@ impl RoutingBlock {
         RoutingUpdate::Orders { changes, mark_raw, prefund }
     }
 
-    pub(crate) fn require_trusted(&mut self, trusted: bool) {
+    pub(crate) fn require_trusted(&mut self, trusted: bool, book: &AccountBook) {
         if trusted { return; }
         self.after.clear();
+        self.participants.extend(book.routing_users());
         self.before = self.participants.iter().map(|user| (*user, RoutingUpdate::Unavailable)).collect();
     }
+}
+
+/// One ordinary IOC, one open and one terminal status, all executions from that receipt. This only preserves
+/// other-dex reservation bounds; it neither establishes a maker's retained balance nor guesses system timing.
+fn ordinary_ioc(coin: &str, rows: &[&NodeDataOrderStatus], actions: &[&RankedAction], fills: &[&crate::types::Fill]) -> bool {
+    let [action] = actions else { return false; };
+    let MarkAction::Book(anchors) = &action.action else { return false; };
+    let [oid] = anchors.created.as_slice() else { return false; };
+    if !anchors.single_ioc_order || !anchors.ordinary_order || action.rank.1 != 3 || anchors.takers.len() != 1
+        || !anchors.cancelled.is_empty() || !anchors.cancelled_cloids.is_empty() || !anchors.rejected_iocs.is_empty()
+        || anchors.ioc_pairing_mismatch.is_some() || anchors.unreceipted_modify.is_some() { return false; }
+    let [open, terminal] = rows else { return false; };
+    if open.status != "open" || terminal.status != "filled" || open.order.side != terminal.order.side { return false; }
+    if rows.iter().any(|row| row.order.oid != *oid || row.order.coin != coin || row.order.is_trigger || row.order.reduce_only
+        || row.order.order_type != "Limit" || row.order.tif.as_deref() != Some("Ioc")) { return false; }
+    !fills.is_empty() && fills.iter().all(|fill| fill.oid == *oid && fill.coin == coin && fill.side == open.order.side && fill.crossed && fill.liquidation.is_none())
 }
 
 #[cfg(test)]
@@ -185,7 +213,63 @@ mod tests {
         // No own order action: a mark-data gap must still invalidate physical capacity before the maker fill.
         let mut fills_only = RoutingBlock::of(&book, &MarkInputs::default(), &trades, &marks(), &unrelated_cash, &[]);
         assert_eq!(fills_only.before.len(), 0);
-        fills_only.require_trusted(false);
+        fills_only.require_trusted(false, &book);
         assert_eq!(fills_only.before, [(who, RoutingUpdate::Unavailable)]);
+        let other_fill = [fills(height, &[(who, "BTC", "A", 2, "1", "0.1")])];
+        let foreign = RoutingBlock::of(&book, &MarkInputs::default(), &other_fill, &marks(), &unrelated_cash, &[]);
+        assert_eq!(foreign.before, [(who, RoutingUpdate::Unavailable)], "foreign fills invalidate before any own-market execution");
+        let funding = crate::accounts::test_support::funding_inner(&[(who, "BTC", "1")]);
+        let settled = crate::accounts::test_support::misc(height, &[&funding]);
+        let funding_block = RoutingBlock::of(&book, &MarkInputs::default(), &trades, &marks(), &unrelated_cash, &[settled]);
+        assert_eq!(funding_block.before, [(who, RoutingUpdate::Unavailable)]);
+        let unknown = crate::accounts::test_support::misc(height, &[r#"{"NewKind":{}}"#]);
+        let idle = RoutingBlock::of(&book, &MarkInputs::default(), &[], &marks(), &unrelated_cash, &[unknown]);
+        assert_eq!(idle.before, [(who, RoutingUpdate::Unavailable)], "unknown cash can affect an idle account");
+        let mut idle = RoutingBlock::of(&book, &MarkInputs::default(), &[], &marks(), &unrelated_cash, &[]);
+        idle.require_trusted(false, &book);
+        assert_eq!(idle.before, [(who, RoutingUpdate::Unavailable)], "a gap cannot leave idle checkpoint trackers trusted");
     }
+
+    #[test]
+    fn gold_ioc_boundary_uses_original_request_receipt_statuses_and_all_six_fills() {
+        use crate::accounts::marks::actions::tests::{replica_line, mark_actions};
+        let golden: serde_json::Value = serde_json::from_str(include_str!("replay/gold_other_dex_golden.json")).unwrap();
+        let pair = &golden["actions"][0]["selected_actions"][0];
+        let request = pair["action"].to_string();
+        let response = pair["response"].to_string();
+        let parsed = mark_actions(&replica_line(1_194_477_717, &[&[(&request, &response)]]));
+        let rows: Vec<NodeDataOrderStatus> = serde_json::from_value(golden["statuses"].clone()).unwrap();
+        let fills: Vec<crate::types::Fill> = golden["fills"].as_array().unwrap().iter()
+            .map(|row| serde_json::from_value(row["fill"].clone()).unwrap()).collect();
+        let valid = |rows: &[NodeDataOrderStatus], actions: &[RankedAction], fills: &[crate::types::Fill]| ordinary_ioc("xyz:GOLD",
+            &rows.iter().collect::<Vec<_>>(), &actions.iter().collect::<Vec<_>>(), &fills.iter().collect::<Vec<_>>());
+        assert!(valid(&rows, &parsed.actions, &fills));
+        for variant in 0..9 {
+            let mut rows = rows.clone(); let mut actions = parsed.actions.clone(); let mut fills = fills.clone();
+            match variant {
+                0 => rows[0].order.coin = "BTC".into(),
+                1 => { rows.remove(0); },
+                2 => rows[0].order.tif = Some("Gtc".into()),
+                3 => rows[0].order.is_trigger = true,
+                4 => fills[1].coin = "BTC".into(),
+                5 => fills[0].oid += 1,
+                6 => fills[0].crossed = false,
+                7 => actions.push(actions[0].clone()),
+                8 => { let MarkAction::Book(a) = &mut actions[0].action else { panic!("book") }; a.ordinary_order = false; },
+                _ => unreachable!(),
+            }
+            assert!(!valid(&rows, &actions, &fills), "variant {variant}");
+        }
+        // One accepted IOC plus a rejected ALO on another dex can still have one created oid and one taker.
+        // Request cardinality, not the apparent receipts, must prevent this false funding boundary.
+        let mut request = pair["action"].clone();
+        let mut rejected = request["orders"][0].clone();
+        rejected["a"] = 0.into(); rejected["t"]["limit"]["tif"] = "Alo".into();
+        request["orders"].as_array_mut().unwrap().push(rejected);
+        let mut response = pair["response"].clone();
+        response["res"]["response"]["data"]["statuses"].as_array_mut().unwrap().push(serde_json::json!({"error":"Insufficient margin"}));
+        let parsed = mark_actions(&replica_line(1_194_477_717, &[&[(&request.to_string(), &response.to_string())]]));
+        assert!(!valid(&rows, &parsed.actions, &fills));
+    }
+
 }

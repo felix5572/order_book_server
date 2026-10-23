@@ -520,6 +520,11 @@ impl MarginStates {
         }
     }
 
+    /// All anchor-eligible accounts need an invalidation event on a global input gap, including idle ones.
+    pub(crate) fn routing_users(&self) -> impl Iterator<Item = Address> + '_ {
+        self.accounts.iter().filter(|(_, account)| account.routing.is_some()).map(|(user, _)| *user)
+    }
+
     pub(crate) fn routing_coin(&self, user: &Address) -> Option<&str> {
         self.accounts.get(user)?.routing.as_ref().map(routing::RoutingProjection::coin)
     }
@@ -555,7 +560,7 @@ impl MarginStates {
             AccountEvent::FundingBalanceUnknown => Err(StopReason::FundingBalanceUnknown),
             AccountEvent::Ledger(delta) => { account.routing = None; apply_ledger(account, markets, user, delta) },
             AccountEvent::Action(action) => { account.routing = None; apply_action(account, markets, block, action) },
-            AccountEvent::Routing(update) => { routing::apply_update(account, update); Ok(()) },
+            AccountEvent::Routing(update) => { routing::apply_update(account, block, update); Ok(()) },
         };
         if let Err(reason) = outcome {
             account.stop_at(block, reason);
