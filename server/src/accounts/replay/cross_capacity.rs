@@ -34,16 +34,27 @@ impl CrossCapacityProjection {
     /// A block envelope must be a single price for every holding. A changing/missing mark or scale mismatch
     /// supplies no exact proof. Sub-micro cash remains in the pool; only whole micro USDC can fund perps.
     pub(super) fn available_micro(&self, cash_wei: i64, prices: &FxHashMap<String, FillMarkRange>) -> Result<Option<i64>, String> {
-        let mut available = i128::from(cash_wei / WEI_PER_MICRO);
-        for held in self.holdings.iter().filter(|held| held.size_raw != 0) {
+        Self::combined_available_micro(cash_wei, std::iter::once(self), prices)
+    }
+
+    /// Unified cash spans clearinghouses. Sum their validated holdings without flooring/clamping each dex;
+    /// a deficit in one pool must offset another pool's equity. Only the final positive amount funds perps.
+    pub(super) fn combined_available_micro<'a>(cash_wei: i64, portfolios: impl Iterator<Item = &'a Self>,
+        prices: &FxHashMap<String, FillMarkRange>) -> Result<Option<i64>, String> {
+        let mut available_wei = i128::from(cash_wei);
+        for held in portfolios.flat_map(|portfolio| &portfolio.holdings).filter(|held| held.size_raw != 0) {
             let Some(mark) = prices.get(&held.coin) else { return Ok(None); };
             if mark.size_decimals != held.size_decimals || mark.min_px_raw == 0 || mark.min_px_raw != mark.max_px_raw { return Ok(None); }
             if held.leverage == 0 { return Err(format!("{} cross capacity leverage is zero", held.coin)); }
             let notional = i128::from(held.size_raw) * i128::from(mark.min_px_raw);
-            available = available.checked_add(notional - notional.abs() / i128::from(held.leverage))
+            let equity_micro = notional - notional.abs() / i128::from(held.leverage);
+            available_wei = equity_micro.checked_mul(i128::from(WEI_PER_MICRO)).and_then(|wei| available_wei.checked_add(wei))
                 .ok_or_else(|| format!("{} cross capacity overflows", held.coin))?;
         }
-        i64::try_from(available.max(0)).map(Some).map_err(|err| format!("cross capacity overflows: {err}"))
+        // Negative cash plus positive collateral can become spendable. Truncating the negative cash first
+        // rounds this amount UP by one micro when spot dust exists (CL1194857392 has 36 remaining wei).
+        i64::try_from(available_wei.max(0) / i128::from(WEI_PER_MICRO)).map(Some)
+            .map_err(|err| format!("cross capacity overflows: {err}"))
     }
 }
 
@@ -75,7 +86,7 @@ mod tests {
         ] };
         let price = |low, high| FillMarkRange { min_px_raw: low, max_px_raw: high, size_decimals: 0 };
         let mut prices = FxHashMap::from_iter([("A".into(), price(5, 5)), ("B".into(), price(3, 3))]);
-        assert_eq!(snapshot.available_micro(-199, &prices).unwrap(), Some(2)); // -1 +10 -3 -3 -1
+        assert_eq!(snapshot.available_micro(-199, &prices).unwrap(), Some(1)); // (-199 + (10 -3 -3 -1) *100) /100
         prices.insert("A".into(), price(5, 6));
         assert_eq!(snapshot.available_micro(100_000, &prices).unwrap(), None);
         prices.remove("A");

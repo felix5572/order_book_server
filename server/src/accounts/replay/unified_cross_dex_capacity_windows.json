@@ -1,0 +1,673 @@
+{
+  "schema": 1,
+  "mark_replay_commit": "556f4b2c99adbf6398ef2a89b52273b4b6352ffe",
+  "scope": "Two complete recorded Unified account windows. The CL and CRCL execution/collateral marks come from independent 10000-block replay, with seven main fields and full order books equal at each endpoint. Cross-only STX fill needs no execution mark. Successful leverage actions replay; recorded rejected leverage action has no state effect. Empty serialized cash/size fields mean zero. Aggregate amounts may reconcile but physical multi-dex routing remains estimated. No endpoint correction is used as a replay input.",
+  "cases": [
+    {
+      "user": "0x9fff71c0935b455929f0d080deae0afc432643fe",
+      "window": [
+        1194850000,
+        1194860000
+      ],
+      "markets": {
+        "ETH": {
+          "dex": 0,
+          "asset": 1,
+          "size_decimals": 4,
+          "margin_mode": "normal",
+          "table_id": 55,
+          "default_leverage": 20
+        },
+        "SOL": {
+          "dex": 0,
+          "asset": 5,
+          "size_decimals": 2,
+          "margin_mode": "normal",
+          "table_id": 54,
+          "default_leverage": 20
+        },
+        "HYPE": {
+          "dex": 0,
+          "asset": 159,
+          "size_decimals": 2,
+          "margin_mode": "normal",
+          "table_id": 52,
+          "default_leverage": 10
+        },
+        "xyz:CL": {
+          "dex": 1,
+          "asset": 29,
+          "size_decimals": 3,
+          "margin_mode": "normal",
+          "table_id": 20,
+          "default_leverage": 20
+        }
+      },
+      "before": {
+        "spot_wei": 2101395636,
+        "dex_states": [
+          {
+            "dex": 0,
+            "cash_micro": -966174552,
+            "positions": {
+              "ETH": {
+                "l": {
+                  "I": {
+                    "l": 5,
+                    "u": 0
+                  }
+                },
+                "M": 55
+              },
+              "SOL": {
+                "l": {
+                  "I": {
+                    "l": 5,
+                    "u": 0
+                  }
+                },
+                "M": 54,
+                "f": {
+                  "a": -3440
+                }
+              },
+              "HYPE": {
+                "s": 1583,
+                "l": {
+                  "C": 5
+                },
+                "M": 52,
+                "f": {
+                  "a": 9194131,
+                  "o": 7943629,
+                  "c": 166118
+                },
+                "e": 1354557056
+              }
+            }
+          },
+          {
+            "dex": 1,
+            "cash_micro": 0,
+            "positions": {
+              "xyz:CL": {
+                "l": {
+                  "I": {
+                    "l": 5,
+                    "u": 0
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "after": {
+        "spot_wei": 36,
+        "dex_states": [
+          {
+            "dex": 0,
+            "cash_micro": -972012656,
+            "positions": {
+              "ETH": {
+                "s": 211,
+                "l": {
+                  "I": {
+                    "l": 5,
+                    "u": -39952890
+                  }
+                },
+                "M": 55,
+                "e": 49914160
+              },
+              "SOL": {
+                "s": 48,
+                "l": {
+                  "I": {
+                    "l": 5,
+                    "u": -39258646
+                  }
+                },
+                "M": 54,
+                "f": {
+                  "a": -3102,
+                  "o": 338,
+                  "c": 338
+                },
+                "e": 49046400
+              },
+              "HYPE": {
+                "s": 1583,
+                "l": {
+                  "C": 5
+                },
+                "M": 52,
+                "f": {
+                  "a": 9209307,
+                  "o": 7958805,
+                  "c": 181294
+                },
+                "e": 1354557056
+              }
+            }
+          },
+          {
+            "dex": 1,
+            "cash_micro": 0,
+            "positions": {
+              "xyz:CL": {
+                "s": -345,
+                "l": {
+                  "I": {
+                    "l": 5,
+                    "u": 43098149
+                  }
+                },
+                "e": 35921400
+              }
+            }
+          }
+        ]
+      },
+      "events": [
+        {
+          "height": 1194850888,
+          "fill": {
+            "coin": "xyz:CL",
+            "px": "104.31",
+            "sz": "0.479",
+            "side": "A",
+            "time": 1792796248405,
+            "startPosition": "0.0",
+            "dir": "Open Short",
+            "closedPnl": "0.0",
+            "hash": "0x8870b76e0314b2da89ea044737fa480202c900539e17d1ac2c3962c0c2188cc5",
+            "oid": 584150435467,
+            "crossed": true,
+            "fee": "0.004316",
+            "tid": 440040038563088,
+            "cloid": "0x85567d2d95bf4f86a74d8df852ea75e8",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.001942"
+          },
+          "mark": {
+            "min_px_raw": 103840,
+            "max_px_raw": 103840,
+            "size_decimals": 3
+          },
+          "collateral": {
+            "HYPE": {
+              "min_px_raw": 762346,
+              "max_px_raw": 762346,
+              "size_decimals": 2
+            }
+          }
+        },
+        {
+          "height": 1194851209,
+          "fill": {
+            "coin": "xyz:CL",
+            "px": "104.01",
+            "sz": "0.479",
+            "side": "B",
+            "time": 1792796271111,
+            "startPosition": "-0.479",
+            "dir": "Close Short",
+            "closedPnl": "0.1437",
+            "hash": "0x78d5023cb72979707a4e044737fb890202ad0022522c98421c9dad8f762d535b",
+            "oid": 584150842635,
+            "crossed": true,
+            "fee": "0.004304",
+            "tid": 433911233084297,
+            "cloid": "0x67f3c5287fa64cf39346a87fdadf6cb6",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.001937"
+          },
+          "mark": {
+            "min_px_raw": 103900,
+            "max_px_raw": 103900,
+            "size_decimals": 3
+          },
+          "collateral": {
+            "HYPE": {
+              "min_px_raw": 763190,
+              "max_px_raw": 763400,
+              "size_decimals": 2
+            }
+          }
+        },
+        {
+          "height": 1194851985,
+          "fill": {
+            "coin": "SOL",
+            "px": "102.18",
+            "sz": "0.48",
+            "side": "B",
+            "time": 1792796326162,
+            "startPosition": "0.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x247be16d369ce90d25f5044737fe910205940052d19007dfc8448cbff590c2f7",
+            "oid": 584151948334,
+            "crossed": true,
+            "fee": "0.021188",
+            "tid": 1020624401511265,
+            "cloid": "0x7e6118295beb40759d129fb9a85bd6a0",
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": {
+            "min_px_raw": 1021900,
+            "max_px_raw": 1021900,
+            "size_decimals": 2
+          },
+          "collateral": {
+            "HYPE": {
+              "min_px_raw": 766229,
+              "max_px_raw": 766229,
+              "size_decimals": 2
+            }
+          }
+        },
+        {
+          "height": 1194853019,
+          "funding": {
+            "user": "0x9fff71c0935b455929f0d080deae0afc432643fe",
+            "coin": "SOL",
+            "funding_amount": "-0.000338",
+            "szi": "0.48",
+            "funding_rate": "0.0000068981"
+          }
+        },
+        {
+          "height": 1194853019,
+          "funding": {
+            "user": "0x9fff71c0935b455929f0d080deae0afc432643fe",
+            "coin": "HYPE",
+            "funding_amount": "-0.015176",
+            "szi": "15.83",
+            "funding_rate": "0.0000125"
+          }
+        },
+        {
+          "height": 1194853138,
+          "fill": {
+            "coin": "ETH",
+            "px": "2365.6",
+            "sz": "0.0211",
+            "side": "B",
+            "time": 1792796408507,
+            "startPosition": "0.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x9e22c99bc14427e89f9c044738031202043200815c4746ba41eb74ee804801d3",
+            "oid": 584153398835,
+            "crossed": true,
+            "fee": "0.021562",
+            "tid": 1036930498079497,
+            "cloid": "0x50971fc362604c119a9ac46f0283a565",
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": {
+            "min_px_raw": 236560,
+            "max_px_raw": 236560,
+            "size_decimals": 4
+          },
+          "collateral": {
+            "HYPE": {
+              "min_px_raw": 766890,
+              "max_px_raw": 766890,
+              "size_decimals": 2
+            }
+          }
+        },
+        {
+          "height": 1194857392,
+          "fill": {
+            "coin": "xyz:CL",
+            "px": "104.12",
+            "sz": "0.345",
+            "side": "A",
+            "time": 1792796713918,
+            "startPosition": "0.0",
+            "dir": "Open Short",
+            "closedPnl": "0.0",
+            "hash": "0x861401bff498a028878d04473813b002049900a58f9bbefa29dcad12b39c7a13",
+            "oid": 584158172821,
+            "crossed": true,
+            "fee": "0.003103",
+            "tid": 498271325978198,
+            "cloid": "0x777fed0692364464abe2385187834aa0",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.001396"
+          },
+          "mark": {
+            "min_px_raw": 103960,
+            "max_px_raw": 103960,
+            "size_decimals": 3
+          },
+          "collateral": {
+            "HYPE": {
+              "min_px_raw": 767540,
+              "max_px_raw": 767540,
+              "size_decimals": 2
+            }
+          }
+        }
+      ],
+      "business_rejections": [],
+      "sources": {
+        "1194850000_selected_states.json": "13d6adfb3b5833c4c4cdd68e6a0553b43941991327b032f3f66839111fc7ee44",
+        "1194860000_selected_states.json": "97be51bd1c74e057cf766058355809213285d0a0cfe3f19fcc4e2015801a1e53",
+        "node_fills_streaming.jsonl.gz": "373db11a86e68f9264309ff1192a09c868a2291c686db42e163228902feb964f",
+        "misc_events_streaming.jsonl.gz": "6e61ef6cb217b3dd590f332718aa420c87e25495efd16c904155c0b78af6341e",
+        "account_actions_selected.jsonl.gz": "3f09d0341d182f573292d7f501feb0cb1a5a5a9601eaae829da08cc2e1eb517c",
+        "cl_all_mark_replay.log": "2f726d5059b895d4c650e4522ccfe16492660403306d31cd77edcb1f1064d049"
+      }
+    },
+    {
+      "user": "0xd955b7c4dada4831b4fd0c52818433c3d975cd64",
+      "window": [
+        1194870000,
+        1194880000
+      ],
+      "markets": {
+        "STX": {
+          "dex": 0,
+          "asset": 19,
+          "size_decimals": 1,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "xyz:CRCL": {
+          "dex": 1,
+          "asset": 18,
+          "size_decimals": 3,
+          "margin_mode": "normal",
+          "table_id": 10,
+          "default_leverage": 10
+        },
+        "xyz:OURA": {
+          "dex": 1,
+          "asset": 123,
+          "size_decimals": 1,
+          "margin_mode": "noCross",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "io:OAI": {
+          "dex": 10,
+          "asset": 0,
+          "size_decimals": 3,
+          "margin_mode": "noCross",
+          "table_id": 6,
+          "default_leverage": 6
+        }
+      },
+      "before": {
+        "spot_wei": 0,
+        "dex_states": [
+          {
+            "dex": 0,
+            "cash_micro": 18662251,
+            "positions": {
+              "STX": {
+                "s": -504,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -194,
+                  "o": -194,
+                  "c": -194
+                },
+                "e": 15535201
+              }
+            }
+          },
+          {
+            "dex": 1,
+            "cash_micro": 0,
+            "positions": {
+              "xyz:CRCL": {
+                "s": 210,
+                "l": {
+                  "I": {
+                    "l": 10,
+                    "u": -16454370
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": 1144,
+                  "o": 786,
+                  "c": 786
+                },
+                "e": 18293940
+              },
+              "xyz:OURA": {
+                "s": 5,
+                "l": {
+                  "I": {
+                    "l": 5,
+                    "u": -19510980
+                  }
+                },
+                "M": 5,
+                "f": {
+                  "a": 25,
+                  "o": 25,
+                  "c": 25
+                },
+                "e": 24444600
+              }
+            }
+          },
+          {
+            "dex": 10,
+            "cash_micro": 0,
+            "positions": {
+              "io:OAI": {
+                "s": -8,
+                "l": {
+                  "I": {
+                    "l": 6,
+                    "u": 13796978
+                  }
+                },
+                "M": 6,
+                "f": {
+                  "a": -445,
+                  "o": -445,
+                  "c": -445
+                },
+                "e": 11822400
+              }
+            }
+          }
+        ]
+      },
+      "after": {
+        "spot_wei": 0,
+        "dex_states": [
+          {
+            "dex": 0,
+            "cash_micro": -11530417,
+            "positions": {
+              "STX": {
+                "s": 461,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -194
+                },
+                "e": 14403023
+              }
+            }
+          },
+          {
+            "dex": 1,
+            "cash_micro": 0,
+            "positions": {
+              "xyz:CRCL": {
+                "s": -162,
+                "l": {
+                  "I": {
+                    "l": 10,
+                    "u": 15139454
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": 1144
+                },
+                "e": 13773564
+              },
+              "xyz:OURA": {
+                "s": 5,
+                "l": {
+                  "I": {
+                    "l": 5,
+                    "u": -19510980
+                  }
+                },
+                "M": 5,
+                "f": {
+                  "a": 25,
+                  "o": 25,
+                  "c": 25
+                },
+                "e": 24444600
+              }
+            }
+          },
+          {
+            "dex": 10,
+            "cash_micro": 0,
+            "positions": {
+              "io:OAI": {
+                "s": -8,
+                "l": {
+                  "I": {
+                    "l": 6,
+                    "u": 13796978
+                  }
+                },
+                "M": 6,
+                "f": {
+                  "a": -445,
+                  "o": -445,
+                  "c": -445
+                },
+                "e": 11822400
+              }
+            }
+          }
+        ]
+      },
+      "events": [
+        {
+          "height": 1194872152,
+          "fill": {
+            "coin": "STX",
+            "px": "0.31243",
+            "sz": "96.5",
+            "side": "B",
+            "time": 1792797779006,
+            "startPosition": "-50.4",
+            "dir": "Short > Long",
+            "closedPnl": "-0.21168",
+            "hash": "0x59755adbc191a5ff5aef0447384d580203a100c15c94c4d1fd3e062e80957fe9",
+            "oid": 584173025106,
+            "crossed": true,
+            "fee": "0.043173",
+            "builderFee": "0.030149",
+            "tid": 1057459156701820,
+            "cloid": "0x02a8cef844004a2ca6cbdf5f26655c65",
+            "feeToken": "USDC",
+            "builder": "0xdbc27ea7aa99274026404b2fa21114815d9997a6",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194872359,
+          "action": {
+            "type": "updateLeverage",
+            "asset": 110018,
+            "isCross": false,
+            "leverage": 10
+          }
+        },
+        {
+          "height": 1194872376,
+          "fill": {
+            "coin": "xyz:CRCL",
+            "px": "85.022",
+            "sz": "0.372",
+            "side": "A",
+            "time": 1792797795114,
+            "startPosition": "0.21",
+            "dir": "Long > Short",
+            "closedPnl": "-0.43932",
+            "hash": "0xbf3b051e59b2e679c0b40447384e380202130003f4b6054b6303b07118b6c064",
+            "oid": 584173184255,
+            "crossed": true,
+            "fee": "0.03436",
+            "builderFee": "0.031628",
+            "tid": 252633783682629,
+            "cloid": "0x9a01bd88f19b41a4b3156bcb631c3130",
+            "feeToken": "USDC",
+            "builder": "0xdbc27ea7aa99274026404b2fa21114815d9997a6",
+            "twapId": null,
+            "deployerFee": "0.001229"
+          },
+          "mark": {
+            "min_px_raw": 85003,
+            "max_px_raw": 85003,
+            "size_decimals": 3
+          },
+          "collateral": {
+            "STX": {
+              "min_px_raw": 31235,
+              "max_px_raw": 31235,
+              "size_decimals": 1
+            }
+          }
+        }
+      ],
+      "business_rejections": [
+        {
+          "height": 1194872139,
+          "action": {
+            "type": "updateLeverage",
+            "asset": 19,
+            "isCross": false,
+            "leverage": 5
+          },
+          "response": {
+            "status": "err",
+            "response": "Cannot switch leverage type with open position."
+          }
+        }
+      ],
+      "sources": {
+        "1194870000_selected_states.json": "1c35df5abdd6f3b3a5f4f0b51295f5b483b5cbc4f6c424e9bc4c9e1c588001c1",
+        "1194880000_selected_states.json": "455853ca65c6b341987f627e82632d642c080467b00e06fc6329ad9868dea186",
+        "node_fills_streaming.jsonl.gz": "373db11a86e68f9264309ff1192a09c868a2291c686db42e163228902feb964f",
+        "misc_events_streaming.jsonl.gz": "6e61ef6cb217b3dd590f332718aa420c87e25495efd16c904155c0b78af6341e",
+        "account_actions_selected.jsonl.gz": "3f09d0341d182f573292d7f501feb0cb1a5a5a9601eaae829da08cc2e1eb517c",
+        "crcl_mark_replay.log": "b38511ec8cf6881047ddcd9a497cd5e3b546a20ab5608eba5bbda0456f117217"
+      }
+    }
+  ]
+}

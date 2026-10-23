@@ -346,8 +346,8 @@ impl AccountMargin {
             AccountMode::PortfolioMargin => return stopped(StopReason::PortfolioMargin),
             AccountMode::Unknown(code) => return stopped(StopReason::UnknownAccountMode(code.clone())),
         };
-        // Native capacity is per clearinghouse. One-dex holdings can price aggregate collateral even with
-        // spot cash, but execution routing remains estimated when the anchor has funds outside that dex.
+        // Preserve known cross holdings in every USDC clearinghouse for aggregate capacity estimates.
+        // Exact physical funding remains restricted to the existing one-dex, zero-spot proof.
         let single_dex = unified.then(|| Self::single_usdc_dex(account, markets)).flatten();
         let unified_routing_known = single_dex.is_some() && !account.spot.iter().any(|(token, cash)| *token == USDC && *cash != 0);
         let mut cross_exposure_seen = FxHashSet::default();
@@ -355,7 +355,8 @@ impl AccountMargin {
         let (mut cross, mut isolated, mut isolated_leverage) = (FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
         for state in account.dex_states.iter().filter(|state| markets.usdc_dexes[state.dex]) {
             cross.insert(state.dex, state.cash_micro * WEI_PER_MICRO);
-            if !unified || single_dex == Some(state.dex) {
+            if !unified || single_dex == Some(state.dex) || state.positions.iter().any(|position|
+                position.size_raw != 0 && matches!(position.margin, PositionMargin::Cross { .. })) {
                 let holdings = state.positions.iter().filter_map(|position| {
                     let PositionMargin::Cross { leverage } = position.margin else { return None; };
                     if position.size_raw == 0 { return None; }
@@ -441,7 +442,9 @@ impl AccountMargin {
     /// Adds to a USDC dex's cross cash (a unified account's pool).
     fn add_cross(&mut self, dex: usize, wei: i64) {
         if self.unified() && !self.cross_capacity.contains_key(&dex) {
-            self.cross_capacity.clear();
+            // A foreign cash movement invalidates physical routing, not the quantities of known holdings.
+            // Unknown/new cross holdings separately poison aggregate capacity through cross_exposure_seen.
+            self.unified_routing_known = false;
         }
         match &mut self.pools {
             Pools::PerDex(cross) => *cross.entry(dex).or_default() += wei,
@@ -537,8 +540,9 @@ impl MarginStates {
             let Some(market) = self.markets.perps.get(&fill.coin) else { continue; };
             if matches!(market.margin_mode, AssetMarginMode::Normal) && !account.isolated_leverage.contains_key(&(market.dex, market.asset)) { continue; }
             if !pools.insert((*user, market.dex)) { continue; }
-            if let Some(snapshot) = account.cross_capacity.get(&market.dex) {
-                // Include closed entries: an earlier fill in this same block may reopen one before the isolated fill.
+            // Include closed entries: an earlier fill in this block may reopen one before the isolated fill.
+            // Unified funding can consume collateral from another dex, even when the filled dex has none.
+            for (_, snapshot) in account.cross_capacity.iter().filter(|(dex, _)| account.unified() || **dex == market.dex) {
                 coins.extend(snapshot.holdings.iter().map(|held| held.coin.clone()));
             }
         }
@@ -715,7 +719,9 @@ fn apply_isolated_fill_at(account: &mut AccountMargin, market: &PerpMarket, bloc
         Some(capacity) => Some(capacity),
         None => match (&account.pools, account.cross_capacity.get(&market.dex), &fill.collateral_marks) {
             (Pools::PerDex(cash), Some(snapshot), Some(prices)) => snapshot.available_micro(cash.get(&market.dex).copied().unwrap_or(0), prices)?,
-            (Pools::Unified(cash), Some(snapshot), Some(prices)) => snapshot.available_micro(*cash, prices)?,
+            (Pools::Unified(cash), _, Some(prices)) if account.cross_exposure_seen.iter()
+                .all(|dex| account.cross_capacity.contains_key(dex)) =>
+                cross_capacity::CrossCapacityProjection::combined_available_micro(*cash, account.cross_capacity.values(), prices)?,
             _ => None,
         },
     };
@@ -2303,16 +2309,21 @@ pub(crate) mod tests {
     #[test]
     fn unified_capacity_proof_excludes_foreign_funds_and_never_recovers_without_a_seed() {
         for variant in 0..4 {
-            let (mut source, markets, _) = unified_capacity_fixture();
+            let (mut source, mut markets, _) = unified_capacity_fixture();
             match variant {
                 0 => source.spot.push((USDC, 1)),
                 1 => source.dex_states[1].cash_micro = 1,
                 2 => source.dex_states[1].cash_micro = -1,
-                _ => { let position = source.dex_states[0].positions[0].clone(); source.dex_states[1].positions.push(position); }
+                _ => {
+                    let position = source.dex_states[0].positions[0].clone();
+                    let dex = source.dex_states[1].dex;
+                    markets.asset_names[dex] = markets.asset_names[0].clone();
+                    source.dex_states[1].positions.push(position);
+                }
             }
             let account = AccountMargin::of(&source, &markets);
             assert!(!account.unified_routing_known);
-            assert_eq!(account.cross_capacity.is_empty(), variant != 0, "spot preserves only an aggregate capacity estimate");
+            assert!(!account.cross_capacity.is_empty(), "foreign cash does not erase validated holdings; routing remains estimated");
         }
         let (source, markets, _) = unified_capacity_fixture();
         let seeded = AccountMargin::of(&source, &markets);
@@ -2323,9 +2334,14 @@ pub(crate) mod tests {
             let mut account = seeded.clone();
             if spot { account.add_spot(1); account.add_spot(-1); }
             else { account.add_cross(1, 0); }
-            assert!(account.cross_capacity.is_empty(), "foreign exposure is invalid even if net cash movement is zero");
+            if spot {
+                assert!(account.cross_capacity.is_empty(), "spot mutations still withdraw the capacity projection");
+            } else {
+                assert!(!account.cross_capacity.is_empty(), "known holdings survive a foreign cash movement");
+                assert!(!account.unified_routing_known, "even a zero-net foreign flow withdraws the routing proof");
+            }
             account.add_cross(0, 1);
-            assert!(account.cross_capacity.is_empty(), "only a checkpoint rebuild restores this proof");
+            assert!(!account.unified_routing_known, "a local flow cannot restore the physical-routing proof");
         }
         let mut replay = MarginStates { markets, accounts: [(user(HOLDER), seeded)].into_iter().collect() };
         replay.apply(10, user(HOLDER), &AccountEvent::Action(BlockAction::Leverage { asset: 224, is_cross: true, leverage: 4 }));
@@ -2421,7 +2437,8 @@ pub(crate) mod tests {
         assert!(!states.accounts[&holder].cross_capacity.contains_key(&0));
         assert!(per_dex().accounts[&holder].cross_capacity.contains_key(&0), "fresh anchor restores proof");
         let mut states = self::states(|_| {});
-        assert!(states.accounts[&holder].cross_capacity.is_empty(), "per-dex native evidence does not prove unified execution routing");
+        assert!(!states.accounts[&holder].cross_capacity.is_empty(), "Unified keeps validated holdings for aggregate estimates");
+        assert!(!states.accounts[&holder].unified_routing_known, "aggregate capacity is not a physical-routing proof");
         states.accounts.get_mut(&holder).unwrap().estimated = true;
         assert!(states.accounts[&holder].estimated, "new exact evidence never clears prior uncertainty");
     }
