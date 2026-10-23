@@ -940,10 +940,17 @@ HIP-3 已满足触发条件、且位于状态流尾部的条件成交，还可�
 这是实际 wire 观测（452 笔普通 taker 的 oid 与回执全匹配，两个目标 hash 的官方 txDetails
 独立确认同一 oracle 动作），不是官方文档保证，也不是 hash 认证。未知格式不停止 mark 重建。
 仍要求唯一 taker、已记录的 triggered 状态、同块同时间唯一 Normal mark 写入；两腿分别核验，
-缺少定位或与状态夹区间冲突时保留价格区间及 `cashEstimated`。不扩展到 EVM、TWAP、系统定位或多次写价。
+缺少可用证据、或状态夹区间位于 oracle 写价之前而与 hash 定位矛盾时，保留价格区间及 `cashEstimated`。
+状态夹区间在同一次 oracle 写价之后时，两条证据指向相同新价格，即使动作位置不同也可确定成交 mark；
+这只确定价格，不宣称确定了触发动作身份。不扩展到 EVM、TWAP、系统定位或多次写价。
 两段 121/98 事件的完整逐仓现金测试在明确提供充足跨仓资金的前提下，消除了原有 -5/-26 微 USDC 差异；
 其他市场资金容量不属于该测试证明范围。ANTH 九笔的 665 微 USDC 分池差异仍未解决，不能按舍入抹平。
 金样本见 `server/src/accounts/marks/fill_prices/hip3/oracle_hash_goldens.json`；完整原始区块放专用研究数据目录。
+`xyz:NBIS 1194139926` 的完整原始块验证了上述后一种情形：唯一 Normal 写价从 164.6 到 164.41，
+成交 hash 定位 oracle，完整触发状态串夹在后续 bundle 的两个普通挂单之间。
+`oracle_bracket_golden.json` 保留动作、回执、连续状态及五户在 `1194130000→1194140000` 的逐仓窗口；
+原偏差 -13,680 / -139,320 / -619,110 / -179,527 / -72,160 微 USDC 在回归中均消除。
+测试显式提供充足跨仓资金，验证逐仓划转和后续减仓，不代替这些账户全部市场的可用资金重建。
 
 Unified isolated funding also needs the physical executing-dex balance: an aggregate pool containing spot or
 other dex cash does not prove that amount was prefunded before a maker fill. Native sweep `0x3c92a80` in

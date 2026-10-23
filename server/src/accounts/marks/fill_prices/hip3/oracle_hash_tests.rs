@@ -26,6 +26,12 @@ impl Fixture {
                 *execution_index = Some(usize::try_from(event["execution_index"].as_u64().unwrap()).unwrap());
             }
         }
+        if let Some(bracket) = event.get("bracket") {
+            let mut parsed = mark_actions(&replica_line(height,
+                &[&[(&bracket["action"].to_string(), &bracket["response"].to_string())]]));
+            for action in &mut parsed.actions { action.rank = serde_json::from_value(bracket["rank"].clone()).unwrap(); }
+            actions.actions.extend(parsed.actions);
+        }
         Self {
             height,
             coins: FxHashMap::from_iter([(coin.into(), Hip3Coin {
@@ -111,9 +117,43 @@ fn full_archived_blocks_derive_oracle_execution_positions_without_projection() {
 }
 
 #[test]
-fn conflicting_status_bracket_cannot_override_a_matched_oracle_locator() {
+fn status_brackets_must_agree_with_the_oracle_locator_on_price_side() {
     let oracle = (1, 3, 20);
-    assert!(matches!(trigger_timing(Placement::Trigger(1), Some(oracle), Some(oracle)), Some(FillTiming::InsideOracle)));
-    assert!(trigger_timing(Placement::Trigger(1), Some((1, 3, 21)), Some(oracle)).is_none());
+    for bracket in [None, Some(oracle), Some((1, 3, 21)), Some((2, 1, 0))] {
+        assert!(matches!(trigger_timing(Placement::Trigger(1), bracket, Some(oracle)), Some(FillTiming::AtOrAfterOracle)));
+    }
+    for before in [(1, 3, 19), (1, 1, 21), (0, 3, 99)] {
+        assert!(trigger_timing(Placement::Trigger(1), Some(before), Some(oracle)).is_none(), "a pre-write bracket conflicts with the new price");
+    }
     assert!(matches!(trigger_timing(Placement::Trigger(1), Some((1, 3, 21)), None), Some(FillTiming::Placed(Placement::Action((1, 3, 21))))));
+}
+
+
+#[test]
+fn oracle_bracket_later_status_and_locator_agree_on_nbis_execution_price() {
+    let golden: Value = serde_json::from_str(include_str!("oracle_bracket_golden.json")).unwrap();
+    let event = &golden["oracle_event"];
+    let fixture = Fixture::of(event);
+    let actions = fixture.inputs.actions.as_ref().unwrap();
+    let brackets = fixture.inputs.statuses.interleaved_trigger_ranks(actions);
+    assert_eq!(brackets.get(&583_470_232_916), Some(&(2, 1, 5)), "receipt-backed opens bracket the trigger in a later bundle");
+    assert!(fixture.inputs.fills.iter().all(|f| f.action_position.is_some_and(|p| p.height == fixture.height && p.index == 371)));
+    fixture.assert_range(event, true);
+}
+
+#[test]
+#[ignore = "requires HIP3_ORACLE_BLOCKS with the archived NBIS replica line"]
+fn oracle_bracket_full_archived_block_confirms_both_price_evidence_sources() {
+    let directory = std::path::PathBuf::from(std::env::var("HIP3_ORACLE_BLOCKS").expect("explicit archive directory"));
+    let golden: Value = serde_json::from_str(include_str!("oracle_bracket_golden.json")).unwrap();
+    let event = &golden["oracle_event"];
+    let mut fixture = Fixture::of(event);
+    let line = std::fs::read_to_string(directory.join(format!("{}_replica.jsonl", fixture.height))).unwrap();
+    let parsed = mark_actions(&line);
+    let oracle = parsed.actions.iter().find(|a| matches!(&a.action, MarkAction::Hip3Oracle { dex, .. } if dex == "xyz")).unwrap();
+    assert_eq!(oracle.rank, (0, 3, 362));
+    assert_eq!(oracle.action, MarkAction::Hip3Oracle { dex: "xyz".into(), execution_index: Some(371) });
+    assert_eq!(fixture.inputs.statuses.interleaved_trigger_ranks(&parsed).get(&583_470_232_916), Some(&(2, 1, 5)));
+    fixture.inputs.actions = Some(parsed);
+    fixture.assert_range(event, true);
 }

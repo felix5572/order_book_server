@@ -1906,6 +1906,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn oracle_bracket_nbis_cash_reconciles_five_recorded_isolated_windows() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/hip3/oracle_bracket_golden.json")).unwrap();
+        assert_eq!(golden["cases"].as_array().unwrap().len(), 5);
+        for source in golden["cases"].as_array().unwrap() {
+            let mut case = source.clone();
+            for event in case["events"].as_array_mut().unwrap() {
+                if event.get("oracle_bracket").is_some() { event["oracle_locator"] = golden["oracle_event"].clone(); }
+            }
+            // This verifies the isolated transfer and subsequent reductions, not moving cross-portfolio capacity.
+            check_hip3_execution_cash(&case, false);
+        }
+    }
+
+    #[test]
     fn oracle_hash_locators_reconcile_full_dram_and_sndk_cash_intervals() {
         let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/hip3/oracle_hash_goldens.json")).unwrap();
         for case in golden["cases"].as_array().unwrap() { check_hip3_execution_cash(case, true); }

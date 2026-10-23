@@ -35,7 +35,7 @@ fn oracle_ranks(actions: &MarkActions) -> FxHashMap<&str, Option<(Rank, Option<u
 
 enum FillTiming {
     Placed(Placement),
-    InsideOracle,
+    AtOrAfterOracle,
 }
 
 impl CoinPrices<'_> {
@@ -49,7 +49,7 @@ impl CoinPrices<'_> {
             FillTiming::Placed(Placement::BeforeActions) => true,
             FillTiming::Placed(Placement::Action(taker)) if taker != rank => taker < rank,
             FillTiming::Placed(Placement::Action(_)) => return None,
-            FillTiming::InsideOracle => false,
+            FillTiming::AtOrAfterOracle => false,
             FillTiming::Placed(Placement::Trigger(oid)) => {
                 let (opening, decimals) = self.opening?;
                 let closing = exact_price_units(&update.px, size_decimals).ok()?;
@@ -115,10 +115,13 @@ pub(super) fn observe(prices: &mut [PricesSeen], coins: &FxHashMap<String, Hip3C
     }
 }
 
-/// Independent status brackets and oracle locators may corroborate, but cannot override one another.
+/// Reconcile the price implied by each source, not an exact action identity. NBIS 1194139926 carries
+/// the oracle's locator while a complete status span is bracketed by a later bundle's ordinary orders.
+/// Both imply the sole Normal write's new price. A bracket before that write still conflicts and stays unknown.
+/// `CoinPrices::at` separately requires one successful oracle and one same-block Normal write.
 fn trigger_timing(placement: Placement, bracket: Option<Rank>, matched_oracle: Option<Rank>) -> Option<FillTiming> {
     if let Some(oracle) = matched_oracle {
-        return bracket.is_none_or(|rank| rank == oracle).then_some(FillTiming::InsideOracle);
+        return bracket.is_none_or(|rank| rank >= oracle).then_some(FillTiming::AtOrAfterOracle);
     }
     Some(FillTiming::Placed(bracket.map_or(placement, Placement::Action)))
 }

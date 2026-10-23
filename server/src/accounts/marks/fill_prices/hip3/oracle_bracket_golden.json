@@ -1,0 +1,5677 @@
+{
+  "provenance": {
+    "window": [
+      1194130000,
+      1194140000
+    ],
+    "source_directory": "/home/yfb222333/research-data/hyperliquid-trade/ob_hourly_watch_20261021/heartbeat_20261023T085957Z/cash_evidence",
+    "scope": "Actual NBIS wire legs, contiguous status bracket, full two actions/receipts. Other fills retain block mark envelopes. Cash regressions assume ample capacity and do not certify unknown cross funding. Full raw-block parser regression verifies the projected ranks/index.",
+    "sha256": {
+      "node_order_statuses_streaming.jsonl.gz": "1d2404548cc032ffc7035cb2879c5df553c2c49db32bbd5cba4dce0f00dc70b1",
+      "system_and_core_writer_actions_streaming.jsonl.gz": "f7ea37bb2310f988545e6e994e11c4c11f5e62447af7bf18d04afd716e6233a8",
+      "node_fills_streaming.jsonl.gz": "96789b8f7e2242f51313a9fe332b3f67161b816b2633942ca89b9c194c59dacc",
+      "replica_cmds.jsonl.gz": "0c32c9b3ab06fbf0aab8386a1e12a196785cec2fe35e27650b51e90de2806978",
+      "hip3_oracle_updates_streaming.jsonl.gz": "edf6a13e77b375d4b0e57ee0c0d6a7e6b913653966a83347d4f8cee477d0f9b7"
+    }
+  },
+  "oracle_event": {
+    "height": 1194139926,
+    "time_ns": 1792745016811116254,
+    "coin": "xyz:NBIS",
+    "size_decimals": 2,
+    "order_asset": 110086,
+    "action": {
+      "type": "multiSig",
+      "signatureChainId": "0x3e7",
+      "signatures": [
+        {
+          "r": "0xb92bebb58b10640e57cca157dac25efec3e4f706807acb6c8e12cb3a4a6f0dc5",
+          "s": "0xa112804c437183d5cfc5db40bbdee7de64ae3db546d8358278305d0b1fdb0bf2",
+          "v": 27
+        }
+      ],
+      "payload": {
+        "multiSigUser": "0x1234567890545d1df9ee64b35fdd16966e08acec",
+        "outerSigner": "0xaa5875fe802c70703a993b5b1fd19d6977ab8404",
+        "action": {
+          "type": "perpDeploy",
+          "setOracle": {
+            "dex": "xyz",
+            "oraclePxs": [
+              [
+                "xyz:AAOI",
+                "71.5"
+              ],
+              [
+                "xyz:AAPL",
+                "345.71"
+              ],
+              [
+                "xyz:AMAT",
+                "384.6"
+              ],
+              [
+                "xyz:AMD",
+                "519.43"
+              ],
+              [
+                "xyz:AMZN",
+                "250.7"
+              ],
+              [
+                "xyz:ARM",
+                "215.38"
+              ],
+              [
+                "xyz:ASML",
+                "1587.8"
+              ],
+              [
+                "xyz:AVGO",
+                "326.37"
+              ],
+              [
+                "xyz:BABA",
+                "100.52"
+              ],
+              [
+                "xyz:BB",
+                "8.65"
+              ],
+              [
+                "xyz:BE",
+                "220.8"
+              ],
+              [
+                "xyz:BIRD",
+                "2.3244"
+              ],
+              [
+                "xyz:BMNR",
+                "22.845"
+              ],
+              [
+                "xyz:BOT",
+                "22.493"
+              ],
+              [
+                "xyz:BRENTOIL",
+                "109"
+              ],
+              [
+                "xyz:BX",
+                "117.59"
+              ],
+              [
+                "xyz:CAMBRICON",
+                "139.7"
+              ],
+              [
+                "xyz:CBRS",
+                "111.42"
+              ],
+              [
+                "xyz:CL",
+                "100.26"
+              ],
+              [
+                "xyz:COIN",
+                "171.28"
+              ],
+              [
+                "xyz:COPPER",
+                "6.4543"
+              ],
+              [
+                "xyz:COST",
+                "1013"
+              ],
+              [
+                "xyz:CRCL",
+                "87.618"
+              ],
+              [
+                "xyz:CRWD",
+                "239.5"
+              ],
+              [
+                "xyz:CRWV",
+                "58.01"
+              ],
+              [
+                "xyz:CVX",
+                "227.31"
+              ],
+              [
+                "xyz:CXMT",
+                "6.4203"
+              ],
+              [
+                "xyz:DELL",
+                "465.75"
+              ],
+              [
+                "xyz:DKNG",
+                "20.855"
+              ],
+              [
+                "xyz:DRAM",
+                "47.528"
+              ],
+              [
+                "xyz:EBAY",
+                "121.86"
+              ],
+              [
+                "xyz:EUR",
+                "1.119"
+              ],
+              [
+                "xyz:EWJ",
+                "93.685"
+              ],
+              [
+                "xyz:EWT",
+                "104.29"
+              ],
+              [
+                "xyz:EWY",
+                "152.09"
+              ],
+              [
+                "xyz:EWZ",
+                "41.75"
+              ],
+              [
+                "xyz:GBP",
+                "1.3381"
+              ],
+              [
+                "xyz:GEV",
+                "847.05"
+              ],
+              [
+                "xyz:GIGADEV",
+                "43.73"
+              ],
+              [
+                "xyz:GLW",
+                "127.65"
+              ],
+              [
+                "xyz:GME",
+                "25.27"
+              ],
+              [
+                "xyz:GOLD",
+                "4018.2"
+              ],
+              [
+                "xyz:GOOGL",
+                "325.22"
+              ],
+              [
+                "xyz:HIMS",
+                "29.135"
+              ],
+              [
+                "xyz:HO",
+                "4.7937"
+              ],
+              [
+                "xyz:HOOD",
+                "97.847"
+              ],
+              [
+                "xyz:HYUNDAI",
+                "220.72"
+              ],
+              [
+                "xyz:IBIDEN",
+                "54.159"
+              ],
+              [
+                "xyz:IBM",
+                "249.63"
+              ],
+              [
+                "xyz:INTC",
+                "87.855"
+              ],
+              [
+                "xyz:IREN",
+                "26.3"
+              ],
+              [
+                "xyz:JIO",
+                "12.896"
+              ],
+              [
+                "xyz:JP225",
+                "62493"
+              ],
+              [
+                "xyz:JPY",
+                "156.87"
+              ],
+              [
+                "xyz:KIOXIA",
+                "80.961"
+              ],
+              [
+                "xyz:KORU",
+                "10.763"
+              ],
+              [
+                "xyz:KR200",
+                "862.89"
+              ],
+              [
+                "xyz:KRW",
+                "1326.4"
+              ],
+              [
+                "xyz:KSTR",
+                "19.407"
+              ],
+              [
+                "xyz:LITE",
+                "789.8"
+              ],
+              [
+                "xyz:LLY",
+                "1289.1"
+              ],
+              [
+                "xyz:LRCX",
+                "235.45"
+              ],
+              [
+                "xyz:LYTE",
+                "18.784"
+              ],
+              [
+                "xyz:MAGS",
+                "70.65"
+              ],
+              [
+                "xyz:META",
+                "648.52"
+              ],
+              [
+                "xyz:MINIMAX",
+                "23.905"
+              ],
+              [
+                "xyz:MRNA",
+                "197.77"
+              ],
+              [
+                "xyz:MRVL",
+                "229.23"
+              ],
+              [
+                "xyz:MSFT",
+                "517.96"
+              ],
+              [
+                "xyz:MSTR",
+                "147.84"
+              ],
+              [
+                "xyz:MU",
+                "880.55"
+              ],
+              [
+                "xyz:NATGAS",
+                "3.116"
+              ],
+              [
+                "xyz:NBIS",
+                "164.28"
+              ],
+              [
+                "xyz:NCLD",
+                "16.265"
+              ],
+              [
+                "xyz:NET",
+                "317.09"
+              ],
+              [
+                "xyz:NFLX",
+                "66.245"
+              ],
+              [
+                "xyz:NOK",
+                "8.395"
+              ],
+              [
+                "xyz:NOW",
+                "154.54"
+              ],
+              [
+                "xyz:NVDA",
+                "214.7"
+              ],
+              [
+                "xyz:ORCL",
+                "126.65"
+              ],
+              [
+                "xyz:OURA",
+                "48.695"
+              ],
+              [
+                "xyz:PALLADIUM",
+                "1059.5"
+              ],
+              [
+                "xyz:PLATINUM",
+                "1563.8"
+              ],
+              [
+                "xyz:PLTR",
+                "195.31"
+              ],
+              [
+                "xyz:PURRDAT",
+                "8.92"
+              ],
+              [
+                "xyz:QCOM",
+                "174.95"
+              ],
+              [
+                "xyz:QNT",
+                "36.722"
+              ],
+              [
+                "xyz:RDDT",
+                "149.36"
+              ],
+              [
+                "xyz:RIVN",
+                "12.12"
+              ],
+              [
+                "xyz:RKLB",
+                "52.341"
+              ],
+              [
+                "xyz:SHAZ",
+                "24.09"
+              ],
+              [
+                "xyz:SHEIN",
+                "4.8217"
+              ],
+              [
+                "xyz:SILVER",
+                "53.924"
+              ],
+              [
+                "xyz:SKHX",
+                "962.4"
+              ],
+              [
+                "xyz:SKHY",
+                "139.66"
+              ],
+              [
+                "xyz:SMH",
+                "532.45"
+              ],
+              [
+                "xyz:SMSN",
+                "162.29"
+              ],
+              [
+                "xyz:SNDK",
+                "1304"
+              ],
+              [
+                "xyz:SNXX",
+                "9.04"
+              ],
+              [
+                "xyz:SOFTBANK",
+                "27.272"
+              ],
+              [
+                "xyz:SOXL",
+                "87.003"
+              ],
+              [
+                "xyz:SP500",
+                "7663.3"
+              ],
+              [
+                "xyz:SPCX",
+                "149.21"
+              ],
+              [
+                "xyz:STRC",
+                "98.95"
+              ],
+              [
+                "xyz:TLT",
+                "81.615"
+              ],
+              [
+                "xyz:TSLA",
+                "379.14"
+              ],
+              [
+                "xyz:TSM",
+                "417.37"
+              ],
+              [
+                "xyz:TWST",
+                "137.65"
+              ],
+              [
+                "xyz:UMC",
+                "18.88"
+              ],
+              [
+                "xyz:UNITREE",
+                "93.216"
+              ],
+              [
+                "xyz:URNM",
+                "41.624"
+              ],
+              [
+                "xyz:USAR",
+                "9.71"
+              ],
+              [
+                "xyz:WDC",
+                "350.55"
+              ],
+              [
+                "xyz:XBI",
+                "151.59"
+              ],
+              [
+                "xyz:XLE",
+                "67.752"
+              ],
+              [
+                "xyz:XYZ100",
+                "29055"
+              ],
+              [
+                "xyz:ZHIPU",
+                "63.392"
+              ],
+              [
+                "xyz:ZM",
+                "96.111"
+              ]
+            ],
+            "markPxs": [
+              [
+                [
+                  "xyz:AAOI",
+                  "71.5"
+                ],
+                [
+                  "xyz:AAPL",
+                  "345.71"
+                ],
+                [
+                  "xyz:AMAT",
+                  "384.6"
+                ],
+                [
+                  "xyz:AMD",
+                  "519.43"
+                ],
+                [
+                  "xyz:AMZN",
+                  "250.7"
+                ],
+                [
+                  "xyz:ARM",
+                  "215.38"
+                ],
+                [
+                  "xyz:ASML",
+                  "1587.8"
+                ],
+                [
+                  "xyz:AVGO",
+                  "326.37"
+                ],
+                [
+                  "xyz:BABA",
+                  "100.52"
+                ],
+                [
+                  "xyz:BB",
+                  "8.65"
+                ],
+                [
+                  "xyz:BE",
+                  "220.8"
+                ],
+                [
+                  "xyz:BIRD",
+                  "2.3244"
+                ],
+                [
+                  "xyz:BMNR",
+                  "22.845"
+                ],
+                [
+                  "xyz:BOT",
+                  "22.493"
+                ],
+                [
+                  "xyz:BRENTOIL",
+                  "109"
+                ],
+                [
+                  "xyz:BX",
+                  "117.59"
+                ],
+                [
+                  "xyz:CAMBRICON",
+                  "139.7"
+                ],
+                [
+                  "xyz:CBRS",
+                  "111.42"
+                ],
+                [
+                  "xyz:CL",
+                  "100.26"
+                ],
+                [
+                  "xyz:COIN",
+                  "171.28"
+                ],
+                [
+                  "xyz:COPPER",
+                  "6.4543"
+                ],
+                [
+                  "xyz:COST",
+                  "1013"
+                ],
+                [
+                  "xyz:CRCL",
+                  "87.618"
+                ],
+                [
+                  "xyz:CRWD",
+                  "239.5"
+                ],
+                [
+                  "xyz:CRWV",
+                  "58.01"
+                ],
+                [
+                  "xyz:CVX",
+                  "227.31"
+                ],
+                [
+                  "xyz:CXMT",
+                  "6.4203"
+                ],
+                [
+                  "xyz:DELL",
+                  "465.75"
+                ],
+                [
+                  "xyz:DKNG",
+                  "20.855"
+                ],
+                [
+                  "xyz:DRAM",
+                  "47.528"
+                ],
+                [
+                  "xyz:EBAY",
+                  "121.86"
+                ],
+                [
+                  "xyz:EUR",
+                  "1.119"
+                ],
+                [
+                  "xyz:EWJ",
+                  "93.685"
+                ],
+                [
+                  "xyz:EWT",
+                  "104.29"
+                ],
+                [
+                  "xyz:EWY",
+                  "152.09"
+                ],
+                [
+                  "xyz:EWZ",
+                  "41.75"
+                ],
+                [
+                  "xyz:GBP",
+                  "1.3381"
+                ],
+                [
+                  "xyz:GEV",
+                  "847.05"
+                ],
+                [
+                  "xyz:GIGADEV",
+                  "43.73"
+                ],
+                [
+                  "xyz:GLW",
+                  "127.65"
+                ],
+                [
+                  "xyz:GME",
+                  "25.27"
+                ],
+                [
+                  "xyz:GOLD",
+                  "4018.2"
+                ],
+                [
+                  "xyz:GOOGL",
+                  "325.22"
+                ],
+                [
+                  "xyz:HIMS",
+                  "29.135"
+                ],
+                [
+                  "xyz:HO",
+                  "4.7937"
+                ],
+                [
+                  "xyz:HOOD",
+                  "97.847"
+                ],
+                [
+                  "xyz:HYUNDAI",
+                  "220.72"
+                ],
+                [
+                  "xyz:IBIDEN",
+                  "54.159"
+                ],
+                [
+                  "xyz:IBM",
+                  "249.63"
+                ],
+                [
+                  "xyz:INTC",
+                  "87.855"
+                ],
+                [
+                  "xyz:IREN",
+                  "26.3"
+                ],
+                [
+                  "xyz:JIO",
+                  "12.896"
+                ],
+                [
+                  "xyz:JP225",
+                  "62493"
+                ],
+                [
+                  "xyz:JPY",
+                  "156.87"
+                ],
+                [
+                  "xyz:KIOXIA",
+                  "80.961"
+                ],
+                [
+                  "xyz:KORU",
+                  "10.763"
+                ],
+                [
+                  "xyz:KR200",
+                  "862.89"
+                ],
+                [
+                  "xyz:KRW",
+                  "1326.4"
+                ],
+                [
+                  "xyz:KSTR",
+                  "19.407"
+                ],
+                [
+                  "xyz:LITE",
+                  "789.8"
+                ],
+                [
+                  "xyz:LLY",
+                  "1289.1"
+                ],
+                [
+                  "xyz:LRCX",
+                  "235.45"
+                ],
+                [
+                  "xyz:LYTE",
+                  "18.784"
+                ],
+                [
+                  "xyz:MAGS",
+                  "70.65"
+                ],
+                [
+                  "xyz:META",
+                  "648.52"
+                ],
+                [
+                  "xyz:MINIMAX",
+                  "23.905"
+                ],
+                [
+                  "xyz:MRNA",
+                  "197.77"
+                ],
+                [
+                  "xyz:MRVL",
+                  "229.23"
+                ],
+                [
+                  "xyz:MSFT",
+                  "517.96"
+                ],
+                [
+                  "xyz:MSTR",
+                  "147.84"
+                ],
+                [
+                  "xyz:MU",
+                  "880.55"
+                ],
+                [
+                  "xyz:NATGAS",
+                  "3.116"
+                ],
+                [
+                  "xyz:NBIS",
+                  "164.28"
+                ],
+                [
+                  "xyz:NCLD",
+                  "16.265"
+                ],
+                [
+                  "xyz:NET",
+                  "317.09"
+                ],
+                [
+                  "xyz:NFLX",
+                  "66.245"
+                ],
+                [
+                  "xyz:NOK",
+                  "8.395"
+                ],
+                [
+                  "xyz:NOW",
+                  "154.54"
+                ],
+                [
+                  "xyz:NVDA",
+                  "214.7"
+                ],
+                [
+                  "xyz:ORCL",
+                  "126.65"
+                ],
+                [
+                  "xyz:OURA",
+                  "48.695"
+                ],
+                [
+                  "xyz:PALLADIUM",
+                  "1059.5"
+                ],
+                [
+                  "xyz:PLATINUM",
+                  "1563.8"
+                ],
+                [
+                  "xyz:PLTR",
+                  "195.31"
+                ],
+                [
+                  "xyz:PURRDAT",
+                  "8.92"
+                ],
+                [
+                  "xyz:QCOM",
+                  "174.95"
+                ],
+                [
+                  "xyz:QNT",
+                  "36.722"
+                ],
+                [
+                  "xyz:RDDT",
+                  "149.36"
+                ],
+                [
+                  "xyz:RIVN",
+                  "12.12"
+                ],
+                [
+                  "xyz:RKLB",
+                  "52.341"
+                ],
+                [
+                  "xyz:SHAZ",
+                  "24.09"
+                ],
+                [
+                  "xyz:SHEIN",
+                  "4.8217"
+                ],
+                [
+                  "xyz:SILVER",
+                  "53.924"
+                ],
+                [
+                  "xyz:SKHX",
+                  "962.4"
+                ],
+                [
+                  "xyz:SKHY",
+                  "139.66"
+                ],
+                [
+                  "xyz:SMH",
+                  "532.45"
+                ],
+                [
+                  "xyz:SMSN",
+                  "162.29"
+                ],
+                [
+                  "xyz:SNDK",
+                  "1304"
+                ],
+                [
+                  "xyz:SNXX",
+                  "9.04"
+                ],
+                [
+                  "xyz:SOFTBANK",
+                  "27.272"
+                ],
+                [
+                  "xyz:SOXL",
+                  "87.003"
+                ],
+                [
+                  "xyz:SP500",
+                  "7663.3"
+                ],
+                [
+                  "xyz:SPCX",
+                  "149.21"
+                ],
+                [
+                  "xyz:STRC",
+                  "98.95"
+                ],
+                [
+                  "xyz:TLT",
+                  "81.615"
+                ],
+                [
+                  "xyz:TSLA",
+                  "379.14"
+                ],
+                [
+                  "xyz:TSM",
+                  "417.37"
+                ],
+                [
+                  "xyz:TWST",
+                  "137.65"
+                ],
+                [
+                  "xyz:UMC",
+                  "18.88"
+                ],
+                [
+                  "xyz:UNITREE",
+                  "93.216"
+                ],
+                [
+                  "xyz:URNM",
+                  "41.624"
+                ],
+                [
+                  "xyz:USAR",
+                  "9.71"
+                ],
+                [
+                  "xyz:WDC",
+                  "350.55"
+                ],
+                [
+                  "xyz:XBI",
+                  "151.59"
+                ],
+                [
+                  "xyz:XLE",
+                  "67.752"
+                ],
+                [
+                  "xyz:XYZ100",
+                  "29055"
+                ],
+                [
+                  "xyz:ZHIPU",
+                  "63.392"
+                ],
+                [
+                  "xyz:ZM",
+                  "96.111"
+                ]
+              ],
+              [
+                [
+                  "xyz:AAOI",
+                  "71.492"
+                ],
+                [
+                  "xyz:AAPL",
+                  "345.56"
+                ],
+                [
+                  "xyz:AMAT",
+                  "384.7"
+                ],
+                [
+                  "xyz:AMD",
+                  "519.56"
+                ],
+                [
+                  "xyz:AMZN",
+                  "250.73"
+                ],
+                [
+                  "xyz:ARM",
+                  "215.54"
+                ],
+                [
+                  "xyz:ASML",
+                  "1588"
+                ],
+                [
+                  "xyz:AVGO",
+                  "326.28"
+                ],
+                [
+                  "xyz:BABA",
+                  "100.59"
+                ],
+                [
+                  "xyz:BB",
+                  "8.6539"
+                ],
+                [
+                  "xyz:BE",
+                  "220.86"
+                ],
+                [
+                  "xyz:BIRD",
+                  "2.3233"
+                ],
+                [
+                  "xyz:BMNR",
+                  "22.872"
+                ],
+                [
+                  "xyz:BOT",
+                  "22.574"
+                ],
+                [
+                  "xyz:BRENTOIL",
+                  "108.95"
+                ],
+                [
+                  "xyz:BX",
+                  "117.7"
+                ],
+                [
+                  "xyz:CAMBRICON",
+                  "139.89"
+                ],
+                [
+                  "xyz:CBRS",
+                  "111.35"
+                ],
+                [
+                  "xyz:CL",
+                  "100.23"
+                ],
+                [
+                  "xyz:COIN",
+                  "171.37"
+                ],
+                [
+                  "xyz:COPPER",
+                  "6.4556"
+                ],
+                [
+                  "xyz:COST",
+                  "1010.2"
+                ],
+                [
+                  "xyz:CRCL",
+                  "87.664"
+                ],
+                [
+                  "xyz:CRWD",
+                  "239.44"
+                ],
+                [
+                  "xyz:CRWV",
+                  "58.024"
+                ],
+                [
+                  "xyz:CVX",
+                  "227.4"
+                ],
+                [
+                  "xyz:CXMT",
+                  "6.4141"
+                ],
+                [
+                  "xyz:DELL",
+                  "465.5"
+                ],
+                [
+                  "xyz:DKNG",
+                  "20.855"
+                ],
+                [
+                  "xyz:DRAM",
+                  "47.554"
+                ],
+                [
+                  "xyz:EBAY",
+                  "121.46"
+                ],
+                [
+                  "xyz:EUR",
+                  "1.1194"
+                ],
+                [
+                  "xyz:EWJ",
+                  "93.765"
+                ],
+                [
+                  "xyz:EWT",
+                  "104.33"
+                ],
+                [
+                  "xyz:EWY",
+                  "152.15"
+                ],
+                [
+                  "xyz:EWZ",
+                  "41.896"
+                ],
+                [
+                  "xyz:GBP",
+                  "1.3373"
+                ],
+                [
+                  "xyz:GEV",
+                  "847.54"
+                ],
+                [
+                  "xyz:GIGADEV",
+                  "43.88"
+                ],
+                [
+                  "xyz:GLW",
+                  "127.68"
+                ],
+                [
+                  "xyz:GME",
+                  "25.309"
+                ],
+                [
+                  "xyz:GOLD",
+                  "4020.8"
+                ],
+                [
+                  "xyz:GOOGL",
+                  "325.3"
+                ],
+                [
+                  "xyz:HIMS",
+                  "29.131"
+                ],
+                [
+                  "xyz:HO",
+                  "4.7861"
+                ],
+                [
+                  "xyz:HOOD",
+                  "97.875"
+                ],
+                [
+                  "xyz:HYUNDAI",
+                  "221.42"
+                ],
+                [
+                  "xyz:IBIDEN",
+                  "54.159"
+                ],
+                [
+                  "xyz:IBM",
+                  "249.55"
+                ],
+                [
+                  "xyz:INTC",
+                  "87.908"
+                ],
+                [
+                  "xyz:IREN",
+                  "26.3"
+                ],
+                [
+                  "xyz:JIO",
+                  "12.9"
+                ],
+                [
+                  "xyz:JP225",
+                  "62517"
+                ],
+                [
+                  "xyz:JPY",
+                  "156.8"
+                ],
+                [
+                  "xyz:KIOXIA",
+                  "81.075"
+                ],
+                [
+                  "xyz:KORU",
+                  "10.767"
+                ],
+                [
+                  "xyz:KR200",
+                  "863.27"
+                ],
+                [
+                  "xyz:KRW",
+                  "1326.4"
+                ],
+                [
+                  "xyz:KSTR",
+                  "19.495"
+                ],
+                [
+                  "xyz:LITE",
+                  "790.01"
+                ],
+                [
+                  "xyz:LLY",
+                  "1290.1"
+                ],
+                [
+                  "xyz:LRCX",
+                  "235.89"
+                ],
+                [
+                  "xyz:LYTE",
+                  "18.733"
+                ],
+                [
+                  "xyz:MAGS",
+                  "70.736"
+                ],
+                [
+                  "xyz:META",
+                  "648.68"
+                ],
+                [
+                  "xyz:MINIMAX",
+                  "23.755"
+                ],
+                [
+                  "xyz:MRNA",
+                  "197.69"
+                ],
+                [
+                  "xyz:MRVL",
+                  "229.36"
+                ],
+                [
+                  "xyz:MSFT",
+                  "517.65"
+                ],
+                [
+                  "xyz:MSTR",
+                  "147.92"
+                ],
+                [
+                  "xyz:MU",
+                  "881.05"
+                ],
+                [
+                  "xyz:NATGAS",
+                  "3.1161"
+                ],
+                [
+                  "xyz:NBIS",
+                  "164.41"
+                ],
+                [
+                  "xyz:NCLD",
+                  "16.233"
+                ],
+                [
+                  "xyz:NET",
+                  "316.67"
+                ],
+                [
+                  "xyz:NFLX",
+                  "66.288"
+                ],
+                [
+                  "xyz:NOK",
+                  "8.3918"
+                ],
+                [
+                  "xyz:NOW",
+                  "154.67"
+                ],
+                [
+                  "xyz:NVDA",
+                  "214.7"
+                ],
+                [
+                  "xyz:ORCL",
+                  "126.52"
+                ],
+                [
+                  "xyz:OURA",
+                  "48.73"
+                ],
+                [
+                  "xyz:PALLADIUM",
+                  "1059.4"
+                ],
+                [
+                  "xyz:PLATINUM",
+                  "1564.7"
+                ],
+                [
+                  "xyz:PLTR",
+                  "195.15"
+                ],
+                [
+                  "xyz:PURRDAT",
+                  "8.9197"
+                ],
+                [
+                  "xyz:QCOM",
+                  "174.83"
+                ],
+                [
+                  "xyz:QNT",
+                  "36.678"
+                ],
+                [
+                  "xyz:RDDT",
+                  "149.08"
+                ],
+                [
+                  "xyz:RIVN",
+                  "12.129"
+                ],
+                [
+                  "xyz:RKLB",
+                  "52.351"
+                ],
+                [
+                  "xyz:SHAZ",
+                  "24.141"
+                ],
+                [
+                  "xyz:SHEIN",
+                  "4.8072"
+                ],
+                [
+                  "xyz:SILVER",
+                  "53.952"
+                ],
+                [
+                  "xyz:SKHX",
+                  "963.31"
+                ],
+                [
+                  "xyz:SKHY",
+                  "139.69"
+                ],
+                [
+                  "xyz:SMH",
+                  "532.38"
+                ],
+                [
+                  "xyz:SMSN",
+                  "162.42"
+                ],
+                [
+                  "xyz:SNDK",
+                  "1304.7"
+                ],
+                [
+                  "xyz:SNXX",
+                  "9.0446"
+                ],
+                [
+                  "xyz:SOFTBANK",
+                  "27.361"
+                ],
+                [
+                  "xyz:SOXL",
+                  "87.061"
+                ],
+                [
+                  "xyz:SP500",
+                  "7662.8"
+                ],
+                [
+                  "xyz:SPCX",
+                  "149.26"
+                ],
+                [
+                  "xyz:STRC",
+                  "98.867"
+                ],
+                [
+                  "xyz:TLT",
+                  "81.647"
+                ],
+                [
+                  "xyz:TSLA",
+                  "379.23"
+                ],
+                [
+                  "xyz:TSM",
+                  "417.5"
+                ],
+                [
+                  "xyz:TWST",
+                  "138.55"
+                ],
+                [
+                  "xyz:UMC",
+                  "18.913"
+                ],
+                [
+                  "xyz:UNITREE",
+                  "93.398"
+                ],
+                [
+                  "xyz:URNM",
+                  "41.653"
+                ],
+                [
+                  "xyz:USAR",
+                  "9.7193"
+                ],
+                [
+                  "xyz:WDC",
+                  "350.71"
+                ],
+                [
+                  "xyz:XBI",
+                  "151.75"
+                ],
+                [
+                  "xyz:XLE",
+                  "67.748"
+                ],
+                [
+                  "xyz:XYZ100",
+                  "29065"
+                ],
+                [
+                  "xyz:ZHIPU",
+                  "63.45"
+                ],
+                [
+                  "xyz:ZM",
+                  "96.348"
+                ]
+              ]
+            ],
+            "externalPerpPxs": [
+              [
+                "xyz:AAOI",
+                "71.5"
+              ],
+              [
+                "xyz:AAPL",
+                "345.71"
+              ],
+              [
+                "xyz:AMAT",
+                "384.6"
+              ],
+              [
+                "xyz:AMD",
+                "519.43"
+              ],
+              [
+                "xyz:AMZN",
+                "250.7"
+              ],
+              [
+                "xyz:ARM",
+                "215.38"
+              ],
+              [
+                "xyz:ASML",
+                "1587.8"
+              ],
+              [
+                "xyz:AVGO",
+                "326.37"
+              ],
+              [
+                "xyz:BABA",
+                "100.52"
+              ],
+              [
+                "xyz:BB",
+                "8.65"
+              ],
+              [
+                "xyz:BE",
+                "220.8"
+              ],
+              [
+                "xyz:BIRD",
+                "2.33"
+              ],
+              [
+                "xyz:BMNR",
+                "22.845"
+              ],
+              [
+                "xyz:BOT",
+                "22.47"
+              ],
+              [
+                "xyz:BRENTOIL",
+                "109"
+              ],
+              [
+                "xyz:BX",
+                "117.59"
+              ],
+              [
+                "xyz:CAMBRICON",
+                "139.78"
+              ],
+              [
+                "xyz:CBRS",
+                "111.42"
+              ],
+              [
+                "xyz:CL",
+                "100.26"
+              ],
+              [
+                "xyz:COIN",
+                "171.28"
+              ],
+              [
+                "xyz:COPPER",
+                "6.4543"
+              ],
+              [
+                "xyz:COST",
+                "1013"
+              ],
+              [
+                "xyz:CRCL",
+                "87.618"
+              ],
+              [
+                "xyz:CRWD",
+                "239.5"
+              ],
+              [
+                "xyz:CRWV",
+                "58.01"
+              ],
+              [
+                "xyz:CVX",
+                "227.31"
+              ],
+              [
+                "xyz:CXMT",
+                "6.4233"
+              ],
+              [
+                "xyz:DELL",
+                "465.75"
+              ],
+              [
+                "xyz:DKNG",
+                "20.855"
+              ],
+              [
+                "xyz:DRAM",
+                "47.528"
+              ],
+              [
+                "xyz:EBAY",
+                "122.04"
+              ],
+              [
+                "xyz:EUR",
+                "1.119"
+              ],
+              [
+                "xyz:EWJ",
+                "93.685"
+              ],
+              [
+                "xyz:EWT",
+                "104.29"
+              ],
+              [
+                "xyz:EWY",
+                "152.09"
+              ],
+              [
+                "xyz:EWZ",
+                "41.74"
+              ],
+              [
+                "xyz:GBP",
+                "1.3381"
+              ],
+              [
+                "xyz:GEV",
+                "847.05"
+              ],
+              [
+                "xyz:GIGADEV",
+                "43.761"
+              ],
+              [
+                "xyz:GLW",
+                "127.65"
+              ],
+              [
+                "xyz:GME",
+                "25.27"
+              ],
+              [
+                "xyz:GOLD",
+                "4018.2"
+              ],
+              [
+                "xyz:GOOGL",
+                "325.22"
+              ],
+              [
+                "xyz:HIMS",
+                "29.135"
+              ],
+              [
+                "xyz:HO",
+                "4.7937"
+              ],
+              [
+                "xyz:HOOD",
+                "97.847"
+              ],
+              [
+                "xyz:HYUNDAI",
+                "220.72"
+              ],
+              [
+                "xyz:IBIDEN",
+                "54.159"
+              ],
+              [
+                "xyz:IBM",
+                "249.63"
+              ],
+              [
+                "xyz:INTC",
+                "87.855"
+              ],
+              [
+                "xyz:IREN",
+                "26.3"
+              ],
+              [
+                "xyz:JIO",
+                "12.896"
+              ],
+              [
+                "xyz:JP225",
+                "62493"
+              ],
+              [
+                "xyz:JPY",
+                "156.87"
+              ],
+              [
+                "xyz:KIOXIA",
+                "80.961"
+              ],
+              [
+                "xyz:KORU",
+                "10.763"
+              ],
+              [
+                "xyz:KR200",
+                "863.86"
+              ],
+              [
+                "xyz:KRW",
+                "1326.4"
+              ],
+              [
+                "xyz:KSTR",
+                "19.4"
+              ],
+              [
+                "xyz:LITE",
+                "789.8"
+              ],
+              [
+                "xyz:LLY",
+                "1289.1"
+              ],
+              [
+                "xyz:LRCX",
+                "235.45"
+              ],
+              [
+                "xyz:LYTE",
+                "18.79"
+              ],
+              [
+                "xyz:MAGS",
+                "70.65"
+              ],
+              [
+                "xyz:META",
+                "648.52"
+              ],
+              [
+                "xyz:MINIMAX",
+                "24.033"
+              ],
+              [
+                "xyz:MRNA",
+                "197.77"
+              ],
+              [
+                "xyz:MRVL",
+                "229.23"
+              ],
+              [
+                "xyz:MSFT",
+                "517.96"
+              ],
+              [
+                "xyz:MSTR",
+                "147.84"
+              ],
+              [
+                "xyz:MU",
+                "880.55"
+              ],
+              [
+                "xyz:NATGAS",
+                "3.116"
+              ],
+              [
+                "xyz:NBIS",
+                "164.28"
+              ],
+              [
+                "xyz:NCLD",
+                "16.265"
+              ],
+              [
+                "xyz:NET",
+                "317.09"
+              ],
+              [
+                "xyz:NFLX",
+                "66.245"
+              ],
+              [
+                "xyz:NOK",
+                "8.395"
+              ],
+              [
+                "xyz:NOW",
+                "154.54"
+              ],
+              [
+                "xyz:NVDA",
+                "214.7"
+              ],
+              [
+                "xyz:ORCL",
+                "126.65"
+              ],
+              [
+                "xyz:OURA",
+                "48.695"
+              ],
+              [
+                "xyz:PALLADIUM",
+                "1059.5"
+              ],
+              [
+                "xyz:PLATINUM",
+                "1563.8"
+              ],
+              [
+                "xyz:PLTR",
+                "195.31"
+              ],
+              [
+                "xyz:PURRDAT",
+                "8.92"
+              ],
+              [
+                "xyz:QCOM",
+                "174.95"
+              ],
+              [
+                "xyz:QNT",
+                "36.725"
+              ],
+              [
+                "xyz:RDDT",
+                "149.39"
+              ],
+              [
+                "xyz:RIVN",
+                "12.12"
+              ],
+              [
+                "xyz:RKLB",
+                "52.341"
+              ],
+              [
+                "xyz:SHAZ",
+                "24.09"
+              ],
+              [
+                "xyz:SHEIN",
+                "4.8217"
+              ],
+              [
+                "xyz:SILVER",
+                "53.924"
+              ],
+              [
+                "xyz:SKHX",
+                "962.4"
+              ],
+              [
+                "xyz:SKHY",
+                "139.66"
+              ],
+              [
+                "xyz:SMH",
+                "532.45"
+              ],
+              [
+                "xyz:SMSN",
+                "162.29"
+              ],
+              [
+                "xyz:SNDK",
+                "1304"
+              ],
+              [
+                "xyz:SNXX",
+                "9.04"
+              ],
+              [
+                "xyz:SOFTBANK",
+                "27.272"
+              ],
+              [
+                "xyz:SOXL",
+                "87.003"
+              ],
+              [
+                "xyz:SP500",
+                "7663.3"
+              ],
+              [
+                "xyz:SPCX",
+                "149.21"
+              ],
+              [
+                "xyz:STRC",
+                "98.95"
+              ],
+              [
+                "xyz:TLT",
+                "81.615"
+              ],
+              [
+                "xyz:TSLA",
+                "379.14"
+              ],
+              [
+                "xyz:TSM",
+                "417.37"
+              ],
+              [
+                "xyz:TWST",
+                "137.5"
+              ],
+              [
+                "xyz:UMC",
+                "18.88"
+              ],
+              [
+                "xyz:UNITREE",
+                "93.216"
+              ],
+              [
+                "xyz:URNM",
+                "41.445"
+              ],
+              [
+                "xyz:USAR",
+                "9.71"
+              ],
+              [
+                "xyz:WDC",
+                "350.55"
+              ],
+              [
+                "xyz:XBI",
+                "151.59"
+              ],
+              [
+                "xyz:XLE",
+                "67.752"
+              ],
+              [
+                "xyz:XYZ100",
+                "29055"
+              ],
+              [
+                "xyz:ZHIPU",
+                "63.167"
+              ],
+              [
+                "xyz:ZM",
+                "96.05"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "response": {
+      "user": "0x1234567890545d1df9ee64b35fdd16966e08acec",
+      "res": {
+        "status": "ok",
+        "response": {
+          "type": "setGlobal",
+          "data": []
+        }
+      }
+    },
+    "rank": [
+      0,
+      3,
+      362
+    ],
+    "execution_index": 371,
+    "before_mark": "164.6",
+    "after_mark": "164.41",
+    "bracket": {
+      "rank": [
+        2,
+        1,
+        5
+      ],
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 189,
+            "b": false,
+            "p": "0.0135",
+            "s": "56505",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 228,
+            "b": true,
+            "p": "0.016946",
+            "s": "10835",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 228,
+            "b": true,
+            "p": "0.016934",
+            "s": "39253",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 228,
+            "b": true,
+            "p": "0.01687",
+            "s": "44804",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 228,
+            "b": true,
+            "p": "0.016841",
+            "s": "38307",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 228,
+            "b": true,
+            "p": "0.016791",
+            "s": "41117",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 228,
+            "b": false,
+            "p": "0.016994",
+            "s": "10670",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 228,
+            "b": false,
+            "p": "0.017007",
+            "s": "38498",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 228,
+            "b": false,
+            "p": "0.017069",
+            "s": "41288",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 228,
+            "b": false,
+            "p": "0.017097",
+            "s": "38961",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 228,
+            "b": false,
+            "p": "0.017143",
+            "s": "41676",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 228,
+            "b": false,
+            "p": "0.017228",
+            "s": "43992",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 201,
+            "b": true,
+            "p": "0.18435",
+            "s": "1019",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 201,
+            "b": true,
+            "p": "0.18426",
+            "s": "4158",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 201,
+            "b": true,
+            "p": "0.18363",
+            "s": "3872",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 201,
+            "b": true,
+            "p": "0.18336",
+            "s": "3673",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 201,
+            "b": true,
+            "p": "0.18288",
+            "s": "4033",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 201,
+            "b": false,
+            "p": "0.18477",
+            "s": "945",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 201,
+            "b": false,
+            "p": "0.18486",
+            "s": "4084",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 201,
+            "b": false,
+            "p": "0.1855",
+            "s": "3451",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 201,
+            "b": false,
+            "p": "0.18579",
+            "s": "3394",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 201,
+            "b": false,
+            "p": "0.18631",
+            "s": "3548",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 82,
+            "b": true,
+            "p": "0.21689",
+            "s": "1006.2",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 82,
+            "b": true,
+            "p": "0.21678",
+            "s": "3368.7",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 82,
+            "b": true,
+            "p": "0.21603",
+            "s": "3132.4",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 82,
+            "b": true,
+            "p": "0.21572",
+            "s": "3426.8",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 82,
+            "b": true,
+            "p": "0.21514",
+            "s": "3068.9",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 82,
+            "b": false,
+            "p": "0.21739",
+            "s": "743.2",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 82,
+            "b": false,
+            "p": "0.2175",
+            "s": "3255",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 82,
+            "b": false,
+            "p": "0.21828",
+            "s": "3256.9",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 82,
+            "b": false,
+            "p": "0.21864",
+            "s": "3357.4",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 82,
+            "b": false,
+            "p": "0.2193",
+            "s": "3366.6",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 164,
+            "b": true,
+            "p": "0.01032",
+            "s": "69033.7",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 164,
+            "b": true,
+            "p": "0.01028",
+            "s": "66880.1",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 164,
+            "b": true,
+            "p": "0.01027",
+            "s": "63307.5",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 164,
+            "b": true,
+            "p": "0.01024",
+            "s": "68388.8",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 164,
+            "b": false,
+            "p": "0.0104",
+            "s": "71958.3",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 164,
+            "b": false,
+            "p": "0.01043",
+            "s": "66249.9",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 130,
+            "b": true,
+            "p": "0.2213",
+            "s": "844.84",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          },
+          {
+            "a": 133,
+            "b": true,
+            "p": "0.000852",
+            "s": "761800",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            }
+          }
+        ],
+        "grouping": "na"
+      },
+      "response": {
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "res": {
+          "status": "ok",
+          "response": {
+            "type": "order",
+            "data": {
+              "statuses": [
+                {
+                  "resting": {
+                    "oid": 583477466024
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466025
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466026
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466027
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466028
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466029
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466030
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466031
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466032
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466033
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466034
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466035
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466036
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466037
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466038
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466039
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466040
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466041
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466042
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466043
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466044
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466045
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466046
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466047
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466048
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466049
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466050
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466051
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466052
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466053
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466054
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466055
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466056
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466057
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466058
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466059
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466060
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466061
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466062
+                  }
+                },
+                {
+                  "resting": {
+                    "oid": 583477466063
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "statuses": [
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": "0xdb50dc641138dab8dcca04472d21160201750049ac3bf98a7f1987b6d03cb4a3",
+        "builder": null,
+        "status": "open",
+        "order": {
+          "coin": "BABY",
+          "side": "A",
+          "limitPx": "0.0135",
+          "sz": "56505.0",
+          "oid": 583477466024,
+          "timestamp": 1792745016811,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "56505.0",
+          "tif": "Alo",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        "hash": null,
+        "builder": null,
+        "status": "triggered",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "A",
+          "limitPx": "148.05",
+          "sz": "0.0",
+          "oid": 583470232916,
+          "timestamp": 1792744363717,
+          "triggerCondition": "Price below 164.5",
+          "isTrigger": true,
+          "triggerPx": "164.5",
+          "children": [],
+          "isPositionTpsl": true,
+          "reduceOnly": true,
+          "orderType": "Stop Market",
+          "origSz": "0.0",
+          "tif": null,
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "B",
+          "limitPx": "164.47",
+          "sz": "0.0",
+          "oid": 583477454345,
+          "timestamp": 1792745015681,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "1.05",
+          "tif": "Alo",
+          "cloid": "0x0000000000000000000001a15f3043b5"
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0xc8264ebc379e26946e7d31ae4746c27182849755",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "B",
+          "limitPx": "164.47",
+          "sz": "0.0",
+          "oid": 583477454986,
+          "timestamp": 1792745015681,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "0.82",
+          "tif": "Alo",
+          "cloid": "0x0000000000000000000001a15e61f1bb"
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "B",
+          "limitPx": "164.46",
+          "sz": "0.0",
+          "oid": 583477453805,
+          "timestamp": 1792745015603,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "1.05",
+          "tif": "Alo",
+          "cloid": "0x0000000000000000000001a15f3043b6"
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "B",
+          "limitPx": "164.46",
+          "sz": "0.0",
+          "oid": 583477458373,
+          "timestamp": 1792745015949,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "4.02",
+          "tif": "Alo",
+          "cloid": "0x00000000000000005689a833d29e0ba9"
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "B",
+          "limitPx": "164.45",
+          "sz": "0.0",
+          "oid": 583477454422,
+          "timestamp": 1792745015681,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "4.02",
+          "tif": "Alo",
+          "cloid": "0x00000000000000005689a4bea5522dc6"
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0xc8264ebc379e26946e7d31ae4746c27182849755",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "B",
+          "limitPx": "164.44",
+          "sz": "0.0",
+          "oid": 583477450108,
+          "timestamp": 1792745015275,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "0.82",
+          "tif": "Alo",
+          "cloid": "0x0000000000000000000001a15e61f1b6"
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "B",
+          "limitPx": "164.44",
+          "sz": "0.0",
+          "oid": 583477455650,
+          "timestamp": 1792745015681,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "1.05",
+          "tif": "Alo",
+          "cloid": "0x0000000000000000000001a15f3043b9"
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0xf27ebb91ea420f73b59b205ac7e0b77a90ec8f3c",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "B",
+          "limitPx": "164.44",
+          "sz": "0.0",
+          "oid": 583477459260,
+          "timestamp": 1792745016081,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "22.93",
+          "tif": "Alo",
+          "cloid": "0x000000000000000018e0cef7c9e6b0c0"
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0xc8264ebc379e26946e7d31ae4746c27182849755",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "B",
+          "limitPx": "164.43",
+          "sz": "0.0",
+          "oid": 583477450198,
+          "timestamp": 1792745015275,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "0.82",
+          "tif": "Alo",
+          "cloid": "0x0000000000000000000001a15e61f1b5"
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        "hash": null,
+        "builder": null,
+        "status": "filled",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "A",
+          "limitPx": "148.06",
+          "sz": "0.0",
+          "oid": 583470232916,
+          "timestamp": 1792745016811,
+          "triggerCondition": "Triggered",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": true,
+          "reduceOnly": true,
+          "orderType": "Stop Market",
+          "origSz": "48.81",
+          "tif": "Gtc",
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        "hash": null,
+        "builder": null,
+        "status": "reduceOnlyCanceled",
+        "order": {
+          "coin": "xyz:NBIS",
+          "side": "A",
+          "limitPx": "153.0",
+          "sz": "0.0",
+          "oid": 583473702780,
+          "timestamp": 1792744678107,
+          "triggerCondition": "Price above 170",
+          "isTrigger": true,
+          "triggerPx": "170.0",
+          "children": [],
+          "isPositionTpsl": true,
+          "reduceOnly": true,
+          "orderType": "Take Profit Market",
+          "origSz": "0.0",
+          "tif": null,
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-23T08:43:36.811116254",
+        "user": "0x31ca8395cf837de08b24da3f660e77761dfb974b",
+        "hash": "0x89f3c28ead87ee108b6d04472d21160201750101488b0ce22dbc6de16c8bc7fb",
+        "builder": null,
+        "status": "open",
+        "order": {
+          "coin": "AZTEC",
+          "side": "B",
+          "limitPx": "0.016946",
+          "sz": "10835.0",
+          "oid": 583477466025,
+          "timestamp": 1792745016811,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "10835.0",
+          "tif": "Alo",
+          "cloid": null
+        }
+      }
+    ],
+    "legs": [
+      [
+        "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.47",
+          "sz": "1.05",
+          "side": "B",
+          "time": 1792745016811,
+          "startPosition": "-2.58",
+          "dir": "Close Short",
+          "closedPnl": "0.430395",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583477454345,
+          "crossed": false,
+          "fee": "-0.000518",
+          "tid": 861488897131337,
+          "cloid": "0x0000000000000000000001a15f3043b5",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000259"
+        }
+      ],
+      [
+        "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.47",
+          "sz": "1.05",
+          "side": "A",
+          "time": 1792745016811,
+          "startPosition": "48.81",
+          "dir": "Close Long",
+          "closedPnl": "0.9555",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583470232916,
+          "crossed": true,
+          "fee": "0.015542",
+          "tid": 861488897131337,
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.007771"
+        }
+      ],
+      [
+        "0xc8264ebc379e26946e7d31ae4746c27182849755",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.47",
+          "sz": "0.82",
+          "side": "B",
+          "time": 1792745016811,
+          "startPosition": "0.0",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583477454986,
+          "crossed": false,
+          "fee": "-0.000404",
+          "tid": 807591453227760,
+          "cloid": "0x0000000000000000000001a15e61f1bb",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000202"
+        }
+      ],
+      [
+        "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.47",
+          "sz": "0.82",
+          "side": "A",
+          "time": 1792745016811,
+          "startPosition": "47.76",
+          "dir": "Close Long",
+          "closedPnl": "0.7462",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583470232916,
+          "crossed": true,
+          "fee": "0.012137",
+          "tid": 807591453227760,
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.006068"
+        }
+      ],
+      [
+        "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.46",
+          "sz": "1.05",
+          "side": "B",
+          "time": 1792745016811,
+          "startPosition": "-1.53",
+          "dir": "Close Short",
+          "closedPnl": "0.440895",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583477453805,
+          "crossed": false,
+          "fee": "-0.000518",
+          "tid": 449801289983175,
+          "cloid": "0x0000000000000000000001a15f3043b6",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000259"
+        }
+      ],
+      [
+        "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.46",
+          "sz": "1.05",
+          "side": "A",
+          "time": 1792745016811,
+          "startPosition": "46.94",
+          "dir": "Close Long",
+          "closedPnl": "0.945",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583470232916,
+          "crossed": true,
+          "fee": "0.015541",
+          "tid": 449801289983175,
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.00777"
+        }
+      ],
+      [
+        "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.46",
+          "sz": "4.02",
+          "side": "B",
+          "time": 1792745016811,
+          "startPosition": "11.8",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583477458373,
+          "crossed": false,
+          "fee": "-0.001983",
+          "tid": 893294115614089,
+          "cloid": "0x00000000000000005689a833d29e0ba9",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000991"
+        }
+      ],
+      [
+        "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.46",
+          "sz": "4.02",
+          "side": "A",
+          "time": 1792745016811,
+          "startPosition": "45.89",
+          "dir": "Close Long",
+          "closedPnl": "3.618",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583470232916,
+          "crossed": true,
+          "fee": "0.059501",
+          "tid": 893294115614089,
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.02975"
+        }
+      ],
+      [
+        "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.45",
+          "sz": "4.02",
+          "side": "B",
+          "time": 1792745016811,
+          "startPosition": "-0.15",
+          "dir": "Short > Long",
+          "closedPnl": "0.068715",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583477454422,
+          "crossed": false,
+          "fee": "-0.001983",
+          "tid": 994363503479923,
+          "cloid": "0x00000000000000005689a4bea5522dc6",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000991"
+        }
+      ],
+      [
+        "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.45",
+          "sz": "4.02",
+          "side": "A",
+          "time": 1792745016811,
+          "startPosition": "41.87",
+          "dir": "Close Long",
+          "closedPnl": "3.5778",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583470232916,
+          "crossed": true,
+          "fee": "0.059498",
+          "tid": 994363503479923,
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.029749"
+        }
+      ],
+      [
+        "0xc8264ebc379e26946e7d31ae4746c27182849755",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.44",
+          "sz": "0.82",
+          "side": "B",
+          "time": 1792745016811,
+          "startPosition": "0.82",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583477450108,
+          "crossed": false,
+          "fee": "-0.000404",
+          "tid": 624896224213662,
+          "cloid": "0x0000000000000000000001a15e61f1b6",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000202"
+        }
+      ],
+      [
+        "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.44",
+          "sz": "0.82",
+          "side": "A",
+          "time": 1792745016811,
+          "startPosition": "37.85",
+          "dir": "Close Long",
+          "closedPnl": "0.7216",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583470232916,
+          "crossed": true,
+          "fee": "0.012135",
+          "tid": 624896224213662,
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.006067"
+        }
+      ],
+      [
+        "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.44",
+          "sz": "1.05",
+          "side": "B",
+          "time": 1792745016811,
+          "startPosition": "-0.48",
+          "dir": "Short > Long",
+          "closedPnl": "0.211152",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583477455650,
+          "crossed": false,
+          "fee": "-0.000517",
+          "tid": 988133039117880,
+          "cloid": "0x0000000000000000000001a15f3043b9",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000258"
+        }
+      ],
+      [
+        "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.44",
+          "sz": "1.05",
+          "side": "A",
+          "time": 1792745016811,
+          "startPosition": "37.03",
+          "dir": "Close Long",
+          "closedPnl": "0.924",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583470232916,
+          "crossed": true,
+          "fee": "0.015539",
+          "tid": 988133039117880,
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.007769"
+        }
+      ],
+      [
+        "0xf27ebb91ea420f73b59b205ac7e0b77a90ec8f3c",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.44",
+          "sz": "22.93",
+          "side": "B",
+          "time": 1792745016811,
+          "startPosition": "61.29",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583477459260,
+          "crossed": false,
+          "fee": "0.027148",
+          "tid": 1009894344085224,
+          "cloid": "0x000000000000000018e0cef7c9e6b0c0",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.013574"
+        }
+      ],
+      [
+        "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.44",
+          "sz": "22.93",
+          "side": "A",
+          "time": 1792745016811,
+          "startPosition": "35.98",
+          "dir": "Close Long",
+          "closedPnl": "20.1784",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583470232916,
+          "crossed": true,
+          "fee": "0.339354",
+          "tid": 1009894344085224,
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.169677"
+        }
+      ],
+      [
+        "0xc8264ebc379e26946e7d31ae4746c27182849755",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.43",
+          "sz": "0.82",
+          "side": "B",
+          "time": 1792745016811,
+          "startPosition": "1.64",
+          "dir": "Open Long",
+          "closedPnl": "0.0",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583477450198,
+          "crossed": false,
+          "fee": "-0.000404",
+          "tid": 1006688208179508,
+          "cloid": "0x0000000000000000000001a15e61f1b5",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "-0.000202"
+        }
+      ],
+      [
+        "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.43",
+          "sz": "0.82",
+          "side": "A",
+          "time": 1792745016811,
+          "startPosition": "13.05",
+          "dir": "Close Long",
+          "closedPnl": "0.7134",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583470232916,
+          "crossed": true,
+          "fee": "0.012134",
+          "tid": 1006688208179508,
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.006067"
+        }
+      ],
+      [
+        "0x01633008559b785867064655f2b4fa96713e1e17",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.42",
+          "sz": "12.23",
+          "side": "B",
+          "time": 1792745016811,
+          "startPosition": "-30.92",
+          "dir": "Close Short",
+          "closedPnl": "-1.256021",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583477382528,
+          "crossed": false,
+          "fee": "0.013673",
+          "tid": 1000060709111122,
+          "cloid": "0x000000000000000000009e0452754dd7",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.006836"
+        }
+      ],
+      [
+        "0x6842ccf7d5360758bf73c21f7511aca4261d2371",
+        {
+          "coin": "xyz:NBIS",
+          "px": "164.42",
+          "sz": "12.23",
+          "side": "A",
+          "time": 1792745016811,
+          "startPosition": "12.23",
+          "dir": "Close Long",
+          "closedPnl": "10.5178",
+          "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+          "oid": 583470232916,
+          "crossed": true,
+          "fee": "0.180977",
+          "tid": 1000060709111122,
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.090488"
+        }
+      ]
+    ]
+  },
+  "cases": [
+    {
+      "user": "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+      "coin": "xyz:NBIS",
+      "size_decimals": 2,
+      "checkpoint_before": {
+        "s": 743,
+        "l": {
+          "I": {
+            "l": 5,
+            "u": -983950549
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -5996651
+        },
+        "e": 1230186497
+      },
+      "checkpoint_after": {
+        "s": 57,
+        "l": {
+          "I": {
+            "l": 5,
+            "u": -74970960
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -5996651
+        },
+        "e": 93730800
+      },
+      "events": [
+        {
+          "height": 1194131096,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.42",
+            "sz": "0.67",
+            "side": "A",
+            "time": 1792744373062,
+            "startPosition": "7.43",
+            "dir": "Close Long",
+            "closedPnl": "-0.100567",
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "oid": 583470308543,
+            "crossed": false,
+            "fee": "-0.000332",
+            "tid": 1108762340092380,
+            "cloid": "0x0000000000000000000001a15f2ffa71",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000166"
+          },
+          "before_mark": "165.41",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.42",
+                "sz": "0.67",
+                "side": "A",
+                "time": 1792744373062,
+                "startPosition": "7.43",
+                "dir": "Close Long",
+                "closedPnl": "-0.100567",
+                "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "oid": 583470308543,
+                "crossed": false,
+                "fee": "-0.000332",
+                "tid": 1108762340092380,
+                "cloid": "0x0000000000000000000001a15f2ffa71",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000166"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194133045,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.43",
+            "sz": "1.41",
+            "side": "A",
+            "time": 1792744523440,
+            "startPosition": "6.76",
+            "dir": "Close Long",
+            "closedPnl": "-0.197541",
+            "hash": "0xcfc349ad799bf299d13d04472d06350204100093149f116b738bf500389fcc84",
+            "oid": 583471966920,
+            "crossed": true,
+            "fee": "0.007837",
+            "tid": 75914603580062,
+            "cloid": "0x0000000000000000000001a15f300bdd",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.003918",
+            "priorityGas": "0.00001119"
+          },
+          "before_mark": "165.43",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.43",
+                "sz": "1.41",
+                "side": "A",
+                "time": 1792744523440,
+                "startPosition": "6.76",
+                "dir": "Close Long",
+                "closedPnl": "-0.197541",
+                "hash": "0xcfc349ad799bf299d13d04472d06350204100093149f116b738bf500389fcc84",
+                "oid": 583471966920,
+                "crossed": true,
+                "fee": "0.007837",
+                "tid": 75914603580062,
+                "cloid": "0x0000000000000000000001a15f300bdd",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.003918",
+                "priorityGas": "0.00001119"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194135216,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.88",
+            "sz": "9.54",
+            "side": "A",
+            "time": 1792744677844,
+            "startPosition": "5.35",
+            "dir": "Long > Short",
+            "closedPnl": "-3.692035",
+            "hash": "0xf021465d7a379232f19b04472d0eb00205030043153ab10593e9f1b0393b6c1d",
+            "oid": 583473700885,
+            "crossed": true,
+            "fee": "0.052851",
+            "tid": 84263884991941,
+            "cloid": "0x0000000000000000000001a15f301d99",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.026425",
+            "priorityGas": "0.00030988"
+          },
+          "before_mark": "164.89",
+          "updates": [
+            [
+              "164.89",
+              "Normal"
+            ]
+          ],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.88",
+                "sz": "9.54",
+                "side": "A",
+                "time": 1792744677844,
+                "startPosition": "5.35",
+                "dir": "Long > Short",
+                "closedPnl": "-3.692035",
+                "hash": "0xf021465d7a379232f19b04472d0eb00205030043153ab10593e9f1b0393b6c1d",
+                "oid": 583473700885,
+                "crossed": true,
+                "fee": "0.052851",
+                "tid": 84263884991941,
+                "cloid": "0x0000000000000000000001a15f301d99",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.026425",
+                "priorityGas": "0.00030988"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194135220,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.88",
+            "sz": "9.54",
+            "side": "A",
+            "time": 1792744678240,
+            "startPosition": "-4.19",
+            "dir": "Open Short",
+            "closedPnl": "0.0",
+            "hash": "0x6612acee992770ae678c04472d0eb40202b600d4342a8f8009db5841582b4a99",
+            "oid": 583473704001,
+            "crossed": true,
+            "fee": "0.052851",
+            "tid": 1064296088570031,
+            "cloid": "0x0000000000000000000001a15f301da7",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.026425",
+            "priorityGas": "0.00013181"
+          },
+          "before_mark": "164.89",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.88",
+                "sz": "9.54",
+                "side": "A",
+                "time": 1792744678240,
+                "startPosition": "-4.19",
+                "dir": "Open Short",
+                "closedPnl": "0.0",
+                "hash": "0x6612acee992770ae678c04472d0eb40202b600d4342a8f8009db5841582b4a99",
+                "oid": 583473704001,
+                "crossed": true,
+                "fee": "0.052851",
+                "tid": 1064296088570031,
+                "cloid": "0x0000000000000000000001a15f301da7",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.026425",
+                "priorityGas": "0.00013181"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194137237,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.13",
+            "sz": "4.94",
+            "side": "B",
+            "time": 1792744823869,
+            "startPosition": "-13.73",
+            "dir": "Close Short",
+            "closedPnl": "-1.235",
+            "hash": "0xad6edfca8d0a9396aee804472d169502057f00b0280db26851378b1d4c0e6d81",
+            "oid": 583475433086,
+            "crossed": false,
+            "fee": "-0.002447",
+            "tid": 480596145049801,
+            "cloid": "0x0000000000000000000001a15f302e3d",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.001223"
+          },
+          "before_mark": "165.15",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.13",
+                "sz": "4.94",
+                "side": "B",
+                "time": 1792744823869,
+                "startPosition": "-13.73",
+                "dir": "Close Short",
+                "closedPnl": "-1.235",
+                "hash": "0xad6edfca8d0a9396aee804472d169502057f00b0280db26851378b1d4c0e6d81",
+                "oid": 583475433086,
+                "crossed": false,
+                "fee": "-0.002447",
+                "tid": 480596145049801,
+                "cloid": "0x0000000000000000000001a15f302e3d",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.001223"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194137998,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.07",
+            "sz": "0.19",
+            "side": "B",
+            "time": 1792744879070,
+            "startPosition": "-8.79",
+            "dir": "Close Short",
+            "closedPnl": "-0.0361",
+            "hash": "0x067e3c3aef52c08607f704472d198e02034f00208a55df58aa46e78dae569a70",
+            "oid": 583475861211,
+            "crossed": false,
+            "fee": "-0.000094",
+            "tid": 376234797175277,
+            "cloid": "0x0000000000000000000001a15f303339",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000047"
+          },
+          "before_mark": "165.07",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.07",
+                "sz": "0.19",
+                "side": "B",
+                "time": 1792744879070,
+                "startPosition": "-8.79",
+                "dir": "Close Short",
+                "closedPnl": "-0.0361",
+                "hash": "0x067e3c3aef52c08607f704472d198e02034f00208a55df58aa46e78dae569a70",
+                "oid": 583475861211,
+                "crossed": false,
+                "fee": "-0.000094",
+                "tid": 376234797175277,
+                "cloid": "0x0000000000000000000001a15f303339",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000047"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194138631,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.87",
+            "sz": "3.68",
+            "side": "B",
+            "time": 1792744925482,
+            "startPosition": "-8.6",
+            "dir": "Close Short",
+            "closedPnl": "0.0368",
+            "hash": "0xb5c9f4ed9df6e03fb74304472d1c070203ac00d338f9ff115992a0405cfaba2a",
+            "oid": 583476552351,
+            "crossed": true,
+            "fee": "0.020385",
+            "tid": 318659685077720,
+            "cloid": "0x0000000000000000000001a15f303bcb",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.010192",
+            "priorityGas": "0.00014518"
+          },
+          "before_mark": "164.85",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.87",
+                "sz": "3.68",
+                "side": "B",
+                "time": 1792744925482,
+                "startPosition": "-8.6",
+                "dir": "Close Short",
+                "closedPnl": "0.0368",
+                "hash": "0xb5c9f4ed9df6e03fb74304472d1c070203ac00d338f9ff115992a0405cfaba2a",
+                "oid": 583476552351,
+                "crossed": true,
+                "fee": "0.020385",
+                "tid": 318659685077720,
+                "cloid": "0x0000000000000000000001a15f303bcb",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.010192",
+                "priorityGas": "0.00014518"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194139400,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.76",
+            "sz": "1.29",
+            "side": "B",
+            "time": 1792744980204,
+            "startPosition": "-4.92",
+            "dir": "Close Short",
+            "closedPnl": "0.154671",
+            "hash": "0xa200354f2333a11ba37904472d1f0802025b0034be36bfed45c8e0a1e2377b06",
+            "oid": 583477088308,
+            "crossed": true,
+            "fee": "0.007141",
+            "tid": 626160833818574,
+            "cloid": "0x0000000000000000000001a15f30405e",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.00357",
+            "priorityGas": "0.00001934"
+          },
+          "before_mark": "164.82",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.76",
+                "sz": "1.29",
+                "side": "B",
+                "time": 1792744980204,
+                "startPosition": "-4.92",
+                "dir": "Close Short",
+                "closedPnl": "0.154671",
+                "hash": "0xa200354f2333a11ba37904472d1f0802025b0034be36bfed45c8e0a1e2377b06",
+                "oid": 583477088308,
+                "crossed": true,
+                "fee": "0.007141",
+                "tid": 626160833818574,
+                "cloid": "0x0000000000000000000001a15f30405e",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.00357",
+                "priorityGas": "0.00001934"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194139880,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.58",
+            "sz": "0.93",
+            "side": "B",
+            "time": 1792745013729,
+            "startPosition": "-3.63",
+            "dir": "Close Short",
+            "closedPnl": "0.278907",
+            "hash": "0x84c6ef3a1c76d843864004472d20e80201af001fb779f715288f9a8cdb7ab22e",
+            "oid": 583477326544,
+            "crossed": false,
+            "fee": "-0.000459",
+            "tid": 92078651879665,
+            "cloid": "0x0000000000000000000001a15f304260",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000229"
+          },
+          "before_mark": "164.61",
+          "updates": [
+            [
+              "164.6",
+              "Normal"
+            ]
+          ],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.58",
+                "sz": "0.93",
+                "side": "B",
+                "time": 1792745013729,
+                "startPosition": "-3.63",
+                "dir": "Close Short",
+                "closedPnl": "0.278907",
+                "hash": "0x84c6ef3a1c76d843864004472d20e80201af001fb779f715288f9a8cdb7ab22e",
+                "oid": 583477326544,
+                "crossed": false,
+                "fee": "-0.000459",
+                "tid": 92078651879665,
+                "cloid": "0x0000000000000000000001a15f304260",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000229"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194139894,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.49",
+            "sz": "0.12",
+            "side": "B",
+            "time": 1792745014679,
+            "startPosition": "-2.7",
+            "dir": "Close Short",
+            "closedPnl": "0.046788",
+            "hash": "0x732b4c14c28f1b8874a504472d20f60204f200fa5d823a5a16f3f7678182f573",
+            "oid": 583477432092,
+            "crossed": false,
+            "fee": "-0.000059",
+            "tid": 1048385006278044,
+            "cloid": "0x0000000000000000000001a15f30434b",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000029"
+          },
+          "before_mark": "164.6",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.49",
+                "sz": "0.12",
+                "side": "B",
+                "time": 1792745014679,
+                "startPosition": "-2.7",
+                "dir": "Close Short",
+                "closedPnl": "0.046788",
+                "hash": "0x732b4c14c28f1b8874a504472d20f60204f200fa5d823a5a16f3f7678182f573",
+                "oid": 583477432092,
+                "crossed": false,
+                "fee": "-0.000059",
+                "tid": 1048385006278044,
+                "cloid": "0x0000000000000000000001a15f30434b",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000029"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194139926,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.47",
+            "sz": "1.05",
+            "side": "B",
+            "time": 1792745016811,
+            "startPosition": "-2.58",
+            "dir": "Close Short",
+            "closedPnl": "0.430395",
+            "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+            "oid": 583477454345,
+            "crossed": false,
+            "fee": "-0.000518",
+            "tid": 861488897131337,
+            "cloid": "0x0000000000000000000001a15f3043b5",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000259"
+          },
+          "before_mark": "164.6",
+          "updates": [
+            [
+              "164.41",
+              "Normal"
+            ]
+          ],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.47",
+                "sz": "1.05",
+                "side": "B",
+                "time": 1792745016811,
+                "startPosition": "-2.58",
+                "dir": "Close Short",
+                "closedPnl": "0.430395",
+                "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+                "oid": 583477454345,
+                "crossed": false,
+                "fee": "-0.000518",
+                "tid": 861488897131337,
+                "cloid": "0x0000000000000000000001a15f3043b5",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000259"
+              }
+            ]
+          ],
+          "oracle_bracket": true
+        },
+        {
+          "height": 1194139926,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.46",
+            "sz": "1.05",
+            "side": "B",
+            "time": 1792745016811,
+            "startPosition": "-1.53",
+            "dir": "Close Short",
+            "closedPnl": "0.440895",
+            "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+            "oid": 583477453805,
+            "crossed": false,
+            "fee": "-0.000518",
+            "tid": 449801289983175,
+            "cloid": "0x0000000000000000000001a15f3043b6",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000259"
+          },
+          "before_mark": "164.6",
+          "updates": [
+            [
+              "164.41",
+              "Normal"
+            ]
+          ],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.46",
+                "sz": "1.05",
+                "side": "B",
+                "time": 1792745016811,
+                "startPosition": "-1.53",
+                "dir": "Close Short",
+                "closedPnl": "0.440895",
+                "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+                "oid": 583477453805,
+                "crossed": false,
+                "fee": "-0.000518",
+                "tid": 449801289983175,
+                "cloid": "0x0000000000000000000001a15f3043b6",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000259"
+              }
+            ]
+          ],
+          "oracle_bracket": true
+        },
+        {
+          "height": 1194139926,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.44",
+            "sz": "1.05",
+            "side": "B",
+            "time": 1792745016811,
+            "startPosition": "-0.48",
+            "dir": "Short > Long",
+            "closedPnl": "0.211152",
+            "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+            "oid": 583477455650,
+            "crossed": false,
+            "fee": "-0.000517",
+            "tid": 988133039117880,
+            "cloid": "0x0000000000000000000001a15f3043b9",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000258"
+          },
+          "before_mark": "164.6",
+          "updates": [
+            [
+              "164.41",
+              "Normal"
+            ]
+          ],
+          "rank": null,
+          "legs": [
+            [
+              "0x399965e15d4e61ec3529cc98b7f7ebb93b733336",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.44",
+                "sz": "1.05",
+                "side": "B",
+                "time": 1792745016811,
+                "startPosition": "-0.48",
+                "dir": "Short > Long",
+                "closedPnl": "0.211152",
+                "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+                "oid": 583477455650,
+                "crossed": false,
+                "fee": "-0.000517",
+                "tid": 988133039117880,
+                "cloid": "0x0000000000000000000001a15f3043b9",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000258"
+              }
+            ]
+          ],
+          "oracle_bracket": true
+        }
+      ],
+      "reported_delta_micro": -13680
+    },
+    {
+      "user": "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+      "coin": "xyz:NBIS",
+      "size_decimals": 2,
+      "checkpoint_before": {
+        "s": -280,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": 508727934
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -8099525
+        },
+        "e": 462332517
+      },
+      "checkpoint_after": {
+        "s": 387,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -572640030
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -8099525
+        },
+        "e": 636421500
+      },
+      "events": [
+        {
+          "height": 1194130264,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.49",
+            "sz": "0.67",
+            "side": "A",
+            "time": 1792744313009,
+            "startPosition": "-2.8",
+            "dir": "Open Short",
+            "closedPnl": "0.0",
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "oid": 583469694287,
+            "crossed": false,
+            "fee": "-0.000332",
+            "tid": 714945699563608,
+            "cloid": "0x00000000000000005689a350fd363091",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000166"
+          },
+          "before_mark": "165.42",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.49",
+                "sz": "0.67",
+                "side": "A",
+                "time": 1792744313009,
+                "startPosition": "-2.8",
+                "dir": "Open Short",
+                "closedPnl": "0.0",
+                "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "oid": 583469694287,
+                "crossed": false,
+                "fee": "-0.000332",
+                "tid": 714945699563608,
+                "cloid": "0x00000000000000005689a350fd363091",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000166"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194131489,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.43",
+            "sz": "0.67",
+            "side": "A",
+            "time": 1792744403016,
+            "startPosition": "-3.47",
+            "dir": "Open Short",
+            "closedPnl": "0.0",
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "oid": 583470548500,
+            "crossed": false,
+            "fee": "-0.000332",
+            "tid": 987580678397268,
+            "cloid": "0x00000000000000005689afec63e71c93",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000166"
+          },
+          "before_mark": "165.49",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.43",
+                "sz": "0.67",
+                "side": "A",
+                "time": 1792744403016,
+                "startPosition": "-3.47",
+                "dir": "Open Short",
+                "closedPnl": "0.0",
+                "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "oid": 583470548500,
+                "crossed": false,
+                "fee": "-0.000332",
+                "tid": 987580678397268,
+                "cloid": "0x00000000000000005689afec63e71c93",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000166"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194132674,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.5",
+            "sz": "3.15",
+            "side": "B",
+            "time": 1792744495430,
+            "startPosition": "-4.14",
+            "dir": "Close Short",
+            "closedPnl": "-0.85302",
+            "hash": "0x7371529c6202942a74eb04472d04c20201ae0081fd05b2fc1739fdef21066e15",
+            "oid": 583471704013,
+            "crossed": false,
+            "fee": "-0.001563",
+            "tid": 832253297316865,
+            "cloid": "0x00000000000000005689a0095f2452fc",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000781"
+          },
+          "before_mark": "165.43",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.5",
+                "sz": "3.15",
+                "side": "B",
+                "time": 1792744495430,
+                "startPosition": "-4.14",
+                "dir": "Close Short",
+                "closedPnl": "-0.85302",
+                "hash": "0x7371529c6202942a74eb04472d04c20201ae0081fd05b2fc1739fdef21066e15",
+                "oid": 583471704013,
+                "crossed": false,
+                "fee": "-0.001563",
+                "tid": 832253297316865,
+                "cloid": "0x00000000000000005689a0095f2452fc",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000781"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194135374,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.88",
+            "sz": "11.29",
+            "side": "A",
+            "time": 1792744689585,
+            "startPosition": "-0.99",
+            "dir": "Open Short",
+            "closedPnl": "0.0",
+            "hash": "0xd763379758e299cfd8dc04472d0f4e020390007cf3e5b8a17b2be2ea17e673ba",
+            "oid": 583473829263,
+            "crossed": true,
+            "fee": "0.077438",
+            "tid": 128704408050037,
+            "cloid": "0x00000000000000005689a864fcc0ca4b",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.038719",
+            "priorityGas": "0.00001968"
+          },
+          "before_mark": "164.88",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.88",
+                "sz": "11.29",
+                "side": "A",
+                "time": 1792744689585,
+                "startPosition": "-0.99",
+                "dir": "Open Short",
+                "closedPnl": "0.0",
+                "hash": "0xd763379758e299cfd8dc04472d0f4e020390007cf3e5b8a17b2be2ea17e673ba",
+                "oid": 583473829263,
+                "crossed": true,
+                "fee": "0.077438",
+                "tid": 128704408050037,
+                "cloid": "0x00000000000000005689a864fcc0ca4b",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.038719",
+                "priorityGas": "0.00001968"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194136960,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.12",
+            "sz": "3.86",
+            "side": "B",
+            "time": 1792744804084,
+            "startPosition": "-12.28",
+            "dir": "Close Short",
+            "closedPnl": "-0.817934",
+            "hash": "0x75acc224f7f6bdbe772604472d1580020f2f000a92f9dc9019756d77b6fa97a9",
+            "oid": 583475218181,
+            "crossed": true,
+            "fee": "0.026514",
+            "tid": 161644923962973,
+            "cloid": "0x00000000000000005689a374d1fe058d",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.013257",
+            "priorityGas": "0.00000673"
+          },
+          "before_mark": "164.95",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.12",
+                "sz": "3.86",
+                "side": "B",
+                "time": 1792744804084,
+                "startPosition": "-12.28",
+                "dir": "Close Short",
+                "closedPnl": "-0.817934",
+                "hash": "0x75acc224f7f6bdbe772604472d1580020f2f000a92f9dc9019756d77b6fa97a9",
+                "oid": 583475218181,
+                "crossed": true,
+                "fee": "0.026514",
+                "tid": 161644923962973,
+                "cloid": "0x00000000000000005689a374d1fe058d",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.013257",
+                "priorityGas": "0.00000673"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194136960,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.12",
+            "sz": "7.2",
+            "side": "B",
+            "time": 1792744804084,
+            "startPosition": "-8.42",
+            "dir": "Close Short",
+            "closedPnl": "-1.52568",
+            "hash": "0x75acc224f7f6bdbe772604472d1580020f2f000a92f9dc9019756d77b6fa97a9",
+            "oid": 583475218181,
+            "crossed": true,
+            "fee": "0.049456",
+            "tid": 934555417787746,
+            "cloid": "0x00000000000000005689a374d1fe058d",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.024728",
+            "priorityGas": "0.00001255"
+          },
+          "before_mark": "164.95",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.12",
+                "sz": "7.2",
+                "side": "B",
+                "time": 1792744804084,
+                "startPosition": "-8.42",
+                "dir": "Close Short",
+                "closedPnl": "-1.52568",
+                "hash": "0x75acc224f7f6bdbe772604472d1580020f2f000a92f9dc9019756d77b6fa97a9",
+                "oid": 583475218181,
+                "crossed": true,
+                "fee": "0.049456",
+                "tid": 934555417787746,
+                "cloid": "0x00000000000000005689a374d1fe058d",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.024728",
+                "priorityGas": "0.00001255"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194136960,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.12",
+            "sz": "0.32",
+            "side": "B",
+            "time": 1792744804084,
+            "startPosition": "-1.22",
+            "dir": "Close Short",
+            "closedPnl": "-0.067808",
+            "hash": "0x75acc224f7f6bdbe772604472d1580020f2f000a92f9dc9019756d77b6fa97a9",
+            "oid": 583475218181,
+            "crossed": true,
+            "fee": "0.002198",
+            "tid": 837087817437951,
+            "cloid": "0x00000000000000005689a374d1fe058d",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.001099",
+            "priorityGas": "0.00000056"
+          },
+          "before_mark": "164.95",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.12",
+                "sz": "0.32",
+                "side": "B",
+                "time": 1792744804084,
+                "startPosition": "-1.22",
+                "dir": "Close Short",
+                "closedPnl": "-0.067808",
+                "hash": "0x75acc224f7f6bdbe772604472d1580020f2f000a92f9dc9019756d77b6fa97a9",
+                "oid": 583475218181,
+                "crossed": true,
+                "fee": "0.002198",
+                "tid": 837087817437951,
+                "cloid": "0x00000000000000005689a374d1fe058d",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.001099",
+                "priorityGas": "0.00000056"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194138460,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.85",
+            "sz": "0.75",
+            "side": "B",
+            "time": 1792744912819,
+            "startPosition": "-0.9",
+            "dir": "Close Short",
+            "closedPnl": "0.043575",
+            "hash": "0x21a97814cf65ff1e232304472d1b5c02027200fa6a691df0c57223678e69d908",
+            "oid": 583474067914,
+            "crossed": false,
+            "fee": "-0.00037",
+            "tid": 708733813429079,
+            "cloid": "0x00000000000000005689aeb538eff157",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000185"
+          },
+          "before_mark": "164.97",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.85",
+                "sz": "0.75",
+                "side": "B",
+                "time": 1792744912819,
+                "startPosition": "-0.9",
+                "dir": "Close Short",
+                "closedPnl": "0.043575",
+                "hash": "0x21a97814cf65ff1e232304472d1b5c02027200fa6a691df0c57223678e69d908",
+                "oid": 583474067914,
+                "crossed": false,
+                "fee": "-0.00037",
+                "tid": 708733813429079,
+                "cloid": "0x00000000000000005689aeb538eff157",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000185"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194139926,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.45",
+            "sz": "4.02",
+            "side": "B",
+            "time": 1792745016811,
+            "startPosition": "-0.15",
+            "dir": "Short > Long",
+            "closedPnl": "0.068715",
+            "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+            "oid": 583477454422,
+            "crossed": false,
+            "fee": "-0.001983",
+            "tid": 994363503479923,
+            "cloid": "0x00000000000000005689a4bea5522dc6",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000991"
+          },
+          "before_mark": "164.6",
+          "updates": [
+            [
+              "164.41",
+              "Normal"
+            ]
+          ],
+          "rank": null,
+          "legs": [
+            [
+              "0x09c8a7efcc50995f45f7492c0ee0b0628cf500d0",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.45",
+                "sz": "4.02",
+                "side": "B",
+                "time": 1792745016811,
+                "startPosition": "-0.15",
+                "dir": "Short > Long",
+                "closedPnl": "0.068715",
+                "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+                "oid": 583477454422,
+                "crossed": false,
+                "fee": "-0.001983",
+                "tid": 994363503479923,
+                "cloid": "0x00000000000000005689a4bea5522dc6",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000991"
+              }
+            ]
+          ],
+          "oracle_bracket": true
+        }
+      ],
+      "reported_delta_micro": -139320
+    },
+    {
+      "user": "0xf27ebb91ea420f73b59b205ac7e0b77a90ec8f3c",
+      "coin": "xyz:NBIS",
+      "size_decimals": 2,
+      "checkpoint_before": {
+        "s": 6129,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -9045676594
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -579239
+        },
+        "e": 10051095200
+      },
+      "checkpoint_after": {
+        "s": 8422,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -12438632912
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -579239
+        },
+        "e": 13821704400
+      },
+      "events": [
+        {
+          "height": 1194139926,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.44",
+            "sz": "22.93",
+            "side": "B",
+            "time": 1792745016811,
+            "startPosition": "61.29",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+            "oid": 583477459260,
+            "crossed": false,
+            "fee": "0.027148",
+            "tid": 1009894344085224,
+            "cloid": "0x000000000000000018e0cef7c9e6b0c0",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.013574"
+          },
+          "before_mark": "164.6",
+          "updates": [
+            [
+              "164.41",
+              "Normal"
+            ]
+          ],
+          "rank": null,
+          "legs": [
+            [
+              "0xf27ebb91ea420f73b59b205ac7e0b77a90ec8f3c",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.44",
+                "sz": "22.93",
+                "side": "B",
+                "time": 1792745016811,
+                "startPosition": "61.29",
+                "dir": "Open Long",
+                "closedPnl": "0.0",
+                "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+                "oid": 583477459260,
+                "crossed": false,
+                "fee": "0.027148",
+                "tid": 1009894344085224,
+                "cloid": "0x000000000000000018e0cef7c9e6b0c0",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.013574"
+              }
+            ]
+          ],
+          "oracle_bracket": true
+        }
+      ],
+      "reported_delta_micro": -619110
+    },
+    {
+      "user": "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+      "coin": "xyz:NBIS",
+      "size_decimals": 2,
+      "checkpoint_before": {
+        "s": 1452,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -2154605009
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -5202621
+        },
+        "e": 2394769577
+      },
+      "checkpoint_after": {
+        "s": 1570,
+        "l": {
+          "I": {
+            "l": 10,
+            "u": -2329273310
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": -5202621
+        },
+        "e": 2588617976
+      },
+      "events": [
+        {
+          "height": 1194130677,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.45",
+            "sz": "0.45",
+            "side": "A",
+            "time": 1792744343031,
+            "startPosition": "14.52",
+            "dir": "Close Long",
+            "closedPnl": "0.23445",
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "oid": 583469968023,
+            "crossed": false,
+            "fee": "-0.000223",
+            "tid": 162761296441112,
+            "cloid": "0x00000000000000005689a7f5d5416832",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000111"
+          },
+          "before_mark": "165.38",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.45",
+                "sz": "0.45",
+                "side": "A",
+                "time": 1792744343031,
+                "startPosition": "14.52",
+                "dir": "Close Long",
+                "closedPnl": "0.23445",
+                "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "oid": 583469968023,
+                "crossed": false,
+                "fee": "-0.000223",
+                "tid": 162761296441112,
+                "cloid": "0x00000000000000005689a7f5d5416832",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000111"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194130919,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.44",
+            "sz": "3.02",
+            "side": "A",
+            "time": 1792744360346,
+            "startPosition": "14.07",
+            "dir": "Close Long",
+            "closedPnl": "1.54322",
+            "hash": "0x889389dbb18979058a0d04472cfde70202ed00c14c8c97d72c5c352e708d52f0",
+            "oid": 583470200819,
+            "crossed": true,
+            "fee": "0.020784",
+            "tid": 158725329272417,
+            "cloid": "0x00000000000000005689a42f1585c839",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.010392",
+            "priorityGas": "0.00000528"
+          },
+          "before_mark": "165.44",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.44",
+                "sz": "3.02",
+                "side": "A",
+                "time": 1792744360346,
+                "startPosition": "14.07",
+                "dir": "Close Long",
+                "closedPnl": "1.54322",
+                "hash": "0x889389dbb18979058a0d04472cfde70202ed00c14c8c97d72c5c352e708d52f0",
+                "oid": 583470200819,
+                "crossed": true,
+                "fee": "0.020784",
+                "tid": 158725329272417,
+                "cloid": "0x00000000000000005689a42f1585c839",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "0.010392",
+                "priorityGas": "0.00000528"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194134643,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.02",
+            "sz": "4.52",
+            "side": "A",
+            "time": 1792744636749,
+            "startPosition": "11.05",
+            "dir": "Close Long",
+            "closedPnl": "0.41132",
+            "hash": "0x9a80ff5982298aa29bfa04472d0c730204cb003f1d2ca9743e49aaac412d648d",
+            "oid": 583473098138,
+            "crossed": false,
+            "fee": "-0.002237",
+            "tid": 278533127991080,
+            "cloid": "0x00000000000000005689a88d888a33d2",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.001118"
+          },
+          "before_mark": "165.0",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.02",
+                "sz": "4.52",
+                "side": "A",
+                "time": 1792744636749,
+                "startPosition": "11.05",
+                "dir": "Close Long",
+                "closedPnl": "0.41132",
+                "hash": "0x9a80ff5982298aa29bfa04472d0c730204cb003f1d2ca9743e49aaac412d648d",
+                "oid": 583473098138,
+                "crossed": false,
+                "fee": "-0.002237",
+                "tid": 278533127991080,
+                "cloid": "0x00000000000000005689a88d888a33d2",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.001118"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194137237,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.14",
+            "sz": "5.27",
+            "side": "B",
+            "time": 1792744823869,
+            "startPosition": "6.53",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0xad6edfca8d0a9396aee804472d169502057f00b0280db26851378b1d4c0e6d81",
+            "oid": 583475440740,
+            "crossed": false,
+            "fee": "-0.00261",
+            "tid": 844871288628742,
+            "cloid": "0x00000000000000005689a81aa6237744",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.001305"
+          },
+          "before_mark": "165.15",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.14",
+                "sz": "5.27",
+                "side": "B",
+                "time": 1792744823869,
+                "startPosition": "6.53",
+                "dir": "Open Long",
+                "closedPnl": "0.0",
+                "hash": "0xad6edfca8d0a9396aee804472d169502057f00b0280db26851378b1d4c0e6d81",
+                "oid": 583475440740,
+                "crossed": false,
+                "fee": "-0.00261",
+                "tid": 844871288628742,
+                "cloid": "0x00000000000000005689a81aa6237744",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.001305"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194139926,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.46",
+            "sz": "4.02",
+            "side": "B",
+            "time": 1792745016811,
+            "startPosition": "11.8",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+            "oid": 583477458373,
+            "crossed": false,
+            "fee": "-0.001983",
+            "tid": 893294115614089,
+            "cloid": "0x00000000000000005689a833d29e0ba9",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000991"
+          },
+          "before_mark": "164.6",
+          "updates": [
+            [
+              "164.41",
+              "Normal"
+            ]
+          ],
+          "rank": null,
+          "legs": [
+            [
+              "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.46",
+                "sz": "4.02",
+                "side": "B",
+                "time": 1792745016811,
+                "startPosition": "11.8",
+                "dir": "Open Long",
+                "closedPnl": "0.0",
+                "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+                "oid": 583477458373,
+                "crossed": false,
+                "fee": "-0.001983",
+                "tid": 893294115614089,
+                "cloid": "0x00000000000000005689a833d29e0ba9",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000991"
+              }
+            ]
+          ],
+          "oracle_bracket": true
+        },
+        {
+          "height": 1194139977,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.55",
+            "sz": "0.12",
+            "side": "A",
+            "time": 1792745020228,
+            "startPosition": "15.82",
+            "dir": "Close Long",
+            "closedPnl": "-0.039612",
+            "hash": "0x14d61b7ceeb1d044164f04472d21490202ce006289b4ef16b89ec6cfadb5aa2e",
+            "oid": 583477498466,
+            "crossed": false,
+            "fee": "-0.000059",
+            "tid": 718893100130544,
+            "cloid": "0x00000000000000005689af913a63b6e7",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000029"
+          },
+          "before_mark": "164.43",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0x66aec3752ac8c7e817708ea13a40942dd31b0a30",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.55",
+                "sz": "0.12",
+                "side": "A",
+                "time": 1792745020228,
+                "startPosition": "15.82",
+                "dir": "Close Long",
+                "closedPnl": "-0.039612",
+                "hash": "0x14d61b7ceeb1d044164f04472d21490202ce006289b4ef16b89ec6cfadb5aa2e",
+                "oid": 583477498466,
+                "crossed": false,
+                "fee": "-0.000059",
+                "tid": 718893100130544,
+                "cloid": "0x00000000000000005689af913a63b6e7",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000029"
+              }
+            ]
+          ]
+        }
+      ],
+      "reported_delta_micro": -179527
+    },
+    {
+      "user": "0xc8264ebc379e26946e7d31ae4746c27182849755",
+      "coin": "xyz:NBIS",
+      "size_decimals": 2,
+      "checkpoint_before": {
+        "s": -9,
+        "l": {
+          "I": {
+            "l": 5,
+            "u": 17888124
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": 288731
+        },
+        "e": 14906700
+      },
+      "checkpoint_after": {
+        "s": 246,
+        "l": {
+          "I": {
+            "l": 5,
+            "u": -323557668
+          }
+        },
+        "M": 10,
+        "f": {
+          "a": 288731
+        },
+        "e": 404538800
+      },
+      "events": [
+        {
+          "height": 1194130136,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.58",
+            "sz": "0.09",
+            "side": "B",
+            "time": 1792744303884,
+            "startPosition": "-0.09",
+            "dir": "Close Short",
+            "closedPnl": "0.0045",
+            "hash": "0xec2ffe406b2595bceda904472cfad802012200260628b48e8ff8a9932a296fa7",
+            "oid": 583469600536,
+            "crossed": false,
+            "fee": "-0.000044",
+            "tid": 438091213103569,
+            "cloid": "0x0000000000000000000001a15e61df95",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000022"
+          },
+          "before_mark": "165.52",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0xc8264ebc379e26946e7d31ae4746c27182849755",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.58",
+                "sz": "0.09",
+                "side": "B",
+                "time": 1792744303884,
+                "startPosition": "-0.09",
+                "dir": "Close Short",
+                "closedPnl": "0.0045",
+                "hash": "0xec2ffe406b2595bceda904472cfad802012200260628b48e8ff8a9932a296fa7",
+                "oid": 583469600536,
+                "crossed": false,
+                "fee": "-0.000044",
+                "tid": 438091213103569,
+                "cloid": "0x0000000000000000000001a15e61df95",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000022"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194130247,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.46",
+            "sz": "0.22",
+            "side": "B",
+            "time": 1792744311738,
+            "startPosition": "0.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x594cfed2d27bf8555ac604472cfb470201f400b86d7f1727fd15aa25917fd23f",
+            "oid": 583469681835,
+            "crossed": false,
+            "fee": "-0.000109",
+            "tid": 846649133403414,
+            "cloid": "0x0000000000000000000001a15e61dfc0",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000054"
+          },
+          "before_mark": "165.42",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0xc8264ebc379e26946e7d31ae4746c27182849755",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.46",
+                "sz": "0.22",
+                "side": "B",
+                "time": 1792744311738,
+                "startPosition": "0.0",
+                "dir": "Open Long",
+                "closedPnl": "0.0",
+                "hash": "0x594cfed2d27bf8555ac604472cfb470201f400b86d7f1727fd15aa25917fd23f",
+                "oid": 583469681835,
+                "crossed": false,
+                "fee": "-0.000109",
+                "tid": 846649133403414,
+                "cloid": "0x0000000000000000000001a15e61dfc0",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000054"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194130677,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.45",
+            "sz": "0.22",
+            "side": "A",
+            "time": 1792744343031,
+            "startPosition": "0.22",
+            "dir": "Close Long",
+            "closedPnl": "-0.0022",
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "oid": 583469967959,
+            "crossed": false,
+            "fee": "-0.000109",
+            "tid": 775078423669284,
+            "cloid": "0x0000000000000000000001a15e61e072",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000054"
+          },
+          "before_mark": "165.38",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0xc8264ebc379e26946e7d31ae4746c27182849755",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.45",
+                "sz": "0.22",
+                "side": "A",
+                "time": 1792744343031,
+                "startPosition": "0.22",
+                "dir": "Close Long",
+                "closedPnl": "-0.0022",
+                "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "oid": 583469967959,
+                "crossed": false,
+                "fee": "-0.000109",
+                "tid": 775078423669284,
+                "cloid": "0x0000000000000000000001a15e61e072",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000054"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194134509,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.95",
+            "sz": "0.46",
+            "side": "B",
+            "time": 1792744626279,
+            "startPosition": "0.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x86e18f1dadcaf546885b04472d0bed0202b3000348ce14182aaa3a706ccecf31",
+            "oid": 583473105848,
+            "crossed": false,
+            "fee": "-0.000227",
+            "tid": 1049183486425445,
+            "cloid": "0x0000000000000000000001a15e61e783",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000113"
+          },
+          "before_mark": "164.96",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0xc8264ebc379e26946e7d31ae4746c27182849755",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.95",
+                "sz": "0.46",
+                "side": "B",
+                "time": 1792744626279,
+                "startPosition": "0.0",
+                "dir": "Open Long",
+                "closedPnl": "0.0",
+                "hash": "0x86e18f1dadcaf546885b04472d0bed0202b3000348ce14182aaa3a706ccecf31",
+                "oid": 583473105848,
+                "crossed": false,
+                "fee": "-0.000227",
+                "tid": 1049183486425445,
+                "cloid": "0x0000000000000000000001a15e61e783",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000113"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194134631,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "165.01",
+            "sz": "0.46",
+            "side": "A",
+            "time": 1792744635942,
+            "startPosition": "0.46",
+            "dir": "Close Long",
+            "closedPnl": "0.0276",
+            "hash": "0x5f6f07cdb8d7065660e804472d0c670201aa00b353da25280337b32077dae041",
+            "oid": 583473214390,
+            "crossed": false,
+            "fee": "-0.000227",
+            "tid": 833387360040319,
+            "cloid": "0x0000000000000000000001a15e61e7c8",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000113"
+          },
+          "before_mark": "165.0",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0xc8264ebc379e26946e7d31ae4746c27182849755",
+              {
+                "coin": "xyz:NBIS",
+                "px": "165.01",
+                "sz": "0.46",
+                "side": "A",
+                "time": 1792744635942,
+                "startPosition": "0.46",
+                "dir": "Close Long",
+                "closedPnl": "0.0276",
+                "hash": "0x5f6f07cdb8d7065660e804472d0c670201aa00b353da25280337b32077dae041",
+                "oid": 583473214390,
+                "crossed": false,
+                "fee": "-0.000227",
+                "tid": 833387360040319,
+                "cloid": "0x0000000000000000000001a15e61e7c8",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000113"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194135864,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.94",
+            "sz": "0.94",
+            "side": "A",
+            "time": 1792744723542,
+            "startPosition": "0.0",
+            "dir": "Open Short",
+            "closedPnl": "0.0",
+            "hash": "0xe2b807a6affe0636e43104472d1138020a17008c4af125088680b2f96ef1e021",
+            "oid": 583474259304,
+            "crossed": false,
+            "fee": "-0.000465",
+            "tid": 880267878327033,
+            "cloid": "0x0000000000000000000001a15e61ea11",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000232"
+          },
+          "before_mark": "164.9",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0xc8264ebc379e26946e7d31ae4746c27182849755",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.94",
+                "sz": "0.94",
+                "side": "A",
+                "time": 1792744723542,
+                "startPosition": "0.0",
+                "dir": "Open Short",
+                "closedPnl": "0.0",
+                "hash": "0xe2b807a6affe0636e43104472d1138020a17008c4af125088680b2f96ef1e021",
+                "oid": 583474259304,
+                "crossed": false,
+                "fee": "-0.000465",
+                "tid": 880267878327033,
+                "cloid": "0x0000000000000000000001a15e61ea11",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000232"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194136370,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.99",
+            "sz": "0.24",
+            "side": "B",
+            "time": 1792744761879,
+            "startPosition": "-0.94",
+            "dir": "Close Short",
+            "closedPnl": "-0.012",
+            "hash": "0x8d6332098781739d8edc04472d133202019600ef2284926f312bdd5c46854d88",
+            "oid": 583474663722,
+            "crossed": false,
+            "fee": "-0.000118",
+            "tid": 332068974480129,
+            "cloid": "0x0000000000000000000001a15e61eb27",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000059"
+          },
+          "before_mark": "164.89",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0xc8264ebc379e26946e7d31ae4746c27182849755",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.99",
+                "sz": "0.24",
+                "side": "B",
+                "time": 1792744761879,
+                "startPosition": "-0.94",
+                "dir": "Close Short",
+                "closedPnl": "-0.012",
+                "hash": "0x8d6332098781739d8edc04472d133202019600ef2284926f312bdd5c46854d88",
+                "oid": 583474663722,
+                "crossed": false,
+                "fee": "-0.000118",
+                "tid": 332068974480129,
+                "cloid": "0x0000000000000000000001a15e61eb27",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000059"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194138418,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.97",
+            "sz": "0.7",
+            "side": "B",
+            "time": 1792744909870,
+            "startPosition": "-0.7",
+            "dir": "Close Short",
+            "closedPnl": "-0.021",
+            "hash": "0x52677a070a90b3d153e104472d1b320203ef00eca593d2a3f6302559c9948dbb",
+            "oid": 583476322859,
+            "crossed": false,
+            "fee": "-0.000346",
+            "tid": 260297938165643,
+            "cloid": "0x0000000000000000000001a15e61eef5",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000173"
+          },
+          "before_mark": "164.97",
+          "updates": [],
+          "rank": null,
+          "legs": [
+            [
+              "0xc8264ebc379e26946e7d31ae4746c27182849755",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.97",
+                "sz": "0.7",
+                "side": "B",
+                "time": 1792744909870,
+                "startPosition": "-0.7",
+                "dir": "Close Short",
+                "closedPnl": "-0.021",
+                "hash": "0x52677a070a90b3d153e104472d1b320203ef00eca593d2a3f6302559c9948dbb",
+                "oid": 583476322859,
+                "crossed": false,
+                "fee": "-0.000346",
+                "tid": 260297938165643,
+                "cloid": "0x0000000000000000000001a15e61eef5",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000173"
+              }
+            ]
+          ]
+        },
+        {
+          "height": 1194139926,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.47",
+            "sz": "0.82",
+            "side": "B",
+            "time": 1792745016811,
+            "startPosition": "0.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+            "oid": 583477454986,
+            "crossed": false,
+            "fee": "-0.000404",
+            "tid": 807591453227760,
+            "cloid": "0x0000000000000000000001a15e61f1bb",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000202"
+          },
+          "before_mark": "164.6",
+          "updates": [
+            [
+              "164.41",
+              "Normal"
+            ]
+          ],
+          "rank": null,
+          "legs": [
+            [
+              "0xc8264ebc379e26946e7d31ae4746c27182849755",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.47",
+                "sz": "0.82",
+                "side": "B",
+                "time": 1792745016811,
+                "startPosition": "0.0",
+                "dir": "Open Long",
+                "closedPnl": "0.0",
+                "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+                "oid": 583477454986,
+                "crossed": false,
+                "fee": "-0.000404",
+                "tid": 807591453227760,
+                "cloid": "0x0000000000000000000001a15e61f1bb",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000202"
+              }
+            ]
+          ],
+          "oracle_bracket": true
+        },
+        {
+          "height": 1194139926,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.44",
+            "sz": "0.82",
+            "side": "B",
+            "time": 1792745016811,
+            "startPosition": "0.82",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+            "oid": 583477450108,
+            "crossed": false,
+            "fee": "-0.000404",
+            "tid": 624896224213662,
+            "cloid": "0x0000000000000000000001a15e61f1b6",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000202"
+          },
+          "before_mark": "164.6",
+          "updates": [
+            [
+              "164.41",
+              "Normal"
+            ]
+          ],
+          "rank": null,
+          "legs": [
+            [
+              "0xc8264ebc379e26946e7d31ae4746c27182849755",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.44",
+                "sz": "0.82",
+                "side": "B",
+                "time": 1792745016811,
+                "startPosition": "0.82",
+                "dir": "Open Long",
+                "closedPnl": "0.0",
+                "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+                "oid": 583477450108,
+                "crossed": false,
+                "fee": "-0.000404",
+                "tid": 624896224213662,
+                "cloid": "0x0000000000000000000001a15e61f1b6",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000202"
+              }
+            ]
+          ],
+          "oracle_bracket": true
+        },
+        {
+          "height": 1194139926,
+          "fill": {
+            "coin": "xyz:NBIS",
+            "px": "164.43",
+            "sz": "0.82",
+            "side": "B",
+            "time": 1792745016811,
+            "startPosition": "1.64",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+            "oid": 583477450198,
+            "crossed": false,
+            "fee": "-0.000404",
+            "tid": 1006688208179508,
+            "cloid": "0x0000000000000000000001a15e61f1b5",
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "-0.000202"
+          },
+          "before_mark": "164.6",
+          "updates": [
+            [
+              "164.41",
+              "Normal"
+            ]
+          ],
+          "rank": null,
+          "legs": [
+            [
+              "0xc8264ebc379e26946e7d31ae4746c27182849755",
+              {
+                "coin": "xyz:NBIS",
+                "px": "164.43",
+                "sz": "0.82",
+                "side": "B",
+                "time": 1792745016811,
+                "startPosition": "1.64",
+                "dir": "Open Long",
+                "closedPnl": "0.0",
+                "hash": "0x75a9ef2dde1655c1772304472d211602017300137919749319729a809d1a2fac",
+                "oid": 583477450198,
+                "crossed": false,
+                "fee": "-0.000404",
+                "tid": 1006688208179508,
+                "cloid": "0x0000000000000000000001a15e61f1b5",
+                "feeToken": "USDC",
+                "twapId": null,
+                "deployerFee": "-0.000202"
+              }
+            ]
+          ],
+          "oracle_bracket": true
+        }
+      ],
+      "reported_delta_micro": -72160
+    }
+  ]
+}
