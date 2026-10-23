@@ -802,6 +802,10 @@ impl AccountBook {
         }
     }
 
+    pub(crate) fn collateral_coins<'a>(&self, fills: impl Iterator<Item = &'a NodeDataFill>) -> Vec<String> {
+        self.replay.as_ref().map_or_else(Vec::new, |replay| replay.current.collateral_coins(fills))
+    }
+
     /// The one entry of a released block (design 000433 r3, 3.4): its `replica_cmds` actions, then its fills, then its
     /// misc events, each through the stream's own application below (the block's other streams are the node marks').
     pub(crate) fn apply_block(
@@ -876,6 +880,7 @@ impl AccountBook {
                 },
                 |mut event| {
                     event.attach_dust(dust.share(user, &fill));
+                    event.restore_mark(block, prices);
                     AccountEvent::Fill(event)
                 },
             );

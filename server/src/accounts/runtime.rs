@@ -738,7 +738,8 @@ fn apply_assembly(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, 
         let CompletedBlock { mut actions, fills, misc_events, hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions } = block;
         let height = actions.height;
         let mark_fills = fills.iter().flat_map(Batch::events_ref).map(BlockFill::of).collect();
-        let inputs = MarkInputs { hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions, fills: mark_fills };
+        let collateral_coins = book.collateral_coins(fills.iter().flat_map(Batch::events_ref));
+        let inputs = MarkInputs { hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions, fills: mark_fills, collateral_coins };
         // Preserve the pre-block oracle for funding before advancing prices to obtain execution marks for fills.
         let mut funding_oracles = rustc_hash::FxHashMap::default();
         for event in misc_events.iter().flat_map(Batch::events_ref) {

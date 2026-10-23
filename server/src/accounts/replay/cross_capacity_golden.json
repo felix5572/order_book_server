@@ -1,0 +1,734 @@
+{
+  "provenance": {
+    "archive": "ob_hourly_watch_20261021/cash_followup_20261023T0136Z/cash_evidence",
+    "scope": "Complete per-dex account window:9GIGADEV fills,9unchanged cross positions,no ledger/funding/leverage changes;all other isolated positions unchanged. Cross prices independently read from HIP3 stream;no price update in any fill block.",
+    "state_sha256": {
+      "1193760000_selected_states.json": "acebf4d86246036780320066532179dadb0db9c13e6d4a154c056a045230d276",
+      "1193770000_selected_states.json": "793e07619ae697023bdd813077627946d7b82ada4483d401a4415a1b4dd03f57"
+    }
+  },
+  "user": "0xab625f3216f1c209a1c069b29491c3009f258292",
+  "window": [
+    1193760000,
+    1193770000
+  ],
+  "coin": "xyz:GIGADEV",
+  "size_decimals": 2,
+  "cross_before_micro": -341913013,
+  "cross_after_micro": -260853551,
+  "isolated_before": {
+    "s": -3540,
+    "l": {
+      "I": {
+        "l": 1,
+        "u": 2816565756
+      }
+    },
+    "M": 10,
+    "f": {
+      "a": 586659,
+      "o": -458912
+    },
+    "e": 1416027485
+  },
+  "isolated_after": {
+    "s": -3333,
+    "l": {
+      "I": {
+        "l": 1,
+        "u": 2652846536
+      }
+    },
+    "M": 10,
+    "f": {
+      "a": 586659,
+      "o": -458912
+    },
+    "e": 1332967181
+  },
+  "holdings": [
+    {
+      "coin": "xyz:TSLA",
+      "position": {
+        "s": 542,
+        "f": {
+          "a": 1848552,
+          "o": 2161644,
+          "c": 340077
+        },
+        "e": 208073800
+      },
+      "size_decimals": 3
+    },
+    {
+      "coin": "xyz:NVDA",
+      "position": {
+        "s": -604,
+        "f": {
+          "a": -743775,
+          "o": -1185413,
+          "c": -968560
+        },
+        "e": 137349600
+      },
+      "size_decimals": 3
+    },
+    {
+      "coin": "xyz:META",
+      "position": {
+        "s": 25,
+        "f": {
+          "a": -121544,
+          "o": 505602,
+          "c": 197991
+        },
+        "e": 14120957
+      },
+      "size_decimals": 3
+    },
+    {
+      "coin": "xyz:AAPL",
+      "position": {
+        "s": 404,
+        "f": {
+          "a": 308099,
+          "o": 308099,
+          "c": 305622
+        },
+        "e": 126970434
+      },
+      "size_decimals": 3
+    },
+    {
+      "coin": "xyz:MSFT",
+      "position": {
+        "s": 92,
+        "f": {
+          "a": -78756,
+          "o": 300435,
+          "c": 236253
+        },
+        "e": 38324440
+      },
+      "size_decimals": 3
+    },
+    {
+      "coin": "xyz:GOOGL",
+      "position": {
+        "s": 134,
+        "f": {
+          "a": 224090,
+          "o": 824145,
+          "c": 824145
+        },
+        "e": 45163360
+      },
+      "size_decimals": 3
+    },
+    {
+      "coin": "xyz:SILVER",
+      "position": {
+        "s": -150,
+        "M": 25,
+        "f": {
+          "a": -2472515,
+          "o": -2472515,
+          "c": -2359780
+        },
+        "e": 89314500
+      },
+      "size_decimals": 2
+    },
+    {
+      "coin": "xyz:CL",
+      "position": {
+        "s": 1049,
+        "f": {
+          "a": -5687998,
+          "o": -5874106,
+          "c": -5879094
+        },
+        "e": 87384073
+      },
+      "size_decimals": 3
+    },
+    {
+      "coin": "xyz:SKHY",
+      "position": {
+        "s": 28,
+        "l": {
+          "C": 10
+        },
+        "M": 10,
+        "f": {
+          "a": -244515,
+          "o": -448535,
+          "c": -448535
+        },
+        "e": 48129200
+      },
+      "size_decimals": 2
+    }
+  ],
+  "events": [
+    {
+      "height": 1193765556,
+      "fill": {
+        "coin": "xyz:GIGADEV",
+        "px": "40.001",
+        "sz": "1.02",
+        "side": "B",
+        "time": 1792717934735,
+        "startPosition": "-35.4",
+        "dir": "Close Short",
+        "closedPnl": "-0.000306",
+        "hash": "0x178211a4def84dc818fb0447276ab402021b008a79fb6c9abb4abcf79dfc27b2",
+        "oid": 583159756345,
+        "crossed": false,
+        "fee": "0.001162",
+        "tid": 127395217106732,
+        "cloid": "0x00000000000000005e4648594f84b137",
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.000523"
+      },
+      "cross_prices": {
+        "xyz:TSLA": {
+          "px_raw": 375500,
+          "size_decimals": 3
+        },
+        "xyz:NVDA": {
+          "px_raw": 212810,
+          "size_decimals": 3
+        },
+        "xyz:META": {
+          "px_raw": 646950,
+          "size_decimals": 3
+        },
+        "xyz:AAPL": {
+          "px_raw": 347390,
+          "size_decimals": 3
+        },
+        "xyz:MSFT": {
+          "px_raw": 519810,
+          "size_decimals": 3
+        },
+        "xyz:GOOGL": {
+          "px_raw": 324160,
+          "size_decimals": 3
+        },
+        "xyz:SILVER": {
+          "px_raw": 543130,
+          "size_decimals": 2
+        },
+        "xyz:CL": {
+          "px_raw": 99756,
+          "size_decimals": 3
+        },
+        "xyz:SKHY": {
+          "px_raw": 1347200,
+          "size_decimals": 2
+        }
+      },
+      "isolated_mark_raw": 400040,
+      "capacity_micro": 0
+    },
+    {
+      "height": 1193765587,
+      "fill": {
+        "coin": "xyz:GIGADEV",
+        "px": "40.0",
+        "sz": "1.0",
+        "side": "A",
+        "time": 1792717936978,
+        "startPosition": "-34.38",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0xc0573e82ed4dc436c1d00447276ad302046d00688840e308641fe9d5ac419e21",
+        "oid": 583159940009,
+        "crossed": true,
+        "fee": "0.00342",
+        "tid": 295181730606174,
+        "cloid": "0x00000000000000005e4648594f84b13a",
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.001539"
+      },
+      "cross_prices": {
+        "xyz:TSLA": {
+          "px_raw": 375500,
+          "size_decimals": 3
+        },
+        "xyz:NVDA": {
+          "px_raw": 212810,
+          "size_decimals": 3
+        },
+        "xyz:META": {
+          "px_raw": 646950,
+          "size_decimals": 3
+        },
+        "xyz:AAPL": {
+          "px_raw": 347390,
+          "size_decimals": 3
+        },
+        "xyz:MSFT": {
+          "px_raw": 519810,
+          "size_decimals": 3
+        },
+        "xyz:GOOGL": {
+          "px_raw": 324160,
+          "size_decimals": 3
+        },
+        "xyz:SILVER": {
+          "px_raw": 543130,
+          "size_decimals": 2
+        },
+        "xyz:CL": {
+          "px_raw": 99756,
+          "size_decimals": 3
+        },
+        "xyz:SKHY": {
+          "px_raw": 1347200,
+          "size_decimals": 2
+        }
+      },
+      "isolated_mark_raw": 400040,
+      "capacity_micro": 40030680
+    },
+    {
+      "height": 1193767183,
+      "fill": {
+        "coin": "xyz:GIGADEV",
+        "px": "40.0",
+        "sz": "1.02",
+        "side": "B",
+        "time": 1792718055307,
+        "startPosition": "-35.38",
+        "dir": "Close Short",
+        "closedPnl": "0.000714",
+        "hash": "0xdad1c63c2106eedcdc4b044727710f0206dd0021bc0a0dae7e9a718ee00ac8c7",
+        "oid": 583159954278,
+        "crossed": false,
+        "fee": "0.001162",
+        "tid": 789819228660339,
+        "cloid": "0x00000000000000005e4648594f84b13b",
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.000523"
+      },
+      "cross_prices": {
+        "xyz:TSLA": {
+          "px_raw": 375370,
+          "size_decimals": 3
+        },
+        "xyz:NVDA": {
+          "px_raw": 212720,
+          "size_decimals": 3
+        },
+        "xyz:META": {
+          "px_raw": 646880,
+          "size_decimals": 3
+        },
+        "xyz:AAPL": {
+          "px_raw": 347480,
+          "size_decimals": 3
+        },
+        "xyz:MSFT": {
+          "px_raw": 519660,
+          "size_decimals": 3
+        },
+        "xyz:GOOGL": {
+          "px_raw": 324090,
+          "size_decimals": 3
+        },
+        "xyz:SILVER": {
+          "px_raw": 542530,
+          "size_decimals": 2
+        },
+        "xyz:CL": {
+          "px_raw": 99925,
+          "size_decimals": 3
+        },
+        "xyz:SKHY": {
+          "px_raw": 1343700,
+          "size_decimals": 2
+        }
+      },
+      "isolated_mark_raw": 400000,
+      "capacity_micro": 198396
+    },
+    {
+      "height": 1193768234,
+      "fill": {
+        "coin": "xyz:GIGADEV",
+        "px": "39.883",
+        "sz": "1.02",
+        "side": "B",
+        "time": 1792718130737,
+        "startPosition": "-34.36",
+        "dir": "Close Short",
+        "closedPnl": "0.120054",
+        "hash": "0x0f535b2213d0297d10cd044727752a0209cb0007aed3484fb31c0674d2d40367",
+        "oid": 583162064005,
+        "crossed": false,
+        "fee": "0.001159",
+        "tid": 42972456364821,
+        "cloid": "0x00000000000000005e4648594f84b17b",
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.000522"
+      },
+      "cross_prices": {
+        "xyz:TSLA": {
+          "px_raw": 375120,
+          "size_decimals": 3
+        },
+        "xyz:NVDA": {
+          "px_raw": 212590,
+          "size_decimals": 3
+        },
+        "xyz:META": {
+          "px_raw": 646100,
+          "size_decimals": 3
+        },
+        "xyz:AAPL": {
+          "px_raw": 347630,
+          "size_decimals": 3
+        },
+        "xyz:MSFT": {
+          "px_raw": 519580,
+          "size_decimals": 3
+        },
+        "xyz:GOOGL": {
+          "px_raw": 323890,
+          "size_decimals": 3
+        },
+        "xyz:SILVER": {
+          "px_raw": 542100,
+          "size_decimals": 2
+        },
+        "xyz:CL": {
+          "px_raw": 100100,
+          "size_decimals": 3
+        },
+        "xyz:SKHY": {
+          "px_raw": 1339100,
+          "size_decimals": 2
+        }
+      },
+      "isolated_mark_raw": 399150,
+      "capacity_micro": 40652831
+    },
+    {
+      "height": 1193768517,
+      "fill": {
+        "coin": "xyz:GIGADEV",
+        "px": "39.86",
+        "sz": "1.02",
+        "side": "B",
+        "time": 1792718151162,
+        "startPosition": "-33.34",
+        "dir": "Close Short",
+        "closedPnl": "0.143514",
+        "hash": "0x3b4fd91ad77c70b33cc9044727764502034e0000727f8f85df18846d96704a9d",
+        "oid": 583162720904,
+        "crossed": false,
+        "fee": "0.001158",
+        "tid": 892112988416358,
+        "cloid": "0x00000000000000005e4648594f84b185",
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.000521"
+      },
+      "cross_prices": {
+        "xyz:TSLA": {
+          "px_raw": 375090,
+          "size_decimals": 3
+        },
+        "xyz:NVDA": {
+          "px_raw": 212540,
+          "size_decimals": 3
+        },
+        "xyz:META": {
+          "px_raw": 646000,
+          "size_decimals": 3
+        },
+        "xyz:AAPL": {
+          "px_raw": 347630,
+          "size_decimals": 3
+        },
+        "xyz:MSFT": {
+          "px_raw": 519510,
+          "size_decimals": 3
+        },
+        "xyz:GOOGL": {
+          "px_raw": 323920,
+          "size_decimals": 3
+        },
+        "xyz:SILVER": {
+          "px_raw": 542400,
+          "size_decimals": 2
+        },
+        "xyz:CL": {
+          "px_raw": 100070,
+          "size_decimals": 3
+        },
+        "xyz:SKHY": {
+          "px_raw": 1337900,
+          "size_decimals": 2
+        }
+      },
+      "isolated_mark_raw": 398830,
+      "capacity_micro": 81044259
+    },
+    {
+      "height": 1193768936,
+      "fill": {
+        "coin": "xyz:GIGADEV",
+        "px": "39.911",
+        "sz": "3.05",
+        "side": "A",
+        "time": 1792718182001,
+        "startPosition": "-32.32",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x55ad1baeee5e514c572604472777e802137d00948951701ef975c701ad522b36",
+        "oid": 583163362519,
+        "crossed": true,
+        "fee": "0.010407",
+        "tid": 366584680769985,
+        "cloid": "0x00000000000000005e4648594f84b1a6",
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.004683"
+      },
+      "cross_prices": {
+        "xyz:TSLA": {
+          "px_raw": 375460,
+          "size_decimals": 3
+        },
+        "xyz:NVDA": {
+          "px_raw": 212610,
+          "size_decimals": 3
+        },
+        "xyz:META": {
+          "px_raw": 646110,
+          "size_decimals": 3
+        },
+        "xyz:AAPL": {
+          "px_raw": 347580,
+          "size_decimals": 3
+        },
+        "xyz:MSFT": {
+          "px_raw": 519540,
+          "size_decimals": 3
+        },
+        "xyz:GOOGL": {
+          "px_raw": 323890,
+          "size_decimals": 3
+        },
+        "xyz:SILVER": {
+          "px_raw": 542830,
+          "size_decimals": 2
+        },
+        "xyz:CL": {
+          "px_raw": 99978,
+          "size_decimals": 3
+        },
+        "xyz:SKHY": {
+          "px_raw": 1340700,
+          "size_decimals": 2
+        }
+      },
+      "isolated_mark_raw": 398090,
+      "capacity_micro": 121594406
+    },
+    {
+      "height": 1193769499,
+      "fill": {
+        "coin": "xyz:GIGADEV",
+        "px": "39.921",
+        "sz": "1.02",
+        "side": "B",
+        "time": 1792718222879,
+        "startPosition": "-35.37",
+        "dir": "Close Short",
+        "closedPnl": "0.07344",
+        "hash": "0x40cb425a1191f20f42440447277a1b020392003fac9510e1e493edacd095cbf9",
+        "oid": 583163752019,
+        "crossed": false,
+        "fee": "0.00116",
+        "tid": 514838134757008,
+        "cloid": "0x00000000000000005e4648594f84b1bf",
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.000522"
+      },
+      "cross_prices": {
+        "xyz:TSLA": {
+          "px_raw": 375240,
+          "size_decimals": 3
+        },
+        "xyz:NVDA": {
+          "px_raw": 212500,
+          "size_decimals": 3
+        },
+        "xyz:META": {
+          "px_raw": 646050,
+          "size_decimals": 3
+        },
+        "xyz:AAPL": {
+          "px_raw": 347580,
+          "size_decimals": 3
+        },
+        "xyz:MSFT": {
+          "px_raw": 519450,
+          "size_decimals": 3
+        },
+        "xyz:GOOGL": {
+          "px_raw": 323750,
+          "size_decimals": 3
+        },
+        "xyz:SILVER": {
+          "px_raw": 542650,
+          "size_decimals": 2
+        },
+        "xyz:CL": {
+          "px_raw": 99983,
+          "size_decimals": 3
+        },
+        "xyz:SKHY": {
+          "px_raw": 1337300,
+          "size_decimals": 2
+        }
+      },
+      "isolated_mark_raw": 399220,
+      "capacity_micro": 0
+    },
+    {
+      "height": 1193769911,
+      "fill": {
+        "coin": "xyz:GIGADEV",
+        "px": "39.911",
+        "sz": "0.11",
+        "side": "B",
+        "time": 1792718251070,
+        "startPosition": "-34.35",
+        "dir": "Close Short",
+        "closedPnl": "0.00902",
+        "hash": "0x12b59f74114365da142f0447277bb7020d390059ac4684acb67e4ac6d0473fc4",
+        "oid": 583164120597,
+        "crossed": false,
+        "fee": "0.000125",
+        "tid": 256038315562675,
+        "cloid": "0x00000000000000005e4648594f84b1c5",
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.000056"
+      },
+      "cross_prices": {
+        "xyz:TSLA": {
+          "px_raw": 375080,
+          "size_decimals": 3
+        },
+        "xyz:NVDA": {
+          "px_raw": 212390,
+          "size_decimals": 3
+        },
+        "xyz:META": {
+          "px_raw": 645850,
+          "size_decimals": 3
+        },
+        "xyz:AAPL": {
+          "px_raw": 347560,
+          "size_decimals": 3
+        },
+        "xyz:MSFT": {
+          "px_raw": 519500,
+          "size_decimals": 3
+        },
+        "xyz:GOOGL": {
+          "px_raw": 323700,
+          "size_decimals": 3
+        },
+        "xyz:SILVER": {
+          "px_raw": 542210,
+          "size_decimals": 2
+        },
+        "xyz:CL": {
+          "px_raw": 99932,
+          "size_decimals": 3
+        },
+        "xyz:SKHY": {
+          "px_raw": 1335800,
+          "size_decimals": 2
+        }
+      },
+      "isolated_mark_raw": 399110,
+      "capacity_micro": 40296494
+    },
+    {
+      "height": 1193769915,
+      "fill": {
+        "coin": "xyz:GIGADEV",
+        "px": "39.911",
+        "sz": "0.91",
+        "side": "B",
+        "time": 1792718251368,
+        "startPosition": "-34.24",
+        "dir": "Close Short",
+        "closedPnl": "0.07462",
+        "hash": "0x849240512d0234fe860b0447277bbb0213410036c80553d0285aeba3ec060ee9",
+        "oid": 583164120597,
+        "crossed": false,
+        "fee": "0.001035",
+        "tid": 172694335849495,
+        "cloid": "0x00000000000000005e4648594f84b1c5",
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.000466"
+      },
+      "cross_prices": {
+        "xyz:TSLA": {
+          "px_raw": 375080,
+          "size_decimals": 3
+        },
+        "xyz:NVDA": {
+          "px_raw": 212390,
+          "size_decimals": 3
+        },
+        "xyz:META": {
+          "px_raw": 645850,
+          "size_decimals": 3
+        },
+        "xyz:AAPL": {
+          "px_raw": 347560,
+          "size_decimals": 3
+        },
+        "xyz:MSFT": {
+          "px_raw": 519500,
+          "size_decimals": 3
+        },
+        "xyz:GOOGL": {
+          "px_raw": 323700,
+          "size_decimals": 3
+        },
+        "xyz:SILVER": {
+          "px_raw": 542210,
+          "size_decimals": 2
+        },
+        "xyz:CL": {
+          "px_raw": 99932,
+          "size_decimals": 3
+        },
+        "xyz:SKHY": {
+          "px_raw": 1335800,
+          "size_decimals": 2
+        }
+      },
+      "isolated_mark_raw": 399110,
+      "capacity_micro": 44661556
+    }
+  ],
+  "old_difference_micro": 126408
+}

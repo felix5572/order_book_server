@@ -117,7 +117,7 @@ impl Inputs {
                 return Err(UnsupportedReason::PortfolioMarginNonUsdcDex);
             }
             usdc_dex_cash += state.cash_micro as f64 / 1e6;
-            for position in state.positions.iter().filter(|position| position.margin == PositionMargin::Cross) {
+            for position in state.positions.iter().filter(|position| matches!(position.margin, PositionMargin::Cross { .. })) {
                 let asset = &dex.assets[position.asset];
                 let mark = asset.mark_px().ok_or(UnsupportedReason::MissingMark)?;
                 let size = asset.size(position.size_raw);

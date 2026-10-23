@@ -183,7 +183,7 @@ fn pool_of<'a>(
 ) -> Result<Pool<'a>, UnsupportedReason> {
     let isolated_cash = match position.margin {
         PositionMargin::Isolated { cash_micro, .. } => Some(cash_micro),
-        PositionMargin::Cross => None,
+        PositionMargin::Cross { .. } => None,
     };
     let token = checkpoint.dexes[state.dex].collateral_token;
     match (rule, isolated_cash) {
@@ -215,7 +215,7 @@ fn settled_in<'a>(checkpoint: &CheckpointAccounts, account: &'a Account, token: 
 
 /// The cross positions of one dex state, with its dex index.
 fn cross(dex_state: &DexAccount) -> impl Iterator<Item = (usize, &Position)> {
-    dex_state.positions.iter().filter(|p| p.margin == PositionMargin::Cross).map(move |p| (dex_state.dex, p))
+    dex_state.positions.iter().filter(|p| matches!(p.margin, PositionMargin::Cross { .. })).map(move |p| (dex_state.dex, p))
 }
 
 fn solve_pool(

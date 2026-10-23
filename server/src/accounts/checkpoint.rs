@@ -283,7 +283,8 @@ pub(crate) struct Position {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PositionMargin {
-    Cross,
+    /// Stored `l.C`; omitted `l` is the client serialized default (20), not the margin-table maximum.
+    Cross { leverage: u32 },
     /// Isolated cash `l.I.u`, micro units of the collateral token, and the leverage `l.I.l` its fills move margin at.
     Isolated { cash_micro: i64, leverage: u32 },
 }
@@ -379,6 +380,8 @@ struct WirePosition {
 
 #[derive(Deserialize)]
 struct WireLeverage {
+    #[serde(rename = "C")]
+    cross: Option<u32>,
     #[serde(rename = "I")]
     isolated: Option<WireIsolated>,
 }
@@ -955,9 +958,13 @@ fn build_dex(
             let asset = asset_index(asset_id, meta.pdi, assets.len())?;
             let table_id = wire.table.unwrap_or(OMITTED_POSITION_TABLE);
             resolve_table(&mut tables, table_id).map_err(|err| format!("{user}: asset {asset_id}: {err}"))?;
-            let margin = match wire.l.and_then(|l| l.isolated) {
-                Some(isolated) => PositionMargin::Isolated { cash_micro: isolated.u, leverage: isolated_leverage(isolated.l, &user, asset_id)? },
-                None => PositionMargin::Cross,
+            let margin = match wire.l {
+                Some(WireLeverage { isolated: Some(isolated), cross: None }) => PositionMargin::Isolated {
+                    cash_micro: isolated.u, leverage: isolated_leverage(isolated.l, &user, asset_id)?,
+                },
+                None => PositionMargin::Cross { leverage: 20 },
+                Some(WireLeverage { isolated: None, cross: Some(leverage) }) if leverage > 0 => PositionMargin::Cross { leverage },
+                Some(_) => return Err(format!("{user}: asset {asset_id}: invalid leverage entry")),
             };
             positions.push(Position { asset, size_raw: wire.s, margin, table_id });
         }
@@ -1291,6 +1298,22 @@ pub(crate) mod tests {
         assert_eq!(parsed.dexes[0].table(btc.table_id).maintenance_micro(1_000_000_000), 25_000_000);
         let pump = positions.iter().find(|position| position.asset == 1).unwrap();
         assert_eq!(pump.table_id, 52);
+    }
+
+    #[test]
+    fn cross_leverage_preserves_explicit_and_omitted_settings() {
+        let mut wire: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        let position = &mut wire["exchange"]["locus"]["cls"][0]["user_states"]["user_to_state"][0][1]["p"]["p"][0][1];
+        position.as_object_mut().unwrap().remove("l");
+        let parsed = parse_checkpoint_bytes(&rmp_serde::to_vec(&wire).unwrap()).unwrap();
+        let positions = &parsed.accounts[&user(HOLDER)].dex_states[0].positions;
+        assert_eq!(positions[0].margin, PositionMargin::Cross { leverage: 20 });
+        for invalid in [json!({"C": 0}), json!({}), json!({"C": 5, "I": {"l": 2, "u": 0}})] {
+            wire["exchange"]["locus"]["cls"][0]["user_states"]["user_to_state"][0][1]["p"]["p"][0][1]["l"] = invalid;
+            assert!(parse_checkpoint_bytes(&rmp_serde::to_vec(&wire).unwrap()).unwrap_err().to_string().contains("invalid leverage entry"));
+        }
+        let parsed = parse_checkpoint_bytes(&fixture()).unwrap();
+        assert_eq!(parsed.accounts[&user(HOLDER)].dex_states[0].positions[0].margin, PositionMargin::Cross { leverage: 10 });
     }
 
     #[test]

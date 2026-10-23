@@ -94,6 +94,8 @@ pub(crate) struct MarkInputs {
     /// Every fill of the block, in order.
     pub(crate) fills: Vec<BlockFill>,
     pub(crate) system_actions: Vec<Batch<system::SystemAction>>,
+    /// Cross-price evidence requested by cash replay; names only, no second price state.
+    pub(crate) collateral_coins: Vec<String>,
 }
 
 /// One block's mark inputs as logged and applied.
@@ -106,6 +108,7 @@ struct BlockInputs {
     statuses: BlockStatuses,
     system: system::SystemBlock,
     fills: Vec<BlockFill>,
+    collateral_coins: Vec<String>,
 }
 
 impl BlockInputs {
@@ -142,13 +145,14 @@ impl BlockInputs {
             Err(err) => report.errors.push((Stream::OrderStatuses, format!("block {height}: {err}"))),
         }
         out.fills = inputs.fills;
+        out.collateral_coins = inputs.collateral_coins;
         out
     }
 
     /// The block's time counts as one: it refreshes the reference caches with no action at all (review 000444 r1 P2-1).
     fn len(&self) -> usize {
         let actions = self.actions.as_ref().map_or(0, |actions| 1 + actions.actions.len());
-        self.hip3.len() + self.diffs.len() + actions + self.statuses.len() + self.fills.len() + self.system.len()
+        self.hip3.len() + self.diffs.len() + actions + self.statuses.len() + self.fills.len() + self.system.len() + self.collateral_coins.len()
     }
 }
 
@@ -185,6 +189,7 @@ impl MarkState {
     /// does not convert, a diff that does not fit or a price action that contradicts the block breaks the contract.
     fn apply(&mut self, height: u64, inputs: &BlockInputs, report: &mut MarksBlockReport) {
         let mut fill_prices = FillPriceBuilder::new(&inputs.fills);
+        fill_prices.collateral(&self.hip3, &self.prices, inputs);
         fill_prices.hip3(&self.hip3, inputs);
         self.apply_hip3(height, &inputs.hip3, report);
         if let Some(actions) = &inputs.actions {
@@ -825,7 +830,7 @@ pub(crate) mod tests {
     impl Default for MarkInputs {
         fn default() -> Self {
             let mark_actions = Ok(MarkActions { height: 0, time_ns: 0, actions: Vec::new() });
-            Self { hip3_oracle_updates: Vec::new(), book_diffs: Vec::new(), mark_actions, order_statuses: Vec::new(), fills: Vec::new(), system_actions: Vec::new() }
+            Self { hip3_oracle_updates: Vec::new(), book_diffs: Vec::new(), mark_actions, order_statuses: Vec::new(), fills: Vec::new(), system_actions: Vec::new(), collateral_coins: Vec::new() }
         }
     }
 
