@@ -306,7 +306,7 @@ pub(crate) struct AccountMargin {
     /// Manual isolated transfers are applied before fills by this stream adapter. Within that same block their
     /// true position relative to fills is unavailable; remember affected collateral pools, not a guessed order.
     margin_updates: Option<(u64, Vec<usize>)>,
-    /// A transfer since the anchor lacked execution marks or cross capacity determining one exact micro-USDC amount.
+    /// A transfer since the anchor lacked execution marks, capacity or Unified routing determining one exact micro-USDC amount.
     estimated: bool,
     stop: Option<Stop>,
 }
@@ -435,7 +435,7 @@ impl AccountMargin {
 
     /// Spendable micro USDC before closing the old isolated leg. With no cross exposure the client's
     /// `max(cross_equity - cross_initial_margin, 0)` is simply positive cash. Preserve sub-micro spot dust.
-    /// A unified pool shares cross exposure across all USDC dexes; standard pools do not.
+    /// Unified aggregate cash is only an upper-bound estimate until its executing-dex routing is proved below.
     fn isolated_capacity_micro(&self, dex: usize) -> Option<i64> {
         let cash = match &self.pools {
             Pools::PerDex(cross) if !self.cross_exposure_seen.contains(&dex) => cross.get(&dex).copied().unwrap_or(0),
@@ -660,6 +660,11 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
             _ => None,
         },
     };
+    // Unified aggregate cash is an upper-bound funding estimate, not the executing dex's cash.
+    // Native sweeps retain 101% of order reserves; a maker may execute without replenishing from spot.
+    // ANTH 1193540000..1193550000 leaves a 665-micro split despite exact fill marks and conserved total.
+    // Keep the numerical estimate, but only the existing single-dex proof can establish exact routing.
+    let unified_routing_unknown = account.unified() && !account.cross_capacity.contains_key(&market.dex);
     let margin = |size_raw: i64, released_micro: i64| {
         let cap = capacity.map(|available| available.checked_add(released_micro)
             .ok_or_else(|| context("transfer capacity overflows"))).transpose()?;
@@ -669,7 +674,7 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
     let same_side = (start > 0) == (end > 0);
     let cash_after = if start == 0 || same_side && end.abs() > start.abs() {
         let transfer = margin(size, 0)?;
-        account.estimated |= transfer.estimated;
+        account.estimated |= transfer.estimated || unified_routing_unknown;
         cash_before + flow(size)? - fee + transfer.micro_usdc
     } else if end == 0 {
         0
@@ -682,7 +687,7 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
         let released = cash_before.checked_add(flow(start)?).and_then(|cash| cash.checked_sub(fee))
             .ok_or_else(|| context("closing cash overflows"))?;
         let transfer = margin(end, released)?;
-        account.estimated |= transfer.estimated;
+        account.estimated |= transfer.estimated || unified_routing_unknown;
         flow(end)? + transfer.micro_usdc
     };
     if end == 0 {
@@ -2023,6 +2028,55 @@ pub(crate) mod tests {
         assert!(states.accounts[&user(ISOLATED)].estimated, "only a new checkpoint resets the earlier uncertainty");
     }
 
+
+    #[test]
+    fn unified_anth_routing_gap_is_estimated_but_total_cash_errors_are_not() {
+        use crate::accounts::checkpoint::{DexAccount, Position};
+        let golden: serde_json::Value = serde_json::from_str(include_str!("replay/unified_routing_golden.json")).unwrap();
+        let market = PerpMarket { dex: 10, asset: 1, size_decimals: 3, margin_mode: AssetMarginMode::NoCross, default_leverage: 4 };
+        let markets = Markets { perps: std::iter::once(("io:ANTH".into(), market)).collect(),
+            usdc_dexes: vec![true; 11], ..Markets::default() };
+        let source = |endpoint: &serde_json::Value| Account {
+            mode: AccountMode::Unified, spot: vec![(USDC, endpoint["spot_usdc_wei"].as_i64().unwrap())], lending: vec![],
+            dex_states: vec![DexAccount { dex: 10, cash_micro: endpoint["dex_cash_micro"].as_i64().unwrap(),
+                positions: vec![Position { asset: 1, size_raw: endpoint["position"]["s"].as_i64().unwrap(), table_id: 6,
+                    margin: PositionMargin::Isolated { cash_micro: endpoint["position"]["l"]["I"]["u"].as_i64().unwrap(), leverage: 4 } }],
+                isolated_settings: vec![] }],
+        };
+        let mut account = AccountMargin::of(&source(&golden["before"]), &markets);
+        assert!(account.cross_capacity.is_empty(), "spot cash prevents a single-dex proof");
+        for (index, row) in golden["fills"].as_array().unwrap().iter().enumerate() {
+            let fill: Fill = serde_json::from_value(row["fill"].clone()).unwrap();
+            let mark = row["mark_raw"].as_u64().unwrap();
+            let event = FillEvent::at_mark(&fill, Some(FillMarkRange { min_px_raw: mark, max_px_raw: mark, size_decimals: 3 })).unwrap();
+            let before = totals(&account)[&0];
+            apply_perp_fill(&mut account, &markets, row["height"].as_u64().unwrap(), &event).unwrap();
+            assert_eq!(totals(&account)[&0], before + event.cash_wei(3, 3).unwrap());
+            assert_eq!(account.estimated, index > 0, "first reduction is exact; flip needs funding; later reductions retain uncertainty");
+        }
+        assert_eq!(account.isolated[&(10, 1)], 7_210_760 * WEI_PER_MICRO);
+        let mut anchor = AccountMargin::of(&source(&golden["after"]), &markets);
+        assert!(!same_cash(&account, &anchor));
+        assert_eq!(totals(&account), totals(&anchor));
+        assert!(only_split_differs(&account, &anchor), "the 665-micro allocation residual is an estimate");
+        anchor.add_spot(WEI_PER_MICRO);
+        assert!(!only_split_differs(&account, &anchor), "even a one-micro total error remains a mismatch");
+
+        // The same routing boundary applies to opening and adding, not only a position flip.
+        for start in ["0", "-0.056"] {
+            let mut account = AccountMargin::of(&source(&golden["before"]), &markets);
+            if start == "0" { account.isolated.clear(); }
+            let AccountEvent::Fill(mut event) = fill_from("io:ANTH", "A", "1919.8", "0.016", "0.008600", start, None) else { unreachable!() };
+            event.mark = Some(FillMarkRange { min_px_raw: 1_923_900, max_px_raw: 1_923_900, size_decimals: 3 });
+            apply_perp_fill(&mut account, &markets, 1_193_540_235, &event).unwrap();
+            assert!(account.estimated, "opening or adding requires executing-dex funding");
+        }
+        let mut closed = AccountMargin::of(&source(&golden["before"]), &markets);
+        let AccountEvent::Fill(close) = fill_from("io:ANTH", "B", "1919.8", "0.056", "0.008600", "-0.056", None) else { unreachable!() };
+        apply_perp_fill(&mut closed, &markets, 1_193_540_235, &close).unwrap();
+        assert!(closed.isolated.is_empty());
+        assert!(!closed.estimated, "closing alone releases cash and needs no external funding");
+    }
 
     #[test]
     fn recorded_cash_capacity_cases_match_micro_cash_and_spot_dust() {

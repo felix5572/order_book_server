@@ -944,3 +944,13 @@ HIP-3 已满足触发条件、且位于状态流尾部的条件成交，还可�
 两段 121/98 事件的完整逐仓现金测试在明确提供充足跨仓资金的前提下，消除了原有 -5/-26 微 USDC 差异；
 其他市场资金容量不属于该测试证明范围。ANTH 九笔的 665 微 USDC 分池差异仍未解决，不能按舍入抹平。
 金样本见 `server/src/accounts/marks/fill_prices/hip3/oracle_hash_goldens.json`；完整原始区块放专用研究数据目录。
+
+Unified isolated funding also needs the physical executing-dex balance: an aggregate pool containing spot or
+other dex cash does not prove that amount was prefunded before a maker fill. Native sweep `0x3c92a80` in
+archived client `6911b792` retains 101% of open-order reserves; the maker path can pass its size check without
+running Unified prefunding. Until that routing is replayed, an open/increase/flip without the existing
+single-dex proof retains its numerical estimate and sets `cashEstimated`; reductions alone do not add this
+uncertainty, and later exact operations do not clear it. `replay/unified_routing_golden.json` records ANTH's
+nine fills at 1193540000–1193550000: the 0.000665 USDC split stays estimated, while any total-cash difference
+still fails reconciliation. The native one-order scenario matches the endpoint but is not a complete
+historical routing proof or a production cash-amount fix.
