@@ -1867,9 +1867,19 @@ pub(crate) mod tests {
         account.pools = per_dex_pools(&[(0, 1_000_000_000_000_000_000)]);
         account.cross_exposure_seen.clear();
         let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, default_leverage: leverage };
-        let markets = Markets { perps: FxHashMap::from_iter([(case["coin"].as_str().unwrap().to_string(), market.clone())]),
-            usdc_dexes: vec![true], ..Markets::default() };
+        let coin = case["coin"].as_str().unwrap().to_string();
+        let markets = Markets { perps: FxHashMap::from_iter([(coin.clone(), market.clone())]),
+            action_assets: FxHashMap::from_iter([(0, coin)]), usdc_dexes: vec![true], ..Markets::default() };
         for event in case["events"].as_array().unwrap() {
+            if let Some(margin) = event.get("isolated_margin") {
+                assert_eq!(margin["action"]["type"], "updateIsolatedMargin");
+                assert_eq!(margin["response"]["res"]["status"], "ok");
+                // Remap the fixture's selected market to (0, 0), as for its fills; preserve wire micro-USDC.
+                apply_action(account, &markets, event["height"].as_u64().unwrap(), &BlockAction::IsolatedMargin {
+                    asset: 0, ntli_micro: margin["action"]["ntli"].as_i64().unwrap(),
+                }).unwrap();
+                continue;
+            }
             if let Some(funding) = event.get("funding") {
                 apply_funding(account, &markets, funding["coin"].as_str().unwrap(),
                     usdc_wei(funding["funding_amount"].as_str().unwrap()).unwrap()).unwrap();
@@ -1915,6 +1925,23 @@ pub(crate) mod tests {
                 if event.get("oracle_bracket").is_some() { event["oracle_locator"] = golden["oracle_event"].clone(); }
             }
             // This verifies the isolated transfer and subsequent reductions, not moving cross-portfolio capacity.
+            check_hip3_execution_cash(&case, false);
+        }
+    }
+
+    #[test]
+    fn oracle_bracket_followup_reconciles_four_sndk_orcl_windows_with_funding() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/hip3/oracle_bracket_followup_goldens.json")).unwrap();
+        assert_eq!(golden["cases"].as_array().unwrap().len(), 4);
+        for source in golden["cases"].as_array().unwrap() {
+            let mut case = source.clone();
+            for event in case["events"].as_array_mut().unwrap() {
+                if let Some(height) = event.get("oracle_locator_height") {
+                    event["oracle_locator"] = golden["oracle_events"].as_array().unwrap().iter()
+                        .find(|oracle| oracle["height"] == *height).unwrap().clone();
+                }
+            }
+            // The selected isolated ledger includes funding; cross funding is assumed ample as in the NBIS fixture.
             check_hip3_execution_cash(&case, false);
         }
     }

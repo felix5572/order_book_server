@@ -157,3 +157,32 @@ fn oracle_bracket_full_archived_block_confirms_both_price_evidence_sources() {
     fixture.inputs.actions = Some(parsed);
     fixture.assert_range(event, true);
 }
+
+#[test]
+fn oracle_bracket_followup_sndk_orcl_uses_post_write_price_in_five_blocks() {
+    let golden: Value = serde_json::from_str(include_str!("oracle_bracket_followup_goldens.json")).unwrap();
+    assert_eq!(golden["oracle_events"].as_array().unwrap().len(), 5);
+    for event in golden["oracle_events"].as_array().unwrap() { Fixture::of(event).assert_range(event, true); }
+}
+
+#[test]
+#[ignore = "requires HIP3_ORACLE_BLOCKS with five archived SNDK/ORCL replica lines"]
+fn oracle_bracket_followup_full_blocks_verify_projected_ranks_and_execution_indices() {
+    let directory = std::path::PathBuf::from(std::env::var("HIP3_ORACLE_BLOCKS").expect("explicit archive directory"));
+    let golden: Value = serde_json::from_str(include_str!("oracle_bracket_followup_goldens.json")).unwrap();
+    for event in golden["oracle_events"].as_array().unwrap() {
+        let mut fixture = Fixture::of(event);
+        let line = std::fs::read_to_string(directory.join(format!("{}_replica.jsonl", fixture.height))).unwrap();
+        let parsed = mark_actions(&line);
+        let dex = event["coin"].as_str().unwrap().split_once(':').unwrap().0;
+        let oracle = parsed.actions.iter().find(|a| matches!(&a.action, MarkAction::Hip3Oracle { dex: actual, .. } if actual == dex)).unwrap();
+        assert_eq!(oracle.rank, serde_json::from_value(event["rank"].clone()).unwrap());
+        assert_eq!(oracle.action, MarkAction::Hip3Oracle { dex: dex.into(), execution_index: Some(usize::try_from(event["execution_index"].as_u64().unwrap()).unwrap()) });
+        let projected = fixture.inputs.statuses.interleaved_trigger_ranks(fixture.inputs.actions.as_ref().unwrap());
+        let actual = fixture.inputs.statuses.interleaved_trigger_ranks(&parsed);
+        assert!(!projected.is_empty());
+        for (oid, rank) in projected { assert_eq!(actual.get(&oid), Some(&rank)); }
+        fixture.inputs.actions = Some(parsed);
+        fixture.assert_range(event, true);
+    }
+}

@@ -951,6 +951,11 @@ HIP-3 已满足触发条件、且位于状态流尾部的条件成交，还可�
 `oracle_bracket_golden.json` 保留动作、回执、连续状态及五户在 `1194130000→1194140000` 的逐仓窗口；
 原偏差 -13,680 / -139,320 / -619,110 / -179,527 / -72,160 微 USDC 在回归中均消除。
 测试显式提供充足跨仓资金，验证逐仓划转和后续减仓，不代替这些账户全部市场的可用资金重建。
+同一修复在另外五个原始块（`1194109481`、`1194110981`、`1194111419`、`1194111913`、`1194132867`）
+也确定了 oracle 写入后的价格。`oracle_bracket_followup_goldens.json` 保留 `xyz:SNDK`、`io:SNDK`、
+`xyz:ORCL` 四户逐仓窗口，原分池偏差 -3,857 / -1,809,281 / -18,630 / -314,172 微 USDC 均消除。
+窗口包含真实资金费和两笔成功逐仓撤款（16.96、5.24 USDC）；按块顺序调用现有现金回放，
+这些正常现金事件不能从样本中省略。完整原始块另验五处 oracle 序号与状态夹区间；跨仓资金仍采用上述充足假设。
 
 Unified isolated funding also needs the physical executing-dex balance: an aggregate pool containing spot or
 other dex cash does not prove that amount was prefunded before a maker fill. Native sweep `0x3c92a80` in
