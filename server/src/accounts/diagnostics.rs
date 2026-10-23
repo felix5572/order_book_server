@@ -13,7 +13,7 @@ const RESEARCH_SAMPLES: u64 = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Cause {
     Positioning, WatcherDiscard, LateOrDropped, Parse, HeightGap, PendingOverflow,
-    Reconstruction, SizeReconstruction, Merge, HeldOverflow, LogOverflow, FundingDependency,
+    Reconstruction, SizeReconstruction, Merge, HeldOverflow, LogOverflow, MarkLogOverflow, FundingDependency,
 }
 impl Cause {
     pub(super) const fn label(self) -> &'static str {
@@ -24,6 +24,7 @@ impl Cause {
             Self::SizeReconstruction => "size_reconstruction", Self::Merge => "anchor_merge",
             Self::HeldOverflow => "hold_overflow", Self::LogOverflow => "replay_log_overflow",
             Self::FundingDependency => "funding_dependency",
+            Self::MarkLogOverflow => "mark_replay_retention_overflow",
         }
     }
     pub(super) const fn category(self) -> &'static str {
@@ -31,7 +32,7 @@ impl Cause {
             Self::Positioning => "initialization",
             Self::WatcherDiscard | Self::LateOrDropped | Self::HeightGap => "inputContinuity",
             Self::Parse => "inputFormat",
-            Self::PendingOverflow | Self::HeldOverflow | Self::LogOverflow => "capacity",
+            Self::PendingOverflow | Self::HeldOverflow | Self::LogOverflow | Self::MarkLogOverflow => "capacity",
             Self::Reconstruction | Self::SizeReconstruction | Self::Merge => "reconstruction",
             Self::FundingDependency => "missingDependency",
         }
@@ -158,6 +159,9 @@ mod tests {
         assert_eq!(Cause::Positioning.level(), log::Level::Info);
         assert_eq!(Cause::Reconstruction.category(), "reconstruction");
         assert_eq!(Cause::LateOrDropped.category(), "inputContinuity");
+        assert_ne!(Cause::MarkLogOverflow.label(), Cause::LogOverflow.label());
+        assert_eq!(Cause::MarkLogOverflow.level(), log::Level::Warn);
+        assert_eq!(Cause::LogOverflow.level(), log::Level::Error);
     }
     #[test]
     fn an_available_view_with_an_old_anchor_does_not_clear_funding_dependency() {

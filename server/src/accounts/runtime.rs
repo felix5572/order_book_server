@@ -35,7 +35,7 @@ use super::{
     },
     checkpoint::parse_checkpoint_file,
     marks::{
-        CheckpointGrid, MARK_STREAMS, MarkInputs, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild,
+        CheckpointGrid, MarkInputs, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild,
         actions::MarkActions, execution::BlockFill, pairing::PairingDiagnostics, seed::MarkSeed, system::SystemAction,
     },
     misc::MiscEvent,
@@ -817,10 +817,8 @@ fn report_marks_block(diagnostics: &mut AccountDiagnostics, height: u64, report:
     }
     report_reconstruction_errors(diagnostics, &errors, height, "live");
     if log_overflowed {
-        diagnostics.report(None, Cause::LogOverflow, Some(height), || "node mark input log exceeded its bound".into());
-        for stream in MARK_STREAMS {
-            ACCOUNTS_DATA_LOSS_TOTAL.with_label_values(&[stream.label(), "mark_log_overflow"]).inc();
-        }
+        diagnostics.report(None, Cause::MarkLogOverflow, Some(height), ||
+            "node mark replay cache exceeded its bound; already-applied live state unchanged; historical rebuild waits for the next checkpoint grid".into());
     }
 }
 

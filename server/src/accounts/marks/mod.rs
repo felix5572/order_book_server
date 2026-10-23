@@ -13,8 +13,9 @@
 //!   later seed is at a later grid height;
 //! - installing checkpoint G compares the snapshot with it (counts and evidence; a mismatch does not withhold the marks,
 //!   the rebuild corrects them), then rebuilds the state from it and the logged blocks above it;
-//! - a loss on a stream the marks read, a seed breaking its contract or a log overflow withholds the marks until a later
-//!   checkpoint rebuilds them from a complete log.
+//! - stream loss or an invalid seed withholds the marks until a covering checkpoint rebuilds them;
+//! - replay-cache overflow only discards already-applied history. Continuous live state stays trusted, but a
+//!   checkpoint mismatch that cannot be corrected from that history withholds prices until a newer rebuild.
 
 pub(crate) mod actions;
 pub(crate) mod book;
@@ -45,14 +46,15 @@ use super::{
 };
 use crate::types::node_data::{Batch, NodeDataOrderDiff, NodeDataOrderStatus, OracleUpdateEvent};
 
-/// Logged inputs (HIP-3 mark updates, diffs, block times, actions, statuses, fills) at most. About 12,000 diffs, 6,800
-/// statuses and a few hundred others are written a second (2026-10-20); the log spans a grid height to that checkpoint's
-/// install (~13 s on bm, ~250k inputs), so this is ~2.5 minutes of a checkpoint late or skipped, not a normal state.
+/// Maximum retained mark-input projections, not live input capacity. BM1194380001..1194380235
+/// contained 839,482 statuses and 693,586 diffs before the checkpoint loaded; derived projections
+/// exhausted this bound in about 14 seconds. Retention failure must not manufacture live stream loss.
 pub(crate) const MAX_LOG_INPUTS: usize = 2_000_000;
 /// Mismatches listed per check (all are counted), and ambiguous cuts listed per seed interval.
 const MAX_CHECK_SAMPLES: usize = 20;
-/// The streams the marks read; a log overflow is a loss of each.
-pub(crate) const MARK_STREAMS: [Stream; 6] = [Stream::Fills, Stream::BlockActions, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses, Stream::SystemActions];
+/// The streams the marks read. Losing retained replay history is not losing their live inputs.
+#[cfg(test)]
+const MARK_STREAMS: [Stream; 6] = [Stream::Fills, Stream::BlockActions, Stream::Hip3OracleUpdates, Stream::BookDiffs, Stream::OrderStatuses, Stream::SystemActions];
 
 /// The node's checkpoint heights: `anchor + k * interval` (`checkpoint_grid`, the two newest on disk at start).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,7 +436,7 @@ pub(crate) struct MarksBlockReport {
     pub(crate) unknown_coin_diffs: usize,
     /// Contract violations by stream; each is a loss of that stream up to the block.
     pub(crate) errors: Vec<(Stream, String)>,
-    /// The log overflowed with this block, a loss of every stream the marks read up to it.
+    /// Already-applied replay history exceeded its bound; live input continuity is unchanged.
     pub(crate) log_overflowed: bool,
     /// Price actions whose lines before them are not pinned to one count: each reads the book at `lo`, the first line
     /// not known to run before it (design 000439 r1 3, r2 revision 5). All are counted.
@@ -459,6 +461,15 @@ pub(crate) enum MarksCheck {
     /// `noSnapshot`: no trusted state was kept at the checkpoint's height (the first after start, the marks were
     /// unavailable there, a node grid other than the inferred one, or a later grid height replaced it).
     Skipped(&'static str),
+}
+
+impl MarksCheck {
+    fn differs(&self) -> bool {
+        let Self::Checked { hip3, books, prices } = self else { return false; };
+        hip3.differ != 0 || hip3.oracle_differ != 0 || books.books_differ != 0
+            || books.orders_differ != 0 || books.missing != 0 || books.extra != 0
+            || prices.fields.iter().any(|(_, _, differ)| *differ != 0)
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -648,9 +659,10 @@ impl NodeMarks {
         self.ambiguous_samples_left -= report.ambiguous_samples.len();
         if !self.log.push(height, block) {
             report.log_overflowed = true;
-            for stream in MARK_STREAMS {
-                self.record_lost_block(stream, height);
-            }
+            // BM1194380235: all inputs were already applied above. Losing the historical copy does
+            // not invalidate live state. The pending grid seed cannot rebuild after the gap; retain
+            // nothing else until the next grid opens a new, potentially complete replay interval.
+            self.log.stop();
         }
         for (stream, _) in &report.errors {
             self.record_lost_block(*stream, height);
@@ -717,6 +729,11 @@ impl NodeMarks {
         let mut errors = Vec::new();
         let mut fill_prices = Vec::new();
         let rebuild = self.rebuild(seed, &mut errors, &mut fill_prices);
+        if rebuild == Rebuild::LogDoesNotReach && check.differs() {
+            // A known disagreement is different from missing historical retention: continuing that
+            // live state would publish an error we have observed and cannot yet repair.
+            self.record_seed_failure(height, "checkpoint mismatch cannot be corrected: mark replay cache does not reach this seed".into());
+        }
         // only a seed the state now stands on clears an older failure; one the log could not reach changed nothing
         if rebuild != Rebuild::LogDoesNotReach && self.seed_failure.as_ref().is_some_and(|(failed, _)| *failed < height) {
             self.seed_failure = None;
@@ -1345,22 +1362,77 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_overflowing_log_is_a_loss_of_both_streams() {
-        let mut marks = NodeMarks::new(GRID, STARTED_MS);
-        run(&mut marks, 995..=995, &[]);
-        marks.install(seed(995));
-        run(&mut marks, 996..=996, &[(996, "359.0")]);
+    fn replay_cache_overflow_preserves_applied_prices_and_waits_for_the_next_grid() {
+        let mut marks = trusted_marks();
         marks.log = InputLog::new(7);
-        marks.log.restart(996);
-        run(&mut marks, 997..=997, &[(997, "359.5")]);
-        let report = marks.apply_block(998, MarkInputs { book_diffs: no_op_diffs(998), ..MarkInputs::default() });
-        assert!(report.log_overflowed, "7 retained inputs at 997 (time and status projections included), 3 more at 998");
-        let seed_at = AnchorInfo { height: 995, time_ms: SEED_TIME_MS + 995 };
-        for stream in [Stream::Hip3OracleUpdates, Stream::BookDiffs] {
-            let lost = Unavailable::DataLoss { stream, bound: LossBound::Block(998) };
-            assert_eq!(marks.streams.get_mut(stream).unwrap().check(stream, seed_at), Err(lost));
+        marks.log.restart(1_001);
+        run(&mut marks, 1_002..=1_002, &[(1_002, "359.5")]);
+        let (fills, order_statuses) = quiet_fill_and_status(1_003);
+        let report = marks.apply_block(1_003, MarkInputs { book_diffs: no_op_diffs(1_003), fills, order_statuses, ..MarkInputs::default() });
+        assert!(report.log_overflowed, "scaled BM1194380235 retention overflow");
+        assert!(!report.fill_prices.is_empty(), "live fills keep their observed execution marks despite cache overflow");
+        assert_eq!((marks.availability(), tsla(&marks)), (Ok(1_003), Some(written(359_500))));
+        assert_eq!((marks.log.base, marks.log.inputs), (None, 0), "do not repeatedly refill an unreachable interval");
+        run(&mut marks, 1_004..=1_099, &[(1_004, "360.0")]);
+        assert_eq!((marks.log.base, marks.log.inputs, marks.availability()), (None, 0, Ok(1_099)));
+        assert_eq!(tsla(&marks), Some(written(360_000)), "new live writes still apply");
+        run(&mut marks, 1_100..=1_101, &[]);
+        assert_eq!(marks.log.base, Some(1_100));
+        let report = marks.install(seed(1_100));
+        assert!(report.check.differs(), "the later checkpoint can still detect and correct a difference");
+        assert_eq!(report.rebuild, Rebuild::Replayed { blocks: 1 });
+        assert_eq!((marks.availability(), marks.status().seed_height), (Ok(1_101), Some(1_100)));
+    }
+
+    #[test]
+    fn an_unreachable_seed_keeps_continuous_state_only_when_no_disagreement_is_known() {
+        for mismatch_kind in 0..4 {
+            let mismatch = mismatch_kind != 0;
+            let mut marks = trusted_marks();
+            run(&mut marks, 1_002..=1_100, &[]);
+            marks.log.capacity = 0;
+            let report = marks.apply_block(1_101, MarkInputs { book_diffs: no_op_diffs(1_101), ..MarkInputs::default() });
+            assert!(report.log_overflowed);
+            let mut checkpoint = seed(1_100);
+            // trusted_marks wrote TSLA=360 at997; retain its full stored time, not just price.
+            checkpoint.hip3.get_mut("xyz:TSLA").unwrap().mark = tsla(&marks);
+            match mismatch_kind {
+                1 => checkpoint.hip3.get_mut("xyz:TSLA").unwrap().oracle = Some(1),
+                2 => { checkpoint.native.assets[0].orders.pop(); },
+                3 => checkpoint.native.assets[0].mark.px += 1,
+                _ => {},
+            }
+            let report = marks.install(checkpoint);
+            assert_eq!(report.check.differs(), mismatch);
+            assert_eq!(report.rebuild, Rebuild::LogDoesNotReach);
+            assert!(report.fill_prices.is_empty(), "no invented historical execution-price backfill");
+            assert_eq!(marks.status().seed_height, Some(995), "failed install never advances provenance");
+            if mismatch {
+                assert!(matches!(marks.availability(), Err(Unavailable::CheckpointFailed { height: 1_100, .. })));
+            } else { assert_eq!(marks.availability(), Ok(1_101)); }
+            marks.log.capacity = 100;
+            run(&mut marks, 1_102..=1_201, &[]);
+            assert_eq!(marks.install(seed(1_200)).rebuild, Rebuild::Replayed { blocks: 1 });
+            assert_eq!(marks.availability(), Ok(1_201));
         }
-        assert_eq!((marks.log.base, marks.log.inputs), (Some(998), 0), "starts over after the block");
+    }
+
+    #[test]
+    fn replay_retention_cannot_heal_real_stream_loss_or_initialize_without_a_seed() {
+        let mut marks = trusted_marks();
+        marks.record_lost_block(Stream::Fills, 1_002);
+        marks.log = InputLog::new(0);
+        marks.log.restart(1_001);
+        assert!(marks.apply_block(1_002, MarkInputs { book_diffs: no_op_diffs(1_002), ..MarkInputs::default() }).log_overflowed);
+        assert!(matches!(marks.availability(), Err(Unavailable::DataLoss { .. })));
+        assert_eq!(marks.install(seed(1_001)).rebuild, Rebuild::LogDoesNotReach);
+        assert!(matches!(marks.availability(), Err(Unavailable::DataLoss { .. })));
+        let mut initializing = NodeMarks::new(GRID, STARTED_MS);
+        initializing.log = InputLog::new(0);
+        initializing.log.restart(999);
+        assert!(initializing.apply_block(1_001, MarkInputs { book_diffs: no_op_diffs(1_001), ..MarkInputs::default() }).log_overflowed);
+        assert_eq!(initializing.install(seed(1_000)).rebuild, Rebuild::LogDoesNotReach);
+        assert!(initializing.availability().is_err());
     }
 
     /// Review 000444 r1 P2-1: a block with no input but its time moves BTC's Spot cache into a new bucket (its member is
@@ -1405,7 +1477,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_overflowing_log_is_a_loss_and_starts_over() {
+    fn an_overflowing_log_discards_retained_history_and_starts_over() {
         let mut log = InputLog::new(2);
         log.restart(9);
         let update = Hip3PriceUpdate { normal: false, oracle: false, coin: "xyz:TSLA".to_string(), px: "1.0".to_string(), time_ns: 1 };
