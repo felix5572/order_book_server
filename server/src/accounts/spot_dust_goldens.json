@@ -1,0 +1,60 @@
+{
+  "block": 1193705508,
+  "checkpoint_from": 1193700000,
+  "checkpoint_to": 1193710000,
+  "source_archive": "ob_hourly_watch_20261021/heartbeat_20261023T001502Z/spot_dust/fills.jsonl.gz",
+  "source_sha256": "676045a06aac0d72ab8625b008d3c0c1af98fcca0810c987f201cf32e610f696",
+  "scope": "Two real PURR dust events. Full archive has1628events/1370users;324activeUnified users. Endpoint quote balances show that relaxing lot validation and crediting px*sz is not established. No exact cash rule asserted.",
+  "cases": [
+    {
+      "user": "0x31c21d5380d70db0f73210fdb33f18005e5db820",
+      "fill": {
+        "coin": "PURR/USDC",
+        "px": "0.094642",
+        "sz": "0.10003",
+        "side": "A",
+        "time": 1792713600026,
+        "startPosition": "0.10003",
+        "dir": "Spot Dust Conversion",
+        "closedPnl": "0.0",
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "oid": 583093110186,
+        "crossed": true,
+        "fee": "0.0",
+        "tid": 0,
+        "feeToken": "USDC",
+        "twapId": null
+      },
+      "base_size_decimals": 0,
+      "base_wei_decimals": 5,
+      "spot_usdc_before_wei": 2261022554704,
+      "spot_usdc_after_wei": 2261023500372,
+      "floor_px_times_sz_wei": 946703
+    },
+    {
+      "user": "0x3a834e763759ff4abaec2246abbeb3f1f11d4d12",
+      "fill": {
+        "coin": "PURR/USDC",
+        "px": "0.094642",
+        "sz": "0.50542",
+        "side": "A",
+        "time": 1792713600026,
+        "startPosition": "0.50542",
+        "dir": "Spot Dust Conversion",
+        "closedPnl": "0.0",
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "oid": 583093110186,
+        "crossed": true,
+        "fee": "0.0",
+        "tid": 0,
+        "feeToken": "USDC",
+        "twapId": null
+      },
+      "base_size_decimals": 0,
+      "base_wei_decimals": 5,
+      "spot_usdc_before_wei": 15532202,
+      "spot_usdc_after_wei": 20310366,
+      "floor_px_times_sz_wei": 4783395
+    }
+  ]
+}

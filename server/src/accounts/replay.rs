@@ -127,6 +127,8 @@ pub(crate) struct FillEvent {
     usdc_fee_wei: i64,
     /// A backstop liquidation other than ADL.
     backstop: bool,
+    /// System conversion of sub-lot spot balances; it does not obey ordinary order quantity precision.
+    spot_dust_conversion: bool,
     /// Execution-time evidence, retained with the event across checkpoint replay; never a later HTTP price.
     mark: Option<FillMarkRange>,
 }
@@ -152,6 +154,7 @@ impl FillEvent {
             start_position: fill.start_position.clone(),
             usdc_fee_wei,
             backstop,
+            spot_dust_conversion: fill.dir == "Spot Dust Conversion",
             mark,
         })
     }
@@ -203,6 +206,8 @@ pub(crate) enum StopReason {
     SpotFeeSource,
     /// A unified account's spot fill of a pair not quoted in USDC.
     NonUsdcSpotFill,
+    /// Midnight system conversion; its cash credit is not yet reconstructed from the recorded fill.
+    SpotDustConversion(String),
     /// A unified account's HIP-4 outcome fill (`#N`): its sizes are not measured.
     OutcomeFill,
     UnknownMarket(String),
@@ -217,7 +222,7 @@ impl StopReason {
     /// The view's `replayStoppedReason`: the label, and what the reason names when it names one.
     pub(crate) fn text(&self) -> String {
         match self {
-            Self::UnknownAccountMode(detail) | Self::UnreadLedger(detail) | Self::UnknownMarket(detail) | Self::Contradiction(detail) => {
+            Self::UnknownAccountMode(detail) | Self::UnreadLedger(detail) | Self::UnknownMarket(detail) | Self::SpotDustConversion(detail) | Self::Contradiction(detail) => {
                 format!("{}:{detail}", self.label())
             }
             Self::TopUpIsolatedOnlyMargin { asset, target_leverage } =>
@@ -241,6 +246,7 @@ impl StopReason {
             Self::NonUsdcSpotTransferFee => "nonUsdcSpotTransferFee",
             Self::SpotFeeSource => "spotFeeSource",
             Self::NonUsdcSpotFill => "nonUsdcSpotFill",
+            Self::SpotDustConversion(_) => "spotDustConversion",
             Self::OutcomeFill => "outcomeFill",
             Self::UnknownMarket(_) => "unknownMarket",
             Self::TopUpIsolatedOnlyMargin { .. } => "topUpIsolatedOnlyMargin",
@@ -626,6 +632,12 @@ fn apply_spot_fill(account: &mut AccountMargin, markets: &Markets, fill: &FillEv
     let pair = index.and_then(|index| markets.spot_pairs.get(index)).ok_or_else(|| StopReason::UnknownMarket(fill.coin.clone()))?;
     if pair.quote_token != USDC {
         return Err(StopReason::NonUsdcSpotFill);
+    }
+    // H1193705508 converted token-precision dust (PURR: 5 decimals versus order szDecimals=0).
+    // Its recorded px*sz is not established as the cash credit. Preserve the account withdrawal boundary,
+    // but report this known business path instead of misclassifying the fractional size as bad state.
+    if fill.spot_dust_conversion {
+        return Err(StopReason::SpotDustConversion(fill.coin.clone()));
     }
     let cash = fill.cash_wei(pair.size_decimals, MAX_SPOT_DECIMALS - pair.size_decimals).map_err(StopReason::Contradiction)?;
     account.add_spot(cash);
@@ -1232,6 +1244,48 @@ pub(crate) mod tests {
             usdc_wei: usdc,
             usdc_fee_wei: fee,
         })
+    }
+
+    fn dust_goldens() -> Vec<Fill> {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("spot_dust_goldens.json")).unwrap();
+        golden["cases"].as_array().unwrap().iter()
+            .map(|row| serde_json::from_value(row["fill"].clone()).unwrap()).collect()
+    }
+
+    #[test]
+    fn spot_dust_is_an_unsupported_cash_operation_not_a_lot_size_contradiction() {
+        for wire in dust_goldens() {
+            let mut replay = states(|_| {});
+            let before = cross(&replay, HOLDER);
+            let event = AccountEvent::Fill(FillEvent::of(&wire).unwrap());
+            replay.apply(1_193_705_508, user(HOLDER), &event);
+            let reason = stop(&replay, HOLDER).expect("unverified cash conversion must stop only this account");
+            assert_eq!(reason.label(), "spotDustConversion");
+            assert_eq!(reason.text(), "spotDustConversion:PURR/USDC");
+            assert_eq!(cross(&replay, HOLDER), before, "no made-up px-times-size credit");
+            assert_eq!(replay.accounts[&user(HOLDER)].stop.as_ref().unwrap().block, Some(1_193_705_508));
+            assert_eq!(stop(&replay, ISOLATED), None, "unaffected accounts continue");
+            replay.apply(1_193_705_509, user(HOLDER), &fill("BTC", "A", "82857.6", "0.001", "0.0", None));
+            assert_eq!(cross(&replay, HOLDER), before, "stopped replay stays withdrawn until a fresh anchor");
+            assert_eq!(stop(&states(|_| {}), HOLDER), None, "a fresh anchor restores replay");
+        }
+    }
+
+    #[test]
+    fn spot_dust_keeps_standard_accounts_and_regular_lot_checks_unchanged() {
+        let mut wire = dust_goldens().remove(0);
+        let mut standard = per_dex();
+        let before = cross(&standard, HOLDER);
+        standard.apply(5, user(HOLDER), &AccountEvent::Fill(FillEvent::of(&wire).unwrap()));
+        assert_eq!(stop(&standard, HOLDER), None, "spot is outside standard perp cash pools");
+        assert_eq!(cross(&standard, HOLDER), before);
+        wire.dir = "Sell".to_string();
+        let mut replay = states(|_| {});
+        replay.apply(5, user(HOLDER), &AccountEvent::Fill(FillEvent::of(&wire).unwrap()));
+        assert!(matches!(stop(&replay, HOLDER), Some(StopReason::Contradiction(_))), "ordinary fills still obey order lot precision");
+        wire.dir = "Spot Dust Conversion".to_string();
+        wire.fee = "not-a-number".to_string();
+        assert!(FillEvent::of(&wire).is_err(), "known business kind does not bypass fee parsing");
     }
 
     /// README 5 / r3 revision 3: each party's side of a transfer, by its role in the delta.
