@@ -973,3 +973,31 @@ The dynamic-capacity regression `replay/cross_capacity_windows.json` covers two 
 cross/spot cash reconcile. Two recorded order/oracle blocks validate collateral timing. At most two shared maps
 per updated dex avoid portfolio clones per fill. Starting spot funds and Unified maker prefunding retain their
 independent routing boundary; the fix does not implement a general Unified sweep scheduler.
+
+
+Unified isolated order-reserve routing (ANTH)
+-------------------------------------------
+
+The cash replay now keeps an optional physical executing-dex projection alongside the authoritative aggregate
+USDC pool. It reads the checkpoint's full `open_order_tracker` aggregates and spot USDC hold, then retains
+receipt-backed ordinary ALO order and cancellation inputs in the existing bounded account event log. Order
+observations do not mark an account as manually changing margin or trigger liquidation-candidate refreshes.
+
+The supported numerical path is deliberately scoped to Unified, one active USDC dex, one isolated-only market,
+a single margin tier, no lending and no frozen spot USDC or another dex's order reserves. Ordinary ALO wrappers
+prefund, update order reservation, then retain the client's `f64(reserve) * 1.01` truncated to micro USDC. Maker
+admission distinguishes direct execution from prefunding; opening/increasing/flipping consumes that physical
+capacity rather than assuming all spot cash was already supplied. Total cash is unchanged by these transfers.
+
+Missing tracker sections, mixed cash/order/fill boundaries and untrusted mark history preserve the existing
+estimate. Cancel-only scheduling does not invent a sweep, and a later block does not automatically sweep or
+replenish after a fill. An ALO with a proven unchanged action mark can establish physical funding again while
+its tracker remains covered. A late first/new-eligibility checkpoint whose intervening orders were not observed
+starts order observation, but withholds that interval's tracker; an already-covered next anchor can activate it.
+
+This numerical path remains `cashEstimated`: its maker rate comes from the observed fee/notional, not recovered
+fee-tier state, and the general deferred sweep scheduler is not implemented. `replay/routing_native_golden.json`
+contains 50 native reserve and 90 native maker-size cases against archived binary `6911b792`. Under the explicit
+last-ALO tracker condition, the ANTH nine-fill regression ends at 7.210095 USDC rather than 7.210760, removing
+the 665-micro allocation residual while conserving total cash at every fill. The older raw-history regression
+remains estimated because the complete historical tracker was not archived; no fixed 665-micro adjustment exists.

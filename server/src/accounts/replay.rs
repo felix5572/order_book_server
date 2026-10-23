@@ -12,6 +12,7 @@
 //! `estimated`; a pool-total difference is still a mismatch (review 000466 r1).
 
 mod isolated;
+pub(crate) mod routing;
 mod cross_capacity;
 #[cfg(test)]
 mod capacity_tests;
@@ -118,6 +119,7 @@ pub(crate) enum AccountEvent {
     FundingBalanceUnknown,
     Ledger(LedgerDelta),
     Action(BlockAction),
+    Routing(routing::RoutingUpdate),
 }
 
 /// What a fill moves: `−side × px × sz − fee` into the pool of `coin` (the notional is computed against the market,
@@ -294,6 +296,7 @@ enum Pools {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AccountMargin {
     pools: Pools,
+    routing: Option<routing::RoutingProjection>,
     /// Isolated cash `l.I.u` of each open isolated position on a USDC dex, by (dex, asset).
     isolated: FxHashMap<(usize, usize), i64>,
     /// (dex, asset) on USDC dexes the account set isolated, with the leverage (`l.I.l`, `updateLeverage`): a position
@@ -326,6 +329,7 @@ impl AccountMargin {
     fn of(account: &Account, markets: &Markets) -> Self {
         let stopped = |reason| Self {
             pools: Pools::Unified(0),
+            routing: None,
             isolated: FxHashMap::default(),
             isolated_leverage: FxHashMap::default(),
             cross_exposure_seen: FxHashSet::default(),
@@ -377,7 +381,7 @@ impl AccountMargin {
         } else {
             Pools::PerDex(cross)
         };
-        Self { pools, isolated, isolated_leverage, cross_exposure_seen, cross_capacity, unified_routing_known, switched: None, margin_updates: None, estimated: false, stop: None }
+        Self { pools, routing: None, isolated, isolated_leverage, cross_exposure_seen, cross_capacity, unified_routing_known, switched: None, margin_updates: None, estimated: false, stop: None }
     }
 
     /// Identify one USDC dex portfolio. Spot funds do not prove physical execution funding; that is tracked separately.
@@ -481,7 +485,15 @@ impl MarginStates {
 
     pub(crate) fn from_checkpoint(checkpoint: &CheckpointAccounts) -> Result<Self, String> {
         let markets = Markets::of(checkpoint)?;
-        let accounts = checkpoint.accounts.iter().map(|(user, account)| (*user, AccountMargin::of(account, &markets))).collect();
+        let mut routes = routing::RoutingProjection::seeds(checkpoint, &markets);
+        let accounts = checkpoint.accounts.iter().map(|(user, account)| {
+            let mut state = AccountMargin::of(account, &markets);
+            state.routing = routes.remove(user);
+            // A resting-order sweep can move cash to spot after a zero-spot anchor. The projection supplies
+            // numerical capacity, not the caller's fee-tier/deferred-sweep proof.
+            if state.routing.is_some() { state.unified_routing_known = false; }
+            (*user, state)
+        }).collect();
         Ok(Self { markets, accounts })
     }
 
@@ -495,6 +507,21 @@ impl MarginStates {
                 self.accounts.remove(user);
             }
         }
+    }
+
+    /// A late first/new-eligibility seed may lack intervening order inputs. Preserve the eligible coin on the
+    /// anchor (so the adapter begins retaining future updates), but withhold its tracker for this interval.
+    pub(crate) fn restrict_routing_coverage(&mut self, previous: Option<&Self>) {
+        for (user, account) in &mut self.accounts {
+            if let Some(route) = &mut account.routing
+                && previous.and_then(|states| states.routing_coin(user)) != Some(route.coin()) {
+                route.invalidate();
+            }
+        }
+    }
+
+    pub(crate) fn routing_coin(&self, user: &Address) -> Option<&str> {
+        self.accounts.get(user)?.routing.as_ref().map(routing::RoutingProjection::coin)
     }
 
     pub(crate) fn collateral_coins<'a>(&self, fills: impl Iterator<Item = &'a crate::types::node_data::NodeDataFill>) -> Vec<String> {
@@ -526,8 +553,9 @@ impl MarginStates {
             AccountEvent::Funding { coin, amount_wei } | AccountEvent::FundingBalance { coin, amount_wei } =>
                 apply_funding(account, markets, coin, *amount_wei),
             AccountEvent::FundingBalanceUnknown => Err(StopReason::FundingBalanceUnknown),
-            AccountEvent::Ledger(delta) => apply_ledger(account, markets, user, delta),
-            AccountEvent::Action(action) => apply_action(account, markets, block, action),
+            AccountEvent::Ledger(delta) => { account.routing = None; apply_ledger(account, markets, user, delta) },
+            AccountEvent::Action(action) => { account.routing = None; apply_action(account, markets, block, action) },
+            AccountEvent::Routing(update) => { routing::apply_update(account, update); Ok(()) },
         };
         if let Err(reason) = outcome {
             account.stop_at(block, reason);
@@ -614,6 +642,7 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
     };
     let cash = fill.cash_wei(market.size_decimals, MAX_PERP_DECIMALS - market.size_decimals).map_err(StopReason::Contradiction)?;
     if !isolated {
+        account.routing = None;
         account.cross_exposure_seen.insert(market.dex);
         if let Some(projection) = account.cross_capacity.get_mut(&market.dex) {
             let start = parse_size_raw(&fill.start_position, market.size_decimals).map_err(StopReason::Contradiction)?;
@@ -630,7 +659,7 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
     // This is an ordering/estimation gap, not a failed action or a reason to stop the account's replay.
     account.estimated |= account.margin_updated_in(block, market.dex);
     let leverage = account.isolated_leverage.get(&key).copied().unwrap_or(market.default_leverage);
-    apply_isolated_fill(account, market, fill, cash, leverage).map_err(StopReason::Contradiction)
+    apply_isolated_fill_at(account, market, block, fill, cash, leverage).map_err(StopReason::Contradiction)
 }
 
 /// An isolated position's fill, in the node's micro USDC (research "逐仓成交的划转", checkpoints 1192420000 →
@@ -647,7 +676,12 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
 /// free71.006925 caps71.007410). Unknown holdings or ambiguous prices preserve an estimate; raw cash is not free margin.
 ///
 /// `cash_wei` is the fill's whole cash flow (`FillEvent::cash_wei`); cross takes what the position does not.
+#[cfg(test)]
 fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &FillEvent, cash_wei: i64, leverage: u32) -> Result<(), String> {
+    apply_isolated_fill_at(account, market, 0, fill, cash_wei, leverage)
+}
+
+fn apply_isolated_fill_at(account: &mut AccountMargin, market: &PerpMarket, block: u64, fill: &FillEvent, cash_wei: i64, leverage: u32) -> Result<(), String> {
     let key = (market.dex, market.asset);
     let context = |what: &str| format!("isolated {} fill: {what}", fill.coin);
     let start = parse_size_raw(&fill.start_position, market.size_decimals).map_err(|err| context(&err))?;
@@ -672,7 +706,7 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
         let notional = notional(size_raw)?;
         Ok(if fill.side == Side::Bid { -notional } else { notional })
     };
-    let capacity = match account.isolated_capacity_micro(market.dex) {
+    let aggregate_capacity = match account.isolated_capacity_micro(market.dex) {
         Some(capacity) => Some(capacity),
         None => match (&account.pools, account.cross_capacity.get(&market.dex), &fill.collateral_marks) {
             (Pools::PerDex(cash), Some(snapshot), Some(prices)) => snapshot.available_micro(cash.get(&market.dex).copied().unwrap_or(0), prices)?,
@@ -680,11 +714,16 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
             _ => None,
         },
     };
+    let routed_capacity = match (&mut account.routing, &account.pools) {
+        (Some(route), Pools::Unified(total)) => route.capacity(block, fill, cash_before, *total),
+        _ => None,
+    };
+    let capacity = routed_capacity.or(aggregate_capacity);
     // Unified aggregate cash is an upper-bound funding estimate, not the executing dex's cash.
     // Native sweeps retain 101% of order reserves; a maker may execute without replenishing from spot.
     // ANTH 1193540000..1193550000 leaves a 665-micro split despite exact fill marks and conserved total.
     // Keep the numerical estimate, but only the existing single-dex proof can establish exact routing.
-    let unified_routing_unknown = account.unified() && (!account.unified_routing_known || account.cross_capacity.get(&market.dex)
+    let unified_routing_unknown = routed_capacity.is_some() || account.unified() && (!account.unified_routing_known || account.cross_capacity.get(&market.dex)
         .is_none_or(|projection| projection.advanced && !fill.crossed));
     let margin = |size_raw: i64, released_micro: i64| {
         let cap = capacity.map(|available| available.checked_add(released_micro)
@@ -716,12 +755,17 @@ fn apply_isolated_fill(account: &mut AccountMargin, market: &PerpMarket, fill: &
     } else {
         account.isolated.insert(key, cash_after * WEI_PER_MICRO);
     }
-    account.add_cross(market.dex, cash_wei - (cash_after - cash_before) * WEI_PER_MICRO);
+    let cross_delta = cash_wei - (cash_after - cash_before) * WEI_PER_MICRO;
+    if account.routing.as_mut().is_some_and(|route| route.filled(block, fill, end, cross_delta).is_none()) {
+        account.routing = None;
+    }
+    account.add_cross(market.dex, cross_delta);
     Ok(())
 }
 
 /// Spot fills of USDC pairs move a unified account's spot USDC; the other modes keep spot out of their pools.
 fn apply_spot_fill(account: &mut AccountMargin, markets: &Markets, fill: &FillEvent, index: Option<usize>) -> Applied {
+    account.routing = None;
     if !account.unified() {
         return Ok(());
     }
@@ -743,6 +787,7 @@ fn apply_spot_fill(account: &mut AccountMargin, markets: &Markets, fill: &FillEv
 /// Funding settles into the position's isolated cash when it is isolated, else into its dex's cross cash.
 fn apply_funding(account: &mut AccountMargin, markets: &Markets, coin: &str, amount_wei: i64) -> Applied {
     let market = perp(markets, coin)?;
+    if account.routing.as_ref().is_some_and(|route| route.coin() != coin) { account.routing = None; }
     match account.isolated.get_mut(&(market.dex, market.asset)) {
         Some(isolated) => *isolated += amount_wei,
         None => account.add_cross(market.dex, amount_wei),

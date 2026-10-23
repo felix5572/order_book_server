@@ -751,11 +751,19 @@ fn apply_assembly(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, 
                 }
             }
         }
+        let mut routing = super::cash_routing::RoutingBlock::of(book, &inputs, &fills, marks, &actions, &misc_events);
         let cash_order = super::cash_order::MarginOrder::of(&actions, &fills, &inputs);
         let mark_report = marks.apply_block(height, inputs);
+        routing.require_trusted(marks.availability().is_ok());
+        let (changed, dropped) = book.apply_routing(height, routing.before);
+        touched.absorb(changed);
+        report_dropped_marks(diagnostics, height, dropped);
         let after_fills = cash_order.defer(&mut actions, marks.availability().is_ok());
         let accounts = book.apply_block(actions, fills, misc_events,
             |coin| funding_oracles.get(coin).copied().flatten(), &mark_report.fill_prices, after_fills);
+        let (changed, dropped) = book.apply_routing(height, routing.after);
+        touched.absorb(changed);
+        report_dropped_marks(diagnostics, height, dropped);
         report_marks_block(diagnostics, height, mark_report);
         touched.absorb(report_block(diagnostics, height, accounts));
         ACCOUNTS_APPLIED_HEIGHT.set(height.cast_signed());

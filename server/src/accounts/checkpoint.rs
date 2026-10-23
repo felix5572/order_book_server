@@ -63,6 +63,10 @@ pub(crate) struct CheckpointAccounts {
     /// Every account holding at least one non-zero position on some dex, with all its dex states (cash-only ones
     /// included: a unified account's pool counts the cash of every same-collateral dex).
     pub(crate) accounts: FxHashMap<Address, Account>,
+    /// Optional native tracker sections, per dex. An omitted archive section is unknown, not no orders.
+    pub(crate) order_trackers: Vec<Option<FxHashMap<Address, OrderTrackerSnapshot>>>,
+    /// Only position holders' positive USDC holds, in 10^-8 USDC. Native omission of h means zero.
+    pub(crate) spot_usdc_holds: FxHashMap<Address, u64>,
     /// Every spot pair by index: the `N` of a spot fill's coin `@N` (`scl.meta.spot_infos[N].tokens = [base, quote]`;
     /// on 1190480000 the node's `spotMeta` listed 336 pairs, every one at its index here).
     pub(crate) spot_pairs: Vec<SpotPair>,
@@ -352,9 +356,23 @@ struct WireTier {
     maintenance_deduction: i64,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct OrderTrackerSnapshot {
+    #[serde(rename = "e", default)]
+    pub(crate) reserve_micro: i64,
+    #[serde(rename = "a", default)]
+    pub(crate) assets: Vec<(u32, super::order_reserve::Reserve)>,
+}
+
+#[derive(Deserialize)]
+struct WireOrderTrackers {
+    user_to_data: Vec<(Address, OrderTrackerSnapshot)>,
+}
+
 #[derive(Deserialize)]
 struct WireUserStates {
     user_to_state: DexUsers,
+    open_order_tracker: Option<WireOrderTrackers>,
 }
 
 #[derive(Deserialize)]
@@ -426,6 +444,8 @@ struct WireSpotUser {
 
 #[derive(Deserialize)]
 struct WireBalance {
+    #[serde(default)]
+    h: u64,
     /// Unsigned on the wire: token deployers / genesis entries reach `u64::MAX` on mainnet (10-19, never on a
     /// collateral token).
     #[serde(default)]
@@ -519,6 +539,7 @@ struct SpotState {
     /// The position holders' non-zero balances, every token (raw, unsigned on the wire): which tokens an account
     /// keeps depends on its mode, known only once `ust` and `blp` are read (`build` narrows).
     balances: FxHashMap<Address, Vec<(u32, u64)>>,
+    usdc_holds: FxHashMap<Address, u64>,
 }
 
 fn address<E: serde::de::Error>(text: &str) -> std::result::Result<Address, E> {
@@ -666,6 +687,7 @@ impl<'de> Visitor<'de> for SpotSeed<'_> {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
         let (mut meta, mut balances) = (None, None);
+        let mut usdc_holds = FxHashMap::default();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "meta" => meta = Some(map.next_value::<WireSpotMeta>()?),
@@ -673,6 +695,9 @@ impl<'de> Visitor<'de> for SpotSeed<'_> {
                     let keep = |user: &Address, wire: WireSpotUser| {
                         if !self.holders.contains(user) {
                             return None;
+                        }
+                        if let Some((_, balance)) = wire.b.iter().find(|(token, balance)| *token == 0 && balance.h != 0) {
+                            usdc_holds.insert(*user, balance.h);
                         }
                         let kept: Vec<(u32, u64)> =
                             wire.b.into_iter().filter(|(_, balance)| balance.t != 0).map(|(token, balance)| (token, balance.t)).collect();
@@ -690,6 +715,7 @@ impl<'de> Visitor<'de> for SpotSeed<'_> {
             tokens: meta.token_infos.into_iter().map(|info| info.spec).collect(),
             pairs: meta.spot_infos.into_iter().map(|info| info.tokens).collect(),
             balances: balances.ok_or_else(|| A::Error::missing_field("scl.user_states"))?,
+            usdc_holds,
         })
     }
 }
@@ -717,9 +743,11 @@ fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, Stri
     let time_ms = node_time_ns(&locus.ctx.time).map_err(|err| format!("ctx.time: {err}"))? / 1_000_000;
     let mut dexes = Vec::with_capacity(locus.cls.len());
     let mut dex_users = Vec::with_capacity(locus.cls.len());
+    let mut order_trackers: Vec<Option<FxHashMap<Address, OrderTrackerSnapshot>>> = Vec::with_capacity(locus.cls.len());
     let mut first_oracle = None;
     let mut native_halted_assets = None;
-    for WireClearinghouse { meta, oracle, user_states, halted_assets } in locus.cls {
+    for WireClearinghouse { meta, oracle, mut user_states, halted_assets } in locus.cls {
+        order_trackers.push(user_states.open_order_tracker.take().map(|tracker| tracker.user_to_data.into_iter().collect()));
         let pdi = meta.pdi;
         let (meta, users) = build_dex(meta, &oracle.pxs2, user_states).map_err(|err| format!("dex pdi {pdi}: {err}"))?;
         if first_oracle.is_none() {
@@ -761,7 +789,9 @@ fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, Stri
         accounts.insert(user, Account { mode, spot, lending, dex_states });
     }
     let spot_pairs = spot_pairs(&locus.spot.pairs, &locus.spot.tokens)?;
-    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral, reserves, accounts, spot_pairs, native_prices })
+    // Routing is only consumed for the same position holders retained above.
+    for users in order_trackers.iter_mut().flatten() { users.retain(|user, _| accounts.contains_key(user)); }
+    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral, reserves, accounts, spot_pairs, native_prices, order_trackers, spot_usdc_holds: locus.spot.usdc_holds })
 }
 
 /// A node time (`2026-10-19T22:09:38.119428098`, UTC, up to nanoseconds) in unix ns.
@@ -1417,4 +1447,25 @@ pub(crate) mod tests {
         checkpoint["exchange"]["locus"]["cls"][0]["meta"].as_object_mut().unwrap().remove("collateralToken");
         assert!(parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).is_err());
     }
+    #[test]
+    fn order_tracker_missing_differs_from_known_empty_and_usdc_hold_is_kept() {
+        let absent = parse_checkpoint_bytes(&fixture()).unwrap();
+        assert!(absent.order_trackers.iter().all(Option::is_none));
+        let mut value: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        for dex in value["exchange"]["locus"]["cls"].as_array_mut().unwrap() {
+            dex["user_states"]["open_order_tracker"] = json!({"user_to_data":[]});
+        }
+        value["exchange"]["locus"]["cls"][0]["user_states"]["open_order_tracker"]["user_to_data"] = json!([
+            [HOLDER, {"e": 200, "a": [[0, {"n":[800,0],"s":[4,0],"p":200,"l":4}]]}],
+            [CASH_ONLY, {"e": 1,"a":[]}]
+        ]);
+        value["exchange"]["locus"]["scl"]["user_states"][0][1]["b"][0][1]["h"] = json!(123);
+        let cp = parse_checkpoint_bytes(&rmp_serde::to_vec(&value).unwrap()).unwrap();
+        assert!(cp.order_trackers.iter().all(Option::is_some));
+        let trackers = cp.order_trackers[0].as_ref().unwrap();
+        assert_eq!(trackers[&user(HOLDER)].assets[0].1.required_micro(), Some(200));
+        assert!(!trackers.contains_key(&user(CASH_ONLY)));
+        assert_eq!(cp.spot_usdc_holds[&user(HOLDER)], 123);
+    }
+
 }

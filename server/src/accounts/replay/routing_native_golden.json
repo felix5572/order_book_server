@@ -1,0 +1,1893 @@
+{
+  "provenance": {
+    "binary_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+    "reserve_function": "0x44c9000",
+    "maker_function": "0x3c957f0",
+    "generator": "hyperliquid-trade/analyze/research/hl_account_state_verify_20261019/scripts/unified_routing_matrix.py",
+    "boundary": "Synthetic inputs executed in archived client using Unicorn. Fee rates are supplied as wire fee/notional estimates; caller fee encoding and historical scheduling are not certified."
+  },
+  "reserve_cases": [
+    {
+      "tracker": {
+        "n": [
+          0,
+          26873014
+        ],
+        "s": [
+          0,
+          14
+        ],
+        "P": -20,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 6718253
+    },
+    {
+      "tracker": {
+        "n": [
+          0,
+          26873014
+        ],
+        "s": [
+          0,
+          14
+        ],
+        "P": -20,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 6718253
+    },
+    {
+      "tracker": {
+        "n": [
+          26884214,
+          0
+        ],
+        "s": [
+          14,
+          0
+        ],
+        "P": -20,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 0
+    },
+    {
+      "tracker": {
+        "n": [
+          26884214,
+          0
+        ],
+        "s": [
+          14,
+          0
+        ],
+        "P": -20,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 0
+    },
+    {
+      "tracker": {
+        "n": [
+          38406020,
+          61424032
+        ],
+        "s": [
+          20,
+          32
+        ],
+        "P": -20,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 15356008
+    },
+    {
+      "tracker": {
+        "n": [
+          38406020,
+          61424032
+        ],
+        "s": [
+          20,
+          32
+        ],
+        "P": -20,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 15356008
+    },
+    {
+      "tracker": {
+        "n": [
+          1920301,
+          1919501
+        ],
+        "s": [
+          1,
+          1
+        ],
+        "P": -20,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 479875
+    },
+    {
+      "tracker": {
+        "n": [
+          1920301,
+          1919501
+        ],
+        "s": [
+          1,
+          1
+        ],
+        "P": -20,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 479875
+    },
+    {
+      "tracker": {
+        "n": [
+          96015050,
+          105572555
+        ],
+        "s": [
+          50,
+          55
+        ],
+        "P": -20,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 26393138
+    },
+    {
+      "tracker": {
+        "n": [
+          96015050,
+          105572555
+        ],
+        "s": [
+          50,
+          55
+        ],
+        "P": -20,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 26393138
+    },
+    {
+      "tracker": {
+        "n": [
+          0,
+          26873014
+        ],
+        "s": [
+          0,
+          14
+        ],
+        "P": -1,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 6718253
+    },
+    {
+      "tracker": {
+        "n": [
+          0,
+          26873014
+        ],
+        "s": [
+          0,
+          14
+        ],
+        "P": -1,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 6718253
+    },
+    {
+      "tracker": {
+        "n": [
+          26884214,
+          0
+        ],
+        "s": [
+          14,
+          0
+        ],
+        "P": -1,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 5759453
+    },
+    {
+      "tracker": {
+        "n": [
+          26884214,
+          0
+        ],
+        "s": [
+          14,
+          0
+        ],
+        "P": -1,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 5760903
+    },
+    {
+      "tracker": {
+        "n": [
+          38406020,
+          61424032
+        ],
+        "s": [
+          20,
+          32
+        ],
+        "P": -1,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 15356008
+    },
+    {
+      "tracker": {
+        "n": [
+          38406020,
+          61424032
+        ],
+        "s": [
+          20,
+          32
+        ],
+        "P": -1,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 15356008
+    },
+    {
+      "tracker": {
+        "n": [
+          1920301,
+          1919501
+        ],
+        "s": [
+          1,
+          1
+        ],
+        "P": -1,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 479875
+    },
+    {
+      "tracker": {
+        "n": [
+          1920301,
+          1919501
+        ],
+        "s": [
+          1,
+          1
+        ],
+        "P": -1,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 479875
+    },
+    {
+      "tracker": {
+        "n": [
+          96015050,
+          105572555
+        ],
+        "s": [
+          50,
+          55
+        ],
+        "P": -1,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 26393138
+    },
+    {
+      "tracker": {
+        "n": [
+          96015050,
+          105572555
+        ],
+        "s": [
+          50,
+          55
+        ],
+        "P": -1,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 26393138
+    },
+    {
+      "tracker": {
+        "n": [
+          0,
+          26873014
+        ],
+        "s": [
+          0,
+          14
+        ],
+        "P": 0,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 6718253
+    },
+    {
+      "tracker": {
+        "n": [
+          0,
+          26873014
+        ],
+        "s": [
+          0,
+          14
+        ],
+        "P": 0,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 6718253
+    },
+    {
+      "tracker": {
+        "n": [
+          26884214,
+          0
+        ],
+        "s": [
+          14,
+          0
+        ],
+        "P": 0,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 6721053
+    },
+    {
+      "tracker": {
+        "n": [
+          26884214,
+          0
+        ],
+        "s": [
+          14,
+          0
+        ],
+        "P": 0,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 6721053
+    },
+    {
+      "tracker": {
+        "n": [
+          38406020,
+          61424032
+        ],
+        "s": [
+          20,
+          32
+        ],
+        "P": 0,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 15356008
+    },
+    {
+      "tracker": {
+        "n": [
+          38406020,
+          61424032
+        ],
+        "s": [
+          20,
+          32
+        ],
+        "P": 0,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 15356008
+    },
+    {
+      "tracker": {
+        "n": [
+          1920301,
+          1919501
+        ],
+        "s": [
+          1,
+          1
+        ],
+        "P": 0,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 480075
+    },
+    {
+      "tracker": {
+        "n": [
+          1920301,
+          1919501
+        ],
+        "s": [
+          1,
+          1
+        ],
+        "P": 0,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 480075
+    },
+    {
+      "tracker": {
+        "n": [
+          96015050,
+          105572555
+        ],
+        "s": [
+          50,
+          55
+        ],
+        "P": 0,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 26393138
+    },
+    {
+      "tracker": {
+        "n": [
+          96015050,
+          105572555
+        ],
+        "s": [
+          50,
+          55
+        ],
+        "P": 0,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 26393138
+    },
+    {
+      "tracker": {
+        "n": [
+          0,
+          26873014
+        ],
+        "s": [
+          0,
+          14
+        ],
+        "P": 1,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 5756653
+    },
+    {
+      "tracker": {
+        "n": [
+          0,
+          26873014
+        ],
+        "s": [
+          0,
+          14
+        ],
+        "P": 1,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 5758203
+    },
+    {
+      "tracker": {
+        "n": [
+          26884214,
+          0
+        ],
+        "s": [
+          14,
+          0
+        ],
+        "P": 1,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 6721053
+    },
+    {
+      "tracker": {
+        "n": [
+          26884214,
+          0
+        ],
+        "s": [
+          14,
+          0
+        ],
+        "P": 1,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 6721053
+    },
+    {
+      "tracker": {
+        "n": [
+          38406020,
+          61424032
+        ],
+        "s": [
+          20,
+          32
+        ],
+        "P": 1,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 14394408
+    },
+    {
+      "tracker": {
+        "n": [
+          38406020,
+          61424032
+        ],
+        "s": [
+          20,
+          32
+        ],
+        "P": 1,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 14395958
+    },
+    {
+      "tracker": {
+        "n": [
+          1920301,
+          1919501
+        ],
+        "s": [
+          1,
+          1
+        ],
+        "P": 1,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 480075
+    },
+    {
+      "tracker": {
+        "n": [
+          1920301,
+          1919501
+        ],
+        "s": [
+          1,
+          1
+        ],
+        "P": 1,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 480075
+    },
+    {
+      "tracker": {
+        "n": [
+          96015050,
+          105572555
+        ],
+        "s": [
+          50,
+          55
+        ],
+        "P": 1,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 25431538
+    },
+    {
+      "tracker": {
+        "n": [
+          96015050,
+          105572555
+        ],
+        "s": [
+          50,
+          55
+        ],
+        "P": 1,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 25433088
+    },
+    {
+      "tracker": {
+        "n": [
+          0,
+          26873014
+        ],
+        "s": [
+          0,
+          14
+        ],
+        "P": 20,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 0
+    },
+    {
+      "tracker": {
+        "n": [
+          0,
+          26873014
+        ],
+        "s": [
+          0,
+          14
+        ],
+        "P": 20,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 0
+    },
+    {
+      "tracker": {
+        "n": [
+          26884214,
+          0
+        ],
+        "s": [
+          14,
+          0
+        ],
+        "P": 20,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 6721053
+    },
+    {
+      "tracker": {
+        "n": [
+          26884214,
+          0
+        ],
+        "s": [
+          14,
+          0
+        ],
+        "P": 20,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 6721053
+    },
+    {
+      "tracker": {
+        "n": [
+          38406020,
+          61424032
+        ],
+        "s": [
+          20,
+          32
+        ],
+        "P": 20,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 9601505
+    },
+    {
+      "tracker": {
+        "n": [
+          38406020,
+          61424032
+        ],
+        "s": [
+          20,
+          32
+        ],
+        "P": 20,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 9601505
+    },
+    {
+      "tracker": {
+        "n": [
+          1920301,
+          1919501
+        ],
+        "s": [
+          1,
+          1
+        ],
+        "P": 20,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 480075
+    },
+    {
+      "tracker": {
+        "n": [
+          1920301,
+          1919501
+        ],
+        "s": [
+          1,
+          1
+        ],
+        "P": 20,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 480075
+    },
+    {
+      "tracker": {
+        "n": [
+          96015050,
+          105572555
+        ],
+        "s": [
+          50,
+          55
+        ],
+        "P": 20,
+        "p": 1923200,
+        "l": 4
+      },
+      "required_micro": 24003762
+    },
+    {
+      "tracker": {
+        "n": [
+          96015050,
+          105572555
+        ],
+        "s": [
+          50,
+          55
+        ],
+        "P": 20,
+        "p": 1920100,
+        "l": 4
+      },
+      "required_micro": 24003762
+    }
+  ],
+  "maker_cases": [
+    {
+      "cross_micro": 0,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 25501600,
+      "position_raw": -13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 25501600,
+      "position_raw": -13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 25501600,
+      "position_raw": -13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 2423200,
+      "position_raw": -1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 2423200,
+      "position_raw": -1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 2423200,
+      "position_raw": -1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 2
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 22
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -1423200,
+      "position_raw": 1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 2
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -1423200,
+      "position_raw": 1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -1423200,
+      "position_raw": 1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 22
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 2
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 22
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 26
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 34
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -24501600,
+      "position_raw": 13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -24501600,
+      "position_raw": 13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 26
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -24501600,
+      "position_raw": 13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 34
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 26
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "A",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 34
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 26
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 34
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 25501600,
+      "position_raw": -13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 25501600,
+      "position_raw": -13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 26
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 25501600,
+      "position_raw": -13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 34
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 26
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 25461300,
+      "position_raw": -13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 34
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 2
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 22
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 2423200,
+      "position_raw": -1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 2
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 2423200,
+      "position_raw": -1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 2423200,
+      "position_raw": -1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 22
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 2
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 14
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 2420100,
+      "position_raw": -1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 22
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": 500000,
+      "position_raw": 0,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -1423200,
+      "position_raw": 1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -1423200,
+      "position_raw": 1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -1423200,
+      "position_raw": 1,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -1420100,
+      "position_raw": 1,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1923200,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -24501600,
+      "position_raw": 13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -24501600,
+      "position_raw": 13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -24501600,
+      "position_raw": 13,
+      "price_raw": 1923200,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    },
+    {
+      "cross_micro": 0,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 0
+    },
+    {
+      "cross_micro": 5816337,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 12
+    },
+    {
+      "cross_micro": 10000000,
+      "isolated_micro": -24461300,
+      "position_raw": 13,
+      "price_raw": 1920100,
+      "mark_raw": 1920100,
+      "side": "B",
+      "leverage": 4,
+      "quantity_raw": 14,
+      "fee_micro": 7526,
+      "native_max_size_raw": 20
+    }
+  ]
+}

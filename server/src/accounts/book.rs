@@ -189,6 +189,7 @@ impl MarkKind {
             AccountEvent::Funding { .. } | AccountEvent::FundingBalance { .. } | AccountEvent::FundingBalanceUnknown => Self::Funding,
             AccountEvent::Ledger(_) => Self::Ledger,
             AccountEvent::Action(action) => Self::Action(action.kind()),
+            AccountEvent::Routing(_) => Self::Action(BlockActionKind::Margin),
         }
     }
 
@@ -802,6 +803,19 @@ impl AccountBook {
         }
     }
 
+    pub(crate) fn routing_coin(&self, user: &Address) -> Option<&str> {
+        self.replay.as_ref()?.anchored.routing_coin(user)
+    }
+
+    pub(crate) fn apply_routing(&mut self, block: u64, updates: Vec<(Address, super::replay::routing::RoutingUpdate)>) -> (Touched, usize) {
+        let mut touched = Touched::default();
+        let mut dropped = 0;
+        if !self.covered(block) {
+            self.record_all(updates.into_iter().map(|(user, update)| (user, AccountEvent::Routing(update))), block, &mut touched, &mut dropped);
+        }
+        (touched, dropped)
+    }
+
     pub(crate) fn collateral_coins<'a>(&self, fills: impl Iterator<Item = &'a NodeDataFill>) -> Vec<String> {
         self.replay.as_ref().map_or_else(Vec::new, |replay| replay.current.collateral_coins(fills))
     }
@@ -905,9 +919,10 @@ impl AccountBook {
             *dropped += 1;
         }
         let replaying = self.replay.as_mut().is_some_and(|replay| replay.current.apply(block, user, &event));
-        let marked = self.accounts.entry(user).or_default().marks.mark(MarkKind::of(&event), block);
+        let routing_only = matches!(event, AccountEvent::Routing(_));
+        let marked = !routing_only && self.accounts.entry(user).or_default().marks.mark(MarkKind::of(&event), block);
         self.events.push_back(LoggedEvent { block, user, event });
-        marked || replaying
+        marked || replaying && !routing_only
     }
 
     fn apply_or_hold(&mut self, block: u64, user: Address, fill: ObservedFill, report: &mut FillsReport) {
@@ -1097,7 +1112,7 @@ impl AccountBook {
         self.fills.lost_block = lost_block;
         self.coins.extend(anchor_coins.into_iter().map(|(name, coin)| (name, CoinBook::anchored(height, coin, 0))));
         self.rebuild_marks(height);
-        self.rebuild_replay(margins);
+        self.rebuild_replay(margins, height);
         for (user, mode) in account_modes {
             self.accounts.entry(user).or_default().mode = Some(mode);
         }
@@ -1119,7 +1134,9 @@ impl AccountBook {
         }
         self.events.retain(|logged| logged.block > height);
         for LoggedEvent { block, user, event } in &self.events {
-            self.accounts.entry(*user).or_default().marks.mark(MarkKind::of(event), *block);
+            if !matches!(event, AccountEvent::Routing(_)) {
+                self.accounts.entry(*user).or_default().marks.mark(MarkKind::of(event), *block);
+            }
         }
         self.accounts.retain(|_, account| !account.marks.is_empty());
     }
@@ -1220,7 +1237,10 @@ impl AccountBook {
     }
 
     /// Step 2: the new anchor's state moved by the logged events above it (the log holds only those by now).
-    fn rebuild_replay(&mut self, anchored: MarginStates) {
+    fn rebuild_replay(&mut self, mut anchored: MarginStates, height: u64) {
+        if self.block_actions.height.is_some_and(|applied| applied > height) {
+            anchored.restrict_routing_coverage(self.replay.as_ref().map(|replay| &replay.anchored));
+        }
         let mut current = anchored.clone();
         for LoggedEvent { block, user, event } in &self.events {
             current.apply(*block, *user, event);
@@ -2555,6 +2575,28 @@ mod tests {
             let check = book.replay.as_ref().unwrap().current.check_against(&expected, &expected);
             assert!(check.compared.values().all(|counts| counts.mismatched == 0 && counts.estimated == 0));
         }
+    }
+
+    #[test]
+    fn routing_order_evidence_is_replayed_without_dirtying_margin_rows() {
+        use crate::accounts::{anchor::Anchor, replay::{routing::{RoutingUpdate, OrderChange}, routing::tests::checkpoint}};
+        let (mut cp, _, who) = checkpoint();
+        let mut book = AccountBook::new(0);
+        book.apply_block_actions(block_actions(cp.height + 1, &[]));
+        book.install_anchor(Anchor::from_checkpoint(&cp).unwrap());
+        assert_eq!(book.routing_coin(&who), Some("xyz:TSLA"), "late first anchor still starts order observation");
+        let event = RoutingUpdate::Orders { changes: vec![OrderChange { coin: "xyz:TSLA".into(), side: Side::Ask,
+            px: "358.32".into(), size: "0.014".into(), remove: false }], mark_raw: Some(358_320), prefund: true };
+        let (touched, dropped) = book.apply_routing(cp.height + 2, vec![(who, event.clone())]);
+        assert_eq!(touched.accounts.len(), 0); assert_eq!(dropped, 0);
+        assert!(book.accounts[&who].marks.margin.is_none());
+        assert_eq!(book.events.back().unwrap().event, AccountEvent::Routing(event));
+        // The following seed has an already-observed eligible account; retained order inputs replay above it.
+        cp.height += 1;
+        book.install_anchor(Anchor::from_checkpoint(&cp).unwrap());
+        assert_eq!(book.routing_coin(&who), Some("xyz:TSLA"));
+        assert!(book.accounts[&who].marks.margin.is_none());
+        assert_eq!(book.events.len(), 1);
     }
 
 }

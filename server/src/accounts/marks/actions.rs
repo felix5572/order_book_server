@@ -57,6 +57,8 @@ impl MarkAction {
 /// (`execution` resolves them in execution order).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BookAnchors {
+    /// Ordinary order wrapper only; modify/cancel have distinct funding boundaries.
+    pub(crate) ordinary_order: bool,
     pub(crate) created: Vec<u64>,
     /// The created orders that carry a cloid: (cloid, oid).
     pub(crate) created_cloids: Vec<(String, u64)>,
@@ -153,7 +155,8 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
         "order" => {
             let orders: Vec<WireOrder> = action.field(action.orders.as_ref(), "orders")?;
             let statuses = statuses()?;
-            let anchors = order_anchors(&orders, &statuses)?;
+            let mut anchors = order_anchors(&orders, &statuses)?;
+            anchors.ordinary_order = true;
             (category(orders.iter().all(WireOrder::is_alo)), MarkAction::Book(anchors))
         }
         "modify" => {
@@ -557,6 +560,7 @@ pub(crate) mod tests {
         assert_eq!(book(1).takers, [], "an ALO only rests");
         assert_eq!(book(2).cancelled_cloids, ["0x0a"], "only the cancel that succeeded");
         let modified = BookAnchors {
+            ordinary_order: false,
             created: vec![8],
             created_cloids: vec![("0xfe63".to_string(), 8)],
             cancelled: vec![],
