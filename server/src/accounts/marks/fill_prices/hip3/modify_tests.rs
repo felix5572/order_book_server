@@ -17,7 +17,7 @@ fn inputs(g: &Value, systems: Vec<SystemAction>) -> (FxHashMap<String, Hip3Coin>
     actions.time_ns = time_ns;
     for action in &mut actions.actions { action.rank = serde_json::from_value(g["modify_rank"].clone()).unwrap(); }
     actions.actions.push(RankedAction { rank: serde_json::from_value(g["oracle_rank"].clone()).unwrap(), user: None,
-        action: MarkAction::Hip3Oracle { dex: coin.split_once(':').unwrap().0.into() } });
+        action: MarkAction::Hip3Oracle { dex: coin.split_once(':').unwrap().0.into(), execution_index: None } });
     assert!(actions.actions.iter().all(|a| !a.action.is_price()), "system competition must work without a native price action");
     let statuses: Vec<NodeDataOrderStatus> = serde_json::from_value(g["statuses"].clone()).unwrap();
     let system = SystemBlock::of(systems, &statuses).unwrap();

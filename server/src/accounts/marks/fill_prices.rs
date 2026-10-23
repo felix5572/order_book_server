@@ -4,7 +4,7 @@
 //! bounds produce the same integer margin transfer, that transfer is exact even when the mark itself is not pinned.
 
 #[cfg(test)]
-pub(crate) use hip3::{golden_prices, trigger_golden_prices, interleaved_golden_prices};
+pub(crate) use hip3::{golden_prices, trigger_golden_prices, interleaved_golden_prices, oracle_golden_prices};
 mod hip3;
 mod liquidation;
 
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn paired_legs_share_bounds_and_evidence_cannot_cross_blocks() {
-        let fill = |crossed| BlockFill { coin: "X".into(), px: "1".into(), sz: "1".into(), crossed, oid: 1, tid: 7, twap: false, liquidation_mark_px: None };
+        let fill = |crossed| BlockFill { coin: "X".into(), px: "1".into(), sz: "1".into(), crossed, oid: 1, tid: 7, action_position: None, twap: false, liquidation_mark_px: None };
         let fills = [fill(false), fill(true)];
         let mut builder = FillPriceBuilder::new(&fills);
         builder.prices[0].observe(Some((99, 0)));
@@ -176,7 +176,7 @@ mod execution_tests {
         test_support::hip3_line};
 
     fn fill(coin: &str, oid: u64, twap: bool) -> BlockFill {
-        BlockFill { coin: coin.into(), px: "82850.0".into(), sz: "0.001".into(), crossed: true, oid, tid: oid, twap, liquidation_mark_px: None }
+        BlockFill { coin: coin.into(), px: "82850.0".into(), sz: "0.001".into(), crossed: true, oid, tid: oid, action_position: None, twap, liquidation_mark_px: None }
     }
 
     #[test]

@@ -1851,7 +1851,9 @@ pub(crate) mod tests {
                     usdc_wei(funding["funding_amount"].as_str().unwrap()).unwrap()).unwrap();
                 continue;
             }
-            let prices = if let Some(interleaved) = event.get("interleaved_statuses") {
+            let prices = if let Some(oracle) = event.get("oracle_locator") {
+                crate::accounts::marks::fill_prices::oracle_golden_prices(oracle)
+            } else if let Some(interleaved) = event.get("interleaved_statuses") {
                 crate::accounts::marks::fill_prices::interleaved_golden_prices(interleaved)
             } else if event.get("triggered_status").is_some() {
                 crate::accounts::marks::fill_prices::trigger_golden_prices(event)
@@ -1876,6 +1878,12 @@ pub(crate) mod tests {
     #[test]
     fn trailing_stop_marks_reconcile_mrna_and_crcl_cash_intervals() {
         let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/trailing_stop_cash_goldens.json")).unwrap();
+        for case in golden["cases"].as_array().unwrap() { check_hip3_execution_cash(case, true); }
+    }
+
+    #[test]
+    fn oracle_hash_locators_reconcile_full_dram_and_sndk_cash_intervals() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/hip3/oracle_hash_goldens.json")).unwrap();
         for case in golden["cases"].as_array().unwrap() { check_hip3_execution_cash(case, true); }
     }
 

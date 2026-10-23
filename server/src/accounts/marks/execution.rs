@@ -55,6 +55,7 @@ mod self_trade;
 mod filled_ioc;
 mod vault;
 mod replacement;
+mod action_position;
 
 use self::self_trade::IocRejections;
 use alloy::primitives::Address;
@@ -80,6 +81,8 @@ pub(crate) struct BlockFill {
     pub(crate) crossed: bool,
     pub(crate) oid: u64,
     pub(crate) tid: u64,
+    /// Optional node L1 hash locator; zero/system/unknown encodings prove no ordinary action.
+    pub(crate) action_position: Option<action_position::L1ActionPosition>,
     /// A TWAP slice: it runs at the start of the block.
     pub(crate) twap: bool,
     /// Node-reported mark for this market liquidation, shared by its maker and taker legs.
@@ -95,6 +98,7 @@ impl BlockFill {
             crossed: fill.crossed,
             oid: fill.oid,
             tid: fill.tid,
+            action_position: action_position::L1ActionPosition::of(&fill.hash),
             twap: fill.twap_id.is_some(),
             liquidation_mark_px: fill.liquidation.as_ref().filter(|v| v.method == "market")
                 .map(|v| v.mark_px.as_str().into()),
@@ -581,7 +585,7 @@ mod tests {
     }
 
     pub(super) fn fill(tid: u64, oid: u64, crossed: bool) -> BlockFill {
-        BlockFill { coin: "BTC".into(), px: "82850.0".into(), sz: "0.002".into(), crossed, oid, tid, twap: false, liquidation_mark_px: None }
+        BlockFill { coin: "BTC".into(), px: "82850.0".into(), sz: "0.002".into(), crossed, oid, tid, action_position: None, twap: false, liquidation_mark_px: None }
     }
 
     /// No coin named: the blocks of these tests carry no self-trade cancel.
@@ -653,7 +657,7 @@ mod tests {
         }], ..BlockStatuses::default() };
         let maker_diff = BookDiff::of(&diff_line(1, coin, maker, "A", "7737.3",
             r#"{"update":{"origSz":"0.635","newSz":"0.624"}}"#).events()[0]).unwrap();
-        let fills = [true, false].map(|crossed| BlockFill { coin: coin.into(), px: "7737.3".into(), sz: "0.011".into(),
+        let fills = [true, false].map(|crossed| BlockFill { action_position: None, coin: coin.into(), px: "7737.3".into(), sz: "0.011".into(),
             crossed, oid: if crossed { trigger } else { maker }, tid: 948_392_423_242_106, twap: false, liquidation_mark_px: None });
         let diffs = [diff(earlier, NEW), diff(later, NEW), maker_diff];
         let points = price_points(&actions, &statuses, &diffs, &fills, no_asset).unwrap();

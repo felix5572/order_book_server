@@ -41,7 +41,7 @@ pub(crate) enum MarkAction {
     /// Per main-dex asset, the submitted (oracle, mark); `None` for an asset the publisher does not price.
     SetGlobal(Vec<Option<(String, String)>>),
     /// Successful HIP-3 setOracle: execution identity only; written prices come from the oracle stream.
-    Hip3Oracle { dex: String },
+    Hip3Oracle { dex: String, execution_index: Option<usize> },
     /// A validator's submitted oracle and external perp prices, by coin.
     Reference { oracle: Vec<(String, String)>, external: Vec<(String, String)> },
 }
@@ -109,8 +109,14 @@ impl MarkActions {
         let time = replica.time().ok_or_else(|| format!("block {height} without abci_block.time"))?;
         let time_ns = node_time_ns(time).map_err(|err| format!("block {height}: {err}"))?;
         let mut actions = Vec::new();
-        for paired in replica.paired().map_err(|err| format!("block {height}: {err}"))? {
-            let kept = ranked(&paired).map_err(|err| format!("block {height}: bundle {}: {err}", paired.bundle_hash))?;
+        let paired_actions = replica.paired().map_err(|err| format!("block {height}: {err}"))?;
+        for (index, paired) in paired_actions.iter().enumerate() {
+            let mut kept = ranked(paired).map_err(|err| format!("block {height}: bundle {}: {err}", paired.bundle_hash))?;
+            if let Some(RankedAction { action: MarkAction::Hip3Oracle { execution_index, .. }, .. }) = &mut kept {
+                // Category-3 action: only later priority actions in this bundle move ahead of it.
+                // A rejected malformed request can prevent this optional proof; it is not a mark failure.
+                *execution_index = oracle_execution_index(index, &paired_actions);
+            }
             actions.extend(kept);
         }
         Ok(Self { height, time_ns, actions })
@@ -221,13 +227,31 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
     Ok(Some(RankedAction { rank: (paired.bundle, category, paired.position), user, action }))
 }
 
+/// The hash locator counts all outer actions (including rejects and noops), in execution order.
+fn oracle_execution_index(index: usize, actions: &[PairedAction<'_, '_>]) -> Option<usize> {
+    let bundle = actions[index].bundle;
+    let mut execution_index = index;
+    for paired in actions[index + 1..].iter().take_while(|a| a.bundle == bundle) {
+        let action = paired.action;
+        let priority = match action.action_type {
+            "noop" | "cancel" | "cancelByCloid" => true,
+            "order" => action.field::<Vec<WireOrder>>(action.orders.as_ref(), "orders").ok()?.iter().all(WireOrder::is_alo),
+            "modify" => action.field::<WireOrder>(action.order.as_ref(), "order").ok()?.is_alo(),
+            "batchModify" => action.field::<Vec<WireModify>>(action.modifies.as_ref(), "modifies").ok()?.iter().all(|m| m.order.is_alo()),
+            _ => false,
+        };
+        execution_index += usize::from(priority);
+    }
+    Some(execution_index)
+}
+
 /// A successful deployer action supplies timing, not a substitute for the written mark.
 fn hip3_oracle(action: &crate::accounts::replica::Action<'_>) -> Result<MarkAction, String> {
     #[derive(Deserialize)]
     struct SetOracle { dex: String }
     let SetOracle { dex } = action.field(action.set_oracle.as_ref(), "setOracle")?;
     if dex.is_empty() || dex.contains(':') { return Err("setOracle with invalid dex".into()); }
-    Ok(MarkAction::Hip3Oracle { dex })
+    Ok(MarkAction::Hip3Oracle { dex, execution_index: None })
 }
 
 /// Request/response pairing is optional evidence for no-fill IOC attribution, not a protocol invariant for an
@@ -470,10 +494,35 @@ pub(crate) mod tests {
         assert_eq!(parsed.actions.len(), 2);
         assert_eq!(parsed.actions[0].rank, (1, 3, 0));
         assert_eq!(parsed.actions[1].rank, (1, 3, 1));
-        for a in parsed.actions {
-            assert_eq!(a.action, MarkAction::Hip3Oracle { dex: "xyz".into() });
+        for (index, a) in parsed.actions.into_iter().enumerate() {
+            assert_eq!(a.action, MarkAction::Hip3Oracle { dex: "xyz".into(), execution_index: Some(index + 2) });
             assert!(!a.action.is_price(), "HIP-3 timing evidence cannot alter native price evaluation");
         }
+    }
+
+    #[test]
+    fn oracle_locator_counts_rejects_and_later_priority_actions_within_its_bundle() {
+        let oracle = r#"{"type":"perpDeploy","setOracle":{"dex":"io"}}"#;
+        let noop = r#"{"type":"noop"}"#;
+        let alo = r#"{"a":1,"b":true,"p":"1","s":"1","r":false,"t":{"limit":{"tif":"Alo"}}}"#;
+        let order = format!(r#"{{"type":"order","orders":[{alo}]}}"#);
+        let modify = format!(r#"{{"type":"modify","oid":1,"order":{alo}}}"#);
+        let batch = format!(r#"{{"type":"batchModify","modifies":[{{"oid":1,"order":{alo}}}]}}"#);
+        let cancel = r#"{"type":"cancel","cancels":[]}"#;
+        let wrapped = format!(r#"{{"type":"multiSig","payload":{{"action":{order}}}}}"#);
+        let accepted = ok(r#"{"type":"default"}"#);
+        let rejected = r#"{"user":null,"res":{"status":"err","response":"business refusal"}}"#;
+        let parsed = mark_actions(&replica_line(1, &[
+            &[(noop, &accepted)],
+            &[(oracle, &accepted), (&order, rejected), (&modify, rejected), (&batch, rejected),
+                (cancel, rejected), (noop, &accepted), (&wrapped, rejected)],
+            &[(cancel, rejected)],
+        ]));
+        assert_eq!(parsed.actions[0].action, MarkAction::Hip3Oracle { dex: "io".into(), execution_index: Some(6) });
+        let unknown = r#"{"type":"order","orders":"unknown-wire-form"}"#;
+        let parsed = mark_actions(&replica_line(1, &[&[(oracle, &accepted), (unknown, rejected)]]));
+        assert_eq!(parsed.actions[0].action, MarkAction::Hip3Oracle { dex: "io".into(), execution_index: None },
+            "unknown optional priority evidence retains the oracle without inventing a locator or stopping marks");
     }
 
     #[test]

@@ -66,7 +66,7 @@ mod tests {
 
     fn fills() -> Vec<BlockFill> {
         [false, true].into_iter().map(|crossed| BlockFill { coin: "xyz:X".into(), px: "2.34".into(),
-            sz: "1".into(), crossed, oid: u64::from(crossed), tid: 7, twap: false,
+            sz: "1".into(), crossed, oid: u64::from(crossed), tid: 7, action_position: None, twap: false,
             liquidation_mark_px: Some("2.32".into()) }).collect()
     }
 

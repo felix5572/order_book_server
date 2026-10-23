@@ -5,7 +5,8 @@
 //! Trailing Stop Market uses its realized triggered-status threshold (MRNA1193502103), not a future trailing estimate.
 //! A complete triggered-to-filled run bracketed by receipt-backed opens of one ordinary action proves that action
 //! rank (DRAM1193759676), including already-eligible triggers executed in a later bundle. Other already-satisfied
-//! triggers, fallback/multiple writes and unreceipted effects keep the full range.
+//! triggers can use the node L1 hash locator of the successful oracle action (DRAM1193762464,
+//! SNDK1193771663). Fallback/multiple writes and unreceipted effects keep the full range.
 //! This refines cash inputs only: the node-mark owner still consumes every written price unchanged.
 
 use rustc_hash::FxHashMap;
@@ -22,28 +23,34 @@ struct CoinPrices<'a> {
     writes: Vec<&'a Hip3PriceUpdate>,
 }
 
-fn oracle_ranks(actions: &MarkActions) -> FxHashMap<&str, Option<Rank>> {
+fn oracle_ranks(actions: &MarkActions) -> FxHashMap<&str, Option<(Rank, Option<usize>)>> {
     let mut out = FxHashMap::default();
     for action in &actions.actions {
-        if let MarkAction::Hip3Oracle { dex } = &action.action {
-            out.entry(dex.as_str()).and_modify(|old| *old = None).or_insert(Some(action.rank));
+        if let MarkAction::Hip3Oracle { dex, execution_index } = &action.action {
+            out.entry(dex.as_str()).and_modify(|old| *old = None).or_insert(Some((action.rank, *execution_index)));
         }
     }
     out
 }
 
+enum FillTiming {
+    Placed(Placement),
+    InsideOracle,
+}
+
 impl CoinPrices<'_> {
-    fn at(&self, rank: Option<Rank>, taker: Option<Placement>, size_decimals: u32, time_ns: Option<u64>, coin: &str, statuses: &BlockStatuses) -> Option<(u64, u32)> {
+    fn at(&self, rank: Option<Rank>, taker: Option<FillTiming>, size_decimals: u32, time_ns: Option<u64>, coin: &str, statuses: &BlockStatuses) -> Option<(u64, u32)> {
         // Invalid/missing evidence cannot be repaired by selecting one side of the update.
         self.all.value()?;
         let [update] = self.writes.as_slice() else { return None; };
         if !update.normal || Some(update.time_ns) != time_ns { return None; }
         let rank = rank?;
         let before = match taker? {
-            Placement::BeforeActions => true,
-            Placement::Action(taker) if taker != rank => taker < rank,
-            Placement::Action(_) => return None,
-            Placement::Trigger(oid) => {
+            FillTiming::Placed(Placement::BeforeActions) => true,
+            FillTiming::Placed(Placement::Action(taker)) if taker != rank => taker < rank,
+            FillTiming::Placed(Placement::Action(_)) => return None,
+            FillTiming::InsideOracle => false,
+            FillTiming::Placed(Placement::Trigger(oid)) => {
                 let (opening, decimals) = self.opening?;
                 let closing = exact_price_units(&update.px, size_decimals).ok()?;
                 let trigger = statuses.trigger_prices.get(&oid)?.as_ref()?;
@@ -88,16 +95,32 @@ pub(super) fn observe(prices: &mut [PricesSeen], coins: &FxHashMap<String, Hip3C
     }).unwrap_or_default();
     for (fill, seen) in fills.iter().zip(prices) {
         let Some(range) = ranges.get(fill.coin.as_ref()) else { continue; };
-        let rank = fill.coin.split_once(':').and_then(|(dex, _)| ranks.get(dex)).copied().flatten();
-        let taker = takers.get(&(fill.coin.as_ref(), fill.tid)).copied().flatten().map(|placement| match placement {
-            Placement::Trigger(oid) => trigger_ranks.get(&oid).copied().map_or(placement, Placement::Action),
-            other => other,
+        let oracle = fill.coin.split_once(':').and_then(|(dex, _)| ranks.get(dex)).copied().flatten();
+        let rank = oracle.map(|(rank, _)| rank);
+        let original = takers.get(&(fill.coin.as_ref(), fill.tid)).copied().flatten();
+        let taker = original.and_then(|placement| {
+            let Placement::Trigger(oid) = placement else { return Some(FillTiming::Placed(placement)); };
+            let bracket = trigger_ranks.get(&oid).copied();
+            // Each leg independently carries provenance. finish() unions their ranges; a missing
+            // locator on either leg keeps the uncertainty rather than borrowing the other leg's hash.
+            let matched_oracle = fill.action_position.zip(oracle).and_then(|(position, (rank, index))|
+                (Some(position.height) == actions.map(|a| a.height)
+                    && index.and_then(|i| u64::try_from(i).ok()) == Some(position.index)).then_some(rank));
+            trigger_timing(placement, bracket, matched_oracle)
         });
         match range.at(rank, taker, coins[fill.coin.as_ref()].size_decimals, actions.map(|a| a.time_ns), &fill.coin, statuses) {
             Some(px) => seen.observe(Some(px)),
             None => seen.clone_from(&range.all),
         }
     }
+}
+
+/// Independent status brackets and oracle locators may corroborate, but cannot override one another.
+fn trigger_timing(placement: Placement, bracket: Option<Rank>, matched_oracle: Option<Rank>) -> Option<FillTiming> {
+    if let Some(oracle) = matched_oracle {
+        return bracket.is_none_or(|rank| rank == oracle).then_some(FillTiming::InsideOracle);
+    }
+    Some(FillTiming::Placed(bracket.map_or(placement, Placement::Action)))
 }
 
 /// Real wire fills with projected action ranks, used by the cash regression as well as the mark-bound checks.
@@ -117,7 +140,7 @@ pub(crate) fn golden_prices(case: &serde_json::Value, event: &serde_json::Value)
     if let Some(ranks) = event["rank"].as_array() {
         for rank in ranks[0].as_array().unwrap() {
             actions.actions.push(RankedAction { rank: serde_json::from_value(rank.clone()).unwrap(), user: None,
-                action: MarkAction::Hip3Oracle { dex: coin.split_once(':').unwrap().0.into() } });
+                action: MarkAction::Hip3Oracle { dex: coin.split_once(':').unwrap().0.into(), execution_index: None } });
         }
         let taker = fills.iter().find(|f| f.crossed).unwrap();
         for rank in ranks[1].as_array().unwrap() {
@@ -166,7 +189,7 @@ impl TriggerFixture {
                 px: case["after_mark"].as_str().unwrap().into(), time_ns }],
             actions: MarkActions { height, time_ns, actions: vec![RankedAction {
                 rank: serde_json::from_value(case["oracle_rank"].clone()).unwrap(), user: None,
-                action: MarkAction::Hip3Oracle { dex: coin.split_once(':').unwrap().0.into() },
+                action: MarkAction::Hip3Oracle { dex: coin.split_once(':').unwrap().0.into(), execution_index: None },
             }] },
             statuses: BlockStatuses::of([serde_json::from_value(case["triggered_status"].clone()).unwrap()]).unwrap(),
         }
@@ -194,10 +217,10 @@ mod tests {
         RankedAction { rank, user: None, action: MarkAction::Book(BookAnchors { created: vec![oid], ..BookAnchors::default() }) }
     }
     fn oracle(rank: Rank, dex: &str) -> RankedAction {
-        RankedAction { rank, user: None, action: MarkAction::Hip3Oracle { dex: dex.into() } }
+        RankedAction { rank, user: None, action: MarkAction::Hip3Oracle { dex: dex.into(), execution_index: None } }
     }
     fn fill(oid: u64, tid: u64, crossed: bool, twap: bool) -> BlockFill {
-        BlockFill { coin: "xyz:X".into(), px: "1".into(), sz: "1".into(), oid, tid, crossed, twap, liquidation_mark_px: None }
+        BlockFill { coin: "xyz:X".into(), px: "1".into(), sz: "1".into(), oid, tid, action_position: None, crossed, twap, liquidation_mark_px: None }
     }
     fn update(normal: bool, price: &str) -> Hip3PriceUpdate {
         Hip3PriceUpdate { normal, oracle: false, coin: "xyz:X".into(), px: price.into(), time_ns: 1 }
@@ -414,3 +437,9 @@ mod modify_tests;
 mod interleaved_tests;
 #[cfg(test)]
 pub(crate) use interleaved_tests::interleaved_golden_prices;
+
+#[cfg(test)]
+mod oracle_hash_tests;
+
+#[cfg(test)]
+pub(crate) use oracle_hash_tests::oracle_golden_prices;
