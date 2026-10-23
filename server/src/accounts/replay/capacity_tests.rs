@@ -83,3 +83,21 @@ fn ewy_two_complete_windows_reconcile_dynamic_capacity_and_funding() {
         }
     }
 }
+
+#[test]
+fn zhipu_complete_window_preserves_capacity_and_spot_dust() {
+    // Independent account: static cross holdings, 40 IOC fills, and only three wei of spot USDC.
+    // Two native caps explain 2_284 + 28_075 micro; no capacity/endpoint correction is an input.
+    let case: serde_json::Value = serde_json::from_str(include_str!("zhipu_capacity_window.json")).unwrap();
+    let (account, markets) = replay(&case, false);
+    let expected: FxHashMap<_, _> = case["after"]["positions"].as_object().unwrap().iter().filter_map(|(coin, raw)| {
+        let isolated = raw["l"].get("I")?;
+        (raw["s"].as_i64().unwrap() != 0).then(|| ((0, markets.perps[coin].asset), isolated["u"].as_i64().unwrap() * WEI_PER_MICRO))
+    }).collect();
+    assert_eq!(account.isolated, expected);
+    assert_eq!(account.pools, Pools::Unified(
+        case["after"]["aggregate_cash_micro"].as_i64().unwrap() * WEI_PER_MICRO
+            + case["after"]["spot_dust_wei"].as_i64().unwrap(),
+    ));
+    assert!(account.estimated, "aggregate equality does not establish Unified spot routing");
+}
