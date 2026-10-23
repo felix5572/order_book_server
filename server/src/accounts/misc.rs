@@ -66,7 +66,7 @@ impl Balance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LedgerDelta {
     /// `send` from `user` at `source` to `destination` at `destination_balance` (the same account when one user);
-    /// the fee is charged at the source.
+    /// `source` identifies principal; a USDC fee may be paid from spot even for perp-to-perp sends.
     Send { user: Address, destination: Address, source: Balance, destination_balance: Balance, usdc_wei: Option<i64>, usdc_fee_wei: i64 },
     /// `spotTransfer`: spot to spot.
     SpotTransfer { user: Address, destination: Address, usdc_wei: Option<i64>, usdc_fee_wei: i64 },

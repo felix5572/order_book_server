@@ -1,0 +1,255 @@
+{
+  "provenance": {
+    "archive": "research_data/ob_hourly_watch_20261021/cash_followup_20261023T0136Z/cash_evidence",
+    "scope": "No fills. Eight ledger events and unchanged isolated balances; seven send debits plus one internalTransfer receipt exactly explain main cash. Two nonzero send fees debit spot instead.",
+    "state_sha256": {
+      "1193760000_selected_states.json": "acebf4d86246036780320066532179dadb0db9c13e6d4a154c056a045230d276",
+      "1193770000_selected_states.json": "793e07619ae697023bdd813077627946d7b82ada4483d401a4415a1b4dd03f57"
+    }
+  },
+  "user": "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+  "window": [
+    1193760000,
+    1193770000
+  ],
+  "main_before_wei": 250838103602100,
+  "main_after_wei": 250541433820800,
+  "spot_before_wei": 16497261181700,
+  "spot_after_wei": 16497061181700,
+  "fee_wei": 200000000,
+  "rows": [
+    {
+      "height": 1193761226,
+      "event": {
+        "time": "2026-10-23T01:06:57.983919042",
+        "hash": "0x06f6f8633a64af18087004472759ca0203fc0048d567cdeaaabfa3b5f9688902",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "0x4c6d11bedf33ff98a9e7a26041c9b5b01c56ea1b"
+            ],
+            "delta": {
+              "type": "send",
+              "user": "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "destination": "0x4c6d11bedf33ff98a9e7a26041c9b5b01c56ea1b",
+              "sourceDex": "",
+              "destinationDex": "",
+              "token": "USDC",
+              "amount": "211.841896",
+              "usdcValue": "211.841896",
+              "fee": "0.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 1792717617236,
+              "feeToken": ""
+            }
+          }
+        }
+      },
+      "source_line_sha256": "bbf4b8dc27d554404ef0e80b06c992bd6d6afad18597a992b7c100d620e3fb6b"
+    },
+    {
+      "height": 1193761243,
+      "event": {
+        "time": "2026-10-23T01:06:59.365573782",
+        "hash": "0xb686b0f93602fe77b80004472759db0203b100ded1061d495a4f5c4bf506d862",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "0xd8846ad366a92b8bf1eb2183c4ad1c9d8cd634dc"
+            ],
+            "delta": {
+              "type": "send",
+              "user": "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "destination": "0xd8846ad366a92b8bf1eb2183c4ad1c9d8cd634dc",
+              "sourceDex": "",
+              "destinationDex": "",
+              "token": "USDC",
+              "amount": "0.257",
+              "usdcValue": "0.257",
+              "fee": "0.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 1792717618791,
+              "feeToken": ""
+            }
+          }
+        }
+      },
+      "source_line_sha256": "84502291b31e525d22fbcebcb1f677dfe192103b59369ff9ac8ef1fc35996428"
+    },
+    {
+      "height": 1193764465,
+      "event": {
+        "time": "2026-10-23T01:10:55.754469556",
+        "hash": "0x0dc7b8b3a7496b270f4104472766710202770099424c89f9b1906406664d4511",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "0x337f2c93e1da13f2452dfa9e2b425b9beccda880"
+            ],
+            "delta": {
+              "type": "send",
+              "user": "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "destination": "0x337f2c93e1da13f2452dfa9e2b425b9beccda880",
+              "sourceDex": "",
+              "destinationDex": "",
+              "token": "USDC",
+              "amount": "2443.181123",
+              "usdcValue": "2443.181123",
+              "fee": "0.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 1792717855065,
+              "feeToken": ""
+            }
+          }
+        }
+      },
+      "source_line_sha256": "3bd6f3ed340aff831b2f73b52ffee8e0fb9fb2e5b106700249b47750bae2f222"
+    },
+    {
+      "height": 1193764488,
+      "event": {
+        "time": "2026-10-23T01:10:57.295431750",
+        "hash": "0x725597015f91a3c073cf044727668802069100e6fa94c292161e42541e957dab",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "0xd8846ad366a92b8bf1eb2183c4ad1c9d8cd634dc"
+            ],
+            "delta": {
+              "type": "send",
+              "user": "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "destination": "0xd8846ad366a92b8bf1eb2183c4ad1c9d8cd634dc",
+              "sourceDex": "",
+              "destinationDex": "",
+              "token": "USDC",
+              "amount": "2.0883",
+              "usdcValue": "2.0883",
+              "fee": "0.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 1792717856471,
+              "feeToken": ""
+            }
+          }
+        }
+      },
+      "source_line_sha256": "c30210e343d36652d31b4070b6fc4327d64b705b6cbe73c43bbcfa862f18bd98"
+    },
+    {
+      "height": 1193767034,
+      "event": {
+        "time": "2026-10-23T01:14:04.500028728",
+        "hash": "0x5f86a9307f45f2ad6100044727707a02020a00161a49117f034f54833e49cc98",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "0xfa7e034baa67423b2ce680dec65cfc94f8d08b93"
+            ],
+            "delta": {
+              "type": "send",
+              "user": "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "destination": "0xfa7e034baa67423b2ce680dec65cfc94f8d08b93",
+              "sourceDex": "",
+              "destinationDex": "",
+              "token": "USDC",
+              "amount": "200.0",
+              "usdcValue": "200.0",
+              "fee": "1.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 1792718028021,
+              "feeToken": "USDC"
+            }
+          }
+        }
+      },
+      "source_line_sha256": "5ab57b305009bb26ea2a18ed1807a81b103ff6e744ffe59d837987cd4a6bcb5f"
+    },
+    {
+      "height": 1193767240,
+      "event": {
+        "time": "2026-10-23T01:14:19.424090607",
+        "hash": "0x4d9593bd581bf7fb4f0f044727714802019900a2f31f16cdf15e3f10171fd1e5",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "0x240a0e76ece0eacd6298920afba98e8610003643"
+            ],
+            "delta": {
+              "type": "send",
+              "user": "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "destination": "0x240a0e76ece0eacd6298920afba98e8610003643",
+              "sourceDex": "",
+              "destinationDex": "",
+              "token": "USDC",
+              "amount": "200.0",
+              "usdcValue": "200.0",
+              "fee": "1.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 1792718047088,
+              "feeToken": "USDC"
+            }
+          }
+        }
+      },
+      "source_line_sha256": "635a1f18592f6bfabfc797a4601e9ba544ee75a4f0046d14a6a47c82364f18fc"
+    },
+    {
+      "height": 1193768799,
+      "event": {
+        "time": "2026-10-23T01:16:11.904410117",
+        "hash": "0x41a67a79c0dd7e264320044727775f020d52005f5bd09cf8e56f25cc7fd15810",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xb750551f41dfff4f094f739ab70b87b1bd967eb5",
+              "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70"
+            ],
+            "delta": {
+              "type": "internalTransfer",
+              "usdc": "90.904606",
+              "user": "0xb750551f41dfff4f094f739ab70b87b1bd967eb5",
+              "destination": "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "fee": "0.0"
+            }
+          }
+        }
+      },
+      "source_line_sha256": "a7d7b43d509967fbd1aa0a9c6774bc74a3b1b56158298134440f894bc48a2181"
+    },
+    {
+      "height": 1193768857,
+      "event": {
+        "time": "2026-10-23T01:16:16.218970162",
+        "hash": "0xb8be309056113778ba3704472777990207240075f114564a5c86dbe315151163",
+        "inner": {
+          "LedgerUpdate": {
+            "users": [
+              "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "0xd8846ad366a92b8bf1eb2183c4ad1c9d8cd634dc"
+            ],
+            "delta": {
+              "type": "send",
+              "user": "0xd6db8b6b271e1144b4d80e1296f8a6366b010e70",
+              "destination": "0xd8846ad366a92b8bf1eb2183c4ad1c9d8cd634dc",
+              "sourceDex": "",
+              "destinationDex": "",
+              "token": "USDC",
+              "amount": "0.2341",
+              "usdcValue": "0.2341",
+              "fee": "0.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 1792718174984,
+              "feeToken": ""
+            }
+          }
+        }
+      },
+      "source_line_sha256": "879acd961e9d385b55967a5cc237ba3e00da0f18b437916b7c0e1373dd70c6ea"
+    }
+  ]
+}

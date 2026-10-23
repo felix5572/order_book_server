@@ -204,10 +204,10 @@ pub(crate) enum StopReason {
     NonUsdcCollateral,
     /// A unified account's `spotTransfer` of another token with a USDC fee (r3 revision 3).
     NonUsdcSpotTransferFee,
-    /// A USDC fee on a transfer from or to spot by an account whose pools do not hold spot: the node takes it from either
+    /// A transfer USDC fee whose funding balance is unknown outside unified pools: the node takes it from either
     /// side (bm 2026-10-20: `0xb4dca8c9…` sent all 278 USDC of spot and the 0.001566 fee left the main dex;
     /// `0x04447ced…` sent 20,000 USDC from the main dex to spot and the 0.001605 fee did not), which spot outside the
-    /// pools cannot tell.
+    /// pools cannot tell. Even perp-to-perp `send` can pay from spot (1193767034/1193767240).
     SpotFeeSource,
     /// A unified account's spot fill of a pair not quoted in USDC.
     NonUsdcSpotFill,
@@ -659,9 +659,9 @@ fn apply_funding(account: &mut AccountMargin, markets: &Markets, coin: &str, amo
     Ok(())
 }
 
-/// A USDC fee on a transfer touching spot, by an account whose pools do not hold spot: which balance pays it is not known.
-const fn spot_fee_source(account: &AccountMargin, touches_spot: bool, usdc_fee_wei: i64) -> Applied {
-    if usdc_fee_wei != 0 && touches_spot && !account.unified() { Err(StopReason::SpotFeeSource) } else { Ok(()) }
+/// The principal source does not identify the fee source. Standard pools omit execution-time spot cash.
+const fn spot_fee_source(account: &AccountMargin, usdc_fee_wei: i64) -> Applied {
+    if usdc_fee_wei != 0 && !account.unified() { Err(StopReason::SpotFeeSource) } else { Ok(()) }
 }
 
 /// `user` is the account the event is applied to; its role (sender, receiver, vault) comes from the delta.
@@ -669,7 +669,7 @@ fn apply_ledger(account: &mut AccountMargin, markets: &Markets, user: Address, d
     match delta {
         LedgerDelta::Send { user: sender, destination, source, destination_balance, usdc_wei, usdc_fee_wei } => {
             if user == *sender {
-                spot_fee_source(account, *source == Balance::Spot || *destination_balance == Balance::Spot, *usdc_fee_wei)?;
+                spot_fee_source(account, *usdc_fee_wei)?;
                 // another token's send takes only its USDC fee
                 let amount = usdc_wei.as_ref().map_or(0, |amount| *amount);
                 add_balance(account, markets, source, -(amount + usdc_fee_wei))?;
@@ -682,7 +682,7 @@ fn apply_ledger(account: &mut AccountMargin, markets: &Markets, user: Address, d
         }
         LedgerDelta::SpotTransfer { user: sender, destination, usdc_wei, usdc_fee_wei } => {
             if user == *sender {
-                spot_fee_source(account, true, *usdc_fee_wei)?;
+                spot_fee_source(account, *usdc_fee_wei)?;
                 match usdc_wei {
                     Some(amount) => account.add_spot(-(amount + usdc_fee_wei)),
                     None if *usdc_fee_wei != 0 => return Err(StopReason::NonUsdcSpotTransferFee),
@@ -1316,10 +1316,10 @@ pub(crate) mod tests {
     fn ledger_deltas_move_each_partys_side() {
         let main = || Balance::Dex(String::new());
         let mut standard = per_dex();
-        standard.apply(5, user(HOLDER), &send(HOLDER, main(), ISOLATED, Balance::Dex("xyz".to_string()), Some(100), 7));
+        standard.apply(5, user(HOLDER), &send(HOLDER, main(), ISOLATED, Balance::Dex("xyz".to_string()), Some(100), 0));
         standard.apply(5, user(ISOLATED), &send(HOLDER, main(), ISOLATED, Balance::Dex("xyz".to_string()), Some(100), 7));
         standard.apply(6, user(HOLDER), &send(HOLDER, Balance::Spot, HOLDER, main(), Some(50), 0));
-        standard.apply(7, user(HOLDER), &send(HOLDER, main(), PORTFOLIO, main(), None, 9));
+        standard.apply(7, user(HOLDER), &send(HOLDER, main(), PORTFOLIO, main(), None, 0));
         let class = AccountEvent::Ledger(LedgerDelta::ClassTransfer { usdc_wei: 1_000, to_perp: false });
         standard.apply(8, user(HOLDER), &class);
         let vault = AccountEvent::Ledger(LedgerDelta::VaultDeposit { vault: user(ISOLATED), usdc_wei: 30 });
@@ -1335,7 +1335,7 @@ pub(crate) mod tests {
         });
         standard.apply(11, user(HOLDER), &withdraw);
         standard.apply(11, user(ISOLATED), &withdraw);
-        let main_cash = -1_200_000_000_000 - 107 + 50 - 9 - 1_000 - 30 - 2_000 + 147_527_244_500;
+        let main_cash = -1_200_000_000_000 - 100 + 50 - 1_000 - 30 - 2_000 + 147_527_244_500;
         assert_eq!(cross(&standard, HOLDER), per_dex_pools(&[(0, main_cash), (1, 3_026_970_000)]), "the user gets the net amount");
         let vault_cash = 30 - 147_609_223_500;
         assert_eq!(cross(&standard, ISOLATED), per_dex_pools(&[(0, vault_cash), (1, 100)]), "the vault pays net plus commission");
@@ -1490,6 +1490,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn real_perp_to_perp_send_fee_can_debit_spot_not_the_source_dex() {
+        use crate::accounts::misc::MiscEvent;
+        let g: serde_json::Value = serde_json::from_str(include_str!("send_fee_source_golden.json")).unwrap();
+        let payer: Address = g["user"].as_str().unwrap().parse().unwrap();
+        let mut standard = per_dex();
+        let mut source = standard.accounts.remove(&user(HOLDER)).unwrap();
+        source.pools = per_dex_pools(&[(0, g["main_before_wei"].as_i64().unwrap())]);
+        standard.accounts.insert(payer, source);
+        let mut unified = states(|_| {});
+        let mut source = unified.accounts.remove(&user(HOLDER)).unwrap();
+        source.pools = Pools::Unified(g["main_before_wei"].as_i64().unwrap() + g["spot_before_wei"].as_i64().unwrap());
+        unified.accounts.insert(payer, source);
+        let mut fees = 0;
+        let mut no_fee_flow = 0;
+        for row in g["rows"].as_array().unwrap() {
+            let MiscEvent::Ledger { delta, .. } = serde_json::from_value(row["event"].clone()).unwrap() else { panic!("ledger expected") };
+            match &delta {
+                LedgerDelta::Send { usdc_wei: Some(amount), usdc_fee_wei, .. } => { no_fee_flow -= amount; fees += usdc_fee_wei; },
+                LedgerDelta::InternalTransfer { usdc_wei, fee_wei, .. } => no_fee_flow += usdc_wei - fee_wei,
+                _ => panic!("fixture changed"),
+            }
+            let height = row["height"].as_u64().unwrap();
+            standard.apply(height, payer, &AccountEvent::Ledger(delta.clone()));
+            unified.apply(height, payer, &AccountEvent::Ledger(delta));
+        }
+        assert_eq!(g["main_before_wei"].as_i64().unwrap() + no_fee_flow, g["main_after_wei"].as_i64().unwrap());
+        assert_eq!(g["spot_before_wei"].as_i64().unwrap() - fees, g["spot_after_wei"].as_i64().unwrap());
+        assert_eq!(stop(&standard, g["user"].as_str().unwrap()), Some(StopReason::SpotFeeSource), "sourceDex identifies principal, not the fee funding pool");
+        assert_eq!(unified.accounts[&payer].stop, None);
+        assert_eq!(unified.accounts[&payer].pools, Pools::Unified(g["main_after_wei"].as_i64().unwrap() + g["spot_after_wei"].as_i64().unwrap()));
+    }
+
+    #[test]
     fn unverified_ledger_cases_stop_the_replay() {
         let spot_transfer = |usdc_wei| {
             AccountEvent::Ledger(LedgerDelta::SpotTransfer { user: user(HOLDER), destination: user(ISOLATED), usdc_wei, usdc_fee_wei: 100 })
@@ -1500,7 +1533,7 @@ pub(crate) mod tests {
             (spot_transfer(Some(27_800_000_000)), None, Some(StopReason::SpotFeeSource)),
             (send(HOLDER, Balance::Spot, ISOLATED, Balance::Spot, None, 100), None, Some(StopReason::SpotFeeSource)),
             (send(HOLDER, Balance::Dex(String::new()), ISOLATED, Balance::Spot, Some(100), 7), None, Some(StopReason::SpotFeeSource)),
-            (send(HOLDER, Balance::Dex(String::new()), ISOLATED, Balance::Dex(String::new()), Some(100), 7), None, None),
+            (send(HOLDER, Balance::Dex(String::new()), ISOLATED, Balance::Dex(String::new()), Some(100), 7), None, Some(StopReason::SpotFeeSource)),
             (AccountEvent::Ledger(LedgerDelta::Unread("liquidation".to_string())), Some(StopReason::UnreadLedger("liquidation".to_string())), Some(StopReason::UnreadLedger("liquidation".to_string()))),
         ];
         for (event, unified_stop, per_dex_stop) in cases {
