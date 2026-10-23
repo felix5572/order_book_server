@@ -12,6 +12,7 @@
 //! `estimated`; a pool-total difference is still a mismatch (review 000466 r1).
 
 mod isolated;
+pub(crate) mod dust;
 
 use std::collections::BTreeMap;
 
@@ -129,6 +130,7 @@ pub(crate) struct FillEvent {
     backstop: bool,
     /// System conversion of sub-lot spot balances; it does not obey ordinary order quantity precision.
     spot_dust_conversion: bool,
+    dust_share: Option<dust::DustShare>,
     /// Execution-time evidence, retained with the event across checkpoint replay; never a later HTTP price.
     mark: Option<FillMarkRange>,
 }
@@ -154,10 +156,13 @@ impl FillEvent {
             start_position: fill.start_position.clone(),
             usdc_fee_wei,
             backstop,
-            spot_dust_conversion: fill.dir == "Spot Dust Conversion",
+            spot_dust_conversion: fill.dir == dust::DUST_DIR,
+            dust_share: None,
             mark,
         })
     }
+
+    pub(crate) fn attach_dust(&mut self, share: Option<dust::DustShare>) { self.dust_share = share; }
 
     /// Replace only this block/trade's projection using a completed trusted seed replay, never a current mark.
     pub(crate) fn restore_mark(&mut self, block: u64, prices: &super::marks::fill_prices::FillMarkPrices) -> bool {
@@ -206,7 +211,7 @@ pub(crate) enum StopReason {
     SpotFeeSource,
     /// A unified account's spot fill of a pair not quoted in USDC.
     NonUsdcSpotFill,
-    /// Midnight system conversion; its cash credit is not yet reconstructed from the recorded fill.
+    /// Midnight system conversion with incomplete batch evidence or an unverified allocation path.
     SpotDustConversion(String),
     /// A unified account's HIP-4 outcome fill (`#N`): its sizes are not measured.
     OutcomeFill,
@@ -633,11 +638,11 @@ fn apply_spot_fill(account: &mut AccountMargin, markets: &Markets, fill: &FillEv
     if pair.quote_token != USDC {
         return Err(StopReason::NonUsdcSpotFill);
     }
-    // H1193705508 converted token-precision dust (PURR: 5 decimals versus order szDecimals=0).
-    // Its recorded px*sz is not established as the cash credit. Preserve the account withdrawal boundary,
-    // but report this known business path instead of misclassifying the fractional size as bad state.
     if fill.spot_dust_conversion {
-        return Err(StopReason::SpotDustConversion(fill.coin.clone()));
+        let share = fill.dust_share.as_ref().ok_or_else(|| StopReason::SpotDustConversion(fill.coin.clone()))?;
+        let cash = share.credit_wei(pair).map_err(|err| StopReason::SpotDustConversion(format!("{}: {err}", fill.coin)))?;
+        account.add_spot(cash);
+        return Ok(());
     }
     let cash = fill.cash_wei(pair.size_decimals, MAX_SPOT_DECIMALS - pair.size_decimals).map_err(StopReason::Contradiction)?;
     account.add_spot(cash);
@@ -1268,6 +1273,24 @@ pub(crate) mod tests {
             replay.apply(1_193_705_509, user(HOLDER), &fill("BTC", "A", "82857.6", "0.001", "0.0", None));
             assert_eq!(cross(&replay, HOLDER), before, "stopped replay stays withdrawn until a fresh anchor");
             assert_eq!(stop(&states(|_| {}), HOLDER), None, "a fresh anchor restores replay");
+        }
+    }
+
+    #[test]
+    fn complete_dust_batch_credits_the_measured_unified_pool() {
+        use crate::types::node_data::NodeDataFill;
+        let (pair, fills, expected) = dust::tests::goldens().remove(0);
+        let block = dust::DustBlock::of(fills.iter());
+        for ((recipient, expected), NodeDataFill(_, wire)) in expected.iter().zip(&fills[1..]) {
+            let mut replay = states(|_| {});
+            replay.markets.spot_pairs[0] = pair.clone();
+            let Pools::Unified(before) = cross(&replay, HOLDER) else { unreachable!() };
+            let mut event = FillEvent::of(wire).unwrap();
+            event.attach_dust(block.share(*recipient, wire));
+            // Map each real recipient into the same isolated unit-test account fixture.
+            replay.apply(1_193_705_508, user(HOLDER), &AccountEvent::Fill(event));
+            assert_eq!(stop(&replay, HOLDER), None);
+            assert_eq!(cross(&replay, HOLDER), Pools::Unified(before + expected));
         }
     }
 

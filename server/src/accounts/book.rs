@@ -837,7 +837,8 @@ impl AccountBook {
             Ok((parse_size_raw(&fill.start_position, coin.size_decimals)?, parse_size_raw(&fill.sz, coin.size_decimals)?))
         };
         self.liquidations.record_block(time_ms, fills.iter().flat_map(Batch::events_ref), size_fill);
-        let fills = fills.into_iter().map(|batch| self.apply_fills_at_marks(batch, fill_prices)).collect();
+        let dust = super::replay::dust::DustBlock::of(fills.iter().flat_map(Batch::events_ref));
+        let fills = fills.into_iter().map(|batch| self.apply_fills_at_marks(batch, fill_prices, &dust)).collect();
         if !self.covered(height) {
             let events = after_fills.into_iter().map(|(action, user)| (user, AccountEvent::Action(action)));
             self.record_all(events, height, &mut block_actions.touched, &mut block_actions.marks_dropped);
@@ -854,10 +855,11 @@ impl AccountBook {
 
     #[cfg(test)]
     pub(crate) fn apply_fills(&mut self, batch: Batch<NodeDataFill>) -> FillsReport {
-        self.apply_fills_at_marks(batch, &super::marks::fill_prices::FillMarkPrices::default())
+        let dust = super::replay::dust::DustBlock::of(batch.events_ref().iter());
+        self.apply_fills_at_marks(batch, &super::marks::fill_prices::FillMarkPrices::default(), &dust)
     }
 
-    fn apply_fills_at_marks(&mut self, batch: Batch<NodeDataFill>, prices: &super::marks::fill_prices::FillMarkPrices) -> FillsReport {
+    fn apply_fills_at_marks(&mut self, batch: Batch<NodeDataFill>, prices: &super::marks::fill_prices::FillMarkPrices, dust: &super::replay::dust::DustBlock) -> FillsReport {
         let block = batch.block_number();
         raise(&mut self.fills.height, block);
         let mut report = FillsReport::default();
@@ -872,7 +874,10 @@ impl AccountBook {
                     raise(&mut self.fills.lost_block, block);
                     AccountEvent::UnreadableFill(err)
                 },
-                AccountEvent::Fill,
+                |mut event| {
+                    event.attach_dust(dust.share(user, &fill));
+                    AccountEvent::Fill(event)
+                },
             );
             if self.record(user, event, block, &mut report.marks_dropped) {
                 report.touched.accounts.push(user);
@@ -2498,6 +2503,52 @@ mod tests {
             assert_eq!(book.events.len(), before);
             let check = book.replay.as_ref().unwrap().current.check_against(&expected, &expected);
             assert!(check.compared.values().all(|v| v.mismatched == 0 && v.estimated == 0));
+        }
+    }
+
+    #[test]
+    fn dust_allocation_survives_split_lines_late_seed_and_covered_replay() {
+        use crate::accounts::checkpoint::{parse_checkpoint_bytes, tests::fixture};
+        use crate::accounts::replay::dust::tests::goldens;
+        let holder = checkpoint_user(HOLDER);
+        let (pair, mut raw, credits) = goldens().remove(0);
+        raw[1].0 = holder;
+        let batches = |height| raw.iter().map(|row| {
+            let envelope = serde_json::json!({"local_time":"2026-10-23T00:00:00.026111765",
+                "block_time":"2026-10-23T00:00:00.026111765", "block_number":height, "events":[row]});
+            sonic_rs::from_str::<Batch<NodeDataFill>>(&envelope.to_string()).unwrap()
+        }).collect();
+        let seed = || {
+            let mut parsed = parse_checkpoint_bytes(&fixture()).unwrap();
+            parsed.spot_pairs[0] = pair.clone();
+            let mut first = anchor(1_000, &[(PUMP, 0, &[(holder, 1_000_000)])]);
+            first.margins = MarginStates::from_checkpoint(&parsed).unwrap();
+            first
+        };
+        let mut expected = seed().margins;
+        expected.add_cross_cash(&holder, 0, credits[0].1);
+        for seed_before_fill in [true, false] {
+            let mut book = AccountBook::new(0);
+            book.apply_fills(fills(100, &[]));
+            book.apply_misc_events(misc(100, &[]));
+            book.apply_block_actions(block_actions(1_000, &[]));
+            if seed_before_fill { book.install_anchor(seed()); }
+            // Real node streaming emits separate lines: all participants must be joined before cash replay.
+            book.apply_block(block_actions(1_001, &[]), batches(1_001), Vec::new(), |_| None,
+                &crate::accounts::marks::fill_prices::FillMarkPrices::default(), Vec::new());
+            if !seed_before_fill { book.install_anchor(seed()); }
+            let current = &book.replay.as_ref().unwrap().current;
+            assert_eq!(current.stop_reason(&holder), None);
+            let check = current.check_against(&expected, &expected);
+            assert!(check.compared.values().all(|counts| counts.mismatched == 0 && counts.estimated == 0));
+            let mut next = anchor(1_002, &[(PUMP, 0, &[(holder, 1_000_000)])]);
+            next.margins = expected.clone();
+            book.apply_block_actions(block_actions(1_002, &[]));
+            book.install_anchor(next);
+            book.apply_block(block_actions(1_001, &[]), batches(1_001), Vec::new(), |_| None,
+                &crate::accounts::marks::fill_prices::FillMarkPrices::default(), Vec::new());
+            let check = book.replay.as_ref().unwrap().current.check_against(&expected, &expected);
+            assert!(check.compared.values().all(|counts| counts.mismatched == 0 && counts.estimated == 0));
         }
     }
 

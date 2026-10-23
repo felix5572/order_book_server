@@ -74,6 +74,8 @@ pub(crate) struct CheckpointAccounts {
 pub(crate) struct SpotPair {
     /// The base token's `szDecimals`: fill sizes carry these, prices `MAX_SPOT_DECIMALS` minus these.
     pub(crate) size_decimals: u32,
+    /// The base token balance precision; system dust may be smaller than one order lot.
+    pub(crate) base_wei_decimals: u32,
     pub(crate) quote_token: u32,
     /// The quote token's `weiDecimals`.
     pub(crate) quote_wei_decimals: u32,
@@ -773,12 +775,14 @@ fn spot_pairs(pairs: &[(u32, u32)], tokens: &[WireTokenSpec]) -> std::result::Re
         .iter()
         .enumerate()
         .map(|(index, (base, quote))| {
-            let size_decimals = token_spec(tokens, *base).map_err(|err| format!("spot pair {index} base {err}"))?.sz_decimals;
+            let base_spec = token_spec(tokens, *base).map_err(|err| format!("spot pair {index} base {err}"))?;
+            let size_decimals = base_spec.sz_decimals;
+            let base_wei_decimals = base_spec.wei_decimals;
             let quote_wei_decimals = token_spec(tokens, *quote).map_err(|err| format!("spot pair {index} quote {err}"))?.wei_decimals;
             if size_decimals > MAX_SPOT_DECIMALS {
                 return Err(format!("spot pair {index}: base szDecimals {size_decimals} above {MAX_SPOT_DECIMALS}"));
             }
-            Ok(SpotPair { size_decimals, quote_token: *quote, quote_wei_decimals })
+            Ok(SpotPair { size_decimals, base_wei_decimals, quote_token: *quote, quote_wei_decimals })
         })
         .collect()
 }
@@ -1252,7 +1256,7 @@ pub(crate) mod tests {
         assert_eq!(settings(HOLDER, 1), [(0, 3)], "a cash-only state keeps its setting");
         assert_eq!(parsed.dexes[0].assets[0].margin_mode, AssetMarginMode::Normal);
         assert_eq!(parsed.dexes[1].assets[0].margin_mode, AssetMarginMode::NoCross);
-        let pair = |size_decimals, quote_token| SpotPair { size_decimals, quote_token, quote_wei_decimals: 8 };
+        let pair = |size_decimals, quote_token| SpotPair { size_decimals, base_wei_decimals: 8, quote_token, quote_wei_decimals: 8 };
         assert_eq!(parsed.spot_pairs, [pair(2, 0), pair(2, 0), pair(2, 360)], "@0 T1/USDC, @1 HYPE/USDC, @2 HYPE/USDH");
     }
 
