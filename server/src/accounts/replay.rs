@@ -308,8 +308,8 @@ pub(crate) struct AccountMargin {
     cross_exposure_seen: FxHashSet<usize>,
     /// Capacity projection owned and advanced by this cash replay from checkpoint holdings and fill start sizes.
     /// Known holdings retain their leverage through close/reopen; an unknown holding or leverage action removes
-    /// the projection until reseeding. Unified capacity uses one dex; physical routing confidence is separate.
-    /// Explicit spot/foreign-dex movement clears the projection.
+    /// the projection until reseeding. Unified capacity combines known dex portfolios; physical routing is separate.
+    /// Explicit spot movement clears the projection.
     cross_capacity: FxHashMap<usize, cross_capacity::CrossCapacityProjection>,
     /// Positive spot USDC can be frozen or remain outside the executing dex. A single-dex portfolio still
     /// gives an aggregate capacity estimate, but only the no-spot anchor proof may mark routing exact.
@@ -726,7 +726,8 @@ fn apply_isolated_fill_at(account: &mut AccountMargin, market: &PerpMarket, bloc
         },
     };
     let routed_capacity = match (&mut account.routing, &account.pools) {
-        (Some(route), Pools::Unified(total)) => route.capacity(block, fill, cash_before, *total),
+        (Some(route), Pools::Unified(total)) => route.anchored_cross_capacity(fill, cash_before, &account.cross_capacity, aggregate_capacity)?
+            .or_else(|| route.capacity(block, fill, cash_before, *total)),
         _ => None,
     };
     let capacity = routed_capacity.or(aggregate_capacity);
@@ -798,7 +799,7 @@ fn apply_spot_fill(account: &mut AccountMargin, markets: &Markets, fill: &FillEv
 /// Funding settles into the position's isolated cash when it is isolated, else into its dex's cross cash.
 fn apply_funding(account: &mut AccountMargin, markets: &Markets, coin: &str, amount_wei: i64) -> Applied {
     let market = perp(markets, coin)?;
-    if account.routing.as_ref().is_some_and(|route| route.coin() != coin) { account.routing = None; }
+    if account.routing.as_ref().is_some_and(|route| route.expires_on_funding(coin)) { account.routing = None; }
     match account.isolated.get_mut(&(market.dex, market.asset)) {
         Some(isolated) => *isolated += amount_wei,
         None => account.add_cross(market.dex, amount_wei),

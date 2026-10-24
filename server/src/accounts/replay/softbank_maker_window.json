@@ -1,0 +1,1954 @@
+{
+  "schema": 1,
+  "mark_replay_commit": "556f4b2c99adbf6398ef2a89b52273b4b6352ffe",
+  "scope": "Complete recorded Unified SOFTBANK account window: 20 fills, no funding/cash/leverage actions. The first isolated maker execution and all cross collateral prices come from independent 10000-block replay (seven main fields and full books match the terminal checkpoint). Later cross fills need no isolated execution mark. Initial open-order trackers are retained. Physical capacity uses the unchanged executing dex cash and its cross holdings; no endpoint correction is an input. Native scalar maker admission and transfer probes support the bound, not the complete wrapper/sweep schedule, so cashEstimated remains set.",
+  "cases": [
+    {
+      "user": "0xe3d38e23fdf2e3ac221a8343dc0a63896be36593",
+      "window": [
+        1194820000,
+        1194830000
+      ],
+      "markets": {
+        "ATOM": {
+          "dex": 0,
+          "asset": 2,
+          "size_decimals": 2,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "AVAX": {
+          "dex": 0,
+          "asset": 6,
+          "size_decimals": 2,
+          "margin_mode": "normal",
+          "table_id": 52,
+          "default_leverage": 10
+        },
+        "OP": {
+          "dex": 0,
+          "asset": 9,
+          "size_decimals": 1,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "STX": {
+          "dex": 0,
+          "asset": 19,
+          "size_decimals": 1,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "ZRO": {
+          "dex": 0,
+          "asset": 46,
+          "size_decimals": 1,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "DOT": {
+          "dex": 0,
+          "asset": 48,
+          "size_decimals": 1,
+          "margin_mode": "normal",
+          "table_id": 51,
+          "default_leverage": 10
+        },
+        "ZEN": {
+          "dex": 0,
+          "asset": 79,
+          "size_decimals": 2,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "PYTH": {
+          "dex": 0,
+          "asset": 81,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "kBONK": {
+          "dex": 0,
+          "asset": 85,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 52,
+          "default_leverage": 10
+        },
+        "JUP": {
+          "dex": 0,
+          "asset": 90,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 51,
+          "default_leverage": 10
+        },
+        "JTO": {
+          "dex": 0,
+          "asset": 94,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "STRK": {
+          "dex": 0,
+          "asset": 113,
+          "size_decimals": 1,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "ETHFI": {
+          "dex": 0,
+          "asset": 121,
+          "size_decimals": 1,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "POL": {
+          "dex": 0,
+          "asset": 142,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "ME": {
+          "dex": 0,
+          "asset": 160,
+          "size_decimals": 1,
+          "margin_mode": "normal",
+          "table_id": 3,
+          "default_leverage": 3
+        },
+        "S": {
+          "dex": 0,
+          "asset": 172,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "BERA": {
+          "dex": 0,
+          "asset": 180,
+          "size_decimals": 1,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "SOPH": {
+          "dex": 0,
+          "asset": 197,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 3,
+          "default_leverage": 3
+        },
+        "SYRUP": {
+          "dex": 0,
+          "asset": 199,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 3,
+          "default_leverage": 3
+        },
+        "XPL": {
+          "dex": 0,
+          "asset": 203,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 51,
+          "default_leverage": 10
+        },
+        "STBL": {
+          "dex": 0,
+          "asset": 209,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 3,
+          "default_leverage": 3
+        },
+        "ZEC": {
+          "dex": 0,
+          "asset": 214,
+          "size_decimals": 2,
+          "margin_mode": "normal",
+          "table_id": 52,
+          "default_leverage": 10
+        },
+        "CC": {
+          "dex": 0,
+          "asset": 218,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 3,
+          "default_leverage": 3
+        },
+        "ICP": {
+          "dex": 0,
+          "asset": 219,
+          "size_decimals": 1,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "AERO": {
+          "dex": 0,
+          "asset": 220,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 3,
+          "default_leverage": 3
+        },
+        "LIT": {
+          "dex": 0,
+          "asset": 223,
+          "size_decimals": 0,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        },
+        "xyz:META": {
+          "dex": 1,
+          "asset": 8,
+          "size_decimals": 3,
+          "margin_mode": "normal",
+          "table_id": 20,
+          "default_leverage": 20
+        },
+        "xyz:SNDK": {
+          "dex": 1,
+          "asset": 16,
+          "size_decimals": 3,
+          "margin_mode": "normal",
+          "table_id": 10,
+          "default_leverage": 10
+        },
+        "xyz:SKHX": {
+          "dex": 1,
+          "asset": 22,
+          "size_decimals": 3,
+          "margin_mode": "normal",
+          "table_id": 10,
+          "default_leverage": 10
+        },
+        "xyz:SMSN": {
+          "dex": 1,
+          "asset": 34,
+          "size_decimals": 3,
+          "margin_mode": "noCross",
+          "table_id": 10,
+          "default_leverage": 10
+        },
+        "xyz:SOFTBANK": {
+          "dex": 1,
+          "asset": 43,
+          "size_decimals": 3,
+          "margin_mode": "noCross",
+          "table_id": 10,
+          "default_leverage": 10
+        },
+        "xyz:XLE": {
+          "dex": 1,
+          "asset": 56,
+          "size_decimals": 2,
+          "margin_mode": "noCross",
+          "table_id": 20,
+          "default_leverage": 20
+        },
+        "xyz:CBRS": {
+          "dex": 1,
+          "asset": 66,
+          "size_decimals": 2,
+          "margin_mode": "noCross",
+          "table_id": 10,
+          "default_leverage": 10
+        },
+        "xyz:BB": {
+          "dex": 1,
+          "asset": 80,
+          "size_decimals": 1,
+          "margin_mode": "noCross",
+          "table_id": 10,
+          "default_leverage": 10
+        },
+        "xyz:DELL": {
+          "dex": 1,
+          "asset": 82,
+          "size_decimals": 2,
+          "margin_mode": "noCross",
+          "table_id": 10,
+          "default_leverage": 10
+        },
+        "NEAR": {
+          "dex": 0,
+          "asset": 74,
+          "size_decimals": 1,
+          "margin_mode": "normal",
+          "table_id": 52,
+          "default_leverage": 10
+        },
+        "DASH": {
+          "dex": 0,
+          "asset": 226,
+          "size_decimals": 2,
+          "margin_mode": "normal",
+          "table_id": 5,
+          "default_leverage": 5
+        }
+      },
+      "before": {
+        "spot_wei": 465102831800,
+        "dex_states": [
+          {
+            "dex": 0,
+            "cash_micro": 1143589,
+            "positions": {
+              "ATOM": {
+                "s": -3824,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -6059,
+                  "o": -6059,
+                  "c": -10303
+                },
+                "e": 66086884
+              },
+              "AVAX": {
+                "s": 676,
+                "l": {
+                  "C": 10
+                },
+                "M": 52,
+                "f": {
+                  "a": -19526,
+                  "o": -19526,
+                  "c": -21258
+                },
+                "e": 66244239
+              },
+              "OP": {
+                "s": 4365,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": 115697,
+                  "o": 115697,
+                  "c": 112479
+                },
+                "e": 66031903
+              },
+              "STX": {
+                "s": 1789,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": 27403,
+                  "o": 27266,
+                  "c": 24400
+                },
+                "e": 66050769
+              },
+              "ZRO": {
+                "s": -64,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -278,
+                  "o": -278,
+                  "c": -278
+                },
+                "e": 11144320
+              },
+              "DOT": {
+                "l": {
+                  "C": 10
+                },
+                "M": 51,
+                "f": {
+                  "a": -550
+                }
+              },
+              "ZEN": {
+                "s": -1140,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -95071,
+                  "o": -95071,
+                  "c": -92257
+                },
+                "e": 66141828
+              },
+              "PYTH": {
+                "s": -311,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -415,
+                  "o": -415,
+                  "c": -277
+                },
+                "e": 22090001
+              },
+              "kBONK": {
+                "s": 13491,
+                "l": {
+                  "C": 10
+                },
+                "M": 52,
+                "f": {
+                  "a": 1896,
+                  "o": 1896,
+                  "c": 535
+                },
+                "e": 43982866
+              },
+              "JUP": {
+                "s": 201,
+                "l": {
+                  "C": 10
+                },
+                "M": 51,
+                "f": {
+                  "a": 39213,
+                  "o": 39213,
+                  "c": 33992
+                },
+                "e": 66964225
+              },
+              "JTO": {
+                "s": -157,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -109327,
+                  "o": -109327,
+                  "c": -108177
+                },
+                "e": 67498250
+              },
+              "STRK": {
+                "s": 8806,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": 134570,
+                  "o": 135257,
+                  "c": 132526
+                },
+                "e": 66054190
+              },
+              "ETHFI": {
+                "s": 986,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": 28493,
+                  "o": 28493,
+                  "c": 23372
+                },
+                "e": 66217291
+              },
+              "POL": {
+                "s": -244,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -691,
+                  "o": -691,
+                  "c": -553
+                },
+                "e": 22121772
+              },
+              "ME": {
+                "s": -1750,
+                "l": {
+                  "C": 3
+                },
+                "M": 3,
+                "e": 10972500
+              },
+              "S": {
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -494
+                }
+              },
+              "BERA": {
+                "s": 3344,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -457996,
+                  "o": -457996,
+                  "c": -449281
+                },
+                "e": 66042563
+              },
+              "SOPH": {
+                "s": -24629,
+                "l": {
+                  "C": 3
+                },
+                "M": 3,
+                "f": {
+                  "a": 310215,
+                  "o": 310215,
+                  "c": 294021
+                },
+                "e": 44078240
+              },
+              "SYRUP": {
+                "s": 339,
+                "l": {
+                  "C": 3
+                },
+                "M": 3,
+                "f": {
+                  "a": 30276,
+                  "o": 30276,
+                  "c": 24162
+                },
+                "e": 66369980
+              },
+              "XPL": {
+                "s": -719,
+                "l": {
+                  "C": 10
+                },
+                "M": 51,
+                "f": {
+                  "a": -14319,
+                  "o": -14319,
+                  "c": -11938
+                },
+                "e": 55218787
+              },
+              "STBL": {
+                "s": -2838,
+                "l": {
+                  "C": 3
+                },
+                "M": 3,
+                "f": {
+                  "a": -93476,
+                  "o": -93476,
+                  "c": -89367
+                },
+                "e": 66066091
+              },
+              "ZEC": {
+                "s": 4,
+                "l": {
+                  "C": 10
+                },
+                "M": 52,
+                "f": {
+                  "a": 2307,
+                  "o": 1995,
+                  "c": 1227
+                },
+                "e": 49526000
+              },
+              "CC": {
+                "s": 604,
+                "l": {
+                  "C": 3
+                },
+                "M": 3,
+                "f": {
+                  "a": 34702,
+                  "o": 34426,
+                  "c": 33606
+                },
+                "e": 66240760
+              },
+              "ICP": {
+                "s": -82,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -563,
+                  "o": -563,
+                  "c": -563
+                },
+                "e": 22474560
+              },
+              "AERO": {
+                "s": 78,
+                "l": {
+                  "C": 3
+                },
+                "M": 3,
+                "f": {
+                  "a": 54196,
+                  "o": 53766,
+                  "c": 50822
+                },
+                "e": 67820090
+              },
+              "LIT": {
+                "s": 16,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": 1853,
+                  "o": 1853,
+                  "c": 49
+                },
+                "e": 52534400
+              }
+            }
+          },
+          {
+            "dex": 1,
+            "cash_micro": -136644499,
+            "positions": {
+              "xyz:META": {
+                "s": 102,
+                "l": {
+                  "C": 10
+                },
+                "f": {
+                  "a": 16910,
+                  "o": 17582,
+                  "c": 15577
+                },
+                "e": 67689410
+              },
+              "xyz:SNDK": {
+                "s": 27,
+                "l": {
+                  "C": 10
+                },
+                "M": 10,
+                "f": {
+                  "a": 743,
+                  "o": 743,
+                  "c": 743
+                },
+                "e": 33547500
+              },
+              "xyz:SKHX": {
+                "s": 60,
+                "l": {
+                  "C": 10
+                },
+                "M": 10,
+                "f": {
+                  "a": 566055,
+                  "o": 566055,
+                  "c": 574663
+                },
+                "e": 71154000
+              },
+              "xyz:SMSN": {
+                "s": 1435,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": -168492397
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": -20945,
+                  "o": -20945,
+                  "c": 8442
+                },
+                "e": 252758650
+              },
+              "xyz:SOFTBANK": {
+                "s": -404,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": 14638714
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": -223,
+                  "o": 302,
+                  "c": 302
+                },
+                "e": 10959712
+              },
+              "xyz:XLE": {
+                "s": -48,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": 44329546
+                  }
+                },
+                "f": {
+                  "a": -943,
+                  "o": -943,
+                  "c": -663
+                },
+                "e": 33246560
+              },
+              "xyz:CBRS": {
+                "s": 47,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": -39908764
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": 49363,
+                  "o": 49363,
+                  "c": 49540
+                },
+                "e": 71030700
+              },
+              "xyz:BB": {
+                "s": -52,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": 60355392
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": -8582,
+                  "o": -8149,
+                  "c": -8009
+                },
+                "e": 45261450
+              },
+              "xyz:DELL": {
+                "s": 12,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": -38752141
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": 93440,
+                  "o": 93440,
+                  "c": 92701
+                },
+                "e": 67796400
+              }
+            }
+          }
+        ]
+      },
+      "after": {
+        "spot_wei": 466198023900,
+        "dex_states": [
+          {
+            "dex": 0,
+            "cash_micro": -268074684,
+            "positions": {
+              "ATOM": {
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -6059
+                }
+              },
+              "AVAX": {
+                "s": 676,
+                "l": {
+                  "C": 10
+                },
+                "M": 52,
+                "f": {
+                  "a": -19526,
+                  "o": -19526,
+                  "c": -21258
+                },
+                "e": 66244239
+              },
+              "OP": {
+                "s": 4365,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": 115697,
+                  "o": 115697,
+                  "c": 112479
+                },
+                "e": 66031903
+              },
+              "STX": {
+                "s": 1789,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": 27403,
+                  "o": 27266,
+                  "c": 24400
+                },
+                "e": 66050769
+              },
+              "ZRO": {
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -278
+                }
+              },
+              "DOT": {
+                "s": 102,
+                "l": {
+                  "C": 10
+                },
+                "M": 51,
+                "f": {
+                  "a": -550
+                },
+                "e": 11054760
+              },
+              "ZEN": {
+                "s": -1140,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -95071,
+                  "o": -95071,
+                  "c": -92257
+                },
+                "e": 66141828
+              },
+              "PYTH": {
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -415
+                }
+              },
+              "kBONK": {
+                "s": 16981,
+                "l": {
+                  "C": 10
+                },
+                "M": 52,
+                "f": {
+                  "a": 1896,
+                  "o": 1896
+                },
+                "e": 54972876
+              },
+              "JUP": {
+                "s": 201,
+                "l": {
+                  "C": 10
+                },
+                "M": 51,
+                "f": {
+                  "a": 39213,
+                  "o": 39213,
+                  "c": 33992
+                },
+                "e": 66964225
+              },
+              "JTO": {
+                "s": -157,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -109327,
+                  "o": -109327,
+                  "c": -108177
+                },
+                "e": 67498250
+              },
+              "STRK": {
+                "s": 8806,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": 134570,
+                  "o": 135257,
+                  "c": 132526
+                },
+                "e": 66054190
+              },
+              "ETHFI": {
+                "s": 986,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": 28493,
+                  "o": 28493,
+                  "c": 23372
+                },
+                "e": 66217291
+              },
+              "POL": {
+                "s": -244,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -691,
+                  "o": -691,
+                  "c": -553
+                },
+                "e": 22121772
+              },
+              "ME": {
+                "l": {
+                  "C": 3
+                },
+                "M": 3
+              },
+              "S": {
+                "s": 216,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -494
+                },
+                "e": 11025288
+              },
+              "BERA": {
+                "s": 3344,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -457996,
+                  "o": -457996,
+                  "c": -449281
+                },
+                "e": 66042563
+              },
+              "SOPH": {
+                "s": -24629,
+                "l": {
+                  "C": 3
+                },
+                "M": 3,
+                "f": {
+                  "a": 310215,
+                  "o": 310215,
+                  "c": 294021
+                },
+                "e": 44078240
+              },
+              "SYRUP": {
+                "s": 339,
+                "l": {
+                  "C": 3
+                },
+                "M": 3,
+                "f": {
+                  "a": 30276,
+                  "o": 30276,
+                  "c": 24162
+                },
+                "e": 66369980
+              },
+              "XPL": {
+                "l": {
+                  "C": 10
+                },
+                "M": 51,
+                "f": {
+                  "a": -14319
+                }
+              },
+              "STBL": {
+                "s": -2838,
+                "l": {
+                  "C": 3
+                },
+                "M": 3,
+                "f": {
+                  "a": -93476,
+                  "o": -93476,
+                  "c": -89367
+                },
+                "e": 66066091
+              },
+              "ZEC": {
+                "s": 5,
+                "l": {
+                  "C": 10
+                },
+                "M": 52,
+                "f": {
+                  "a": 2307,
+                  "o": 1995
+                },
+                "e": 61522000
+              },
+              "CC": {
+                "s": 604,
+                "l": {
+                  "C": 3
+                },
+                "M": 3,
+                "f": {
+                  "a": 34702,
+                  "o": 34426,
+                  "c": 33606
+                },
+                "e": 66240760
+              },
+              "ICP": {
+                "s": -82,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": -563,
+                  "o": -563,
+                  "c": -563
+                },
+                "e": 22474560
+              },
+              "AERO": {
+                "s": 78,
+                "l": {
+                  "C": 3
+                },
+                "M": 3,
+                "f": {
+                  "a": 54196,
+                  "o": 53766,
+                  "c": 50822
+                },
+                "e": 67820090
+              },
+              "LIT": {
+                "s": 24,
+                "l": {
+                  "C": 5
+                },
+                "M": 5,
+                "f": {
+                  "a": 1853,
+                  "o": 1853
+                },
+                "e": 78111600
+              }
+            }
+          },
+          {
+            "dex": 1,
+            "cash_micro": -140061096,
+            "positions": {
+              "xyz:META": {
+                "s": 102,
+                "l": {
+                  "C": 10
+                },
+                "f": {
+                  "a": 16910,
+                  "o": 17582,
+                  "c": 15577
+                },
+                "e": 67689410
+              },
+              "xyz:SNDK": {
+                "s": 27,
+                "l": {
+                  "C": 10
+                },
+                "M": 10,
+                "f": {
+                  "a": 743,
+                  "o": 743,
+                  "c": 743
+                },
+                "e": 33547500
+              },
+              "xyz:SKHX": {
+                "s": 60,
+                "l": {
+                  "C": 10
+                },
+                "M": 10,
+                "f": {
+                  "a": 566055,
+                  "o": 566055,
+                  "c": 574663
+                },
+                "e": 71154000
+              },
+              "xyz:SMSN": {
+                "s": 1435,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": -168492397
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": -20945,
+                  "o": -20945,
+                  "c": 8442
+                },
+                "e": 252758650
+              },
+              "xyz:SOFTBANK": {
+                "s": -807,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": 29317175
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": -223,
+                  "o": 302
+                },
+                "e": 21969672
+              },
+              "xyz:XLE": {
+                "s": -48,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": 44329546
+                  }
+                },
+                "f": {
+                  "a": -943,
+                  "o": -943,
+                  "c": -663
+                },
+                "e": 33246560
+              },
+              "xyz:CBRS": {
+                "s": 47,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": -39908764
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": 49363,
+                  "o": 49363,
+                  "c": 49540
+                },
+                "e": 71030700
+              },
+              "xyz:BB": {
+                "s": -52,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": 60355392
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": -8582,
+                  "o": -8149,
+                  "c": -8009
+                },
+                "e": 45261450
+              },
+              "xyz:DELL": {
+                "s": 12,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": -38752141
+                  }
+                },
+                "M": 10,
+                "f": {
+                  "a": 93440,
+                  "o": 93440,
+                  "c": 92701
+                },
+                "e": 67796400
+              }
+            }
+          }
+        ]
+      },
+      "events": [
+        {
+          "height": 1194820315,
+          "fill": {
+            "coin": "xyz:SOFTBANK",
+            "px": "27.32",
+            "sz": "0.403",
+            "side": "A",
+            "time": 1792794053526,
+            "startPosition": "-0.404",
+            "dir": "Open Short",
+            "closedPnl": "0.0",
+            "hash": "0x2f3a35605c45471330b304473782db0202b50045f74865e5d302e0b31b4920fd",
+            "oid": 584118263119,
+            "crossed": false,
+            "fee": "0.00033",
+            "tid": 128662155008307,
+            "feeToken": "USDC",
+            "twapId": null,
+            "deployerFee": "0.000165"
+          },
+          "mark": {
+            "min_px_raw": 27261,
+            "max_px_raw": 27261,
+            "size_decimals": 3
+          },
+          "collateral": {
+            "ATOM": {
+              "min_px_raw": 17335,
+              "max_px_raw": 17335,
+              "size_decimals": 2
+            },
+            "AVAX": {
+              "min_px_raw": 90989,
+              "max_px_raw": 90989,
+              "size_decimals": 2
+            },
+            "OP": {
+              "min_px_raw": 11691,
+              "max_px_raw": 11691,
+              "size_decimals": 1
+            },
+            "STX": {
+              "min_px_raw": 31775,
+              "max_px_raw": 31775,
+              "size_decimals": 1
+            },
+            "ZRO": {
+              "min_px_raw": 173830,
+              "max_px_raw": 173830,
+              "size_decimals": 1
+            },
+            "ZEN": {
+              "min_px_raw": 59709,
+              "max_px_raw": 59709,
+              "size_decimals": 2
+            },
+            "PYTH": {
+              "min_px_raw": 71057,
+              "max_px_raw": 71057,
+              "size_decimals": 0
+            },
+            "kBONK": {
+              "min_px_raw": 3183,
+              "max_px_raw": 3183,
+              "size_decimals": 0
+            },
+            "JUP": {
+              "min_px_raw": 300750,
+              "max_px_raw": 300750,
+              "size_decimals": 0
+            },
+            "JTO": {
+              "min_px_raw": 449070,
+              "max_px_raw": 449070,
+              "size_decimals": 0
+            },
+            "STRK": {
+              "min_px_raw": 4998,
+              "max_px_raw": 4998,
+              "size_decimals": 1
+            },
+            "ETHFI": {
+              "min_px_raw": 66392,
+              "max_px_raw": 66392,
+              "size_decimals": 1
+            },
+            "POL": {
+              "min_px_raw": 90757,
+              "max_px_raw": 90757,
+              "size_decimals": 0
+            },
+            "ME": {
+              "min_px_raw": 6259,
+              "max_px_raw": 6259,
+              "size_decimals": 1
+            },
+            "BERA": {
+              "min_px_raw": 16102,
+              "max_px_raw": 16102,
+              "size_decimals": 1
+            },
+            "SOPH": {
+              "min_px_raw": 1615,
+              "max_px_raw": 1615,
+              "size_decimals": 0
+            },
+            "SYRUP": {
+              "min_px_raw": 184523,
+              "max_px_raw": 184523,
+              "size_decimals": 0
+            },
+            "XPL": {
+              "min_px_raw": 76832,
+              "max_px_raw": 76832,
+              "size_decimals": 0
+            },
+            "STBL": {
+              "min_px_raw": 26828,
+              "max_px_raw": 26828,
+              "size_decimals": 0
+            },
+            "ZEC": {
+              "min_px_raw": 12231000,
+              "max_px_raw": 12231000,
+              "size_decimals": 2
+            },
+            "CC": {
+              "min_px_raw": 102663,
+              "max_px_raw": 102663,
+              "size_decimals": 0
+            },
+            "ICP": {
+              "min_px_raw": 274950,
+              "max_px_raw": 274950,
+              "size_decimals": 1
+            },
+            "AERO": {
+              "min_px_raw": 741680,
+              "max_px_raw": 741680,
+              "size_decimals": 0
+            },
+            "LIT": {
+              "min_px_raw": 3237300,
+              "max_px_raw": 3237300,
+              "size_decimals": 0
+            },
+            "xyz:META": {
+              "min_px_raw": 640800,
+              "max_px_raw": 640800,
+              "size_decimals": 3
+            },
+            "xyz:SNDK": {
+              "min_px_raw": 1242300,
+              "max_px_raw": 1242300,
+              "size_decimals": 3
+            },
+            "xyz:SKHX": {
+              "min_px_raw": 950000,
+              "max_px_raw": 950000,
+              "size_decimals": 3
+            }
+          }
+        },
+        {
+          "height": 1194824026,
+          "fill": {
+            "coin": "NEAR",
+            "px": "4.7489",
+            "sz": "2.4",
+            "side": "A",
+            "time": 1792794319552,
+            "startPosition": "0.0",
+            "dir": "Open Short",
+            "closedPnl": "0.0",
+            "hash": "0x9f2a36aca9ae62f5a0a3044737915a020140009244a181c742f2e1ff68a23ce0",
+            "oid": 584121250905,
+            "crossed": false,
+            "fee": "0.001709",
+            "tid": 302646640731443,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194824086,
+          "fill": {
+            "coin": "ME",
+            "px": "0.06241",
+            "sz": "175.0",
+            "side": "B",
+            "time": 1792794323540,
+            "startPosition": "-175.0",
+            "dir": "Close Short",
+            "closedPnl": "0.05075",
+            "hash": "0xc42382c7c679850dc59d044737919602016900ad617ca3df67ec2e1a857d5ef8",
+            "oid": 584121128736,
+            "crossed": false,
+            "fee": "0.001638",
+            "tid": 350193741475656,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194825198,
+          "fill": {
+            "coin": "PYTH",
+            "px": "0.070846",
+            "sz": "311.0",
+            "side": "B",
+            "time": 1792794401658,
+            "startPosition": "-311.0",
+            "dir": "Close Short",
+            "closedPnl": "0.056602",
+            "hash": "0xd1b68b9d45ec82dfd33004473795ee0201c00082e0efa1b1757f36f004e05cca",
+            "oid": 584121266639,
+            "crossed": false,
+            "fee": "0.003304",
+            "tid": 1017013884183196,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194827241,
+          "fill": {
+            "coin": "NEAR",
+            "px": "4.7349",
+            "sz": "2.4",
+            "side": "B",
+            "time": 1792794553903,
+            "startPosition": "-2.4",
+            "dir": "Close Short",
+            "closedPnl": "0.0336",
+            "hash": "0x2c194497153858cc2d930447379de9020256007cb03b779ecfe1efe9d43c32b6",
+            "oid": 584122915268,
+            "crossed": false,
+            "fee": "0.001704",
+            "tid": 223334222463465,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194828014,
+          "fill": {
+            "coin": "ZRO",
+            "px": "1.7312",
+            "sz": "6.4",
+            "side": "B",
+            "time": 1792794611837,
+            "startPosition": "-6.4",
+            "dir": "Close Short",
+            "closedPnl": "0.06464",
+            "hash": "0x87cb150ea6b4accb8944044737a0ee02035500f441b7cb9d2b93c06165b886b6",
+            "oid": 584123390762,
+            "crossed": false,
+            "fee": "0.001661",
+            "tid": 682440005706181,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194828167,
+          "fill": {
+            "coin": "XPL",
+            "px": "0.07655",
+            "sz": "261.0",
+            "side": "B",
+            "time": 1792794622830,
+            "startPosition": "-719.0",
+            "dir": "Close Short",
+            "closedPnl": "0.064989",
+            "hash": "0x0cea4dd2e3d4ee8b0e64044737a18702163a00b87ed80d5db0b2f925a2d8c875",
+            "oid": 584123635431,
+            "crossed": false,
+            "fee": "0.002996",
+            "tid": 263555111666991,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194828168,
+          "fill": {
+            "coin": "XPL",
+            "px": "0.07655",
+            "sz": "131.0",
+            "side": "B",
+            "time": 1792794622898,
+            "startPosition": "-458.0",
+            "dir": "Close Short",
+            "closedPnl": "0.032619",
+            "hash": "0x5e6b68be35ab97065fe5044737a18802069a00a3d0aeb5d802341410f4af70f1",
+            "oid": 584123635431,
+            "crossed": false,
+            "fee": "0.001504",
+            "tid": 455639279756291,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194828168,
+          "fill": {
+            "coin": "XPL",
+            "px": "0.07655",
+            "sz": "261.0",
+            "side": "B",
+            "time": 1792794622898,
+            "startPosition": "-327.0",
+            "dir": "Close Short",
+            "closedPnl": "0.064989",
+            "hash": "0xdc8cb9c5b571e370de06044737a18802069f00ab50750242805565187475bd5b",
+            "oid": 584123635431,
+            "crossed": false,
+            "fee": "0.002996",
+            "tid": 922737219270630,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194828168,
+          "fill": {
+            "coin": "XPL",
+            "px": "0.07655",
+            "sz": "66.0",
+            "side": "B",
+            "time": 1792794622898,
+            "startPosition": "-66.0",
+            "dir": "Close Short",
+            "closedPnl": "0.016434",
+            "hash": "0xed8c61b5016edc8def06044737a1880206b6009a9c61fb5f91550d07c062b678",
+            "oid": 584123635431,
+            "crossed": false,
+            "fee": "0.000757",
+            "tid": 482859943146719,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194828174,
+          "fill": {
+            "coin": "DASH",
+            "px": "53.723",
+            "sz": "0.21",
+            "side": "B",
+            "time": 1792794623339,
+            "startPosition": "0.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x3d91c0cb836856653f0b044737a18e02093800b11e6b7537e15a6c1e426c304f",
+            "oid": 584123635530,
+            "crossed": false,
+            "fee": "0.001692",
+            "tid": 317805609485186,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194828361,
+          "fill": {
+            "coin": "ATOM",
+            "px": "1.72",
+            "sz": "12.06",
+            "side": "B",
+            "time": 1792794636605,
+            "startPosition": "-38.24",
+            "dir": "Close Short",
+            "closedPnl": "0.098892",
+            "hash": "0xbe8b7ad140320cfec005044737a249020aa600b6db352bd062542623ff35e6e9",
+            "oid": 584123635343,
+            "crossed": false,
+            "fee": "0.003111",
+            "tid": 809389192684826,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194828361,
+          "fill": {
+            "coin": "ATOM",
+            "px": "1.72",
+            "sz": "26.18",
+            "side": "B",
+            "time": 1792794636605,
+            "startPosition": "-26.18",
+            "dir": "Close Short",
+            "closedPnl": "0.214676",
+            "hash": "0x4dac73c80bf552864f26044737a249020ac200ada6f87158f1751f1acaf92c70",
+            "oid": 584123635343,
+            "crossed": false,
+            "fee": "0.006754",
+            "tid": 874757013541717,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194828491,
+          "fill": {
+            "coin": "LIT",
+            "px": "3.2113",
+            "sz": "4.0",
+            "side": "B",
+            "time": 1792794645542,
+            "startPosition": "16.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x75620ee23ac6a0e776db044737a2cb020d2d00c7d5c9bfb9192aba34f9ca7ad2",
+            "oid": 584124001778,
+            "crossed": false,
+            "fee": "0.001926",
+            "tid": 940922768203918,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194828907,
+          "fill": {
+            "coin": "DASH",
+            "px": "53.494",
+            "sz": "0.21",
+            "side": "B",
+            "time": 1792794674663,
+            "startPosition": "0.21",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x75827dd03679e25176fc044737a46b02058000b5d17d0123194b2922f57dbc3c",
+            "oid": 584124643653,
+            "crossed": false,
+            "fee": "0.001685",
+            "tid": 365475538444251,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194829105,
+          "fill": {
+            "coin": "S",
+            "px": "0.051043",
+            "sz": "216.0",
+            "side": "B",
+            "time": 1792794688712,
+            "startPosition": "0.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x14bf3a0a048a6acd1638044737a5310219ab00ef9f8d899fb887e55cc38e44b7",
+            "oid": 584124997612,
+            "crossed": false,
+            "fee": "0.001653",
+            "tid": 503813524331392,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194829475,
+          "fill": {
+            "coin": "ZEC",
+            "px": "1199.6",
+            "sz": "0.01",
+            "side": "B",
+            "time": 1792794713896,
+            "startPosition": "0.04",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x69aefdae6203e6836b28044737a6a30206890093fd0705550d77a9012107c06e",
+            "oid": 584125224249,
+            "crossed": false,
+            "fee": "0.001799",
+            "tid": 740159061399498,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194829514,
+          "fill": {
+            "coin": "kBONK",
+            "px": "0.003149",
+            "sz": "3490.0",
+            "side": "B",
+            "time": 1792794716623,
+            "startPosition": "13491.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0xd2e2bbc2cb28fce7d45c044737a6ca0203e800a8662c1bb976ab67158a2cd6d2",
+            "oid": 584125436075,
+            "crossed": false,
+            "fee": "0.001648",
+            "tid": 188853085343655,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194829655,
+          "fill": {
+            "coin": "DOT",
+            "px": "1.0838",
+            "sz": "10.2",
+            "side": "B",
+            "time": 1792794726710,
+            "startPosition": "0.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x450ec9e0623ee0f94688044737a757000049e1c5fd31ffcbe8d775332132bae3",
+            "oid": 584125677884,
+            "crossed": false,
+            "fee": "0.001658",
+            "tid": 676420555391634,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        },
+        {
+          "height": 1194829719,
+          "fill": {
+            "coin": "LIT",
+            "px": "3.183",
+            "sz": "4.0",
+            "side": "B",
+            "time": 1792794731431,
+            "startPosition": "20.0",
+            "dir": "Open Long",
+            "closedPnl": "0.0",
+            "hash": "0x04b0df97d9de617f062a044737a79702024a007d74d18051a8798aea98d23b69",
+            "oid": 584125762301,
+            "crossed": false,
+            "fee": "0.001909",
+            "tid": 404924695822052,
+            "feeToken": "USDC",
+            "twapId": null
+          },
+          "mark": null,
+          "collateral": {}
+        }
+      ],
+      "business_rejections": [],
+      "trackers": {
+        "0": {
+          "e": 4406724,
+          "a": [
+            [
+              199,
+              {
+                "n": [
+                  0,
+                  67393200
+                ],
+                "s": [
+                  0,
+                  339
+                ],
+                "P": 339,
+                "p": 198650,
+                "l": 3
+              }
+            ],
+            [
+              197,
+              {
+                "n": [
+                  0,
+                  13220172
+                ],
+                "s": [
+                  0,
+                  7308
+                ],
+                "P": -24629,
+                "p": 1627,
+                "l": 3
+              }
+            ]
+          ]
+        },
+        "1": {
+          "e": 3669986,
+          "a": [
+            [
+              10056,
+              {
+                "n": [
+                  33154080,
+                  0
+                ],
+                "s": [
+                  48,
+                  0
+                ],
+                "P": -48,
+                "p": 690870,
+                "l": 3
+              }
+            ],
+            [
+              10043,
+              {
+                "n": [
+                  0,
+                  11009960
+                ],
+                "s": [
+                  0,
+                  403
+                ],
+                "P": -404,
+                "p": 27220,
+                "l": 3
+              }
+            ]
+          ]
+        }
+      },
+      "sources": {
+        "1194820000_selected_states.json": "4e2613736acfaa8d0e74fed18e8660661840e002e287098439f4f671411dc101",
+        "1194830000_selected_states.json": "653904fd3323bc83ad9dc0df5e2da2da1c57106e668dacad70cb977f6322849f",
+        "node_fills_streaming.jsonl.gz": "373db11a86e68f9264309ff1192a09c868a2291c686db42e163228902feb964f",
+        "misc_events_streaming.jsonl.gz": "6e61ef6cb217b3dd590f332718aa420c87e25495efd16c904155c0b78af6341e",
+        "account_actions_selected.jsonl.gz": "3f09d0341d182f573292d7f501feb0cb1a5a5a9601eaae829da08cc2e1eb517c",
+        "../../heartbeat_20261024T002140Z/softbank_followup/mark_replay.log": "5fd4295929b79757f93767c67f7b0ff43f26436b3438ea3f1a43abaa641fb069"
+      }
+    }
+  ],
+  "native_probe": {
+    "native_binary_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+    "cases": [
+      {
+        "available_micro": 3668831,
+        "max_maker_size_raw": 403,
+        "result": {
+          "isolated_cash_micro": 29317175,
+          "size_raw": -807,
+          "cross_cash_micro": 0
+        }
+      },
+      {
+        "available_micro": 3669986,
+        "max_maker_size_raw": 403,
+        "result": {
+          "isolated_cash_micro": 29318330,
+          "size_raw": -807,
+          "cross_cash_micro": 0
+        }
+      },
+      {
+        "available_micro": 4659033447,
+        "max_maker_size_raw": 512714,
+        "result": {
+          "isolated_cash_micro": 29318330,
+          "size_raw": -807,
+          "cross_cash_micro": 4655363461
+        }
+      },
+      {
+        "available_micro": 0,
+        "max_maker_size_raw": 0,
+        "result": {
+          "isolated_cash_micro": 25648344,
+          "size_raw": -807,
+          "cross_cash_micro": 0
+        }
+      }
+    ],
+    "scope": "Native isolated transfer and maker-admission functions with intercepted lookups, independently derived executing-dex available margin; no routing wrapper or sweep schedule executed. Physical cross cash uses checkpoint with no prior account events."
+  }
+}

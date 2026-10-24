@@ -14,6 +14,7 @@ use crate::{accounts::{checkpoint::{AccountMode, CheckpointAccounts, PositionMar
 use super::{AccountMargin, FillEvent, Markets, Pools};
 
 mod other_dex;
+mod anchor_cross;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RoutingUpdate {
@@ -37,6 +38,8 @@ pub(crate) struct OrderChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FundingPath {
     RestingMaker,
+    /// Checkpoint executing-dex cash, valid only until its first observed routing boundary/fill.
+    AnchoredCrossMaker { dex: usize },
     /// Known locked funds bound available collateral; they do not establish physical prefunding/sweep order.
     OtherDexReserve { locked_micro: i64, ioc_block: Option<u64> },
 }
@@ -60,6 +63,10 @@ impl RoutingProjection {
         if checkpoint.order_trackers.iter().any(Option::is_none) { return result; }
         for (user, account) in &checkpoint.accounts {
             if account.mode != AccountMode::Unified || checkpoint.spot_usdc_holds.get(user).copied().unwrap_or(0) != 0 { continue; }
+            if let Some(route) = Self::anchored_cross_seed(checkpoint, markets, user, account) {
+                result.insert(*user, route);
+                continue;
+            }
             if let Some(route) = Self::other_dex_seed(checkpoint, markets, user, account) {
                 result.insert(*user, route);
                 continue;
@@ -102,6 +109,10 @@ impl RoutingProjection {
 
     pub(super) fn coin(&self) -> &str { &self.coin }
 
+    pub(super) fn expires_on_funding(&self, coin: &str) -> bool {
+        self.coin != coin || matches!(self.path, FundingPath::AnchoredCrossMaker { .. })
+    }
+
     pub(super) const fn invalidate(&mut self) { self.tracker_trusted = false; self.cash_micro = None; }
 
     pub(super) fn orders(&mut self, changes: &[OrderChange], mark_raw: Option<u64>, prefund: bool, aggregate_wei: i64) -> Option<()> {
@@ -139,7 +150,7 @@ impl RoutingProjection {
             FundingPath::OtherDexReserve { locked_micro, ioc_block: Some(height) }
                 if height == block && fill.coin == self.coin && fill.crossed && !fill.backstop =>
                 (aggregate_wei / WEI_PER_MICRO).checked_sub(locked_micro).map(|cash| cash.max(0)),
-            FundingPath::OtherDexReserve { .. } => None,
+            FundingPath::OtherDexReserve { .. } | FundingPath::AnchoredCrossMaker { .. } => None,
         };
         if capacity.is_none() { self.cash_micro = None; }
         capacity
@@ -170,6 +181,7 @@ impl RoutingProjection {
 
     pub(super) fn filled(&mut self, block: u64, fill: &FillEvent, end: i64, cross_delta_wei: i64) -> Option<()> {
         if !self.tracker_trusted || fill.coin != self.coin || cross_delta_wei % WEI_PER_MICRO != 0 { return None; }
+        if matches!(self.path, FundingPath::AnchoredCrossMaker { .. }) { return None; }
         if let FundingPath::OtherDexReserve { ioc_block, .. } = self.path {
             return (ioc_block == Some(block) && fill.crossed && !fill.backstop).then_some(());
         }

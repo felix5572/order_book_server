@@ -260,3 +260,109 @@ fn missing_cross_dex_projection_cannot_turn_a_partial_portfolio_into_capacity() 
     assert_eq!(account.isolated[&(1, 29)], 43_102_577 * WEI_PER_MICRO);
     assert!(account.estimated);
 }
+
+fn softbank_source() -> (serde_json::Value, MarginStates, Address) {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!("softbank_maker_window.json")).unwrap();
+    let case = fixture["cases"][0].clone();
+    let (source, mut markets) = cross_dex_source(&case);
+    let who: Address = case["user"].as_str().unwrap().parse().unwrap();
+    let (mut checkpoint, _, _) = routing::tests::checkpoint();
+    checkpoint.accounts = [(who, source)].into_iter().collect();
+    checkpoint.spot_usdc_holds.clear();
+    checkpoint.order_trackers = (0..2).map(|dex| Some(case["trackers"][dex.to_string()].as_object().map_or_else(
+        FxHashMap::default, |tracker| [(who, crate::accounts::checkpoint::OrderTrackerSnapshot {
+            reserve_micro: tracker["e"].as_i64().unwrap(),
+            assets: serde_json::from_value(tracker["a"].clone()).unwrap(),
+        })].into_iter().collect()))).collect();
+    // The candidate's recorded table10 is the native implicit one-tier table. Other tables are not
+    // admission inputs; physical capacity instead uses each cross position's explicit stored leverage.
+    markets.tables = vec![FxHashMap::default(); 2];
+    markets.tables[1].insert(10, MarginTable::single(10).unwrap());
+    let routes = routing::RoutingProjection::seeds(&checkpoint, &markets);
+    let mut account = AccountMargin::of(&checkpoint.accounts[&who], &markets);
+    account.routing = Some(routes[&who].clone());
+    (case, MarginStates { markets, accounts: [(who, account)].into_iter().collect() }, who)
+}
+
+fn softbank_fill(case: &serde_json::Value) -> FillEvent {
+    let event = &case["events"][0];
+    let wire: Fill = serde_json::from_value(event["fill"].clone()).unwrap();
+    let mut fill = FillEvent::at_mark(&wire, Some(recorded_range(&event["mark"]))).unwrap();
+    fill.collateral_marks = Some(Arc::new(event["collateral"].as_object().unwrap().iter()
+        .map(|(coin, price)| (coin.clone(), recorded_range(price))).collect()));
+    fill
+}
+
+#[test]
+fn softbank_complete_window_caps_first_maker_by_executing_dex_capacity() {
+    let (case, mut states, who) = softbank_source();
+    let fill = softbank_fill(&case);
+    let account = &states.accounts[&who];
+    let capacity = account.routing.as_ref().unwrap().anchored_cross_capacity(&fill, 14_638_714, &account.cross_capacity, Some(4_659_033_447)).unwrap();
+    assert_eq!(capacity, Some(3_668_831));
+    let height = case["events"][0]["height"].as_u64().unwrap();
+    states.apply(height, who, &AccountEvent::Fill(fill));
+    assert_eq!(states.accounts[&who].isolated[&(1, 43)], 29_317_175 * WEI_PER_MICRO);
+    assert!(states.accounts[&who].routing.is_none(), "a first maker consumes the checkpoint physical-balance proof");
+    for event in case["events"].as_array().unwrap().iter().skip(1) {
+        assert!(event.get("funding").is_none() && event.get("action").is_none());
+        let wire: Fill = serde_json::from_value(event["fill"].clone()).unwrap();
+        states.apply(event["height"].as_u64().unwrap(), who, &AccountEvent::Fill(FillEvent::of(&wire).unwrap()));
+    }
+    let account = &states.accounts[&who];
+    assert!(account.stop.is_none(), "{:?}", account.stop);
+    let mut cash = case["after"]["spot_wei"].as_i64().unwrap();
+    let mut expected = FxHashMap::default();
+    for dex in case["after"]["dex_states"].as_array().unwrap() {
+        cash += dex["cash_micro"].as_i64().unwrap() * WEI_PER_MICRO;
+        for (coin, raw) in dex["positions"].as_object().unwrap() {
+            if raw.get("s").is_none_or(|s| s.as_i64().unwrap() == 0) { continue; }
+            if let Some(isolated) = raw["l"].get("I") {
+                let market = &states.markets.perps[coin];
+                expected.insert((market.dex, market.asset), isolated["u"].as_i64().unwrap() * WEI_PER_MICRO);
+            }
+        }
+    }
+    assert_eq!(account.isolated, expected, "all isolated cash, not only the focal position");
+    assert_eq!(account.pools, Pools::Unified(cash));
+    assert!(account.estimated, "native scalar admission does not prove the complete Unified wrapper");
+    let (old, _) = replay_cross_dex(&case, false);
+    assert_eq!(old.isolated[&(1, 43)] - account.isolated[&(1, 43)], 1_155 * WEI_PER_MICRO);
+}
+
+#[test]
+fn softbank_physical_capacity_expires_on_boundary_and_requires_complete_prices() {
+    for variant in 0..11 {
+        let (case, mut states, who) = softbank_source();
+        let mut fill = softbank_fill(&case);
+        let account = states.accounts.get_mut(&who).unwrap();
+        match variant {
+            0 => routing::apply_update(account, 1, &routing::RoutingUpdate::Unavailable),
+            1 => routing::apply_update(account, 1, &routing::RoutingUpdate::OrdinaryIoc),
+            2 => fill.collateral_marks = None,
+            3 => { Arc::make_mut(fill.collateral_marks.as_mut().unwrap()).get_mut("xyz:META").unwrap().max_px_raw += 1; },
+            4 => account.cross_capacity.get_mut(&1).unwrap().advanced = true,
+            5 => fill.crossed = true,
+            6 => fill.sz = "0.402".into(),
+            7 => fill.mark = None,
+            8 => { Arc::make_mut(fill.collateral_marks.as_mut().unwrap()).remove("xyz:META"); },
+            9 => { Arc::make_mut(fill.collateral_marks.as_mut().unwrap()).get_mut("xyz:META").unwrap().size_decimals = 2; },
+            10 => fill.mark = Some(FillMarkRange { min_px_raw: 50_000, max_px_raw: 50_000, size_decimals: 3 }),
+            _ => unreachable!(),
+        }
+        let capacity = account.routing.as_ref().and_then(|route|
+            route.anchored_cross_capacity(&fill, 14_638_714, &account.cross_capacity, Some(4_659_033_447)).unwrap());
+        assert_eq!(capacity, None, "variant {variant} cannot retain a checkpoint physical cap");
+    }
+    let (case, mut states, who) = softbank_source();
+    states.apply(1, who, &AccountEvent::Action(BlockAction::Withdraw { amount_wei: 0 }));
+    assert!(states.accounts[&who].routing.is_none(), "cash actions invalidate the anchor even before a later fill");
+    let (_, mut funding_states, funding_user) = softbank_source();
+    funding_states.apply(1, funding_user, &AccountEvent::Funding { coin: "xyz:SOFTBANK".into(), amount_wei: 100 });
+    assert!(funding_states.accounts[&funding_user].routing.is_none(), "even own-position funding consumes the first-maker boundary");
+    let mut fill = softbank_fill(&case);
+    fill.start_position = "-0.405".into();
+    let (_, states, who) = softbank_source();
+    let a = &states.accounts[&who];
+    assert_eq!(a.routing.as_ref().unwrap().anchored_cross_capacity(&fill, 14_638_714, &a.cross_capacity, Some(4_659_033_447)).unwrap(), None);
+}

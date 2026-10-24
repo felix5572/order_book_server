@@ -1024,3 +1024,15 @@ Main-dex cash 456.515934 USDC is entirely retained by order reserve 451.995975 U
 171.163023 USDC from spot. All six steps match the native supplied-capacity arithmetic, ending at isolated cash
 11479.565555 USDC rather than 11494.025270, correcting the 14.459715 USDC split while conserving total cash.
 The golden regression is offline; live rollout and generic routing confidence are separate acceptance steps.
+
+
+Unified checkpoint maker collateral (SOFTBANK)
+---------------------------------------------
+
+Unified maker funding at an untouched checkpoint can use the executing dex's own cash and cross collateral.
+SOFTBANK H1194820315 has 3.668831 USDC available on xyz despite 4659.033447 USDC aggregate capacity;
+native admission accepts the complete 0.403 maker fill without replenishment, and that local cap explains
+the 0.001155 USDC split. `replay/softbank_maker_window.json` verifies all cash across the 20-fill window.
+This path requires one eligible isolated-only tracked target, complete execution collateral prices, no
+intervening routing boundary, and the whole remaining maker side. It expires after the first fill and remains
+`cashEstimated`; missing prices, a changed tracker or admission requiring replenishment keep the prior estimate.
