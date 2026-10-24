@@ -1,0 +1,257 @@
+{
+  "provenance": {
+    "window": [
+      1196040000,
+      1196050000
+    ],
+    "user": "0x70ece0a4e714dffc2c2635c4f04cc6e6bb348aec",
+    "archive": "ob_hourly_watch_20261021/heartbeat_20261024T232306Z/cash_evidence",
+    "scope": "Selected checkpoint states, complete two-fill interval, successful idempotent isolated3x action17blocks earlier. Ten cross positions unchanged; full mark/book replay234x7 and236books/316153orders exact. Every execution collateral envelope single-valued. No endpoint-derived cap is an input.",
+    "native_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+    "probe_base_commit": "9fef842ebfed618e0d82ecc3864815164fe1b51c",
+    "original_error_micro": 56546
+  },
+  "markets": {
+    "INJ": {
+      "size_decimals": 1,
+      "native_asset": 13
+    },
+    "UNI": {
+      "size_decimals": 1,
+      "native_asset": 39
+    },
+    "ZRO": {
+      "size_decimals": 1,
+      "native_asset": 46
+    },
+    "NEAR": {
+      "size_decimals": 1,
+      "native_asset": 74
+    },
+    "DYM": {
+      "size_decimals": 1,
+      "native_asset": 109
+    },
+    "ENA": {
+      "size_decimals": 0,
+      "native_asset": 122
+    },
+    "HYPE": {
+      "size_decimals": 2,
+      "native_asset": 159
+    },
+    "VVV": {
+      "size_decimals": 2,
+      "native_asset": 178
+    },
+    "NIL": {
+      "size_decimals": 0,
+      "native_asset": 186
+    },
+    "ZEC": {
+      "size_decimals": 2,
+      "native_asset": 214
+    },
+    "MEGA": {
+      "size_decimals": 0,
+      "native_asset": 217
+    }
+  },
+  "before": {
+    "cash_micro": 2152492191,
+    "spot_wei": 0,
+    "positions": {
+      "INJ": {
+        "s": 4273,
+        "l": {
+          "C": 5
+        },
+        "M": 5
+      },
+      "UNI": {
+        "s": 11807,
+        "l": {
+          "C": 10
+        },
+        "M": 52
+      },
+      "ZRO": {
+        "s": -23286,
+        "l": {
+          "C": 5
+        },
+        "M": 5
+      },
+      "NEAR": {
+        "s": 16157,
+        "l": {
+          "C": 10
+        },
+        "M": 52
+      },
+      "DYM": {
+        "s": 1224592,
+        "l": {
+          "C": 3
+        },
+        "M": 3
+      },
+      "ENA": {
+        "s": 42375,
+        "l": {
+          "C": 10
+        },
+        "M": 52
+      },
+      "HYPE": {
+        "s": -9389,
+        "l": {
+          "C": 10
+        },
+        "M": 52
+      },
+      "VVV": {
+        "s": -9021,
+        "l": {
+          "C": 3
+        },
+        "M": 3
+      },
+      "NIL": {
+        "s": 0,
+        "l": {
+          "I": {
+            "l": 3,
+            "u": 0
+          }
+        },
+        "M": 3
+      },
+      "ZEC": {
+        "s": -598,
+        "l": {
+          "C": 10
+        },
+        "M": 52
+      },
+      "MEGA": {
+        "s": -60729,
+        "l": {
+          "C": 3
+        },
+        "M": 3
+      }
+    }
+  },
+  "leverage_action": {
+    "height": 1196045879,
+    "bundle_hash": "0xda5c9da478e0c8dddf4a5dddf8164852635286470badabb2da9f7c75f64652f7",
+    "index": 2113,
+    "action": {
+      "type": "updateLeverage",
+      "asset": 186,
+      "isCross": false,
+      "leverage": 3
+    },
+    "response": {
+      "user": "0x70ece0a4e714dffc2c2635c4f04cc6e6bb348aec",
+      "res": {
+        "status": "ok",
+        "response": {
+          "type": "default"
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "height": 1196045896,
+      "fill": {
+        "coin": "NIL",
+        "px": "0.089009",
+        "sz": "2553.0",
+        "side": "A",
+        "time": 1792882459419,
+        "startPosition": "0.0",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x260c2ffefe70eb27278504474a36480201ef00e4997409f9c9d4db51bd74c511",
+        "oid": 584932620421,
+        "crossed": true,
+        "fee": "0.1777",
+        "builderFee": "0.079533",
+        "tid": 335115763257850,
+        "cloid": "0x020000030100000abc4421cc8161f014",
+        "feeToken": "USDC",
+        "builder": "0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81",
+        "twapId": null
+      },
+      "mark_raw": 88879,
+      "collateral": {
+        "INJ": 759760,
+        "UNI": 681100,
+        "ZRO": 174050,
+        "NEAR": 446920,
+        "DYM": 1810,
+        "ENA": 194140,
+        "HYPE": 763970,
+        "VVV": 241333,
+        "ZEC": 12047000,
+        "MEGA": 45280
+      },
+      "capacity_micro": 120313291,
+      "native_after": {
+        "isolated_cash_micro": 302808936,
+        "size_raw": -2553,
+        "cross_cash_micro": 44566632
+      }
+    },
+    {
+      "height": 1196045896,
+      "fill": {
+        "coin": "NIL",
+        "px": "0.089009",
+        "sz": "1504.0",
+        "side": "A",
+        "time": 1792882459419,
+        "startPosition": "-2553.0",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x260c2ffefe70eb27278504474a36480201ef00e4997409f9c9d4db51bd74c511",
+        "oid": 584932620421,
+        "crossed": true,
+        "fee": "0.104685",
+        "builderFee": "0.046854",
+        "tid": 1043211150272362,
+        "cloid": "0x020000030100000abc4421cc8161f014",
+        "feeToken": "USDC",
+        "builder": "0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81",
+        "twapId": null
+      },
+      "mark_raw": 88879,
+      "collateral": {
+        "INJ": 759760,
+        "UNI": 681100,
+        "ZRO": 174050,
+        "NEAR": 446920,
+        "DYM": 1810,
+        "ENA": 194140,
+        "HYPE": 763970,
+        "VVV": 241333,
+        "ZEC": 12047000,
+        "MEGA": 45280
+      },
+      "capacity_micro": 44566632,
+      "native_after": {
+        "isolated_cash_micro": 481140419,
+        "size_raw": -4057,
+        "cross_cash_micro": 0
+      }
+    }
+  ],
+  "after": {
+    "cash_micro": 2032178900,
+    "isolated_micro": 481140419,
+    "size_raw": -4057
+  }
+}

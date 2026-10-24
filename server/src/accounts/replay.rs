@@ -921,9 +921,12 @@ fn apply_action(account: &mut AccountMargin, markets: &Markets, block: u64, acti
         }
         BlockAction::Leverage { asset, is_cross, leverage } => {
             let market = market_of(*asset)?;
-            // An action can change either membership or a cross IM divisor; invalidate even an idempotent setting.
-            account.cross_capacity.remove(&market.dex);
             let key = (market.dex, market.asset);
+            // NIL1196045879 repeats the saved3x setting while closed: no cross membership, divisor or cash changes.
+            // Keep that existing proof; active positions and actual setting changes still invalidate it.
+            let unchanged_closed_isolated = !*is_cross && !account.isolated.contains_key(&key)
+                && account.isolated_leverage.get(&key) == Some(leverage);
+            if !unchanged_closed_isolated { account.cross_capacity.remove(&market.dex); }
             // a switch either way, or a new isolated leverage: a fill of the block may precede it
             let changed = if *is_cross {
                 account.isolated_leverage.remove(&key).is_some()

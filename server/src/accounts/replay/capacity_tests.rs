@@ -432,3 +432,59 @@ fn near_complete_flip_windows_preserve_signed_cash_and_spot_dust() {
         assert!(account.estimated);
     }
 }
+
+#[test]
+fn repeated_closed_isolated_leverage_retains_cross_capacity() {
+    let case: serde_json::Value = serde_json::from_str(include_str!("nil_idempotent_leverage_golden.json")).unwrap();
+    for already_unknown in [false, true] {
+        let (mut anchor, mut markets) = source(&case);
+        anchor.mode = AccountMode::Default;
+        let key = (0, markets.perps["NIL"].asset);
+        let raw = &case["leverage_action"]["action"];
+        let action_asset = u32::try_from(raw["asset"].as_u64().unwrap()).unwrap();
+        markets.action_assets.insert(action_asset, "NIL".into());
+        let holder = case["provenance"]["user"].as_str().unwrap().parse::<Address>().unwrap();
+        let mut account = AccountMargin::of(&anchor, &markets);
+        assert!(!account.isolated.contains_key(&key), "NIL is closed with a saved3x setting");
+        assert_eq!(account.isolated_leverage[&key], 3);
+        if already_unknown { account.cross_capacity.remove(&0); }
+        let mut states = MarginStates { markets, accounts: [(holder, account)].into_iter().collect() };
+        let action = BlockAction::Leverage { asset: action_asset, is_cross: raw["isCross"].as_bool().unwrap(),
+            leverage: u32::try_from(raw["leverage"].as_u64().unwrap()).unwrap() };
+        let action_height = case["leverage_action"]["height"].as_u64().unwrap();
+        for _ in 0..2 {
+            assert!(states.apply(action_height, holder, &AccountEvent::Action(action.clone())));
+            assert_eq!(states.accounts[&holder].cross_capacity.contains_key(&0), !already_unknown,
+                "a no-op preserves an existing proof and never recreates a missing one");
+        }
+        for row in case["events"].as_array().unwrap() {
+            let wire: Fill = serde_json::from_value(row["fill"].clone()).unwrap();
+            let requested = states.collateral_coins([crate::types::node_data::NodeDataFill(holder, wire.clone())].iter());
+            assert_eq!(requested.len(), if already_unknown { 0 } else { 10 });
+            let mut fill = FillEvent::at_mark(&wire, Some(FillMarkRange {
+                min_px_raw: row["mark_raw"].as_u64().unwrap(), max_px_raw: row["mark_raw"].as_u64().unwrap(), size_decimals: 0,
+            })).unwrap();
+            if !already_unknown {
+                let prices = row["collateral"].as_object().unwrap().iter().map(|(coin, px)| (coin.clone(), FillMarkRange {
+                    min_px_raw: px.as_u64().unwrap(), max_px_raw: px.as_u64().unwrap(), size_decimals: states.markets.perps[coin].size_decimals,
+                })).collect();
+                fill.collateral_marks = Some(Arc::new(prices));
+                let account = &states.accounts[&holder];
+                let Pools::PerDex(cash) = &account.pools else { unreachable!() };
+                assert_eq!(account.cross_capacity[&0].available_micro(cash[&0], fill.collateral_marks.as_ref().unwrap()).unwrap(),
+                    Some(row["capacity_micro"].as_i64().unwrap()));
+            }
+            assert!(states.apply(row["height"].as_u64().unwrap(), holder, &AccountEvent::Fill(fill)));
+        }
+        let account = &states.accounts[&holder];
+        assert!(account.stop.is_none());
+        let error = if already_unknown { case["provenance"]["original_error_micro"].as_i64().unwrap() } else { 0 };
+        assert_eq!(account.isolated[&key], (case["after"]["isolated_micro"].as_i64().unwrap() + error) * WEI_PER_MICRO);
+        assert_eq!(account.pools, Pools::PerDex([(0, (case["after"]["cash_micro"].as_i64().unwrap() - error) * WEI_PER_MICRO)].into_iter().collect()));
+        assert_eq!(account.estimated, already_unknown);
+        // The new proof is deliberately limited to a closed position. Active-position leverage handling
+        // retains its existing conservative invalidation, even for the same numerical setting.
+        assert!(states.apply(1196045897, holder, &AccountEvent::Action(action)));
+        assert!(!states.accounts[&holder].cross_capacity.contains_key(&0));
+    }
+}
