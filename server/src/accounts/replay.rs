@@ -815,7 +815,7 @@ const fn spot_fee_source(account: &AccountMargin, usdc_fee_wei: i64) -> Applied 
 /// `user` is the account the event is applied to; its role (sender, receiver, vault) comes from the delta.
 fn apply_ledger(account: &mut AccountMargin, markets: &Markets, user: Address, delta: &LedgerDelta) -> Applied {
     match delta {
-        LedgerDelta::Send { user: sender, destination, source, destination_balance, usdc_wei, usdc_fee_wei } => {
+        LedgerDelta::Send { user: sender, destination, source, destination_balance, usdc_wei, usdc_fee_wei, .. } => {
             if user == *sender {
                 spot_fee_source(account, *usdc_fee_wei)?;
                 // another token's send takes only its USDC fee
@@ -1398,6 +1398,7 @@ pub(crate) mod tests {
             destination_balance: destination,
             usdc_wei: usdc,
             usdc_fee_wei: fee,
+            nonce: None,
         })
     }
 

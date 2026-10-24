@@ -1036,3 +1036,5 @@ the 0.001155 USDC split. `replay/softbank_maker_window.json` verifies all cash a
 This path requires one eligible isolated-only tracked target, complete execution collateral prices, no
 intervening routing boundary, and the whole remaining maker side. It expires after the first fill and remains
 `cashEstimated`; missing prices, a changed tracker or admission requiring replenishment keep the prior estimate.
+
+现金回放补充（2026-10-24）：已确认的延迟 `SystemSendAssetAction`（USDC 从 spot 转主 dex）与成功账本流水按账户、nonce、金额和去向唯一匹配，且双方同块成交全部能归属普通下单时，先入账再回放成交。该顺序仍在 funding 之后，并写入同一重放日志；缺时序、重复证据、同块其他现金操作或无法归属成交时保持原估算。EUR 1194920000→1194930000 的四笔成交据此消除 849.373668 USDC 分配误差；统一账户物理划转边界仍保留 `cashEstimated`。NEAR 两个完整反手窗口也补为金样本，核验负现金与现货尾数合并后的微 USDC 取整（由 e8269ea 覆盖）。这些是离线验证，不替代部署后的 checkpoint 验收。

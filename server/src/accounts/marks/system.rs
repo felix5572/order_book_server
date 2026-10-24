@@ -19,6 +19,7 @@ use crate::types::node_data::NodeDataOrderStatus;
 pub(crate) struct SystemAction {
     user: Address,
     evm_tx_hash: Option<B256>,
+    nonce: Option<u64>,
     action: Action,
 }
 
@@ -33,8 +34,34 @@ enum Action {
     CancelByCloid { cancels: Vec<CancelByCloid>, #[serde(default)] f: bool },
     #[serde(rename = "vaultTransfer")]
     VaultTransfer { #[serde(rename = "vaultAddress")] vault: Address, #[serde(rename = "isDeposit")] is_deposit: bool },
+    #[serde(rename = "SystemSendAssetAction")]
+    SendAsset { destination: Address, #[serde(rename = "fromSubAccount", deserialize_with = "nullable")] from_sub_account: Option<Address>,
+        #[serde(rename = "sourceDexOrSpot", deserialize_with = "nullable")] source: Option<u32>, #[serde(rename = "destinationDexOrSpot", deserialize_with = "nullable")] destination_dex: Option<u32>,
+        token: u32, wei: u64 },
     #[serde(other)]
     Other,
+}
+
+// These wire fields permit explicit null; omission must not become evidence for spot/no-subaccount.
+fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(de: D) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(de)
+}
+
+/// Successful ledger matching supplies the outcome; this request only supplies pre-bundle timing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DelayedSend {
+    pub(crate) user: Address,
+    pub(crate) destination: Address,
+    pub(crate) nonce: u64,
+    pub(crate) wei: u64,
+}
+
+impl SystemAction {
+    pub(crate) fn spot_to_main_usdc(&self) -> Option<DelayedSend> {
+        self.evm_tx_hash?;
+        let Action::SendAsset { destination, from_sub_account: None, source: None, destination_dex: Some(0), token: 0, wei } = self.action else { return None; };
+        Some(DelayedSend { user: self.user, destination, nonce: self.nonce?, wei })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,7 +125,7 @@ impl SystemBlock {
                 }
                 Action::Cancel { cancels, f } => out.cancels.extend(cancels.into_iter().map(|c| CancelRequest { user: event.user, asset: c.a, oid: Some(c.o), cloid: None, delayed: Some(!f) })),
                 Action::CancelByCloid { cancels, f } => out.cancels.extend(cancels.into_iter().map(|c| CancelRequest { user: event.user, asset: c.asset, oid: None, cloid: Some(c.cloid), delayed: Some(!f) })),
-                Action::Other | Action::VaultTransfer { .. } => {}
+                Action::Other | Action::VaultTransfer { .. } | Action::SendAsset { .. } => {}
             }
         }
         if out.requests.is_empty() && out.cancels.is_empty() { return Ok(out); }
@@ -182,13 +209,17 @@ impl SystemBlock {
     }
 }
 
+pub(crate) fn positive_delay(timing: Option<(f64, f64)>) -> bool {
+    timing.is_some_and(|(delay, scale)| delay.is_finite() && scale.is_finite() && delay > 0.0 && scale > 0.0)
+}
+
 impl SystemAnchors {
     fn target(&mut self, delayed: Option<bool>, timing: Option<(f64, f64)>) -> Result<&mut BookAnchors, String> {
         match delayed {
             Some(false) => Ok(&mut self.after),
             Some(true) => {
                 let Some((delay, scale)) = timing else { return Err("CoreWriter phase requires checkpoint delay parameters".into()); };
-                if !delay.is_finite() || !scale.is_finite() || delay <= 0.0 || scale <= 0.0 {
+                if !positive_delay(Some((delay, scale))) {
                     return Err("CoreWriter phase is unverified for nonpositive/nonfinite delay parameters".into());
                 }
                 Ok(&mut self.before)

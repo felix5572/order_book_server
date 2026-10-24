@@ -366,3 +366,69 @@ fn softbank_physical_capacity_expires_on_boundary_and_requires_complete_prices()
     let a = &states.accounts[&who];
     assert_eq!(a.routing.as_ref().unwrap().anchored_cross_capacity(&fill, 14_638_714, &a.cross_capacity, Some(4_659_033_447)).unwrap(), None);
 }
+
+fn assert_recorded_cash(case: &serde_json::Value, account: &AccountMargin, markets: &Markets) {
+    let mut cash = case["after"]["spot_wei"].as_i64().unwrap();
+    let mut isolated = FxHashMap::default();
+    for dex in case["after"]["dex_states"].as_array().unwrap() {
+        cash += dex["cash_micro"].as_i64().unwrap() * WEI_PER_MICRO;
+        for (coin, position) in dex["positions"].as_object().unwrap() {
+            if position.get("s").is_none_or(|s| s.as_i64().unwrap() == 0) { continue; }
+            if let Some(margin) = position["l"].get("I") {
+                let market = &markets.perps[coin];
+                isolated.insert((market.dex, market.asset), margin["u"].as_i64().unwrap() * WEI_PER_MICRO);
+            }
+        }
+    }
+    assert_eq!(account.isolated, isolated, "{}", case["window"]);
+    assert_eq!(account.pools, Pools::Unified(cash), "{}", case["window"]);
+}
+
+#[test]
+fn eur_delayed_system_send_funds_the_recorded_four_fill_window() {
+    use crate::accounts::cash_order::ledger::{PreBundleLedger, tests::{golden, block}};
+    let case = golden();
+    let who: Address = case["user"].as_str().unwrap().parse().unwrap();
+    let (source, mut markets) = cross_dex_source(&case);
+    markets.dexes.insert(String::new(), 0);
+    let mut results = Vec::new();
+    for reorder in [false, true] {
+        let mut account = AccountMargin::of(&source, &markets);
+        for raw in case["blocks"].as_array().unwrap() {
+            let height = raw["height"].as_u64().unwrap();
+            let (actions, fills, mut misc, inputs) = block(raw);
+            let early = PreBundleLedger::of(&actions, &fills, &misc, &inputs, reorder).take(&mut misc, true);
+            for batch in early {
+                for event in batch.events() {
+                    let crate::accounts::misc::MiscEvent::Ledger { delta, .. } = event else { panic!() };
+                    apply_ledger(&mut account, &markets, who, &delta).unwrap();
+                }
+            }
+            for event in case["events"].as_array().unwrap().iter().filter(|e| e["height"].as_u64() == Some(height)) {
+                let fill: Fill = serde_json::from_value(event["fill"].clone()).unwrap();
+                apply_perp_fill(&mut account, &markets, height, &FillEvent::at_mark(&fill, Some(recorded_range(&event["mark"]))).unwrap()).unwrap();
+            }
+            for batch in misc {
+                for event in batch.events() {
+                    let crate::accounts::misc::MiscEvent::Ledger { delta, .. } = event else { panic!() };
+                    apply_ledger(&mut account, &markets, who, &delta).unwrap();
+                }
+            }
+        }
+        if reorder { assert_recorded_cash(&case, &account, &markets); }
+        results.push(account);
+    }
+    assert_eq!(results[1].isolated[&(1, 25)] - results[0].isolated[&(1, 25)], 849_373_668 * WEI_PER_MICRO);
+    assert!(results[1].estimated, "corrected event order does not prove the Unified physical sweep path");
+}
+
+#[test]
+fn near_complete_flip_windows_preserve_signed_cash_and_spot_dust() {
+    for raw in [include_str!("near_flip_a.json"), include_str!("near_flip_b.json")] {
+        let fixture: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let case = &fixture["case"];
+        let (account, markets) = replay_cross_dex(case, false);
+        assert_recorded_cash(case, &account, &markets);
+        assert!(account.estimated);
+    }
+}

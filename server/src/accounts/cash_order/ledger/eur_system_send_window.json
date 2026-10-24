@@ -1,0 +1,989 @@
+{
+  "schema": 1,
+  "case": {
+    "user": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+    "window": [
+      1194920000,
+      1194930000
+    ],
+    "markets": {
+      "xyz:EUR": {
+        "dex": 1,
+        "asset": 25,
+        "size_decimals": 1,
+        "margin_mode": "noCross",
+        "table_id": 50,
+        "default_leverage": 20
+      }
+    },
+    "before": {
+      "spot_wei": 2135769,
+      "dex_states": [
+        {
+          "dex": 0,
+          "cash_micro": 0,
+          "positions": {}
+        },
+        {
+          "dex": 1,
+          "cash_micro": 0,
+          "positions": {
+            "xyz:EUR": {
+              "s": -144263,
+              "l": {
+                "I": {
+                  "l": 2,
+                  "u": 24244495172
+                }
+              },
+              "M": 50,
+              "f": {
+                "a": -28097212,
+                "o": -28097212
+              },
+              "e": 16162139081
+            }
+          }
+        }
+      ]
+    },
+    "after": {
+      "spot_wei": 771107709269,
+      "dex_states": [
+        {
+          "dex": 0,
+          "cash_micro": 0,
+          "positions": {}
+        },
+        {
+          "dex": 1,
+          "cash_micro": 0,
+          "positions": {
+            "xyz:EUR": {
+              "s": -159948,
+              "l": {
+                "I": {
+                  "l": 2,
+                  "u": 26879650822
+                }
+              },
+              "M": 50,
+              "f": {
+                "a": -28097212,
+                "o": -28097212
+              },
+              "e": 17918702231
+            }
+          }
+        }
+      ]
+    },
+    "events": [
+      {
+        "height": 1194923131,
+        "fill": {
+          "coin": "xyz:EUR",
+          "px": "1.1199",
+          "sz": "239.1",
+          "side": "A",
+          "time": 1792801439482,
+          "startPosition": "-14426.3",
+          "dir": "Open Short",
+          "closedPnl": "0.0",
+          "hash": "0x3bb7e34e6663f8133d31044739147b0201870034016716e5df808ea12567d1fd",
+          "oid": 584207134613,
+          "crossed": true,
+          "fee": "0.023135",
+          "tid": 776636362352024,
+          "cloid": "0x1b505c73617cd1461e87c6c92908dead",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.010411"
+        },
+        "mark": {
+          "min_px_raw": 112010,
+          "max_px_raw": 112010,
+          "size_decimals": 1
+        },
+        "collateral": {}
+      },
+      {
+        "height": 1194923131,
+        "fill": {
+          "coin": "xyz:EUR",
+          "px": "1.1199",
+          "sz": "1277.0",
+          "side": "A",
+          "time": 1792801439482,
+          "startPosition": "-14665.4",
+          "dir": "Open Short",
+          "closedPnl": "0.0",
+          "hash": "0x3bb7e34e6663f8133d31044739147b0201870034016716e5df808ea12567d1fd",
+          "oid": 584207134613,
+          "crossed": true,
+          "fee": "0.123561",
+          "tid": 764926390389686,
+          "cloid": "0x1b505c73617cd1461e87c6c92908dead",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.055602"
+        },
+        "mark": {
+          "min_px_raw": 112010,
+          "max_px_raw": 112010,
+          "size_decimals": 1
+        },
+        "collateral": {}
+      },
+      {
+        "height": 1194924406,
+        "fill": {
+          "coin": "xyz:EUR",
+          "px": "1.1199",
+          "sz": "21.8",
+          "side": "A",
+          "time": 1792801530896,
+          "startPosition": "-15942.4",
+          "dir": "Open Short",
+          "closedPnl": "0.0",
+          "hash": "0x1fc550506be51b3e213f0447391976020378003606e83a10c38dfba32ae8f528",
+          "oid": 584208094539,
+          "crossed": true,
+          "fee": "0.002109",
+          "tid": 782327838298207,
+          "cloid": "0x328cb20a1c50ea0fc900f3cfeb5f8c7c",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.000949"
+        },
+        "mark": {
+          "min_px_raw": 112000,
+          "max_px_raw": 112000,
+          "size_decimals": 1
+        },
+        "collateral": {}
+      },
+      {
+        "height": 1194928211,
+        "fill": {
+          "coin": "xyz:EUR",
+          "px": "1.1199",
+          "sz": "30.6",
+          "side": "A",
+          "time": 1792801802241,
+          "startPosition": "-15964.2",
+          "dir": "Open Short",
+          "closedPnl": "0.0",
+          "hash": "0x4724091745a83506489d044739285302026300fce0ab53d8eaecb46a04ac0ef0",
+          "oid": 584211062165,
+          "crossed": true,
+          "fee": "0.00296",
+          "tid": 659891982065912,
+          "cloid": "0xac92351d83255389089f124eb5f54a7c",
+          "feeToken": "USDC",
+          "twapId": null,
+          "deployerFee": "0.001332"
+        },
+        "mark": {
+          "min_px_raw": 112000,
+          "max_px_raw": 112000,
+          "size_decimals": 1
+        },
+        "collateral": {}
+      }
+    ],
+    "blocks": [
+      {
+        "height": 1194923131,
+        "replica": {
+          "abci_block": {
+            "time": "2026-10-24T00:23:59.482790903",
+            "signed_action_bundles": [
+              [
+                "0xb125acdb417455d1fe0fea5a4ac37bb056f8aed7fd9bfa3ae2795b65e0d8cf8a",
+                {
+                  "signed_actions": [
+                    {
+                      "signature": {
+                        "r": "0xe8d60764c7574be520056037b52a32182505f209fed74d5f66f04b0edfb465b9",
+                        "s": "0xe8c4ada9fbf56a2f0231f5bcf24cde3c6af677447f11b5285dbb89f2d39f5ef",
+                        "v": 28
+                      },
+                      "action": {
+                        "type": "order",
+                        "orders": [
+                          {
+                            "a": 110025,
+                            "b": false,
+                            "p": "1.1098",
+                            "s": "1516.1",
+                            "r": false,
+                            "t": {
+                              "limit": {
+                                "tif": "Ioc"
+                              }
+                            },
+                            "c": "0x1b505c73617cd1461e87c6c92908dead"
+                          }
+                        ],
+                        "grouping": "na"
+                      },
+                      "nonce": 1792801438985
+                    }
+                  ],
+                  "broadcaster": "0xc9ba414780c1b75e9806e3469300993fd2bfa883",
+                  "broadcaster_nonce": 1792801343327
+                }
+              ]
+            ],
+            "round": 1498946466,
+            "parent_round": 1498946464,
+            "hardfork": {
+              "version": 108,
+              "round": 1481450749
+            },
+            "proposer": "0x5ac99df645f3414876c816caa18b2d234024b487"
+          },
+          "resps": {
+            "Full": [
+              [
+                "0xb125acdb417455d1fe0fea5a4ac37bb056f8aed7fd9bfa3ae2795b65e0d8cf8a",
+                [
+                  {
+                    "user": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                    "res": {
+                      "status": "ok",
+                      "response": {
+                        "type": "order",
+                        "data": {
+                          "statuses": [
+                            {
+                              "filled": {
+                                "totalSz": "1516.1",
+                                "avgPx": "1.1199",
+                                "oid": 584207134613,
+                                "cloid": "0x1b505c73617cd1461e87c6c92908dead"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              ]
+            ]
+          },
+          "height": 1194923131
+        },
+        "fills": [
+          {
+            "local_time": "2026-10-24T00:23:59.699307448",
+            "block_time": "2026-10-24T00:23:59.482790903",
+            "block_number": 1194923131,
+            "events": [
+              [
+                "0x3e781befd071c59d820725f70ce109298f750706",
+                {
+                  "coin": "xyz:EUR",
+                  "px": "1.1199",
+                  "sz": "239.1",
+                  "side": "B",
+                  "time": 1792801439482,
+                  "startPosition": "-18266.8",
+                  "dir": "Close Short",
+                  "closedPnl": "0.234318",
+                  "hash": "0x3bb7e34e6663f8133d31044739147b0201870034016716e5df808ea12567d1fd",
+                  "oid": 584203785506,
+                  "crossed": false,
+                  "fee": "0.007229",
+                  "tid": 776636362352024,
+                  "cloid": "0xbb1ebc000000000018e14f1f24999bb6",
+                  "feeToken": "USDC",
+                  "builder": "0xab5dbc057628bc18523c4cdfc0e1e2ebdbecb704",
+                  "twapId": null,
+                  "deployerFee": "0.003253"
+                }
+              ]
+            ]
+          },
+          {
+            "local_time": "2026-10-24T00:23:59.699315333",
+            "block_time": "2026-10-24T00:23:59.482790903",
+            "block_number": 1194923131,
+            "events": [
+              [
+                "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                {
+                  "coin": "xyz:EUR",
+                  "px": "1.1199",
+                  "sz": "239.1",
+                  "side": "A",
+                  "time": 1792801439482,
+                  "startPosition": "-14426.3",
+                  "dir": "Open Short",
+                  "closedPnl": "0.0",
+                  "hash": "0x3bb7e34e6663f8133d31044739147b0201870034016716e5df808ea12567d1fd",
+                  "oid": 584207134613,
+                  "crossed": true,
+                  "fee": "0.023135",
+                  "tid": 776636362352024,
+                  "cloid": "0x1b505c73617cd1461e87c6c92908dead",
+                  "feeToken": "USDC",
+                  "twapId": null,
+                  "deployerFee": "0.010411"
+                }
+              ]
+            ]
+          },
+          {
+            "local_time": "2026-10-24T00:23:59.699320253",
+            "block_time": "2026-10-24T00:23:59.482790903",
+            "block_number": 1194923131,
+            "events": [
+              [
+                "0x303729b53e97d3f43a1bd13e7f4c6bf77ae41e83",
+                {
+                  "coin": "xyz:EUR",
+                  "px": "1.1199",
+                  "sz": "1277.0",
+                  "side": "B",
+                  "time": 1792801439482,
+                  "startPosition": "-61815.2",
+                  "dir": "Close Short",
+                  "closedPnl": "1.35362",
+                  "hash": "0x3bb7e34e6663f8133d31044739147b0201870034016716e5df808ea12567d1fd",
+                  "oid": 584206824144,
+                  "crossed": false,
+                  "fee": "0.009152",
+                  "tid": 764926390389686,
+                  "cloid": "0x00000000000000121792747698099290",
+                  "feeToken": "USDC",
+                  "twapId": null,
+                  "deployerFee": "0.004576"
+                }
+              ]
+            ]
+          },
+          {
+            "local_time": "2026-10-24T00:23:59.699323960",
+            "block_time": "2026-10-24T00:23:59.482790903",
+            "block_number": 1194923131,
+            "events": [
+              [
+                "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                {
+                  "coin": "xyz:EUR",
+                  "px": "1.1199",
+                  "sz": "1277.0",
+                  "side": "A",
+                  "time": 1792801439482,
+                  "startPosition": "-14665.4",
+                  "dir": "Open Short",
+                  "closedPnl": "0.0",
+                  "hash": "0x3bb7e34e6663f8133d31044739147b0201870034016716e5df808ea12567d1fd",
+                  "oid": 584207134613,
+                  "crossed": true,
+                  "fee": "0.123561",
+                  "tid": 764926390389686,
+                  "cloid": "0x1b505c73617cd1461e87c6c92908dead",
+                  "feeToken": "USDC",
+                  "twapId": null,
+                  "deployerFee": "0.055602"
+                }
+              ]
+            ]
+          }
+        ],
+        "statuses": [
+          {
+            "local_time": "2026-10-24T00:23:59.699327055",
+            "block_time": "2026-10-24T00:23:59.482790903",
+            "block_number": 1194923131,
+            "events": [
+              {
+                "time": "2026-10-24T00:23:59.482790903",
+                "user": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                "hash": "0x3bb7e34e6663f8133d31044739147b0201870034016716e5df808ea12567d1fd",
+                "builder": null,
+                "status": "open",
+                "order": {
+                  "coin": "xyz:EUR",
+                  "side": "A",
+                  "limitPx": "1.1098",
+                  "sz": "1516.1",
+                  "oid": 584207134613,
+                  "timestamp": 1792801439482,
+                  "triggerCondition": "N/A",
+                  "isTrigger": false,
+                  "triggerPx": "0.0",
+                  "children": [],
+                  "isPositionTpsl": false,
+                  "reduceOnly": false,
+                  "orderType": "Limit",
+                  "origSz": "1516.1",
+                  "tif": "Ioc",
+                  "cloid": "0x1b505c73617cd1461e87c6c92908dead"
+                }
+              }
+            ]
+          },
+          {
+            "local_time": "2026-10-24T00:23:59.699333998",
+            "block_time": "2026-10-24T00:23:59.482790903",
+            "block_number": 1194923131,
+            "events": [
+              {
+                "time": "2026-10-24T00:23:59.482790903",
+                "user": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                "hash": null,
+                "builder": null,
+                "status": "filled",
+                "order": {
+                  "coin": "xyz:EUR",
+                  "side": "A",
+                  "limitPx": "1.1098",
+                  "sz": "0.0",
+                  "oid": 584207134613,
+                  "timestamp": 1792801439482,
+                  "triggerCondition": "N/A",
+                  "isTrigger": false,
+                  "triggerPx": "0.0",
+                  "children": [],
+                  "isPositionTpsl": false,
+                  "reduceOnly": false,
+                  "orderType": "Limit",
+                  "origSz": "1516.1",
+                  "tif": "Ioc",
+                  "cloid": "0x1b505c73617cd1461e87c6c92908dead"
+                }
+              }
+            ]
+          }
+        ],
+        "system": [
+          {
+            "local_time": "2026-10-24T00:23:59.691834944",
+            "block_time": "2026-10-24T00:23:59.482790903",
+            "block_number": 1194923131,
+            "events": [
+              {
+                "user": "0x6b9e773128f453f5c2c60935ee2de2cbc5390a24",
+                "nonce": 4464363,
+                "evm_tx_hash": "0x36e417f27201fd059f5d1be2bda96b3f70fb882a50cb683096a9ea4e5a767c07",
+                "action": {
+                  "type": "SystemSendAssetAction",
+                  "destination": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                  "fromSubAccount": null,
+                  "sourceDexOrSpot": null,
+                  "destinationDexOrSpot": 0,
+                  "token": 0,
+                  "wei": 858980000000
+                }
+              }
+            ]
+          }
+        ],
+        "misc": [
+          {
+            "local_time": "2026-10-24T00:23:59.691805699",
+            "block_time": "2026-10-24T00:23:59.482790903",
+            "block_number": 1194923131,
+            "events": [
+              {
+                "time": "2026-10-24T00:23:59.482790903",
+                "hash": "0x1abdbc6a5b776d251c37044739147b0000f8d44ff67a8bf7be8667bd1a7b470f",
+                "inner": {
+                  "LedgerUpdate": {
+                    "users": [
+                      "0x6b9e773128f453f5c2c60935ee2de2cbc5390a24",
+                      "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907"
+                    ],
+                    "delta": {
+                      "type": "send",
+                      "user": "0x6b9e773128f453f5c2c60935ee2de2cbc5390a24",
+                      "destination": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                      "sourceDex": "spot",
+                      "destinationDex": "",
+                      "token": "USDC",
+                      "amount": "8589.8",
+                      "usdcValue": "8589.8",
+                      "fee": "0.0",
+                      "nativeTokenFee": "0.0",
+                      "nonce": 4464363,
+                      "feeToken": ""
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "local_time": "2026-10-24T00:23:59.699870538",
+            "block_time": "2026-10-24T00:23:59.482790903",
+            "block_number": 1194923131,
+            "events": [
+              {
+                "time": "2026-10-24T00:23:59.482790903",
+                "hash": "0x1bc2c39b18f9624a1d3c044739147b0201980080b3fc811cbf8b6eedd7fd3c34",
+                "inner": {
+                  "LedgerUpdate": {
+                    "users": [
+                      "0x0142a0138bc37992d039506a6c8b87d6b27f3a42",
+                      "0x66cf0aace1b4e562593bec10ec7868fba9932224"
+                    ],
+                    "delta": {
+                      "type": "send",
+                      "user": "0x0142a0138bc37992d039506a6c8b87d6b27f3a42",
+                      "destination": "0x66cf0aace1b4e562593bec10ec7868fba9932224",
+                      "sourceDex": "spot",
+                      "destinationDex": "",
+                      "token": "USDC",
+                      "amount": "3.007326",
+                      "usdcValue": "3.007326",
+                      "fee": "0.0",
+                      "nativeTokenFee": "0.0",
+                      "nonce": 1792801437259,
+                      "feeToken": ""
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "height": 1194924406,
+        "replica": {
+          "abci_block": {
+            "time": "2026-10-24T00:25:30.896279226",
+            "signed_action_bundles": [
+              [
+                "0xe69ed7f98c3ba1db4121aa7c646251eee62692933f12cd5ea50006dbcc351080",
+                {
+                  "signed_actions": [
+                    {
+                      "signature": {
+                        "r": "0x20cbe1a383bb0f11c55aef9b7d362b6813675f9f107da5ffa73fb727cebbf5be",
+                        "s": "0x7fdd26eee772acf85b0d250bbafb6503e9078394d68886e8f6e20850893ebcfa",
+                        "v": 27
+                      },
+                      "action": {
+                        "type": "order",
+                        "orders": [
+                          {
+                            "a": 110025,
+                            "b": false,
+                            "p": "1.1098",
+                            "s": "21.8",
+                            "r": false,
+                            "t": {
+                              "limit": {
+                                "tif": "Ioc"
+                              }
+                            },
+                            "c": "0x328cb20a1c50ea0fc900f3cfeb5f8c7c"
+                          }
+                        ],
+                        "grouping": "na"
+                      },
+                      "nonce": 1792801530289
+                    }
+                  ],
+                  "broadcaster": "0xc9ba414780c1b75e9806e3469300993fd2bfa883",
+                  "broadcaster_nonce": 1792801344703
+                }
+              ]
+            ],
+            "round": 1498947822,
+            "parent_round": 1498947821,
+            "hardfork": {
+              "version": 108,
+              "round": 1481450749
+            },
+            "proposer": "0x4a900e9266b00e3d5310e09bb49520b80f2bd417"
+          },
+          "resps": {
+            "Full": [
+              [
+                "0xe69ed7f98c3ba1db4121aa7c646251eee62692933f12cd5ea50006dbcc351080",
+                [
+                  {
+                    "user": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                    "res": {
+                      "status": "ok",
+                      "response": {
+                        "type": "order",
+                        "data": {
+                          "statuses": [
+                            {
+                              "filled": {
+                                "totalSz": "21.8",
+                                "avgPx": "1.1199",
+                                "oid": 584208094539,
+                                "cloid": "0x328cb20a1c50ea0fc900f3cfeb5f8c7c"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              ]
+            ]
+          },
+          "height": 1194924406
+        },
+        "fills": [
+          {
+            "local_time": "2026-10-24T00:25:31.108973689",
+            "block_time": "2026-10-24T00:25:30.896279226",
+            "block_number": 1194924406,
+            "events": [
+              [
+                "0x33ad48ed92e3e91a98278f0f7456eae6eafa516e",
+                {
+                  "coin": "xyz:EUR",
+                  "px": "1.1199",
+                  "sz": "21.8",
+                  "side": "B",
+                  "time": 1792801530896,
+                  "startPosition": "3912.1",
+                  "dir": "Open Long",
+                  "closedPnl": "0.0",
+                  "hash": "0x1fc550506be51b3e213f0447391976020378003606e83a10c38dfba32ae8f528",
+                  "oid": 584207157810,
+                  "crossed": false,
+                  "fee": "-0.000048",
+                  "tid": 782327838298207,
+                  "cloid": "0x16175861080352000000000016279519",
+                  "feeToken": "USDC",
+                  "twapId": null,
+                  "deployerFee": "-0.000024"
+                }
+              ]
+            ]
+          },
+          {
+            "local_time": "2026-10-24T00:25:31.108980471",
+            "block_time": "2026-10-24T00:25:30.896279226",
+            "block_number": 1194924406,
+            "events": [
+              [
+                "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                {
+                  "coin": "xyz:EUR",
+                  "px": "1.1199",
+                  "sz": "21.8",
+                  "side": "A",
+                  "time": 1792801530896,
+                  "startPosition": "-15942.4",
+                  "dir": "Open Short",
+                  "closedPnl": "0.0",
+                  "hash": "0x1fc550506be51b3e213f0447391976020378003606e83a10c38dfba32ae8f528",
+                  "oid": 584208094539,
+                  "crossed": true,
+                  "fee": "0.002109",
+                  "tid": 782327838298207,
+                  "cloid": "0x328cb20a1c50ea0fc900f3cfeb5f8c7c",
+                  "feeToken": "USDC",
+                  "twapId": null,
+                  "deployerFee": "0.000949"
+                }
+              ]
+            ]
+          }
+        ],
+        "statuses": [
+          {
+            "local_time": "2026-10-24T00:25:31.108984449",
+            "block_time": "2026-10-24T00:25:30.896279226",
+            "block_number": 1194924406,
+            "events": [
+              {
+                "time": "2026-10-24T00:25:30.896279226",
+                "user": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                "hash": "0x1fc550506be51b3e213f0447391976020378003606e83a10c38dfba32ae8f528",
+                "builder": null,
+                "status": "open",
+                "order": {
+                  "coin": "xyz:EUR",
+                  "side": "A",
+                  "limitPx": "1.1098",
+                  "sz": "21.8",
+                  "oid": 584208094539,
+                  "timestamp": 1792801530896,
+                  "triggerCondition": "N/A",
+                  "isTrigger": false,
+                  "triggerPx": "0.0",
+                  "children": [],
+                  "isPositionTpsl": false,
+                  "reduceOnly": false,
+                  "orderType": "Limit",
+                  "origSz": "21.8",
+                  "tif": "Ioc",
+                  "cloid": "0x328cb20a1c50ea0fc900f3cfeb5f8c7c"
+                }
+              }
+            ]
+          },
+          {
+            "local_time": "2026-10-24T00:25:31.108987194",
+            "block_time": "2026-10-24T00:25:30.896279226",
+            "block_number": 1194924406,
+            "events": [
+              {
+                "time": "2026-10-24T00:25:30.896279226",
+                "user": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                "hash": null,
+                "builder": null,
+                "status": "filled",
+                "order": {
+                  "coin": "xyz:EUR",
+                  "side": "A",
+                  "limitPx": "1.1098",
+                  "sz": "0.0",
+                  "oid": 584208094539,
+                  "timestamp": 1792801530896,
+                  "triggerCondition": "N/A",
+                  "isTrigger": false,
+                  "triggerPx": "0.0",
+                  "children": [],
+                  "isPositionTpsl": false,
+                  "reduceOnly": false,
+                  "orderType": "Limit",
+                  "origSz": "21.8",
+                  "tif": "Ioc",
+                  "cloid": "0x328cb20a1c50ea0fc900f3cfeb5f8c7c"
+                }
+              }
+            ]
+          }
+        ],
+        "system": [],
+        "misc": []
+      },
+      {
+        "height": 1194928211,
+        "replica": {
+          "abci_block": {
+            "time": "2026-10-24T00:30:02.241171355",
+            "signed_action_bundles": [
+              [
+                "0x36771d515069e281169f38b14a2ba41a82045708851853481a146ae3a007e498",
+                {
+                  "signed_actions": [
+                    {
+                      "signature": {
+                        "r": "0xcea6a0b0462ffc50ec7dcb87447f60381cdd7ba5f427e625d40d3f1b22472153",
+                        "s": "0x146849a57df55bf46d847e09e02034f86f88d74b3a849870e187baac37196151",
+                        "v": 28
+                      },
+                      "action": {
+                        "type": "order",
+                        "orders": [
+                          {
+                            "a": 110025,
+                            "b": false,
+                            "p": "1.1098",
+                            "s": "30.6",
+                            "r": false,
+                            "t": {
+                              "limit": {
+                                "tif": "Ioc"
+                              }
+                            },
+                            "c": "0xac92351d83255389089f124eb5f54a7c"
+                          }
+                        ],
+                        "grouping": "na"
+                      },
+                      "nonce": 1792801801776
+                    }
+                  ],
+                  "broadcaster": "0xc9ba414780c1b75e9806e3469300993fd2bfa883",
+                  "broadcaster_nonce": 1792801648860
+                }
+              ]
+            ],
+            "round": 1498951842,
+            "parent_round": 1498951841,
+            "hardfork": {
+              "version": 108,
+              "round": 1481450749
+            },
+            "proposer": "0xb796a00b6e50c3dd46e43346c921fe8e146f4e06"
+          },
+          "resps": {
+            "Full": [
+              [
+                "0x36771d515069e281169f38b14a2ba41a82045708851853481a146ae3a007e498",
+                [
+                  {
+                    "user": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                    "res": {
+                      "status": "ok",
+                      "response": {
+                        "type": "order",
+                        "data": {
+                          "statuses": [
+                            {
+                              "filled": {
+                                "totalSz": "30.6",
+                                "avgPx": "1.1199",
+                                "oid": 584211062165,
+                                "cloid": "0xac92351d83255389089f124eb5f54a7c"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              ]
+            ]
+          },
+          "height": 1194928211
+        },
+        "fills": [
+          {
+            "local_time": "2026-10-24T00:30:02.467125387",
+            "block_time": "2026-10-24T00:30:02.241171355",
+            "block_number": 1194928211,
+            "events": [
+              [
+                "0x33ad48ed92e3e91a98278f0f7456eae6eafa516e",
+                {
+                  "coin": "xyz:EUR",
+                  "px": "1.1199",
+                  "sz": "30.6",
+                  "side": "B",
+                  "time": 1792801802241,
+                  "startPosition": "4052.1",
+                  "dir": "Open Long",
+                  "closedPnl": "0.0",
+                  "hash": "0x4724091745a83506489d044739285302026300fce0ab53d8eaecb46a04ac0ef0",
+                  "oid": 584207157810,
+                  "crossed": false,
+                  "fee": "-0.000068",
+                  "tid": 659891982065912,
+                  "cloid": "0x16175861080352000000000016279519",
+                  "feeToken": "USDC",
+                  "twapId": null,
+                  "deployerFee": "-0.000034"
+                }
+              ]
+            ]
+          },
+          {
+            "local_time": "2026-10-24T00:30:02.467131128",
+            "block_time": "2026-10-24T00:30:02.241171355",
+            "block_number": 1194928211,
+            "events": [
+              [
+                "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                {
+                  "coin": "xyz:EUR",
+                  "px": "1.1199",
+                  "sz": "30.6",
+                  "side": "A",
+                  "time": 1792801802241,
+                  "startPosition": "-15964.2",
+                  "dir": "Open Short",
+                  "closedPnl": "0.0",
+                  "hash": "0x4724091745a83506489d044739285302026300fce0ab53d8eaecb46a04ac0ef0",
+                  "oid": 584211062165,
+                  "crossed": true,
+                  "fee": "0.00296",
+                  "tid": 659891982065912,
+                  "cloid": "0xac92351d83255389089f124eb5f54a7c",
+                  "feeToken": "USDC",
+                  "twapId": null,
+                  "deployerFee": "0.001332"
+                }
+              ]
+            ]
+          }
+        ],
+        "statuses": [
+          {
+            "local_time": "2026-10-24T00:30:02.467133422",
+            "block_time": "2026-10-24T00:30:02.241171355",
+            "block_number": 1194928211,
+            "events": [
+              {
+                "time": "2026-10-24T00:30:02.241171355",
+                "user": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                "hash": "0x4724091745a83506489d044739285302026300fce0ab53d8eaecb46a04ac0ef0",
+                "builder": null,
+                "status": "open",
+                "order": {
+                  "coin": "xyz:EUR",
+                  "side": "A",
+                  "limitPx": "1.1098",
+                  "sz": "30.6",
+                  "oid": 584211062165,
+                  "timestamp": 1792801802241,
+                  "triggerCondition": "N/A",
+                  "isTrigger": false,
+                  "triggerPx": "0.0",
+                  "children": [],
+                  "isPositionTpsl": false,
+                  "reduceOnly": false,
+                  "orderType": "Limit",
+                  "origSz": "30.6",
+                  "tif": "Ioc",
+                  "cloid": "0xac92351d83255389089f124eb5f54a7c"
+                }
+              }
+            ]
+          },
+          {
+            "local_time": "2026-10-24T00:30:02.467135787",
+            "block_time": "2026-10-24T00:30:02.241171355",
+            "block_number": 1194928211,
+            "events": [
+              {
+                "time": "2026-10-24T00:30:02.241171355",
+                "user": "0xb20a59ed4d31f1fb86f8f12d7806bae80ac1a907",
+                "hash": null,
+                "builder": null,
+                "status": "filled",
+                "order": {
+                  "coin": "xyz:EUR",
+                  "side": "A",
+                  "limitPx": "1.1098",
+                  "sz": "0.0",
+                  "oid": 584211062165,
+                  "timestamp": 1792801802241,
+                  "triggerCondition": "N/A",
+                  "isTrigger": false,
+                  "triggerPx": "0.0",
+                  "children": [],
+                  "isPositionTpsl": false,
+                  "reduceOnly": false,
+                  "orderType": "Limit",
+                  "origSz": "30.6",
+                  "tif": "Ioc",
+                  "cloid": "0xac92351d83255389089f124eb5f54a7c"
+                }
+              }
+            ]
+          }
+        ],
+        "system": [],
+        "misc": []
+      }
+    ],
+    "sources": {
+      "1194920000_selected_states.json": "9901313522d5c2f06dd0ae4d6f083db015eba1116e571a61f13fa958d85e9269",
+      "1194930000_selected_states.json": "d815750303808ab79e4dcb35eec876f98e60730085843ab70be3bcb6e1886d2b",
+      "node_fills_streaming.jsonl.gz": "8e397ce6d65761349a308a0aa21b0302a40732bcdab736d1f33bb2e228891f2e",
+      "eur_mark_replay.log": "571c4376f58bbc78bccf6973c724f67c68e85658506e49debc27b18da5456d7c"
+    }
+  },
+  "provenance": "BM 2026-10-24 selected checkpoint/user/window facts. Execution prices from independent 10000-block replay (main234x7 and236books exact). EUR replica reduced to matched user bundles with successful ledger+system requests; hashes identify original retained inputs. No checkpoint correction input."
+}

@@ -67,7 +67,7 @@ impl Balance {
 pub(crate) enum LedgerDelta {
     /// `send` from `user` at `source` to `destination` at `destination_balance` (the same account when one user);
     /// `source` identifies principal; a USDC fee may be paid from spot even for perp-to-perp sends.
-    Send { user: Address, destination: Address, source: Balance, destination_balance: Balance, usdc_wei: Option<i64>, usdc_fee_wei: i64 },
+    Send { user: Address, destination: Address, source: Balance, destination_balance: Balance, usdc_wei: Option<i64>, usdc_fee_wei: i64, nonce: Option<u64> },
     /// `spotTransfer`: spot to spot.
     SpotTransfer { user: Address, destination: Address, usdc_wei: Option<i64>, usdc_fee_wei: i64 },
     /// `internalTransfer`: main dex to main dex. `usdc` is the gross debit; the destination receives `usdc - fee`.
@@ -151,6 +151,7 @@ struct WireDelta {
     #[serde(rename = "type")]
     delta_type: String,
     user: Option<Address>,
+    nonce: Option<u64>,
     destination: Option<Address>,
     vault: Option<Address>,
     source_dex: Option<String>,
@@ -208,6 +209,7 @@ impl TryFrom<WireDelta> for LedgerDelta {
         let usdc = || wire.usdc_wei(wire.usdc.as_ref(), "usdc");
         Ok(match wire.delta_type.as_str() {
             "send" => Self::Send {
+                nonce: wire.nonce,
                 user: user()?,
                 destination: destination()?,
                 source: Balance::of(wire.need(wire.source_dex.clone(), "sourceDex")?),
@@ -380,6 +382,7 @@ mod tests {
             destination_balance: Balance::Dex(String::new()),
             usdc_wei: Some(156_862_745_100),
             usdc_fee_wei: 100_000_000,
+            nonce: Some(1_792_476_044_972),
         };
         assert_eq!(delta(&[a, b], send_with_fee), Ok(expected));
         let usol_from_spot = r#"{"type":"send","user":"0xbd334a55db91617545e8d1b09941e036ad8e4200","destination":"0xce554c3132584352f8c202770c8b66d709d0472e","sourceDex":"spot","destinationDex":"spot","token":"USOL","amount":"720.78340032","usdcValue":"75170.500819","fee":"1.0","nativeTokenFee":"0.0","nonce":1792476964919,"feeToken":"USDC"}"#;

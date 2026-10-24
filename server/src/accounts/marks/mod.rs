@@ -610,6 +610,12 @@ impl NodeMarks {
         Ok(state.height)
     }
 
+    /// Delayed system actions drain before signed bundles. Missing/stale timing supplies no cash-order proof.
+    pub(crate) fn delayed_system_before_bundles(&self, block: u64) -> bool {
+        self.availability().ok().and_then(|height| height.checked_add(1)) == Some(block)
+            && self.state.as_ref().is_some_and(|state| system::positive_delay(state.system_timing))
+    }
+
     /// Funding is a begin-block operation: only the state immediately before this block can select its recipient.
     /// HIP-3 and main-dex oracles share this owner and its loss/seed lifecycle. Never substitute a mark or HTTP quote.
     pub(crate) fn funding_oracle(&self, block: u64, coin: &str) -> Option<(u64, u32)> {

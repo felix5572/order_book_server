@@ -1,0 +1,252 @@
+{
+  "schema": 1,
+  "case": {
+    "user": "0xaf0932f9bb91f4ac70f861d956546e66614304e7",
+    "window": [
+      1194960000,
+      1194970000
+    ],
+    "markets": {
+      "NEAR": {
+        "dex": 0,
+        "asset": 74,
+        "size_decimals": 1,
+        "margin_mode": "normal",
+        "table_id": 52,
+        "default_leverage": 10
+      },
+      "ENA": {
+        "dex": 0,
+        "asset": 122,
+        "size_decimals": 0,
+        "margin_mode": "normal",
+        "table_id": 52,
+        "default_leverage": 10
+      }
+    },
+    "before": {
+      "spot_wei": 278010526,
+      "dex_states": [
+        {
+          "dex": 0,
+          "cash_micro": -37220400,
+          "positions": {
+            "NEAR": {
+              "s": -1042,
+              "l": {
+                "I": {
+                  "l": 10,
+                  "u": 529418318
+                }
+              },
+              "M": 52,
+              "f": {
+                "a": 282277
+              },
+              "e": 481289380
+            },
+            "ENA": {
+              "s": 211,
+              "l": {
+                "C": 10
+              },
+              "M": 52,
+              "f": {
+                "a": -24482,
+                "o": 368,
+                "c": 368
+              },
+              "e": 41043720
+            }
+          }
+        },
+        {
+          "dex": 1,
+          "cash_micro": 0,
+          "positions": {}
+        }
+      ]
+    },
+    "after": {
+      "spot_wei": 26,
+      "dex_states": [
+        {
+          "dex": 0,
+          "cash_micro": -37324845,
+          "positions": {
+            "NEAR": {
+              "s": 1017,
+              "l": {
+                "I": {
+                  "l": 10,
+                  "u": -423680414
+                }
+              },
+              "M": 52,
+              "f": {
+                "a": 282277
+              },
+              "e": 470576070
+            },
+            "ENA": {
+              "s": 211,
+              "l": {
+                "C": 10
+              },
+              "M": 52,
+              "f": {
+                "a": -24482,
+                "o": 368,
+                "c": 368
+              },
+              "e": 41043720
+            }
+          }
+        },
+        {
+          "dex": 1,
+          "cash_micro": 0,
+          "positions": {}
+        }
+      ]
+    },
+    "events": [
+      {
+        "height": 1194963555,
+        "fill": {
+          "coin": "NEAR",
+          "px": "4.6248",
+          "sz": "86.5",
+          "side": "B",
+          "time": 1792804323571,
+          "startPosition": "-104.2",
+          "dir": "Close Short",
+          "closedPnl": "-0.51035",
+          "hash": "0xc5d6dc017af44295c750044739b26302013000e715f76167699f875439f81c80",
+          "oid": 584237635133,
+          "crossed": true,
+          "fee": "0.172819",
+          "tid": 541052053109030,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        "mark": {
+          "min_px_raw": 462640,
+          "max_px_raw": 462640,
+          "size_decimals": 1
+        },
+        "collateral": {
+          "ENA": {
+            "min_px_raw": 196000,
+            "max_px_raw": 196000,
+            "size_decimals": 0
+          }
+        }
+      },
+      {
+        "height": 1194963555,
+        "fill": {
+          "coin": "NEAR",
+          "px": "4.6253",
+          "sz": "121.9",
+          "side": "B",
+          "time": 1792804323571,
+          "startPosition": "-17.7",
+          "dir": "Short > Long",
+          "closedPnl": "-0.11328",
+          "hash": "0xc5d6dc017af44295c750044739b26302013000e715f76167699f875439f81c80",
+          "oid": 584237635133,
+          "crossed": true,
+          "fee": "0.243571",
+          "tid": 151913574444164,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        "mark": {
+          "min_px_raw": 462640,
+          "max_px_raw": 462640,
+          "size_decimals": 1
+        },
+        "collateral": {
+          "ENA": {
+            "min_px_raw": 196000,
+            "max_px_raw": 196000,
+            "size_decimals": 0
+          }
+        }
+      },
+      {
+        "height": 1194964222,
+        "fill": {
+          "coin": "NEAR",
+          "px": "4.6154",
+          "sz": "208.4",
+          "side": "A",
+          "time": 1792804375167,
+          "startPosition": "104.2",
+          "dir": "Long > Short",
+          "closedPnl": "-1.03158",
+          "hash": "0xe1844fde6c6e9300e2fe044739b4fe02011800c40761b1d2854cfb312b626ceb",
+          "oid": 584238039980,
+          "crossed": true,
+          "fee": "0.415518",
+          "tid": 634445910047188,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        "mark": {
+          "min_px_raw": 461450,
+          "max_px_raw": 461450,
+          "size_decimals": 1
+        },
+        "collateral": {
+          "ENA": {
+            "min_px_raw": 195440,
+            "max_px_raw": 195440,
+            "size_decimals": 0
+          }
+        }
+      },
+      {
+        "height": 1194966940,
+        "fill": {
+          "coin": "NEAR",
+          "px": "4.6271",
+          "sz": "205.9",
+          "side": "B",
+          "time": 1792804570411,
+          "startPosition": "-104.2",
+          "dir": "Short > Long",
+          "closedPnl": "-1.21914",
+          "hash": "0xe3eea98f7859225ce568044739bf9c0203990075135c412e87b754e2375cfc47",
+          "oid": 584239526735,
+          "crossed": true,
+          "fee": "0.411574",
+          "tid": 1009147755760527,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        "mark": {
+          "min_px_raw": 462750,
+          "max_px_raw": 462750,
+          "size_decimals": 1
+        },
+        "collateral": {
+          "ENA": {
+            "min_px_raw": 196550,
+            "max_px_raw": 196550,
+            "size_decimals": 0
+          }
+        }
+      }
+    ],
+    "blocks": [],
+    "sources": {
+      "1194960000_selected_states.json": "3ee3618d05b772117d468b23ecdfee2aa8a8a13829aa0d1a0e95c1d781e8e388",
+      "1194970000_selected_states.json": "7cdfeb1bd132b2393e9b7c9a46f9701a03b72923ab3f8f6904ef2722e16ff923",
+      "node_fills_streaming.jsonl.gz": "8e397ce6d65761349a308a0aa21b0302a40732bcdab736d1f33bb2e228891f2e",
+      "near_b_mark_replay.log": "7a4e4e3940a6a7ddc8db0fa6281ed6b1d4fda7f9da20c0c49a3669015996240d"
+    }
+  },
+  "provenance": "BM 2026-10-24 selected checkpoint/user/window facts. Execution prices from independent 10000-block replay (main234x7 and236books exact). EUR replica reduced to matched user bundles with successful ledger+system requests; hashes identify original retained inputs. No checkpoint correction input."
+}

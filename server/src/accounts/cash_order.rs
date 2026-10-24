@@ -11,6 +11,15 @@ use super::{
 };
 use crate::types::node_data::{Batch, NodeDataFill};
 
+pub(crate) mod ledger;
+pub(crate) use ledger::PreBundleLedger;
+
+#[derive(Default)]
+pub(crate) struct OrderedCashEvents {
+    pub(crate) before_fills: Vec<Batch<super::misc::MiscEvent>>,
+    pub(crate) after_fills: Vec<KeptAction>,
+}
+
 struct MarginAfterFills {
     earliest: Rank,
     has_fill: bool,

@@ -735,7 +735,7 @@ fn apply_assembly(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, 
     }
     let mut touched = Touched::default();
     for block in completed {
-        let CompletedBlock { mut actions, fills, misc_events, hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions } = block;
+        let CompletedBlock { mut actions, fills, mut misc_events, hip3_oracle_updates, book_diffs, mark_actions, order_statuses, system_actions } = block;
         let height = actions.height;
         let mark_fills = fills.iter().flat_map(Batch::events_ref).map(BlockFill::of).collect();
         let collateral_coins = book.collateral_coins(fills.iter().flat_map(Batch::events_ref));
@@ -753,14 +753,18 @@ fn apply_assembly(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, 
         }
         let mut routing = super::cash_routing::RoutingBlock::of(book, &inputs, &fills, marks, &actions, &misc_events);
         let cash_order = super::cash_order::MarginOrder::of(&actions, &fills, &inputs);
+        let ledger_order = super::cash_order::PreBundleLedger::of(&actions, &fills, &misc_events, &inputs,
+            marks.delayed_system_before_bundles(height));
         let mark_report = marks.apply_block(height, inputs);
         routing.require_trusted(marks.availability().is_ok(), book);
         let (changed, dropped) = book.apply_routing(height, routing.before);
         touched.absorb(changed);
         report_dropped_marks(diagnostics, height, dropped);
         let after_fills = cash_order.defer(&mut actions, marks.availability().is_ok());
+        let before_fills = ledger_order.take(&mut misc_events, marks.availability().is_ok());
         let accounts = book.apply_block(actions, fills, misc_events,
-            |coin| funding_oracles.get(coin).copied().flatten(), &mark_report.fill_prices, after_fills);
+            |coin| funding_oracles.get(coin).copied().flatten(), &mark_report.fill_prices,
+            super::cash_order::OrderedCashEvents { before_fills, after_fills });
         let (changed, dropped) = book.apply_routing(height, routing.after);
         touched.absorb(changed);
         report_dropped_marks(diagnostics, height, dropped);
