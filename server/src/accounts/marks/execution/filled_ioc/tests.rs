@@ -159,3 +159,63 @@ fn terminal_remainder_cannot_equal_or_exceed_the_original_size() {
         assert_eq!(cut(&g, &a, &SystemAnchors::default()).lo, 2, "remainder {size}");
     }
 }
+
+fn close_golden() -> Golden { serde_json::from_str(include_str!("reduce_only_close_golden.json")).unwrap() }
+
+#[test]
+fn full_reduce_only_ioc_cleanup_precedes_the_next_price_action() {
+    let g = close_golden();
+    assert_eq!(g.statuses.iter().map(|s| s.status.as_str()).collect::<Vec<_>>(),
+        ["open", "filled", "reduceOnlyCanceled"]);
+    assert_eq!(cut(&g, &actions(&g, false), &SystemAnchors::default()), Cut { lo: 2, hi: 2, fills_lo: 2 });
+    assert_eq!(cut(&g, &actions(&g, true), &SystemAnchors::default()), Cut { lo: 0, hi: 0, fills_lo: 0 });
+    let mut with_boundary = close_golden();
+    let mut boundary = with_boundary.statuses[0].clone(); boundary.status = "futureStatus".into();
+    with_boundary.statuses.push(boundary);
+    assert_eq!(cut(&with_boundary, &actions(&with_boundary, false), &SystemAnchors::default()).lo, 2,
+        "a following boundary preserves an already witnessed cleanup");
+}
+
+#[test]
+fn reduce_only_cleanup_requires_complete_contiguous_identity_and_paired_quantity() {
+    for case in ["noHead", "noTerminal", "interrupted", "unknownCancel", "cancelNotReduceOnly",
+        "wrongUser", "wrongCoin", "wrongSide", "triggerCancel", "takerNotReduceOnly", "partialTerminal",
+        "wrongTerminalKey", "duplicateHead", "noMaker", "duplicateMaker", "duplicateTaker", "makerSize",
+        "makerPrice", "makerTwap", "shortQuantity", "systemCancel", "multipleRequests", "noReceipt", "duplicateCleanup", "notOldOrder"] {
+        let mut g = close_golden();
+        let mut a = actions(&g, false);
+        let mut system = SystemAnchors::default();
+        match case {
+            "duplicateCleanup" => g.statuses.push(g.statuses[2].clone()),
+            "notOldOrder" => g.statuses[2].order.timestamp = g.statuses[0].order.timestamp,
+            "noHead" => { g.statuses.remove(0); },
+            "noTerminal" => { g.statuses.remove(1); },
+            "interrupted" => { let mut b = g.statuses[0].clone(); b.status = "futureStatus".into(); g.statuses.insert(2, b); },
+            "unknownCancel" => g.statuses[2].status = "futureStatus".into(),
+            "cancelNotReduceOnly" => g.statuses[2].order.reduce_only = false,
+            "wrongUser" => g.statuses[2].user = alloy::primitives::Address::repeat_byte(9),
+            "wrongCoin" => g.statuses[2].order.coin = "BTC".into(),
+            "wrongSide" => g.statuses[2].order.side = OrderSide::Bid,
+            "triggerCancel" => g.statuses[2].order.is_trigger = true,
+            "takerNotReduceOnly" => { g.statuses[0].order.reduce_only = false; g.statuses[1].order.reduce_only = false; },
+            "partialTerminal" => g.statuses[1].order.sz = "1".into(),
+            "wrongTerminalKey" => g.statuses[1].order.cloid = Some("another".into()),
+            "duplicateHead" => g.statuses.push(g.statuses[0].clone()),
+            "noMaker" => g.fills.retain(|f| f.1.crossed),
+            "duplicateMaker" => g.fills.push(g.fills[0].clone()),
+            "duplicateTaker" => g.fills.push(g.fills[1].clone()),
+            "makerSize" => g.fills[0].1.sz = "1".into(),
+            "makerPrice" => g.fills[0].1.px = "0.1".into(),
+            "makerTwap" => g.fills[0].1.twap_id = Some(1),
+            "shortQuantity" => { for f in &mut g.fills { f.1.sz = "1".into(); } },
+            "systemCancel" => system.before.cancelled.push(g.statuses[2].order.oid),
+            "multipleRequests" => { let MarkAction::Book(b) = &mut a.actions[0].action else { panic!() }; b.single_ioc_order = false; },
+            "noReceipt" => { let MarkAction::Book(b) = &mut a.actions[0].action else { panic!() }; b.created.clear(); },
+            _ => unreachable!(),
+        }
+        let statuses = BlockStatuses::of(g.statuses.clone()).unwrap();
+        let fills = g.fills.iter().map(BlockFill::of).collect::<Vec<_>>();
+        let attributed = statuses.filled_iocs.attributed(&a, &fills, &|coin| (coin == g.coin).then_some(g.asset), &system);
+        assert!(!attributed.iter().any(|(_, oids)| oids.contains(&584_547_511_107)), "{case}");
+    }
+}

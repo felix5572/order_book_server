@@ -1,0 +1,221 @@
+{
+  "height": 1195513614,
+  "coin": "TIA",
+  "asset": 63,
+  "block_time": "2026-10-24T12:13:36.568812142",
+  "action": {
+    "type": "order",
+    "orders": [
+      {
+        "a": 63,
+        "b": false,
+        "p": "0.5523",
+        "s": "317.6",
+        "r": true,
+        "t": {
+          "limit": {
+            "tif": "Ioc"
+          }
+        },
+        "c": "0x0000000000000000000001a15e4e7d84"
+      }
+    ],
+    "grouping": {
+      "p": 0
+    }
+  },
+  "response": {
+    "user": "0x9e5d8291fd4b9f9de1d36c76f25d2a6f7beb4582",
+    "res": {
+      "status": "ok",
+      "response": {
+        "type": "order",
+        "data": {
+          "statuses": [
+            {
+              "filled": {
+                "totalSz": "317.6",
+                "avgPx": "0.55232",
+                "oid": 584547546204,
+                "cloid": "0x0000000000000000000001a15e4e7d84"
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "statuses": [
+    {
+      "time": "2026-10-24T12:13:36.568812142",
+      "user": "0x9e5d8291fd4b9f9de1d36c76f25d2a6f7beb4582",
+      "hash": "0xf953cbe58ecfb885facd044742170e0201de00cb29c2d7589d1c77384dc39270",
+      "builder": null,
+      "status": "open",
+      "order": {
+        "coin": "TIA",
+        "side": "A",
+        "limitPx": "0.5523",
+        "sz": "317.6",
+        "oid": 584547546204,
+        "timestamp": 1792844016568,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Limit",
+        "origSz": "317.6",
+        "tif": "Ioc",
+        "cloid": "0x0000000000000000000001a15e4e7d84"
+      }
+    },
+    {
+      "time": "2026-10-24T12:13:36.568812142",
+      "user": "0x9e5d8291fd4b9f9de1d36c76f25d2a6f7beb4582",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "TIA",
+        "side": "A",
+        "limitPx": "0.5523",
+        "sz": "0.0",
+        "oid": 584547546204,
+        "timestamp": 1792844016568,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Limit",
+        "origSz": "317.6",
+        "tif": "Ioc",
+        "cloid": "0x0000000000000000000001a15e4e7d84"
+      }
+    },
+    {
+      "time": "2026-10-24T12:13:36.568812142",
+      "user": "0x9e5d8291fd4b9f9de1d36c76f25d2a6f7beb4582",
+      "hash": null,
+      "builder": null,
+      "status": "reduceOnlyCanceled",
+      "order": {
+        "coin": "TIA",
+        "side": "A",
+        "limitPx": "0.55233",
+        "sz": "317.6",
+        "oid": 584547511107,
+        "timestamp": 1792844011914,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Limit",
+        "origSz": "317.6",
+        "tif": "Alo",
+        "cloid": "0x0000000000000000000001a15e4e7d83"
+      }
+    }
+  ],
+  "diffs": [
+    {
+      "user": "0x4e60e3a4a32d63d245aa4e4ce304b4254b088f95",
+      "oid": 584547541432,
+      "coin": "TIA",
+      "side": "B",
+      "px": "0.55232",
+      "raw_book_diff": {
+        "update": {
+          "origSz": "724.2",
+          "newSz": "406.6"
+        }
+      }
+    },
+    {
+      "user": "0x9e5d8291fd4b9f9de1d36c76f25d2a6f7beb4582",
+      "oid": 584547511107,
+      "coin": "TIA",
+      "side": "A",
+      "px": "0.55233",
+      "raw_book_diff": "remove"
+    }
+  ],
+  "fills": [
+    [
+      "0x4e60e3a4a32d63d245aa4e4ce304b4254b088f95",
+      {
+        "coin": "TIA",
+        "px": "0.55232",
+        "sz": "317.6",
+        "side": "B",
+        "time": 1792844016568,
+        "startPosition": "-2850.1",
+        "dir": "Close Short",
+        "closedPnl": "-0.724128",
+        "hash": "0xf953cbe58ecfb885facd044742170e0201de00cb29c2d7589d1c77384dc39270",
+        "oid": 584547541432,
+        "crossed": false,
+        "fee": "-0.001754",
+        "tid": 1024189392119542,
+        "cloid": "0x1f889c01000000003f00000000000000",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    [
+      "0x9e5d8291fd4b9f9de1d36c76f25d2a6f7beb4582",
+      {
+        "coin": "TIA",
+        "px": "0.55232",
+        "sz": "317.6",
+        "side": "A",
+        "time": 1792844016568,
+        "startPosition": "317.6",
+        "dir": "Close Long",
+        "closedPnl": "0.034936",
+        "hash": "0xf953cbe58ecfb885facd044742170e0201de00cb29c2d7589d1c77384dc39270",
+        "oid": 584547546204,
+        "crossed": true,
+        "fee": "0.02947",
+        "tid": 1024189392119542,
+        "cloid": "0x0000000000000000000001a15e4e7d84",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ]
+  ],
+  "provenance": {
+    "window": [
+      1195510000,
+      1195520000
+    ],
+    "original_diff_indices": [
+      473,
+      474
+    ],
+    "original_status_indices": [
+      785,
+      786,
+      787
+    ],
+    "source": "BM raw streaming events and replica. Unrelated events omitted; no fields altered.",
+    "sga_rank": [
+      1,
+      3,
+      0
+    ],
+    "old_mid_units": 55232,
+    "correct_mid_units": 55234,
+    "old_ema_numerator": -0.4976086594589352,
+    "node_ema_numerator": -0.4975738438539318,
+    "taker_wire_position": [
+      0,
+      458
+    ]
+  }
+}
