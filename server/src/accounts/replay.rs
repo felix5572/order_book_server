@@ -2052,20 +2052,32 @@ pub(crate) mod tests {
     #[test]
     fn native_liquidation_and_later_reduction_reconcile_the_full_cashcat_interval() {
         let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/native_liquidation_cash_golden.json")).unwrap();
+        check_native_liquidation_cash(&golden, 6);
+    }
+
+    #[test]
+    fn native_liquidation_reconciles_pons_cash_without_claiming_exact_unified_routing() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/native_pons_liquidation_cash_golden.json")).unwrap();
+        check_native_liquidation_cash(&golden, 122);
+    }
+
+    fn check_native_liquidation_cash(golden: &serde_json::Value, expected_fills: usize) {
         let before = &golden["checkpoint_before"];
         let leverage = u32::try_from(before["l"]["I"]["l"].as_u64().unwrap()).unwrap();
         let mut states = per_dex();
         let account = states.accounts.get_mut(&user(ISOLATED)).unwrap();
         account.isolated.clear();
         account.isolated.insert((0, 0), before["l"]["I"]["u"].as_i64().unwrap() * WEI_PER_MICRO);
-        // This corpus proves the six-fill isolated ledger. Other-asset funding is deliberately ample,
-        // not a reconstruction of the account's entire cross portfolio or intrawindow order reserves.
-        account.pools = per_dex_pools(&[(0, 1_000_000_000_000_000_000)]);
+        // CASHCAT verifies isolated allocation with ample synthetic cross funding. PONS includes its
+        // observed aggregate Unified pool; neither corpus proves internal spot/dex reserve sweeps.
+        account.pools = golden["unified_pool_before_wei"].as_i64().map_or_else(
+            || per_dex_pools(&[(0, 1_000_000_000_000_000_000)]), Pools::Unified);
+        account.unified_routing_known = false;
         account.cross_exposure_seen.clear();
         let market = PerpMarket { dex: 0, asset: 0, size_decimals: 0,
             margin_mode: AssetMarginMode::Normal, default_leverage: leverage };
         let events = golden["events"].as_array().unwrap();
-        assert_eq!(events.len(), 6);
+        assert_eq!(events.len(), expected_fills);
         for recorded in events {
             let height = recorded["height"].as_u64().unwrap();
             let prices = crate::accounts::marks::fill_prices::native_golden_prices(recorded);
@@ -2078,7 +2090,12 @@ pub(crate) mod tests {
             assert_eq!(totals(account)[&0], total + flow);
         }
         assert_eq!(account.isolated[&(0, 0)], golden["checkpoint_after"]["l"]["I"]["u"].as_i64().unwrap() * WEI_PER_MICRO);
-        assert!(!account.estimated, "paired native liquidation mark closes the only ambiguous transfer");
+        if let Some(pool) = golden["unified_pool_after_wei"].as_i64() {
+            assert_eq!(account.pools, Pools::Unified(pool));
+            assert!(account.estimated, "matching endpoint cash does not prove internal Unified routing");
+        } else {
+            assert!(!account.estimated, "paired native liquidation mark closes the only ambiguous transfer");
+        }
     }
 
     #[test]
