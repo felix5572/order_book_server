@@ -7,6 +7,8 @@
 pub(crate) use hip3::{golden_prices, trigger_golden_prices, interleaved_golden_prices, oracle_golden_prices};
 mod hip3;
 mod liquidation;
+#[cfg(test)]
+pub(crate) use liquidation::native_golden_prices;
 
 use std::sync::Arc;
 

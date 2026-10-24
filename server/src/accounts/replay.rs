@@ -2050,6 +2050,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn native_liquidation_and_later_reduction_reconcile_the_full_cashcat_interval() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/native_liquidation_cash_golden.json")).unwrap();
+        let before = &golden["checkpoint_before"];
+        let leverage = u32::try_from(before["l"]["I"]["l"].as_u64().unwrap()).unwrap();
+        let mut states = per_dex();
+        let account = states.accounts.get_mut(&user(ISOLATED)).unwrap();
+        account.isolated.clear();
+        account.isolated.insert((0, 0), before["l"]["I"]["u"].as_i64().unwrap() * WEI_PER_MICRO);
+        // This corpus proves the six-fill isolated ledger. Other-asset funding is deliberately ample,
+        // not a reconstruction of the account's entire cross portfolio or intrawindow order reserves.
+        account.pools = per_dex_pools(&[(0, 1_000_000_000_000_000_000)]);
+        account.cross_exposure_seen.clear();
+        let market = PerpMarket { dex: 0, asset: 0, size_decimals: 0,
+            margin_mode: AssetMarginMode::Normal, default_leverage: leverage };
+        let events = golden["events"].as_array().unwrap();
+        assert_eq!(events.len(), 6);
+        for recorded in events {
+            let height = recorded["height"].as_u64().unwrap();
+            let prices = crate::accounts::marks::fill_prices::native_golden_prices(recorded);
+            let fill: Fill = serde_json::from_value(recorded["fill"].clone()).unwrap();
+            let mut event = FillEvent::of(&fill).unwrap();
+            assert!(event.restore_mark(height, &prices));
+            let flow = event.cash_wei(0, MAX_PERP_DECIMALS).unwrap();
+            let total = totals(account)[&0];
+            apply_isolated_fill(account, &market, &event, flow, leverage).unwrap();
+            assert_eq!(totals(account)[&0], total + flow);
+        }
+        assert_eq!(account.isolated[&(0, 0)], golden["checkpoint_after"]["l"]["I"]["u"].as_i64().unwrap() * WEI_PER_MICRO);
+        assert!(!account.estimated, "paired native liquidation mark closes the only ambiguous transfer");
+    }
+
+    #[test]
     fn recorded_liquidation_mark_reconciles_five_live_isolated_makers() {
         let golden: serde_json::Value = serde_json::from_str(include_str!("marks/fill_prices/liquidation_cash_goldens.json")).unwrap();
         let prices = crate::accounts::marks::fill_prices::golden_prices(&golden, &golden["event"]);

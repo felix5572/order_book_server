@@ -1,7 +1,8 @@
 //! Market-liquidation fills record the execution mark on both legs. BM para:LRCX 1193180450:
 //! using 232.7792 resolves five isolated maker balances exactly; the block also contained 233.52.
-//! Refine only trusted HIP-3 ranges containing that price. This neither updates the mark state nor
-//! supplies missing price history. Backstop/ADL and native liquidation timing remain outside this proof.
+//! CASHCAT1195272693 confirms the same rule on main:14485micro additional margin becomes12817
+//! after a later reduction. Refine only trusted ranges containing the mutually recorded price.
+//! This neither updates global mark/collateral state nor supplies missing history. Backstop/ADL stay excluded.
 
 use rustc_hash::FxHashMap;
 
@@ -36,9 +37,9 @@ impl LiquidationLegs {
 }
 
 pub(super) fn refine(prices: &mut FillMarkPrices, fills: &[BlockFill]) {
-    // Most blocks have no HIP-3 liquidation: no map allocation for ordinary fills.
+    // Most blocks have no market liquidation: no map allocation for ordinary fills.
     let mut trades: FxHashMap<(&str, u64), LiquidationLegs> = FxHashMap::default();
-    for fill in fills.iter().filter(|fill| fill.coin.contains(':') && fill.liquidation_mark_px.is_some()) {
+    for fill in fills.iter().filter(|fill| fill.liquidation_mark_px.is_some()) {
         trades.entry((&fill.coin, fill.tid)).or_default();
     }
     if trades.is_empty() { return; }
@@ -56,6 +57,20 @@ pub(super) fn refine(prices: &mut FillMarkPrices, fills: &[BlockFill]) {
             }
         }
     }
+}
+
+/// Seed the independently replayed native ranges and pass both recorded wire legs through the production builder.
+#[cfg(test)]
+pub(crate) fn native_golden_prices(event: &serde_json::Value) -> FillMarkPrices {
+    let fills = event["legs"].as_array().unwrap().iter().map(|leg| {
+        let wire: crate::types::node_data::NodeDataFill = serde_json::from_value(leg.clone()).unwrap();
+        BlockFill::of(&wire)
+    }).collect::<Vec<_>>();
+    let mut builder = super::FillPriceBuilder::new(&fills);
+    for seen in &mut builder.prices {
+        for price in event["original_range_raw"].as_array().unwrap() { seen.observe(Some((price.as_u64().unwrap(), 0))); }
+    }
+    builder.finish(event["height"].as_u64().unwrap(), &fills)
 }
 
 #[cfg(test)]
@@ -95,29 +110,40 @@ mod tests {
         let mut fs = fills();
         assert_eq!(prices(&fs, false).get(100, "xyz:X", 7), None, "recorded mark cannot repair missing history");
         for f in &mut fs { f.coin = "BTC".into(); }
-        assert_eq!(prices(&fs, true).get(100, "BTC", 7).unwrap().max_px_raw, 234, "native timing is unchanged");
+        assert_eq!(prices(&fs, true).get(100, "BTC", 7).unwrap().max_px_raw, 232, "native liquidation uses the same two-leg proof");
+        assert_eq!(prices(&fs, false).get(100, "BTC", 7), None, "native history is also required");
         for f in &mut fs { f.coin = "xyz:X".into(); f.liquidation_mark_px = None; }
         assert_eq!(prices(&fs, true).get(100, "xyz:X", 7).unwrap().max_px_raw, 234);
     }
 
     #[test]
     fn bad_or_disagreeing_prices_withdraw_this_trade_projection() {
-        for px in ["NaN", "-2.32", "0", "2.321", "2.31", "2.35", "2.33"] {
-            let mut fs = fills(); fs[1].liquidation_mark_px = Some(px.into());
-            assert_eq!(prices(&fs, true).get(100, "xyz:X", 7), None, "{px}");
+        for coin in ["xyz:X", "CASHCAT"] {
+            for px in ["NaN", "-2.32", "0", "2.321", "2.31", "2.35", "2.33"] {
+                let mut fs = fills();
+                for f in &mut fs { f.coin = coin.into(); }
+                fs[1].liquidation_mark_px = Some(px.into());
+                assert_eq!(prices(&fs, true).get(100, coin, 7), None, "{coin} {px}");
+            }
+            let mut fs = fills();
+            for f in &mut fs { f.coin = coin.into(); }
+            fs[1].liquidation_mark_px = None;
+            assert_eq!(prices(&fs, true).get(100, coin, 7), None);
         }
-        let mut fs = fills(); fs[1].liquidation_mark_px = None;
-        assert_eq!(prices(&fs, true).get(100, "xyz:X", 7), None);
     }
 
     #[test]
     fn a_unique_maker_and_taker_are_required() {
-        let mut fs = fills();
-        assert_eq!(prices(&fs[..1], true).get(100, "xyz:X", 7), None);
-        fs[1].crossed = false;
-        assert_eq!(prices(&fs, true).get(100, "xyz:X", 7), None);
-        fs = fills(); fs.push(fs[0].clone());
-        assert_eq!(prices(&fs, true).get(100, "xyz:X", 7), None);
+        for coin in ["xyz:X", "CASHCAT"] {
+            let mut fs = fills();
+            for f in &mut fs { f.coin = coin.into(); }
+            assert_eq!(prices(&fs[..1], true).get(100, coin, 7), None);
+            fs[1].crossed = false;
+            assert_eq!(prices(&fs, true).get(100, coin, 7), None);
+            fs[1].crossed = true;
+            fs.push(fs[0].clone());
+            assert_eq!(prices(&fs, true).get(100, coin, 7), None);
+        }
     }
 
     #[test]
