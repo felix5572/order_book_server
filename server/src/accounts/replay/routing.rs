@@ -1,5 +1,5 @@
-//! Scoped Unified funding: an isolated-only maker balance, or an ordinary IOC capacity bound excluding
-//! unchanged zero-position order reservations on other dexes. Both paths preserve the estimated boundary.
+//! Scoped Unified funding projections: executing-dex maker cash, retained-cash sufficiency, and ordinary IOC
+//! capacity excluding untouched other-dex reservations. Every path preserves the estimated boundary.
 //! The aggregate pool remains the cash authority. This projection distinguishes a resting order's retained cash
 //! from spot cash. Native 6911b792: 0x44c9000 reserve, 0x3c92a80 101% retention, 0x5b370f0 order prefund/sweep.
 //! Maker admission uses the observed fee as a rate estimate; its caller's encoding and deferred sweep sets are
@@ -15,6 +15,7 @@ use super::{AccountMargin, FillEvent, Markets, Pools};
 
 mod other_dex;
 mod anchor_cross;
+mod reserved_maker;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RoutingUpdate {
@@ -38,6 +39,8 @@ pub(crate) struct OrderChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FundingPath {
     RestingMaker,
+    /// Lower bound on already retained cash; never predicts a replenishment or sweep timestamp.
+    ReservedMaker,
     /// Checkpoint executing-dex cash, valid only until its first observed routing boundary/fill.
     AnchoredCrossMaker { dex: usize },
     /// Known locked funds bound available collateral; they do not establish physical prefunding/sweep order.
@@ -49,6 +52,7 @@ pub(super) struct RoutingProjection {
     coin: String,
     decimals: u32,
     reserve: Reserve,
+    /// Exact observed/projected cash, or a conservative lower bound for ReservedMaker.
     /// `None` distinguishes unobserved deferred routing from a known empty executing balance.
     cash_micro: Option<i64>,
     last_fill_block: Option<u64>,
@@ -68,6 +72,10 @@ impl RoutingProjection {
                 continue;
             }
             if let Some(route) = Self::other_dex_seed(checkpoint, markets, user, account) {
+                result.insert(*user, route);
+                continue;
+            }
+            if let Some(route) = Self::reserved_maker_seed(checkpoint, markets, user, account) {
                 result.insert(*user, route);
                 continue;
             }
@@ -110,7 +118,7 @@ impl RoutingProjection {
     pub(super) fn coin(&self) -> &str { &self.coin }
 
     pub(super) fn expires_on_funding(&self, coin: &str) -> bool {
-        self.coin != coin || matches!(self.path, FundingPath::AnchoredCrossMaker { .. })
+        self.coin != coin || matches!(self.path, FundingPath::AnchoredCrossMaker { .. } | FundingPath::ReservedMaker)
     }
 
     pub(super) const fn invalidate(&mut self) { self.tracker_trusted = false; self.cash_micro = None; }
@@ -147,6 +155,7 @@ impl RoutingProjection {
         if !self.tracker_trusted { self.cash_micro = None; return None; }
         let capacity = match self.path {
             FundingPath::RestingMaker => self.maker_capacity(block, fill, cash_before, aggregate_wei),
+            FundingPath::ReservedMaker => self.reserved_maker_capacity(fill, cash_before),
             FundingPath::OtherDexReserve { locked_micro, ioc_block: Some(height) }
                 if height == block && fill.coin == self.coin && fill.crossed && !fill.backstop =>
                 (aggregate_wei / WEI_PER_MICRO).checked_sub(locked_micro).map(|cash| cash.max(0)),
@@ -195,6 +204,11 @@ impl RoutingProjection {
         self.reserve.position_raw = end;
         self.reserve.price_raw = fill.mark.filter(|m| m.min_px_raw == m.max_px_raw).map_or(0, |m| m.min_px_raw);
         self.cash_micro = self.cash_micro.and_then(|cash| cash.checked_add(cross_delta_wei / WEI_PER_MICRO));
+        if self.path == FundingPath::ReservedMaker {
+            // Either no sweep ran, or excess above 101% of the reduced reservation returned to spot.
+            // Keep the lower of those balances; never claim which sweep schedule actually ran.
+            self.cash_micro = self.cash_micro.zip(self.reserve.retained_micro()).map(|(cash, retained)| cash.min(retained));
+        }
         self.last_fill_block = Some(block);
         Some(())
     }
