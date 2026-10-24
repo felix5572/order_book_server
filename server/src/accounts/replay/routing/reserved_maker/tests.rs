@@ -9,9 +9,10 @@ fn recorded() -> serde_json::Value { serde_json::from_str(include_str!("../../pr
 
 // Native positions, metadata, tracker, money and fills. Remap executing dex slot10 to fixture slot1;
 // keep its native PDI10/asset10. Unrelated checkpoint sections are scaffold, not a full native wrapper.
-fn seeded() -> (CheckpointAccounts, Markets, Address) {
+fn seeded() -> (CheckpointAccounts, Markets, Address) { seeded_case(&recorded()) }
+
+fn seeded_case(case: &serde_json::Value) -> (CheckpointAccounts, Markets, Address) {
     let (mut cp, _, who) = super::super::tests::checkpoint();
-    let case = recorded();
     cp.dexes[1].pdi = 10;
     let mut markets = Markets { usdc_dexes: vec![true; 2], tables: vec![Default::default(); 2],
         asset_names: vec![vec![]; 2], ..Default::default() };
@@ -42,15 +43,18 @@ fn seeded() -> (CheckpointAccounts, Markets, Address) {
         DexAccount { dex, cash_micro: state["u"].as_i64().unwrap(), positions, isolated_settings: vec![] }
     }).collect();
     for (dex, key) in ["0", "10"].into_iter().enumerate() {
-        let tracker: OrderTrackerSnapshot = serde_json::from_value(case["before"]["trackers"][key].clone()).unwrap();
-        cp.order_trackers[dex].as_mut().unwrap().insert(who, tracker);
+        if !case["before"]["trackers"][key].is_null() {
+            let tracker: OrderTrackerSnapshot = serde_json::from_value(case["before"]["trackers"][key].clone()).unwrap();
+            cp.order_trackers[dex].as_mut().unwrap().insert(who, tracker);
+        }
     }
     (cp, markets, who)
 }
 
 fn event(row: &serde_json::Value) -> FillEvent {
     let wire: Fill = serde_json::from_value(row["fill"].clone()).unwrap();
-    let mut fill = FillEvent::at_mark(&wire, Some(FillMarkRange { min_px_raw: 193_080, max_px_raw: 193_080, size_decimals: 1 })).unwrap();
+    let mark = row["mark_raw"].as_u64().unwrap();
+    let mut fill = FillEvent::at_mark(&wire, Some(FillMarkRange { min_px_raw: mark, max_px_raw: mark, size_decimals: 1 })).unwrap();
     fill.collateral_marks = Some(Arc::new(row["collateral"].as_object().unwrap().iter().map(|(coin, v)| {
         (coin.clone(), FillMarkRange { min_px_raw: v["min_px_raw"].as_u64().unwrap(),
             max_px_raw: v["max_px_raw"].as_u64().unwrap(), size_decimals: v["size_decimals"].as_u64().unwrap() as u32 })
@@ -152,4 +156,36 @@ fn order_ioc_and_unattributed_updates_discard_retention_proof() {
     let route = account.routing.as_ref().unwrap();
     assert!(route.expires_on_funding("io:PRL"));
     assert!(route.expires_on_funding("ETH"));
+}
+
+#[test]
+fn prl_full_maker_consumes_reserve_despite_positive_but_insufficient_aggregate_capacity() {
+    let case: serde_json::Value = serde_json::from_str(include_str!("../../prl_consumed_reserve_golden.json")).unwrap();
+    for with_route in [false, true] {
+        let (cp, markets, who) = seeded_case(&case);
+        let mut account = AccountMargin::of(&cp.accounts[&who], &markets);
+        if with_route {
+            account.routing = RoutingProjection::seeds(&cp, &markets).remove(&who);
+            assert_eq!(account.routing.as_ref().unwrap().path, FundingPath::ReservedMaker);
+        }
+        let row = &case["fills"][0];
+        let fill = event(row);
+        let Pools::Unified(pool_before) = account.pools else { panic!("Unified fixture") };
+        assert_eq!(CrossCapacityProjection::combined_available_micro(pool_before, account.cross_capacity.values(),
+            fill.collateral_marks.as_ref().unwrap()).unwrap(), Some(69_466_132));
+        let total_before = pool_before + account.isolated.values().sum::<i64>();
+        apply_perp_fill(&mut account, &markets, row["height"].as_u64().unwrap(), &fill).unwrap();
+        let difference = if with_route { 0 } else { 68_727_201 };
+        assert_eq!(account.isolated[&(1, 10)] / WEI_PER_MICRO, -655_012_420 - difference);
+        assert_eq!(account.pools, Pools::Unified(-1_008_695_003_064 + difference * WEI_PER_MICRO));
+        let Pools::Unified(pool_after) = account.pools else { unreachable!() };
+        assert_eq!(pool_after + account.isolated.values().sum::<i64>(), total_before + fill.cash_wei(1, 5).unwrap());
+        if with_route {
+            let route = account.routing.as_ref().unwrap();
+            assert_eq!(route.reserve.size_raw, [0, 0]);
+            assert_eq!(route.reserve.required_micro(), Some(0));
+            assert_eq!(route.cash_micro, Some(0), "fully consumed reservation leaves no guaranteed retained cash");
+        }
+        assert!(account.estimated, "a sufficient retained-cash bound does not prove all routing timings");
+    }
 }

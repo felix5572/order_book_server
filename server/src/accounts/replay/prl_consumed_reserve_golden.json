@@ -1,0 +1,388 @@
+{
+  "coin": "io:PRL",
+  "user": "0xed2b0842d30d854545ec2f94f84c380196f61147",
+  "window": [
+    1195590000,
+    1195600000
+  ],
+  "node_binary_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+  "before": {
+    "height": 1195590000,
+    "states": {
+      "0": {
+        "u": -10099945917,
+        "p": {
+          "p": [
+            [
+              1,
+              {
+                "l": {
+                  "C": 10
+                },
+                "M": 55,
+                "f": {
+                  "a": 26243
+                }
+              }
+            ],
+            [
+              74,
+              {
+                "s": 6028,
+                "l": {
+                  "C": 10
+                },
+                "M": 52,
+                "f": {
+                  "a": -557123,
+                  "o": -557123,
+                  "c": -644033
+                },
+                "e": 2839540000
+              }
+            ],
+            [
+              159,
+              {
+                "s": 11143,
+                "l": {
+                  "C": 10
+                },
+                "M": 52,
+                "f": {
+                  "a": 14129049,
+                  "o": 14129049,
+                  "c": 282040
+                },
+                "e": 8821336680
+              }
+            ]
+          ],
+          "n": 2
+        }
+      },
+      "10": {
+        "u": 139575266,
+        "p": {
+          "p": [
+            [
+              100010,
+              {
+                "s": 2773,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": -378613814
+                  }
+                },
+                "M": 3,
+                "f": {
+                  "a": 847493,
+                  "o": 847493,
+                  "c": 3354
+                },
+                "e": 566625000
+              }
+            ]
+          ],
+          "n": 1
+        }
+      }
+    },
+    "trackers": {
+      "0": null,
+      "1": null,
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": {
+        "e": 138193333,
+        "a": [
+          [
+            100010,
+            {
+              "n": [
+                414580000,
+                0
+              ],
+              "s": [
+                2182,
+                0
+              ],
+              "P": 2773,
+              "p": 195410,
+              "l": 3
+            }
+          ]
+        ]
+      }
+    },
+    "spot_usdc_wei": 1161395336
+  },
+  "after": {
+    "height": 1195600000,
+    "states": {
+      "0": {
+        "u": -10099945917,
+        "p": {
+          "p": [
+            [
+              1,
+              {
+                "l": {
+                  "C": 10
+                },
+                "M": 55,
+                "f": {
+                  "a": 26243
+                }
+              }
+            ],
+            [
+              74,
+              {
+                "s": 6028,
+                "l": {
+                  "C": 10
+                },
+                "M": 52,
+                "f": {
+                  "a": -557123,
+                  "o": -557123,
+                  "c": -644033
+                },
+                "e": 2839540000
+              }
+            ],
+            [
+              159,
+              {
+                "s": 11143,
+                "l": {
+                  "C": 10
+                },
+                "M": 52,
+                "f": {
+                  "a": 14129049,
+                  "o": 14129049,
+                  "c": 282040
+                },
+                "e": 8821336680
+              }
+            ]
+          ],
+          "n": 2
+        }
+      },
+      "10": {
+        "u": 0,
+        "p": {
+          "p": [
+            [
+              100010,
+              {
+                "s": 4955,
+                "l": {
+                  "I": {
+                    "l": 3,
+                    "u": -655012420
+                  }
+                },
+                "M": 3,
+                "f": {
+                  "a": 847493,
+                  "o": 847493
+                },
+                "e": 981205000
+              }
+            ]
+          ],
+          "n": 1
+        }
+      }
+    },
+    "trackers": {
+      "0": null,
+      "1": null,
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null,
+      "9": null,
+      "10": null
+    },
+    "spot_usdc_wei": 1299588636
+  },
+  "markets": [
+    {
+      "dex": 0,
+      "asset": 74,
+      "meta": {
+        "szDecimals": 1,
+        "name": "NEAR",
+        "marginTableId": 52,
+        "marginMode": "normal"
+      }
+    },
+    {
+      "dex": 0,
+      "asset": 159,
+      "meta": {
+        "szDecimals": 2,
+        "name": "HYPE",
+        "marginTableId": 52,
+        "marginMode": "normal"
+      }
+    },
+    {
+      "dex": 10,
+      "asset": 10,
+      "meta": {
+        "szDecimals": 1,
+        "name": "io:PRL",
+        "marginTableId": 3,
+        "marginMode": "noCross"
+      }
+    }
+  ],
+  "fills": [
+    {
+      "height": 1195599753,
+      "fill": {
+        "coin": "io:PRL",
+        "px": "1.9",
+        "sz": "218.2",
+        "side": "B",
+        "time": 1792850270683,
+        "startPosition": "277.3",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xbf320a396e137b75c0ab044743678901f400221f09169a4762fab58c2d175560",
+        "oid": 583817296190,
+        "crossed": false,
+        "fee": "0.011939",
+        "tid": 951476146895198,
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.005373"
+      },
+      "mark_raw": 191080,
+      "collateral": {
+        "HYPE": {
+          "min_px_raw": 759020,
+          "max_px_raw": 759020,
+          "size_decimals": 2
+        },
+        "io:PRL": {
+          "min_px_raw": 191080,
+          "max_px_raw": 191080,
+          "size_decimals": 1
+        },
+        "xyz:CRCL": {
+          "min_px_raw": 84848,
+          "max_px_raw": 84848,
+          "size_decimals": 3
+        },
+        "ETH": {
+          "min_px_raw": 236680,
+          "max_px_raw": 236680,
+          "size_decimals": 4
+        },
+        "BTC": {
+          "min_px_raw": 806820,
+          "max_px_raw": 806820,
+          "size_decimals": 5
+        },
+        "BNB": {
+          "min_px_raw": 730400,
+          "max_px_raw": 730400,
+          "size_decimals": 3
+        },
+        "SOL": {
+          "min_px_raw": 1013400,
+          "max_px_raw": 1013400,
+          "size_decimals": 2
+        },
+        "xyz:SNDK": {
+          "min_px_raw": 1235600,
+          "max_px_raw": 1235600,
+          "size_decimals": 3
+        },
+        "NEAR": {
+          "min_px_raw": 443530,
+          "max_px_raw": 443530,
+          "size_decimals": 1
+        }
+      }
+    }
+  ],
+  "inputs": {
+    "aggregate_micro": 69466132,
+    "local_available_micro": 139575266,
+    "cross_equity_micro": {
+      "0": 10018222830,
+      "10": 0
+    },
+    "physical_cash_micro": 139575266
+  },
+  "native_cases": {
+    "aggregate": {
+      "steps": [
+        {
+          "tid": 951476146895198,
+          "capacity_before_micro": 69466132,
+          "isolated_cash_micro": -723739621,
+          "size_raw": 4955,
+          "cross_cash_micro": 0
+        }
+      ],
+      "isolated_micro": -723739621,
+      "difference_from_checkpoint_micro": -68727201,
+      "margin_moved_micro": 69466132
+    },
+    "local": {
+      "steps": [
+        {
+          "tid": 951476146895198,
+          "capacity_before_micro": 139575266,
+          "isolated_cash_micro": -655012420,
+          "size_raw": 4955,
+          "cross_cash_micro": 1381933
+        }
+      ],
+      "isolated_micro": -655012420,
+      "difference_from_checkpoint_micro": 0,
+      "margin_moved_micro": 138193333
+    },
+    "ample": {
+      "steps": [
+        {
+          "tid": 951476146895198,
+          "capacity_before_micro": 1000000000000,
+          "isolated_cash_micro": -655012420,
+          "size_raw": 4955,
+          "cross_cash_micro": 999861806667
+        }
+      ],
+      "isolated_micro": -655012420,
+      "difference_from_checkpoint_micro": 0,
+      "margin_moved_micro": 138193333
+    }
+  },
+  "scope": "Native fill arithmetic with supplied available collateral derived from checkpoint portfolios and replayed execution marks. Does not execute full order/gather wrapper or prove intervening physical routing.",
+  "native_maximum_raw": 2191,
+  "cash_floor_micro": 0,
+  "reserve_micro": 0,
+  "provenance": {
+    "scope": "Native reserve, maker-size and fill arithmetic using supplied lookup/equity/tier containers. Complete selected-user events and endpoint tracker observed; exact intermediate sweep timing not asserted. cashEstimated remains true.",
+    "mark_evidence": "1195590000..1195600000 complete price/book replay; execution mark191080 and all collateral marks unique. No account order/funding actions in this interval."
+  }
+}
