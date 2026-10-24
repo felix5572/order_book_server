@@ -200,7 +200,7 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_secs(5), subscribed).await.expect("the frames come at once"));
         assert_eq!(json(&data.recv().await.unwrap())["channel"], "subscriptionResponse");
         let frame = json(&data.recv().await.unwrap());
-        assert_eq!((frame["channel"].as_str(), frame["data"]["coin"].as_str(), frame["data"]["tierBps"].as_u64()), (Some(EXT_FORCED_FLOW), Some(PUMP), Some(100)));
+        assert_eq!((frame["channel"].as_str(), frame["data"]["coin"].as_str(), frame["data"]["tierBps"].as_u64()), (Some(EXT_FORCED_FLOW), Some(PUMP), Some(50)));
         assert_eq!((frame["data"]["status"].as_str(), frame["data"]["reason"].as_str()), (Some("unavailable"), Some("the server runs without an order book")));
         assert!(session.on_forced_flow_message(&outbound, &mut manager, ClientMessage::Unsubscribe { subscription: sub.clone() }, sub).await);
         assert_eq!(json(&data.recv().await.unwrap())["channel"], "subscriptionResponse");

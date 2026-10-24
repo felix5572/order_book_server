@@ -23,11 +23,15 @@ const FIXED_POINT_DECIMALS: u32 = 8;
 pub(crate) const BAND_EDGES_BPS: [u32; 9] = [1, 5, 10, 25, 50, 100, 200, 500, 1_000];
 
 /// A subscription's cadence by its distance (r4 revision 9): up to 10 bp at most every 100 ms (the near entries move
-/// with every mark), up to 100 bp every second, up to 1,000 bp every 5 seconds. Each tier is computed for its own
-/// distance; a subscription's narrower distance filters its tier's frames.
+/// with every mark), up to 50 bp every 100 ms too (bm 2026-10-23: the costly small-coin orders were reached at ~6 bp a
+/// second, a 20 bp watch a second apart gained little), up to 100 bp every second, up to 1,000 bp every 5 seconds.
+/// Each tier is computed for its own distance; a subscription's narrower distance filters its tier's frames, and a
+/// frame goes out when the tier's content changed, so the 10 bp tier stays apart from the 50 bp one: its subscribers
+/// get no frame for a change between 10 and 50 bp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Tier {
     Near,
+    NearWide,
     Mid,
     Far,
 }
@@ -36,7 +40,8 @@ impl Tier {
     pub(crate) const fn of(max_distance_bps: u32) -> Option<Self> {
         match max_distance_bps {
             0..=10 => Some(Self::Near),
-            11..=100 => Some(Self::Mid),
+            11..=50 => Some(Self::NearWide),
+            51..=100 => Some(Self::Mid),
             101..=1_000 => Some(Self::Far),
             _ => None,
         }
@@ -45,6 +50,7 @@ impl Tier {
     pub(crate) const fn bps(self) -> u32 {
         match self {
             Self::Near => 10,
+            Self::NearWide => 50,
             Self::Mid => 100,
             Self::Far => 1_000,
         }
@@ -52,7 +58,7 @@ impl Tier {
 
     pub(crate) const fn period(self) -> std::time::Duration {
         std::time::Duration::from_millis(match self {
-            Self::Near => 100,
+            Self::Near | Self::NearWide => 100,
             Self::Mid => 1_000,
             Self::Far => 5_000,
         })
@@ -629,7 +635,11 @@ mod tests {
 
     #[test]
     fn subscriptions_fall_into_three_tiers() {
-        assert_eq!([0, 10, 11, 100, 101, 1_000, 1_001].map(Tier::of), [Some(Tier::Near), Some(Tier::Near), Some(Tier::Mid), Some(Tier::Mid), Some(Tier::Far), Some(Tier::Far), None]);
+        assert_eq!(
+            [0, 10, 11, 50, 51, 100, 101, 1_000, 1_001].map(Tier::of),
+            [Some(Tier::Near), Some(Tier::Near), Some(Tier::NearWide), Some(Tier::NearWide), Some(Tier::Mid), Some(Tier::Mid), Some(Tier::Far), Some(Tier::Far), None]
+        );
+        assert_eq!([Tier::Near, Tier::NearWide, Tier::Mid].map(|tier| (tier.bps(), tier.period().as_millis())), [(10, 100), (50, 100), (100, 1_000)]);
         assert_eq!(Tier::Far.period(), std::time::Duration::from_secs(5));
     }
 

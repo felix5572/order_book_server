@@ -2,7 +2,7 @@
 //! owner task: which (coin, tier) is demanded - by a WS subscription's guard or an HTTP query -, each one's pipeline of
 //! two reads (the band's trigger orders, then the entries' walks, both in the flow reader task), and its latest frame.
 //!
-//! A demanded (coin, tier) runs its pipeline once per tier period (100 ms, 1 s, 5 s); a local leg that turns withheld
+//! A demanded (coin, tier) runs its pipeline once per tier period (100 ms for 10 and 50 bp, 1 s, 5 s); a local leg that turns withheld
 //! or ended starts it at once. The frame is published when its content differs from the last published one (r5:
 //! compared before `seq`, which numbers the published contents); the heights it carries are those of its inputs.
 

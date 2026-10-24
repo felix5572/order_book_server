@@ -516,10 +516,11 @@ mod tests {
     #[test]
     fn a_subscription_admits_its_tier_and_coins_only() {
         let empty = frame(Vec::new());
-        assert!(FlowFilter::of(None, 50, None, None, None).unwrap().admits(&empty));
+        assert!(FlowFilter::of(None, 100, None, None, None).unwrap().admits(&empty));
         assert!(!FlowFilter::of(None, 10, None, None, None).unwrap().admits(&empty), "another tier");
-        assert!(!FlowFilter::of(Some("BTC".to_string()), 50, None, None, None).unwrap().admits(&empty));
-        assert!(!FlowFilter::of(None, 50, None, Some(vec!["PUMP".to_string()]), None).unwrap().admits(&empty), "excluded");
+        assert!(!FlowFilter::of(None, 50, None, None, None).unwrap().admits(&empty), "the 50 bp tier, not the 100 bp one");
+        assert!(!FlowFilter::of(Some("BTC".to_string()), 100, None, None, None).unwrap().admits(&empty));
+        assert!(!FlowFilter::of(None, 100, None, Some(vec!["PUMP".to_string()]), None).unwrap().admits(&empty), "excluded");
         let only_triggers = FlowFilter::of(None, 100, Some(vec!["trigger".to_string()]), None, Some(0)).unwrap();
         let with_entry = frame(vec![liquidation(1, 1_000_000, 0.0123, 90.0)]);
         assert_eq!(view(&with_entry, &only_triggers)["data"]["entries"], serde_json::json!([]));
