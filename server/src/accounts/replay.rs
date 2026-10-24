@@ -781,6 +781,11 @@ fn apply_spot_fill(account: &mut AccountMargin, markets: &Markets, fill: &FillEv
     if !account.unified() {
         return Ok(());
     }
+    // Borrow-liquidation proceeds settle debt, not ordinary spendable spot cash. The fill stream
+    // does not supply that settlement; preserve the same unsupported-backstop boundary as perps.
+    if fill.backstop {
+        return Err(StopReason::BackstopLiquidation);
+    }
     let pair = index.and_then(|index| markets.spot_pairs.get(index)).ok_or_else(|| StopReason::UnknownMarket(fill.coin.clone()))?;
     if pair.quote_token != USDC {
         return Err(StopReason::NonUsdcSpotFill);
@@ -1260,6 +1265,44 @@ pub(crate) mod tests {
         assert_eq!(states.accounts[&user(HOLDER)].stop, Some(Stop { block: Some(7), reason: StopReason::BackstopLiquidation }));
         states.apply(8, user(HOLDER), &fill(PUMP_COIN, "B", "0.004477", "1.0", "0.0", None));
         assert_eq!(cross(&states, HOLDER), per_dex_pools(&[(0, main), (1, 3_026_970_000)]), "a stopped account stays");
+    }
+
+    #[test]
+    fn spot_borrow_liquidation_never_credits_ordinary_unified_cash() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("spot_borrow_liquidation_golden.json")).unwrap();
+        for row in golden["rows"].as_array().unwrap() {
+            let wire: Fill = serde_json::from_value(row["record"]["events"][0][1].clone()).unwrap();
+            let event = AccountEvent::Fill(FillEvent::of(&wire).unwrap());
+            for unified in [false, true] {
+                let mut replay = if unified { states(|_| {}) } else { per_dex() };
+                // The real pair107 is HYPE/USDC; fixture pair1 carries the same token/quantity scale.
+                let pair = replay.markets.spot_pairs[1].clone();
+                replay.markets.spot_pairs.resize(108, pair);
+                let before = replay.accounts[&user(HOLDER)].json();
+                let block = row["height"].as_u64().unwrap();
+                assert!(replay.apply(block, user(HOLDER), &event));
+                assert_eq!(replay.accounts[&user(HOLDER)].json(), before, "both liquidated and backstop legs, including zero-size events");
+                if unified {
+                    assert_eq!(stop(&replay, HOLDER), Some(StopReason::BackstopLiquidation));
+                    assert!(!replay.apply(block, user(HOLDER), &event), "a stopped replay cannot apply the event again");
+                    assert_eq!(replay.replayed_row(&user(HOLDER), PUMP_COIN, 1_000_000, 52, [], |_| None), None);
+                } else {
+                    assert_eq!(stop(&replay, HOLDER), None, "per-dex replay excludes spot cash already");
+                }
+            }
+        }
+        // Control: stripping the exceptional settlement type gives exactly the observed false credit.
+        let row = golden["rows"].as_array().unwrap().iter().find(|row|
+            row["record"]["events"][0][0] == golden["mismatch"]["user"]).unwrap();
+        let mut wire: Fill = serde_json::from_value(row["record"]["events"][0][1].clone()).unwrap();
+        wire.liquidation = None;
+        let mut replay = states(|_| {});
+        let pair = replay.markets.spot_pairs[1].clone();
+        replay.markets.spot_pairs.resize(108, pair);
+        let Pools::Unified(before) = cross(&replay, HOLDER) else { unreachable!() };
+        replay.apply(row["height"].as_u64().unwrap(), user(HOLDER), &AccountEvent::Fill(FillEvent::of(&wire).unwrap()));
+        assert_eq!(cross(&replay, HOLDER), Pools::Unified(before + golden["difference_wei"].as_i64().unwrap()));
+        assert_eq!(stop(&replay, HOLDER), None, "ordinary spot fills retain their existing behavior");
     }
 
     const PUMP_COIN: &str = "PUMP";

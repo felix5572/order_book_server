@@ -1,0 +1,173 @@
+{
+  "source": "Node rareLine raw rows retained in systemd journal; public userFillsByTime independently matches affected victim fill.",
+  "scope": "Observed endpoint difference and original fills; complete1195660000..1195670000 checkpoint/raw window already rotated during local power outage. Does not establish a full settlement replay.",
+  "mismatch": {
+    "anchor": {
+      "isolated": {
+        "0:116": "-9137.46447"
+      },
+      "pools": {
+        "unified": "0.00848249"
+      }
+    },
+    "anchorFrom": 1195660000,
+    "anchorTo": 1195670000,
+    "kind": "replayMismatch",
+    "replayed": {
+      "isolated": {
+        "0:116": "-9137.46447"
+      },
+      "pools": {
+        "unified": "33.94033649"
+      }
+    },
+    "user": "0xa9cf92b41ef47b299b5ad49b8db555c2fe7a7cb6"
+  },
+  "difference_wei": 3393185400,
+  "rows": [
+    {
+      "height": 1195668392,
+      "record": {
+        "local_time": "2026-10-24T15:20:02.655685744",
+        "block_time": "2026-10-24T15:19:57.030862654",
+        "block_number": 1195668392,
+        "events": [
+          [
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            {
+              "coin": "@107",
+              "px": "73.7649",
+              "sz": "0.0",
+              "side": "B",
+              "time": 1792855197030,
+              "startPosition": "0.0",
+              "dir": "Partial Borrow Liquidation",
+              "closedPnl": "0.0",
+              "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "oid": 584680057532,
+              "crossed": false,
+              "fee": "0.0",
+              "tid": 359183946210225,
+              "liquidation": {
+                "liquidatedUser": "0x7677600f13a75b36b2e1fba5078bc9ff94d51e81",
+                "markPx": "74.51",
+                "method": "backstop"
+              },
+              "feeToken": "HYPE",
+              "twapId": null
+            }
+          ]
+        ]
+      },
+      "raw_sha256": "997311a59f6349eb263b365371cd0e69379b180e50029e8734b890dfe71a6ae3"
+    },
+    {
+      "height": 1195668392,
+      "record": {
+        "local_time": "2026-10-24T15:20:02.655690633",
+        "block_time": "2026-10-24T15:19:57.030862654",
+        "block_number": 1195668392,
+        "events": [
+          [
+            "0x7677600f13a75b36b2e1fba5078bc9ff94d51e81",
+            {
+              "coin": "@107",
+              "px": "73.7649",
+              "sz": "0.0",
+              "side": "A",
+              "time": 1792855197030,
+              "startPosition": "0.0",
+              "dir": "Partial Borrow Liquidation",
+              "closedPnl": "0.0",
+              "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "oid": 584680057532,
+              "crossed": true,
+              "fee": "0.0",
+              "tid": 359183946210225,
+              "liquidation": {
+                "liquidatedUser": "0x7677600f13a75b36b2e1fba5078bc9ff94d51e81",
+                "markPx": "74.51",
+                "method": "backstop"
+              },
+              "feeToken": "USDC",
+              "twapId": null
+            }
+          ]
+        ]
+      },
+      "raw_sha256": "7018b40dbebffe62051e54700fd12daaf37c3fb16e6ebb8cce80e2bd25f91e37"
+    },
+    {
+      "height": 1195668392,
+      "record": {
+        "local_time": "2026-10-24T15:20:02.655696444",
+        "block_time": "2026-10-24T15:19:57.030862654",
+        "block_number": 1195668392,
+        "events": [
+          [
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            {
+              "coin": "@107",
+              "px": "73.7649",
+              "sz": "0.46",
+              "side": "B",
+              "time": 1792855197030,
+              "startPosition": "0.0",
+              "dir": "Partial Borrow Liquidation",
+              "closedPnl": "0.0",
+              "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "oid": 584680057533,
+              "crossed": false,
+              "fee": "0.0",
+              "tid": 99612775247901,
+              "liquidation": {
+                "liquidatedUser": "0xa9cf92b41ef47b299b5ad49b8db555c2fe7a7cb6",
+                "markPx": "74.51",
+                "method": "backstop"
+              },
+              "feeToken": "HYPE",
+              "twapId": null
+            }
+          ]
+        ]
+      },
+      "raw_sha256": "2d967e562472befe6940e75735e6a990848cbe13e50cc8408d0a0e4ba0d86de8"
+    },
+    {
+      "height": 1195668392,
+      "record": {
+        "local_time": "2026-10-24T15:20:02.655701253",
+        "block_time": "2026-10-24T15:19:57.030862654",
+        "block_number": 1195668392,
+        "events": [
+          [
+            "0xa9cf92b41ef47b299b5ad49b8db555c2fe7a7cb6",
+            {
+              "coin": "@107",
+              "px": "73.7649",
+              "sz": "0.46",
+              "side": "A",
+              "time": 1792855197030,
+              "startPosition": "0.0",
+              "dir": "Partial Borrow Liquidation",
+              "closedPnl": "0.0",
+              "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "oid": 584680057533,
+              "crossed": true,
+              "fee": "0.0",
+              "tid": 99612775247901,
+              "liquidation": {
+                "liquidatedUser": "0xa9cf92b41ef47b299b5ad49b8db555c2fe7a7cb6",
+                "markPx": "74.51",
+                "method": "backstop"
+              },
+              "feeToken": "USDC",
+              "twapId": null
+            }
+          ]
+        ]
+      },
+      "raw_sha256": "f8dbcad6beabb3d96cbec2a5bd7eb8aa285a67b7b7ff92f9ca6652f97cd3ac32"
+    }
+  ]
+}
