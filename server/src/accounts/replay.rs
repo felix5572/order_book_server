@@ -307,8 +307,9 @@ pub(crate) struct AccountMargin {
     /// execution-time cross marks, which the isolated fill's own mark cannot establish.
     cross_exposure_seen: FxHashSet<usize>,
     /// Capacity projection owned and advanced by this cash replay from checkpoint holdings and fill start sizes.
-    /// Known holdings retain their leverage through close/reopen; an unknown holding or leverage action removes
-    /// the projection until reseeding. Unified capacity combines known dex portfolios; physical routing is separate.
+    /// Known holdings retain leverage through close/reopen and closed-asset setting changes. Unknown holdings
+    /// or active-position leverage changes remove the projection until reseeding. Unified capacity combines known
+    /// dex portfolios; physical routing is separate.
     /// Explicit spot movement clears the projection.
     cross_capacity: FxHashMap<usize, cross_capacity::CrossCapacityProjection>,
     /// Positive spot USDC can be frozen or remain outside the executing dex. A single-dex portfolio still
@@ -922,21 +923,22 @@ fn apply_action(account: &mut AccountMargin, markets: &Markets, block: u64, acti
         BlockAction::Leverage { asset, is_cross, leverage } => {
             let market = market_of(*asset)?;
             let key = (market.dex, market.asset);
-            // NIL1196045879 repeats the saved3x setting while closed: no cross membership, divisor or cash changes.
-            // Keep that existing proof; active positions and actual setting changes still invalidate it.
-            let unchanged_closed_isolated = !*is_cross && !account.isolated.contains_key(&key)
-                && account.isolated_leverage.get(&key) == Some(leverage);
-            if !unchanged_closed_isolated { account.cross_capacity.remove(&market.dex); }
+            // BTC1196390000..1196400000 closes before switching cross/isolated settings. Preserve a
+            // complete portfolio through closed-asset changes; active or already-unknown holdings cannot
+            // use that proof. This retains aggregate capacity, never certifies Unified physical routing.
+            let retained = !account.isolated.contains_key(&key) && account.cross_capacity.get_mut(&market.dex)
+                .is_some_and(|portfolio| portfolio.set_closed_leverage(&markets.asset_names[market.dex][market.asset],
+                    (*is_cross).then_some(*leverage), market.size_decimals));
+            if !retained { account.cross_capacity.remove(&market.dex); }
             // a switch either way, or a new isolated leverage: a fill of the block may precede it
             let changed = if *is_cross {
                 account.isolated_leverage.remove(&key).is_some()
             } else {
                 account.isolated_leverage.insert(key, *leverage) != Some(*leverage)
             };
-            if changed {
-                if *is_cross { account.cross_exposure_seen.insert(market.dex); }
-                account.switch(block, key);
-            }
+            if changed && *is_cross { account.cross_exposure_seen.insert(market.dex); }
+            // A newly retained cross divisor cannot order a fill against a setting in the same block.
+            if changed || retained && *is_cross { account.switch(block, key); }
         }
         BlockAction::TopUpIsolatedOnlyMargin { asset, target_leverage } => {
             return Err(StopReason::TopUpIsolatedOnlyMargin { asset: *asset, target_leverage: target_leverage.clone() });

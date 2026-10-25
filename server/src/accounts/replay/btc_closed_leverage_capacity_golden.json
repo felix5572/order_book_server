@@ -1,0 +1,861 @@
+{
+  "user": "0x25eff56c07c65ea770492721164d8582caf8230a",
+  "window": [
+    1196390000,
+    1196400000
+  ],
+  "markets": {
+    "BTC": {
+      "dex": 0,
+      "asset": 0,
+      "size_decimals": 5,
+      "default_leverage": 20,
+      "margin_mode": "normal",
+      "table_id": 56
+    }
+  },
+  "before": {
+    "spot_wei": 6309000,
+    "dex_states": [
+      {
+        "dex": 0,
+        "cash_micro": 0,
+        "positions": {
+          "BTC": {
+            "s": -22599,
+            "l": {
+              "I": {
+                "l": 40,
+                "u": 18641163958
+              }
+            },
+            "M": 56,
+            "f": {
+              "a": -9747476
+            },
+            "e": 18209370240
+          }
+        }
+      }
+    ]
+  },
+  "after": {
+    "spot_wei": 0,
+    "dex_states": [
+      {
+        "dex": 0,
+        "cash_micro": 0,
+        "positions": {
+          "BTC": {
+            "s": -44574,
+            "l": {
+              "I": {
+                "l": 15,
+                "u": 38258309185
+              }
+            },
+            "M": 56,
+            "f": {
+              "a": -10160456,
+              "o": -412980,
+              "c": -412980
+            },
+            "e": 35910597360
+          }
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "height": 1196391159,
+      "fill": {
+        "coin": "BTC",
+        "px": "80527.0",
+        "sz": "0.08141",
+        "side": "B",
+        "time": 1792907514443,
+        "startPosition": "-0.22599",
+        "dir": "Close Short",
+        "closedPnl": "3.98909",
+        "hash": "0x6aef017e422621226c6804474f7af70201370063dd293ff40eb7acd10129fb0d",
+        "oid": 585108813897,
+        "crossed": true,
+        "fee": "8.522413",
+        "builderFee": "5.572347",
+        "tid": 873393998501235,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805200,
+        "max_px_raw": 805200,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "123dcf7702ab93fdfa0f8915bb4b46f75808de9f8f719ecc57ad4b98a2e2b4f1"
+    },
+    {
+      "height": 1196391159,
+      "fill": {
+        "coin": "BTC",
+        "px": "80527.0",
+        "sz": "0.14458",
+        "side": "B",
+        "time": 1792907514443,
+        "startPosition": "-0.14458",
+        "dir": "Close Short",
+        "closedPnl": "7.08442",
+        "hash": "0x6aef017e422621226c6804474f7af70201370063dd293ff40eb7acd10129fb0d",
+        "oid": 585108813897,
+        "crossed": true,
+        "fee": "15.135371",
+        "builderFee": "9.896204",
+        "tid": 996758004767065,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805200,
+        "max_px_raw": 805200,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "e2bdf59d4693cbd1c371c4b4757b811ce1776b06b493c95b7af17865b3d02379"
+    },
+    {
+      "height": 1196393744,
+      "ledger": {
+        "users": [
+          "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+          "0x25eff56c07c65ea770492721164d8582caf8230a"
+        ],
+        "delta": {
+          "type": "send",
+          "user": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+          "destination": "0x25eff56c07c65ea770492721164d8582caf8230a",
+          "sourceDex": "",
+          "destinationDex": "",
+          "token": "USDC",
+          "amount": "2226.757297",
+          "usdcValue": "2226.757297",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": 1792907702608,
+          "feeToken": ""
+        }
+      },
+      "source_sha256": "dcd4546a0f9fe368ab379854ce5ef1fce0164f7323352d51fa05fa48f3b02b15"
+    },
+    {
+      "height": 1196393864,
+      "action": {
+        "type": "updateLeverage",
+        "asset": 0,
+        "isCross": true,
+        "leverage": 40
+      },
+      "source_sha256": "785afcb12db51a1bf3717ca8caa61e4d746215319099205d4d52e08162f0a24f"
+    },
+    {
+      "height": 1196393892,
+      "fill": {
+        "coin": "BTC",
+        "px": "80515.0",
+        "sz": "0.29527",
+        "side": "A",
+        "time": 1792907714095,
+        "startPosition": "0.0",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x0dcbd17ce8f3aa930f4504474f85a402010b006283f6c965b1947ccfa7f7847d",
+        "oid": 585110393387,
+        "crossed": true,
+        "fee": "30.905762",
+        "builderFee": "20.207614",
+        "tid": 112288777105010,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805150,
+        "max_px_raw": 805150,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "1424fb2f7cf6f979e35f510857e7b6dc25028ab3fa269659bc17573138c836ba"
+    },
+    {
+      "height": 1196393892,
+      "fill": {
+        "coin": "BTC",
+        "px": "80515.0",
+        "sz": "0.00134",
+        "side": "A",
+        "time": 1792907714095,
+        "startPosition": "-0.29527",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x0dcbd17ce8f3aa930f4504474f85a402010b006283f6c965b1947ccfa7f7847d",
+        "oid": 585110393387,
+        "crossed": true,
+        "fee": "0.140256",
+        "builderFee": "0.091706",
+        "tid": 407525155194778,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805150,
+        "max_px_raw": 805150,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "d93a6b1ad85773aa6f6223ab6bc522cfb206264ef9711638033a92945510ad41"
+    },
+    {
+      "height": 1196393892,
+      "fill": {
+        "coin": "BTC",
+        "px": "80515.0",
+        "sz": "0.18593",
+        "side": "A",
+        "time": 1792907714095,
+        "startPosition": "-0.29661",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x0dcbd17ce8f3aa930f4504474f85a402010b006283f6c965b1947ccfa7f7847d",
+        "oid": 585110393387,
+        "crossed": true,
+        "fee": "19.461199",
+        "builderFee": "12.72463",
+        "tid": 750853561467210,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805150,
+        "max_px_raw": 805150,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "0e224490e6b2bb4f34abb8d9d0c4ef1eb23bb0b1ef99ce36f2fc0e22d10b3230"
+    },
+    {
+      "height": 1196393892,
+      "fill": {
+        "coin": "BTC",
+        "px": "80515.0",
+        "sz": "0.22",
+        "side": "A",
+        "time": 1792907714095,
+        "startPosition": "-0.48254",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x0dcbd17ce8f3aa930f4504474f85a402010b006283f6c965b1947ccfa7f7847d",
+        "oid": 585110393387,
+        "crossed": true,
+        "fee": "23.02729",
+        "builderFee": "15.056305",
+        "tid": 24257526391294,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805150,
+        "max_px_raw": 805150,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "9903ef20b8bbb080a3418c83c7b276d9edfa2c0118b918344761c7ab7e8a8759"
+    },
+    {
+      "height": 1196393892,
+      "fill": {
+        "coin": "BTC",
+        "px": "80515.0",
+        "sz": "0.19122",
+        "side": "A",
+        "time": 1792907714095,
+        "startPosition": "-0.70254",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x0dcbd17ce8f3aa930f4504474f85a402010b006283f6c965b1947ccfa7f7847d",
+        "oid": 585110393387,
+        "crossed": true,
+        "fee": "20.014901",
+        "builderFee": "13.086666",
+        "tid": 22853187088633,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805150,
+        "max_px_raw": 805150,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "56d770dad77561e0cf0ff3e7454a9f1b7d0d66bba03cb23bf3923e5a83baa495"
+    },
+    {
+      "height": 1196393892,
+      "fill": {
+        "coin": "BTC",
+        "px": "80515.0",
+        "sz": "0.21238",
+        "side": "A",
+        "time": 1792907714095,
+        "startPosition": "-0.89376",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x0dcbd17ce8f3aa930f4504474f85a402010b006283f6c965b1947ccfa7f7847d",
+        "oid": 585110393387,
+        "crossed": true,
+        "fee": "22.229708",
+        "builderFee": "14.534809",
+        "tid": 94533189100209,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805150,
+        "max_px_raw": 805150,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "c6a9ef26c11f4165cb67a8ab76407713d6a71e89334c4077a70fcbd293b0d599"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80526.0",
+        "sz": "0.00005",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-1.10614",
+        "dir": "Close Short",
+        "closedPnl": "-0.00055",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "0.005233",
+        "builderFee": "0.003422",
+        "tid": 449459448299036,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "cc125f8cc389d492550a704e9608e3f0089693f0b5f27c13d7ceabf8ff3a5648"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80527.0",
+        "sz": "0.00015",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-1.10609",
+        "dir": "Close Short",
+        "closedPnl": "-0.0018",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "0.015702",
+        "builderFee": "0.010267",
+        "tid": 96645078921989,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "01c64f56a0eb16abece094766d71d0df1ea9b9b1dd797f6a23f654245014f7f8"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80527.0",
+        "sz": "0.00049",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-1.10594",
+        "dir": "Close Short",
+        "closedPnl": "-0.00588",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "0.051295",
+        "builderFee": "0.033539",
+        "tid": 41982751668544,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "ab9841aca2e785eb493c3563710f3e3bd36ed9981dc455e5c70f7bdf1fc917e0"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80527.0",
+        "sz": "0.00629",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-1.10545",
+        "dir": "Close Short",
+        "closedPnl": "-0.07548",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "0.658468",
+        "builderFee": "0.430537",
+        "tid": 754047696645212,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "9a8a69bacf904ce2953ebe0d60ea4ea025b64f317a1ba33bd79cd7365fdb156b"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80529.0",
+        "sz": "0.01552",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-1.09916",
+        "dir": "Close Short",
+        "closedPnl": "-0.21728",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "1.624752",
+        "builderFee": "1.062338",
+        "tid": 143732372644428,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "183d04770b23eb18646803394c4e097210ac4efec406b1a8927b11f4f8cb36ba"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80533.0",
+        "sz": "0.0022",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-1.08364",
+        "dir": "Close Short",
+        "closedPnl": "-0.0396",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "0.230323",
+        "builderFee": "0.150596",
+        "tid": 467880452893337,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "2899772413daa01167c986771ac4edeba3a544a74221706c51ff3d2b0e00636f"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80533.0",
+        "sz": "0.15036",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-1.08144",
+        "dir": "Close Short",
+        "closedPnl": "-2.70648",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "15.741623",
+        "builderFee": "10.2926",
+        "tid": 726440264816680,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "90370bdcabdf06bbf1521c77d8b3c899436be8d15bc69bf8b0774846d8af0b0d"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80533.0",
+        "sz": "0.00124",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-0.93108",
+        "dir": "Close Short",
+        "closedPnl": "-0.02232",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "0.129818",
+        "builderFee": "0.084881",
+        "tid": 230701432048625,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "358860133482094e68ba94191be238bc7b665fd3eca99832da317633177c3743"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80533.0",
+        "sz": "0.48428",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-0.92984",
+        "dir": "Close Short",
+        "closedPnl": "-8.71704",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "50.700677",
+        "builderFee": "33.150443",
+        "tid": 110966637885806,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "702fd3c50455b225611edf00bbb49367d564da926223ee7d30d9da63ad77a149"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80533.0",
+        "sz": "0.03725",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-0.44556",
+        "dir": "Close Short",
+        "closedPnl": "-0.6705",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "3.89981",
+        "builderFee": "2.549876",
+        "tid": 988083696762573,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "b9488f4319bbcc34ced03ce0cd73e8d29ad66f327ad559d1a6d932fc045122ec"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80534.0",
+        "sz": "0.15474",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-0.40831",
+        "dir": "Close Short",
+        "closedPnl": "-2.94006",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "16.20038",
+        "builderFee": "10.592556",
+        "tid": 651712010831384,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "00bd3620499e439a9b2e3c6d634c9eb36a5960a87f7f1bf2c981cd057dcc2578"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80534.0",
+        "sz": "0.006",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-0.25357",
+        "dir": "Close Short",
+        "closedPnl": "-0.114",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "0.628164",
+        "builderFee": "0.410723",
+        "tid": 791765676003687,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "964cefbcbe0efe797dd39e1621ddf0a3b5f6413d902473716cb3f8d2dc5d06fb"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80535.0",
+        "sz": "0.09",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-0.24757",
+        "dir": "Close Short",
+        "closedPnl": "-1.8",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "9.422594",
+        "builderFee": "6.160927",
+        "tid": 77707320506991,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "aa1fc89fd4c3e22781db7071799de2ffc31963657a33c43abadff28d256ee894"
+    },
+    {
+      "height": 1196394438,
+      "fill": {
+        "coin": "BTC",
+        "px": "80535.0",
+        "sz": "0.15757",
+        "side": "B",
+        "time": 1792907754583,
+        "startPosition": "-0.15757",
+        "dir": "Close Short",
+        "closedPnl": "-3.1514",
+        "hash": "0xbd9ed76bd4191ef8bf1804474f87c602026300516f1c3dca616782be931cf8e3",
+        "oid": 585110699170,
+        "crossed": true,
+        "fee": "16.496868",
+        "builderFee": "10.786414",
+        "tid": 162755487491359,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805290,
+        "max_px_raw": 805290,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "71be64406a6cf6ae253c2915feaf1965cbd6b8c268fe2ad2866527fa5bc27091"
+    },
+    {
+      "height": 1196396373,
+      "action": {
+        "type": "updateLeverage",
+        "asset": 0,
+        "isCross": false,
+        "leverage": 15
+      },
+      "source_sha256": "920cfe15c1f360b4865cf96ec953ac6d8503063fe84247bce7610f3712731111"
+    },
+    {
+      "height": 1196396403,
+      "fill": {
+        "coin": "BTC",
+        "px": "80564.0",
+        "sz": "0.14576",
+        "side": "A",
+        "time": 1792907895402,
+        "startPosition": "0.0",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x53e1cac94888a5a8555b04474f8f7302012100aee38bc47af7aa761c078c7f92",
+        "oid": 585111769354,
+        "crossed": true,
+        "fee": "15.26591",
+        "builderFee": "9.981557",
+        "tid": 1004550267087989,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805540,
+        "max_px_raw": 805540,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "74e2a9325de85e10a7bd7616e28a3ad6e49f46bbae0ac8c69593166cb235c7a9"
+    },
+    {
+      "height": 1196396403,
+      "fill": {
+        "coin": "BTC",
+        "px": "80564.0",
+        "sz": "0.14346",
+        "side": "A",
+        "time": 1792907895402,
+        "startPosition": "-0.14576",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x53e1cac94888a5a8555b04474f8f7302012100aee38bc47af7aa761c078c7f92",
+        "oid": 585111769354,
+        "crossed": true,
+        "fee": "15.025024",
+        "builderFee": "9.824054",
+        "tid": 337434952343263,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805540,
+        "max_px_raw": 805540,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "44ec2e7773ac6c2ff5ac642febf6afdc3c4d26f708ecc7d0d5ade2b9aa07238c"
+    },
+    {
+      "height": 1196396403,
+      "fill": {
+        "coin": "BTC",
+        "px": "80564.0",
+        "sz": "0.15652",
+        "side": "A",
+        "time": 1792907895402,
+        "startPosition": "-0.28922",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x53e1cac94888a5a8555b04474f8f7302012100aee38bc47af7aa761c078c7f92",
+        "oid": 585111769354,
+        "crossed": true,
+        "fee": "16.392839",
+        "builderFee": "10.718395",
+        "tid": 652207793569616,
+        "feeToken": "USDC",
+        "builder": "0x5aafc1f252d544f744d17a4e734afd6efc47ede4",
+        "twapId": null
+      },
+      "mark": {
+        "min_px_raw": 805540,
+        "max_px_raw": 805540,
+        "size_decimals": 5
+      },
+      "collateral": {},
+      "source_sha256": "ec6624ff328021c3713595c4b5db3e30e8fc8d5bb153fbfd3ea24792176ae75b"
+    },
+    {
+      "height": 1196397811,
+      "funding": {
+        "user": "0x25eff56c07c65ea770492721164d8582caf8230a",
+        "coin": "BTC",
+        "funding_amount": "0.41298",
+        "szi": "-0.44574",
+        "funding_rate": "0.000011494"
+      },
+      "source_sha256": "1e6b72e1f79ffbeb108503cd6f25c167c783a0797a8fd88603f86ac544382ccf"
+    }
+  ],
+  "provenance": {
+    "evidence": "BM heartbeat_20261025T062812Z/cash_evidence",
+    "replay_price_probe_sha256": "2d835964bf4ced00095b813a050d10c453d9d80897a7d6fe569cf93a7297167d",
+    "execution_prices": "10000 blocks, all234x7prices and236books314411orders exact; all25selectedfills single-valued marks",
+    "old_split_error_micro": 57205,
+    "last_order_requested_size": "0.44579",
+    "last_order_filled_size": "0.44574",
+    "scope": "Actual selected account checkpoint, full25fills,2leverage-setting changes,ledger transfer,funding; initial isolated40x setting comes from the checkpoint. Market table unused by this cash replay. No target correction or synthetic capacity input; physical Unified routing remains estimated."
+  },
+  "main_dex": true
+}

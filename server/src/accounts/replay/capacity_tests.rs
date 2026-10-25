@@ -152,11 +152,17 @@ fn recorded_range(raw: &serde_json::Value) -> FillMarkRange {
 }
 
 fn replay_cross_dex(case: &serde_json::Value, omit_capacity: bool) -> (AccountMargin, Markets) {
-    let (source, markets) = cross_dex_source(case);
+    let (source, mut markets) = cross_dex_source(case);
+    if case["main_dex"].as_bool() == Some(true) { markets.dexes.insert(String::new(), 0); }
     let mut account = AccountMargin::of(&source, &markets);
     if omit_capacity { account.cross_capacity.clear(); }
     for event in case["events"].as_array().unwrap() {
         let height = event["height"].as_u64().unwrap();
+        if let Some(ledger) = event.get("ledger") {
+            let delta: LedgerDelta = serde_json::from_value(ledger["delta"].clone()).unwrap();
+            apply_ledger(&mut account, &markets, case["user"].as_str().unwrap().parse().unwrap(), &delta).unwrap();
+            continue;
+        }
         if let Some(action) = event.get("action") {
             assert_eq!(action["type"], "updateLeverage");
             apply_action(&mut account, &markets, height, &BlockAction::Leverage {
@@ -487,4 +493,81 @@ fn repeated_closed_isolated_leverage_retains_cross_capacity() {
         assert!(states.apply(1196045897, holder, &AccountEvent::Action(action)));
         assert!(!states.accounts[&holder].cross_capacity.contains_key(&0));
     }
+}
+
+#[test]
+fn btc_closed_leverage_switches_preserve_capacity_across_the_complete_window() {
+    let case: serde_json::Value = serde_json::from_str(include_str!("btc_closed_leverage_capacity_golden.json")).unwrap();
+    let (account, markets) = replay_cross_dex(&case, false);
+    assert_recorded_cash(&case, &account, &markets);
+    assert!(account.estimated, "initial spot and Unified physical routing remain a separate proof boundary");
+    let (unknown, _) = replay_cross_dex(&case, true);
+    assert_eq!(unknown.isolated[&(0, 0)] - account.isolated[&(0, 0)], 57_205 * WEI_PER_MICRO,
+        "discarding the complete portfolio loses the last fill's funding cap");
+    assert!(unknown.estimated);
+}
+
+#[test]
+fn closed_leverage_projection_preserves_other_holdings_but_never_recovers_unknown_state() {
+    let case: serde_json::Value = serde_json::from_str(include_str!("btc_closed_leverage_capacity_golden.json")).unwrap();
+    let (source, markets) = cross_dex_source(&case);
+    let closed = |account: &mut AccountMargin| { account.isolated.clear(); };
+    for unknown in [false, true] {
+        let mut account = AccountMargin::of(&source, &markets);
+        closed(&mut account);
+        if unknown { account.cross_capacity.clear(); }
+        for (height, cross, leverage) in [(1, true, 20), (2, true, 30), (3, false, 15), (4, false, 10)] {
+            apply_action(&mut account, &markets, height, &BlockAction::Leverage { asset: 0, is_cross: cross, leverage }).unwrap();
+            assert_eq!(account.cross_capacity.contains_key(&0), !unknown);
+            if !unknown {
+                let holdings = &account.cross_capacity[&0].holdings;
+                assert_eq!(holdings.len(), usize::from(cross));
+                if cross { assert_eq!((holdings[0].size_raw, holdings[0].leverage), (0, leverage)); }
+            }
+        }
+    }
+    let mut account = AccountMargin::of(&source, &markets);
+    closed(&mut account);
+    let other = cross_capacity::Holding { coin: "OTHER".into(), size_raw: -8, leverage: 5, size_decimals: 2 };
+    account.cross_capacity.get_mut(&0).unwrap().holdings.push(other.clone());
+    apply_action(&mut account, &markets, 10, &BlockAction::Leverage { asset: 0, is_cross: false, leverage: 15 }).unwrap();
+    assert_eq!(account.cross_capacity[&0].holdings, [other]);
+    // Active isolated or cross exposure cannot use the closed-position proof.
+    for cross in [false, true] {
+        let mut account = AccountMargin::of(&source, &markets);
+        if cross {
+            closed(&mut account);
+            account.cross_capacity.get_mut(&0).unwrap().holdings.push(cross_capacity::Holding {
+                coin: "BTC".into(), size_raw: -22_599, leverage: 40, size_decimals: 5,
+            });
+        }
+        apply_action(&mut account, &markets, 20, &BlockAction::Leverage { asset: 0, is_cross: cross, leverage: 15 }).unwrap();
+        assert!(!account.cross_capacity.contains_key(&0));
+    }
+    let mut account = AccountMargin::of(&source, &markets);
+    closed(&mut account);
+    account.isolated_leverage.clear();
+    apply_action(&mut account, &markets, 30, &BlockAction::Leverage { asset: 0, is_cross: true, leverage: 20 }).unwrap();
+    let raw: Fill = serde_json::from_value(case["events"].as_array().unwrap().iter()
+        .find(|e| e["height"] == 1196393892_u64).unwrap()["fill"].clone()).unwrap();
+    let fill = FillEvent::of(&raw).unwrap();
+    assert_eq!(apply_perp_fill(&mut account, &markets, 30, &fill), Err(StopReason::IsolatedFill),
+        "same-block fill/setting order cannot use the new divisor");
+    assert!(apply_perp_fill(&mut account, &markets, 31, &fill).is_ok());
+    assert!(account.cross_capacity.contains_key(&0));
+    assert!(apply_perp_fill(&mut account, &markets, 32, &fill).is_ok());
+    assert!(!account.cross_capacity.contains_key(&0), "repeated startPosition must withdraw the portfolio");
+}
+
+#[test]
+fn zhipu_closed_leverage_preserves_foreign_collateral_capacity() {
+    let case: serde_json::Value = serde_json::from_str(include_str!("zhipu_closed_leverage_capacity_golden.json")).unwrap();
+    let (account, markets) = replay_cross_dex(&case, false);
+    assert_recorded_cash(&case, &account, &markets);
+    assert!(account.estimated, "cross-dex cash movement retains the Unified physical-routing boundary");
+    let (unknown, _) = replay_cross_dex(&case, true);
+    let market = &markets.perps["xyz:ZHIPU"];
+    assert_eq!(unknown.isolated[&(market.dex, market.asset)] - account.isolated[&(market.dex, market.asset)],
+        1_071 * WEI_PER_MICRO, "discarding one dex invalidates the combined collateral proof");
+    assert!(unknown.estimated);
 }

@@ -1,0 +1,1184 @@
+{
+  "user": "0x6e345f0defe1c207db23930a79c20782953db498",
+  "window": [
+    1196380000,
+    1196390000
+  ],
+  "markets": {
+    "RSR": {
+      "dex": 0,
+      "asset": 92,
+      "size_decimals": 0,
+      "default_leverage": 3,
+      "margin_mode": "normal",
+      "table_id": 3
+    },
+    "WIF": {
+      "dex": 0,
+      "asset": 98,
+      "size_decimals": 0,
+      "default_leverage": 5,
+      "margin_mode": "normal",
+      "table_id": 5
+    },
+    "GRASS": {
+      "dex": 0,
+      "asset": 151,
+      "size_decimals": 1,
+      "default_leverage": 3,
+      "margin_mode": "normal",
+      "table_id": 3
+    },
+    "SAND": {
+      "dex": 0,
+      "asset": 156,
+      "size_decimals": 0,
+      "default_leverage": 5,
+      "margin_mode": "normal",
+      "table_id": 5
+    },
+    "ALGO": {
+      "dex": 0,
+      "asset": 158,
+      "size_decimals": 0,
+      "default_leverage": 5,
+      "margin_mode": "normal",
+      "table_id": 5
+    },
+    "PAXG": {
+      "dex": 0,
+      "asset": 187,
+      "size_decimals": 3,
+      "default_leverage": 10,
+      "margin_mode": "normal",
+      "table_id": 51
+    },
+    "AVNT": {
+      "dex": 0,
+      "asset": 208,
+      "size_decimals": 0,
+      "default_leverage": 5,
+      "margin_mode": "normal",
+      "table_id": 5
+    },
+    "CHIP": {
+      "dex": 0,
+      "asset": 229,
+      "size_decimals": 0,
+      "default_leverage": 3,
+      "margin_mode": "normal",
+      "table_id": 3
+    },
+    "GRAM": {
+      "dex": 0,
+      "asset": 230,
+      "size_decimals": 0,
+      "default_leverage": 5,
+      "margin_mode": "normal",
+      "table_id": 5
+    },
+    "USELESS": {
+      "dex": 0,
+      "asset": 233,
+      "size_decimals": 0,
+      "default_leverage": 3,
+      "margin_mode": "normal",
+      "table_id": 3
+    },
+    "xyz:GOLD": {
+      "dex": 1,
+      "asset": 3,
+      "size_decimals": 4,
+      "default_leverage": 20,
+      "margin_mode": "normal",
+      "table_id": 25
+    },
+    "xyz:GOOGL": {
+      "dex": 1,
+      "asset": 12,
+      "size_decimals": 3,
+      "default_leverage": 20,
+      "margin_mode": "normal",
+      "table_id": 20
+    },
+    "xyz:SILVER": {
+      "dex": 1,
+      "asset": 26,
+      "size_decimals": 2,
+      "default_leverage": 20,
+      "margin_mode": "normal",
+      "table_id": 25
+    },
+    "xyz:XLE": {
+      "dex": 1,
+      "asset": 56,
+      "size_decimals": 2,
+      "default_leverage": 20,
+      "margin_mode": "noCross",
+      "table_id": 20
+    },
+    "xyz:EBAY": {
+      "dex": 1,
+      "asset": 70,
+      "size_decimals": 2,
+      "default_leverage": 10,
+      "margin_mode": "noCross",
+      "table_id": 10
+    },
+    "xyz:ASML": {
+      "dex": 1,
+      "asset": 78,
+      "size_decimals": 3,
+      "default_leverage": 10,
+      "margin_mode": "noCross",
+      "table_id": 10
+    },
+    "xyz:NOW": {
+      "dex": 1,
+      "asset": 85,
+      "size_decimals": 2,
+      "default_leverage": 10,
+      "margin_mode": "noCross",
+      "table_id": 10
+    },
+    "xyz:GEV": {
+      "dex": 1,
+      "asset": 102,
+      "size_decimals": 3,
+      "default_leverage": 10,
+      "margin_mode": "noCross",
+      "table_id": 10
+    },
+    "xyz:UNITREE": {
+      "dex": 1,
+      "asset": 104,
+      "size_decimals": 2,
+      "default_leverage": 10,
+      "margin_mode": "noCross",
+      "table_id": 10
+    },
+    "xyz:NET": {
+      "dex": 1,
+      "asset": 110,
+      "size_decimals": 2,
+      "default_leverage": 10,
+      "margin_mode": "noCross",
+      "table_id": 10
+    },
+    "para:UNITREE": {
+      "dex": 8,
+      "asset": 19,
+      "size_decimals": 2,
+      "default_leverage": 10,
+      "margin_mode": "noCross",
+      "table_id": 10
+    },
+    "para:TREAD": {
+      "dex": 8,
+      "asset": 34,
+      "size_decimals": 0,
+      "default_leverage": 5,
+      "margin_mode": "noCross",
+      "table_id": 5
+    },
+    "io:OAI": {
+      "dex": 10,
+      "asset": 0,
+      "size_decimals": 3,
+      "default_leverage": 6,
+      "margin_mode": "noCross",
+      "table_id": 6
+    },
+    "io:TCNT": {
+      "dex": 10,
+      "asset": 8,
+      "size_decimals": 3,
+      "default_leverage": 10,
+      "margin_mode": "noCross",
+      "table_id": 10
+    },
+    "xyz:ZHIPU": {
+      "dex": 1,
+      "asset": 91,
+      "size_decimals": 3,
+      "default_leverage": 10,
+      "margin_mode": "noCross",
+      "table_id": 10
+    }
+  },
+  "before": {
+    "spot_wei": 0,
+    "dex_states": [
+      {
+        "dex": 0,
+        "cash_micro": 49155117,
+        "positions": {
+          "RSR": {
+            "s": 50,
+            "l": {
+              "C": 3
+            },
+            "M": 3,
+            "f": {
+              "a": 58,
+              "o": 58,
+              "c": 58
+            },
+            "e": 93800
+          },
+          "WIF": {
+            "s": 2,
+            "l": {
+              "C": 5
+            },
+            "M": 5,
+            "f": {
+              "a": 136,
+              "o": 136,
+              "c": 136
+            },
+            "e": 383080
+          },
+          "GRASS": {
+            "s": -172,
+            "l": {
+              "C": 3
+            },
+            "M": 3,
+            "f": {
+              "a": -867,
+              "o": -867,
+              "c": -867
+            },
+            "e": 11614816
+          },
+          "SAND": {
+            "s": 18,
+            "l": {
+              "C": 5
+            },
+            "M": 5,
+            "f": {
+              "a": -1608,
+              "o": -1608,
+              "c": -1608
+            },
+            "e": 1017540
+          },
+          "ALGO": {
+            "s": 1,
+            "l": {
+              "C": 5
+            },
+            "M": 5,
+            "f": {
+              "a": 45,
+              "o": 45,
+              "c": 45
+            },
+            "e": 110920
+          },
+          "PAXG": {
+            "s": -2,
+            "l": {
+              "C": 10
+            },
+            "M": 51,
+            "f": {
+              "a": -3152,
+              "o": -3152,
+              "c": -3152
+            },
+            "e": 8092800
+          },
+          "AVNT": {
+            "s": -9,
+            "l": {
+              "C": 5
+            },
+            "M": 5,
+            "f": {
+              "a": -25,
+              "o": -25,
+              "c": -25
+            },
+            "e": 1065780
+          },
+          "CHIP": {
+            "s": -9,
+            "l": {
+              "C": 3
+            },
+            "M": 3,
+            "f": {
+              "a": -30,
+              "o": -30,
+              "c": -30
+            },
+            "e": 408681
+          },
+          "GRAM": {
+            "s": -16,
+            "l": {
+              "C": 5
+            },
+            "M": 5,
+            "f": {
+              "a": 39008,
+              "o": 39008,
+              "c": 39008
+            },
+            "e": 19819200
+          },
+          "USELESS": {
+            "s": -1,
+            "l": {
+              "C": 3
+            },
+            "M": 3,
+            "f": {
+              "a": -10,
+              "o": -10,
+              "c": -10
+            },
+            "e": 173610
+          }
+        }
+      },
+      {
+        "dex": 1,
+        "cash_micro": 40411536,
+        "positions": {
+          "xyz:GOLD": {
+            "s": -9,
+            "l": {
+              "C": 25
+            },
+            "M": 25,
+            "f": {
+              "a": 263122,
+              "o": -1882,
+              "c": -1882
+            },
+            "e": 3595830
+          },
+          "xyz:GOOGL": {
+            "s": 6,
+            "f": {
+              "a": 892,
+              "o": 892,
+              "c": 892
+            },
+            "e": 2049120,
+            "l": {
+              "C": 20
+            },
+            "M": 20
+          },
+          "xyz:SILVER": {
+            "s": -69,
+            "l": {
+              "C": 25
+            },
+            "M": 25,
+            "f": {
+              "a": 307170,
+              "o": -6105,
+              "c": -6105
+            },
+            "e": 37162710
+          },
+          "xyz:XLE": {
+            "s": -115,
+            "l": {
+              "I": {
+                "l": 20,
+                "u": 83527761
+              }
+            },
+            "f": {
+              "a": -19389,
+              "o": -19389,
+              "c": -19389
+            },
+            "e": 79538600,
+            "M": 20
+          },
+          "xyz:EBAY": {
+            "s": 4,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": -4277070
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": 1374,
+              "o": 1374,
+              "c": 1374
+            },
+            "e": 4750300
+          },
+          "xyz:ASML": {
+            "s": -1,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": 1717477
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": -627,
+              "o": -627,
+              "c": -627
+            },
+            "e": 1560900
+          },
+          "xyz:NOW": {
+            "s": -2,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": 3502815
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": 1499,
+              "o": 1499,
+              "c": 1499
+            },
+            "e": 3185200
+          },
+          "xyz:GEV": {
+            "s": -1,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": 922173
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": -2109,
+              "o": -2109,
+              "c": -2109
+            },
+            "e": 836490
+          },
+          "xyz:UNITREE": {
+            "s": 3,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": -1795374
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": -61250,
+              "o": -61250,
+              "c": -61250
+            },
+            "e": 2062830
+          },
+          "xyz:NET": {
+            "s": -4,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": 14136025
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": 460,
+              "o": 460,
+              "c": 460
+            },
+            "e": 12840400
+          }
+        }
+      },
+      {
+        "dex": 8,
+        "cash_micro": 0,
+        "positions": {
+          "para:UNITREE": {
+            "s": 58,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": -33857884
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": -1937673,
+              "o": -1937673,
+              "c": -1937673
+            },
+            "e": 39830150
+          },
+          "para:TREAD": {
+            "s": 8,
+            "l": {
+              "I": {
+                "l": 5,
+                "u": -3744682
+              }
+            },
+            "M": 5,
+            "f": {
+              "a": -51584,
+              "o": -51584,
+              "c": -51584
+            },
+            "e": 4740000
+          }
+        }
+      },
+      {
+        "dex": 10,
+        "cash_micro": 0,
+        "positions": {
+          "io:OAI": {
+            "s": 15,
+            "l": {
+              "I": {
+                "l": 6,
+                "u": -18173245
+              }
+            },
+            "M": 6,
+            "f": {
+              "a": 5033,
+              "o": 5033,
+              "c": 5033
+            },
+            "e": 21799500
+          },
+          "io:TCNT": {
+            "s": -755,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": 42835627
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": -118203,
+              "o": -118203,
+              "c": -118203
+            },
+            "e": 38837955
+          }
+        }
+      }
+    ]
+  },
+  "after": {
+    "spot_wei": 133100,
+    "dex_states": [
+      {
+        "dex": 0,
+        "cash_micro": 48898488,
+        "positions": {
+          "RSR": {
+            "s": 50,
+            "l": {
+              "C": 3
+            },
+            "M": 3,
+            "f": {
+              "a": 58,
+              "o": 58,
+              "c": 58
+            },
+            "e": 93800
+          },
+          "WIF": {
+            "s": 2,
+            "l": {
+              "C": 5
+            },
+            "M": 5,
+            "f": {
+              "a": 136,
+              "o": 136,
+              "c": 136
+            },
+            "e": 383080
+          },
+          "GRASS": {
+            "s": -172,
+            "l": {
+              "C": 3
+            },
+            "M": 3,
+            "f": {
+              "a": -867,
+              "o": -867,
+              "c": -867
+            },
+            "e": 11614816
+          },
+          "SAND": {
+            "s": 18,
+            "l": {
+              "C": 5
+            },
+            "M": 5,
+            "f": {
+              "a": -1608,
+              "o": -1608,
+              "c": -1608
+            },
+            "e": 1017540
+          },
+          "ALGO": {
+            "s": 1,
+            "l": {
+              "C": 5
+            },
+            "M": 5,
+            "f": {
+              "a": 45,
+              "o": 45,
+              "c": 45
+            },
+            "e": 110920
+          },
+          "PAXG": {
+            "s": -2,
+            "l": {
+              "C": 10
+            },
+            "M": 51,
+            "f": {
+              "a": -3152,
+              "o": -3152,
+              "c": -3152
+            },
+            "e": 8092800
+          },
+          "AVNT": {
+            "s": -9,
+            "l": {
+              "C": 5
+            },
+            "M": 5,
+            "f": {
+              "a": -25,
+              "o": -25,
+              "c": -25
+            },
+            "e": 1065780
+          },
+          "CHIP": {
+            "s": -9,
+            "l": {
+              "C": 3
+            },
+            "M": 3,
+            "f": {
+              "a": -30,
+              "o": -30,
+              "c": -30
+            },
+            "e": 408681
+          },
+          "GRAM": {
+            "s": -16,
+            "l": {
+              "C": 5
+            },
+            "M": 5,
+            "f": {
+              "a": 39008,
+              "o": 39008,
+              "c": 39008
+            },
+            "e": 19819200
+          },
+          "USELESS": {
+            "s": -1,
+            "l": {
+              "C": 3
+            },
+            "M": 3,
+            "f": {
+              "a": -10,
+              "o": -10,
+              "c": -10
+            },
+            "e": 173610
+          }
+        }
+      },
+      {
+        "dex": 1,
+        "cash_micro": 40355302,
+        "positions": {
+          "xyz:GOLD": {
+            "s": -9,
+            "l": {
+              "C": 25
+            },
+            "M": 25,
+            "f": {
+              "a": 263122,
+              "o": -1882,
+              "c": -1882
+            },
+            "e": 3595830
+          },
+          "xyz:GOOGL": {
+            "s": 6,
+            "f": {
+              "a": 892,
+              "o": 892,
+              "c": 892
+            },
+            "e": 2049120,
+            "l": {
+              "C": 20
+            },
+            "M": 20
+          },
+          "xyz:SILVER": {
+            "s": -69,
+            "l": {
+              "C": 25
+            },
+            "M": 25,
+            "f": {
+              "a": 307170,
+              "o": -6105,
+              "c": -6105
+            },
+            "e": 37162710
+          },
+          "xyz:XLE": {
+            "s": -115,
+            "l": {
+              "I": {
+                "l": 20,
+                "u": 83527761
+              }
+            },
+            "f": {
+              "a": -19389,
+              "o": -19389,
+              "c": -19389
+            },
+            "e": 79538600,
+            "M": 20
+          },
+          "xyz:EBAY": {
+            "s": 4,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": -4277070
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": 1374,
+              "o": 1374,
+              "c": 1374
+            },
+            "e": 4750300
+          },
+          "xyz:ASML": {
+            "s": -1,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": 1717477
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": -627,
+              "o": -627,
+              "c": -627
+            },
+            "e": 1560900
+          },
+          "xyz:NOW": {
+            "s": -2,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": 3502815
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": 1499,
+              "o": 1499,
+              "c": 1499
+            },
+            "e": 3185200
+          },
+          "xyz:ZHIPU": {
+            "s": -49,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": 3437292
+              }
+            },
+            "M": 10,
+            "e": 3126040
+          },
+          "xyz:GEV": {
+            "s": -1,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": 922173
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": -2109,
+              "o": -2109,
+              "c": -2109
+            },
+            "e": 836490
+          },
+          "xyz:UNITREE": {
+            "s": 3,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": -1795374
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": -61250,
+              "o": -61250,
+              "c": -61250
+            },
+            "e": 2062830
+          },
+          "xyz:NET": {
+            "s": -4,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": 14136025
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": 460,
+              "o": 460,
+              "c": 460
+            },
+            "e": 12840400
+          }
+        }
+      },
+      {
+        "dex": 8,
+        "cash_micro": 0,
+        "positions": {
+          "para:UNITREE": {
+            "s": 58,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": -33857884
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": -1937673,
+              "o": -1937673,
+              "c": -1937673
+            },
+            "e": 39830150
+          },
+          "para:TREAD": {
+            "s": 8,
+            "l": {
+              "I": {
+                "l": 5,
+                "u": -3744682
+              }
+            },
+            "M": 5,
+            "f": {
+              "a": -51584,
+              "o": -51584,
+              "c": -51584
+            },
+            "e": 4740000
+          }
+        }
+      },
+      {
+        "dex": 10,
+        "cash_micro": 0,
+        "positions": {
+          "io:OAI": {
+            "s": 15,
+            "l": {
+              "I": {
+                "l": 6,
+                "u": -18173245
+              }
+            },
+            "M": 6,
+            "f": {
+              "a": 5033,
+              "o": 5033,
+              "c": 5033
+            },
+            "e": 21799500
+          },
+          "io:TCNT": {
+            "s": -755,
+            "l": {
+              "I": {
+                "l": 10,
+                "u": 42835627
+              }
+            },
+            "M": 10,
+            "f": {
+              "a": -118203,
+              "o": -118203,
+              "c": -118203
+            },
+            "e": 38837955
+          }
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "height": 1196386525,
+      "action": {
+        "type": "updateLeverage",
+        "asset": 110091,
+        "isCross": false,
+        "leverage": 10
+      },
+      "source_sha256": "3a9bb2d36a9ffa361b9f024b9317826f512e1169445a02b55b3da3fc649490f3"
+    },
+    {
+      "height": 1196386566,
+      "fill": {
+        "coin": "xyz:ZHIPU",
+        "px": "63.797",
+        "sz": "0.048",
+        "side": "A",
+        "time": 1792907175536,
+        "startPosition": "0.0",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0xb022268477178fd3b19b04474f69060205d3006a121aaea553ead1d7361b69be",
+        "oid": 585105569858,
+        "crossed": true,
+        "fee": "0.000275",
+        "tid": 160079165198134,
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.000137"
+      },
+      "mark": {
+        "min_px_raw": 63569,
+        "max_px_raw": 63569,
+        "size_decimals": 3
+      },
+      "collateral": {
+        "AVNT": {
+          "min_px_raw": 113490,
+          "max_px_raw": 113490,
+          "size_decimals": 0
+        },
+        "xyz:GOLD": {
+          "min_px_raw": 399450,
+          "max_px_raw": 399450,
+          "size_decimals": 4
+        },
+        "GRASS": {
+          "min_px_raw": 67173,
+          "max_px_raw": 67173,
+          "size_decimals": 1
+        },
+        "RSR": {
+          "min_px_raw": 1609,
+          "max_px_raw": 1609,
+          "size_decimals": 0
+        },
+        "ALGO": {
+          "min_px_raw": 102970,
+          "max_px_raw": 102970,
+          "size_decimals": 0
+        },
+        "CHIP": {
+          "min_px_raw": 44462,
+          "max_px_raw": 44462,
+          "size_decimals": 0
+        },
+        "xyz:GOOGL": {
+          "min_px_raw": 320620,
+          "max_px_raw": 320620,
+          "size_decimals": 3
+        },
+        "PAXG": {
+          "min_px_raw": 4002300,
+          "max_px_raw": 4002300,
+          "size_decimals": 3
+        },
+        "WIF": {
+          "min_px_raw": 181190,
+          "max_px_raw": 181190,
+          "size_decimals": 0
+        },
+        "USELESS": {
+          "min_px_raw": 182430,
+          "max_px_raw": 182430,
+          "size_decimals": 0
+        },
+        "SAND": {
+          "min_px_raw": 49191,
+          "max_px_raw": 49191,
+          "size_decimals": 0
+        },
+        "xyz:SILVER": {
+          "min_px_raw": 535740,
+          "max_px_raw": 535740,
+          "size_decimals": 2
+        },
+        "xyz:ZHIPU": {
+          "min_px_raw": 63569,
+          "max_px_raw": 63569,
+          "size_decimals": 3
+        },
+        "GRAM": {
+          "min_px_raw": 1241000,
+          "max_px_raw": 1241000,
+          "size_decimals": 0
+        }
+      },
+      "source_sha256": "3bb1c5fb407d8a77d70fd9ce3aaa423a92c1e7b8439a9aa3e7d34ade4dbb826d"
+    },
+    {
+      "height": 1196386631,
+      "fill": {
+        "coin": "xyz:ZHIPU",
+        "px": "63.784",
+        "sz": "0.001",
+        "side": "A",
+        "time": 1792907179878,
+        "startPosition": "-0.048",
+        "dir": "Open Short",
+        "closedPnl": "0.0",
+        "hash": "0x8d97d366f5f261738f1104474f69470202ec004c90f5804531607eb9b4f63b5e",
+        "oid": 585105633746,
+        "crossed": true,
+        "fee": "0.000005",
+        "tid": 397068434480809,
+        "feeToken": "USDC",
+        "twapId": null,
+        "deployerFee": "0.000002"
+      },
+      "mark": {
+        "min_px_raw": 63580,
+        "max_px_raw": 63580,
+        "size_decimals": 3
+      },
+      "collateral": {
+        "AVNT": {
+          "min_px_raw": 113500,
+          "max_px_raw": 113500,
+          "size_decimals": 0
+        },
+        "xyz:GOLD": {
+          "min_px_raw": 399450,
+          "max_px_raw": 399450,
+          "size_decimals": 4
+        },
+        "GRASS": {
+          "min_px_raw": 67150,
+          "max_px_raw": 67150,
+          "size_decimals": 1
+        },
+        "RSR": {
+          "min_px_raw": 1609,
+          "max_px_raw": 1609,
+          "size_decimals": 0
+        },
+        "ALGO": {
+          "min_px_raw": 102920,
+          "max_px_raw": 102920,
+          "size_decimals": 0
+        },
+        "CHIP": {
+          "min_px_raw": 44453,
+          "max_px_raw": 44453,
+          "size_decimals": 0
+        },
+        "xyz:GOOGL": {
+          "min_px_raw": 320620,
+          "max_px_raw": 320620,
+          "size_decimals": 3
+        },
+        "PAXG": {
+          "min_px_raw": 4002300,
+          "max_px_raw": 4002300,
+          "size_decimals": 3
+        },
+        "WIF": {
+          "min_px_raw": 181120,
+          "max_px_raw": 181120,
+          "size_decimals": 0
+        },
+        "USELESS": {
+          "min_px_raw": 182350,
+          "max_px_raw": 182350,
+          "size_decimals": 0
+        },
+        "SAND": {
+          "min_px_raw": 49180,
+          "max_px_raw": 49180,
+          "size_decimals": 0
+        },
+        "xyz:SILVER": {
+          "min_px_raw": 535730,
+          "max_px_raw": 535730,
+          "size_decimals": 2
+        },
+        "xyz:ZHIPU": {
+          "min_px_raw": 63580,
+          "max_px_raw": 63580,
+          "size_decimals": 3
+        },
+        "GRAM": {
+          "min_px_raw": 1240900,
+          "max_px_raw": 1240900,
+          "size_decimals": 0
+        }
+      },
+      "source_sha256": "7b922afb211879801cbddc141acc82baf7db344e785247d24bdba8166e6cd78c"
+    }
+  ],
+  "provenance": {
+    "evidence": "BM heartbeat_20261025T062812Z/cash_evidence",
+    "replay_price_probe_sha256": "cff2e38e8ef6eadbba2205d7d416ecfb7df08e8d770249c0ab3e0d1ec075b978",
+    "original_error_micro": 1071,
+    "scope": "Complete selected account checkpoints and all2fills+closed leverage action;13crossholding marks from10000block replay with exact7pricefields/books. Absent native leverage defaults resolved from recorded margin table. Does not prove physical Unified sweep sequence."
+  }
+}

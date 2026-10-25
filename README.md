@@ -974,6 +974,17 @@ cross/spot cash reconcile. Two recorded order/oracle blocks validate collateral 
 per updated dex avoid portfolio clones per fill. Starting spot funds and Unified maker prefunding retain their
 independent routing boundary; the fix does not implement a general Unified sweep scheduler.
 
+Closed-asset leverage changes preserve an existing complete cross portfolio and update its zero-size cross
+setting. Active-position changes and unknown portfolios still invalidate capacity; a same-block fill cannot
+assume the new cross setting's order. The recorded BTC window 1196390000–1196400000 includes 25 fills,
+two leverage-setting changes, an incoming transfer and funding. Retaining capacity caps the final isolated fill and
+closes its 0.057205 USDC split (`replay/btc_closed_leverage_capacity_golden.json`). The independent ZHIPU
+window 1196380000–1196390000 has two fills and 13 unchanged cross holdings across two dexes: the first
+fill's requested 0.306225 USDC margin is capped at 0.305154, closing its 0.001071 USDC split
+(`replay/zhipu_closed_leverage_capacity_golden.json`). Both complete account endpoints reconcile. Initial
+spot funds and Unified physical routing retain their estimated boundary; this is offline regression evidence,
+not deployment acceptance.
+
 
 Unified isolated order-reserve routing (ANTH)
 -------------------------------------------

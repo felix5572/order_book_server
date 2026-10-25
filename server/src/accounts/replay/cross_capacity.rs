@@ -21,14 +21,28 @@ pub(super) struct CrossCapacityProjection {
 }
 
 impl CrossCapacityProjection {
-    /// The anchor only retains leverage for open cross positions. Keep closed entries for later reopens;
-    /// a new asset or contradictory start size cannot inherit an invented leverage or holding.
+    /// The anchor retains leverage for open cross positions; successful closed-asset settings can add zero
+    /// entries. Keep them through close/reopen; unknown assets or contradictory sizes cannot invent settings.
     pub(super) fn advance(&mut self, coin: &str, start_raw: i64, delta_raw: i64) -> Result<bool, String> {
         let Some(held) = self.holdings.iter_mut().find(|held| held.coin == coin) else { return Ok(false); };
         if held.size_raw != start_raw { return Ok(false); }
         self.advanced = true;
         held.size_raw = start_raw.checked_add(delta_raw).ok_or_else(|| format!("{coin} cross capacity size overflows"))?;
         Ok(true)
+    }
+
+    /// A complete portfolio proves an absent/zero holding is closed. Its leverage can change without
+    /// changing equity or the other holdings. Never use this to reconstruct a discarded portfolio.
+    pub(super) fn set_closed_leverage(&mut self, coin: &str, cross_leverage: Option<u32>, size_decimals: u32) -> bool {
+        let index = self.holdings.iter().position(|held| held.coin == coin);
+        if index.is_some_and(|index| self.holdings[index].size_raw != 0) { return false; }
+        match (index, cross_leverage) {
+            (Some(index), Some(leverage)) => self.holdings[index].leverage = leverage,
+            (None, Some(leverage)) => self.holdings.push(Holding { coin: coin.into(), size_raw: 0, leverage, size_decimals }),
+            (Some(index), None) => { self.holdings.remove(index); }
+            (None, None) => {}
+        }
+        true
     }
 
     /// A block envelope must be a single price for every holding. A changing/missing mark or scale mismatch
