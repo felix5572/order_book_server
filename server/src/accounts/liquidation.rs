@@ -11,7 +11,7 @@
 //! dexes held no position on 2026-10-19, so their pools follow the same rule unverified.
 
 use super::{
-    checkpoint::{Account, AccountMode, CheckpointAccounts, DexAccount, Position, PositionMargin, base_size, mark_px},
+    checkpoint::{Account, AccountMode, CheckpointAccounts, DexAccount, Position, PositionMargin, mark_px},
     margin::MarginTable,
     portfolio::{PortfolioMargin, PortfolioState, USDC, portfolio_state},
 };
@@ -90,10 +90,9 @@ type Pool<'a> = (f64, Vec<(usize, &'a Position)>);
 /// at the node mark of their height.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct HeldAtMark<'a> {
-    /// Signed, in 10^-szDecimals.
+    /// Signed native size. The matching native mark scale makes their product micro-USD.
     pub(crate) size_raw: i64,
-    pub(crate) size_decimals: u32,
-    /// In 10^-(6 - szDecimals) USD, the unit of the stored mark.
+    /// Native stored mark; its scale complements the raw size's scale.
     pub(crate) mark_raw: u64,
     pub(crate) table: &'a MarginTable,
 }
@@ -232,7 +231,7 @@ fn solve_pool(
             return LiquidationPx::Unsupported(UnsupportedReason::MissingMark);
         };
         if !std::ptr::eq(*position, target) {
-            others.push(HeldAtMark { size_raw: position.size_raw, size_decimals: asset.size_decimals, mark_raw, table: dex.table(position.table_id) });
+            others.push(HeldAtMark { size_raw: position.size_raw, mark_raw, table: dex.table(position.table_id) });
         }
     }
     let Some((dex_index, _)) = members.iter().find(|(_, position)| std::ptr::eq(*position, target)) else {
@@ -245,10 +244,12 @@ fn solve_pool(
 /// The liquidation price of a position of `size` (base units) with `table` in a pool of `cash` whose other members are
 /// `others`: the node solves the position continuously in its price and holds the others at their integer maintenance.
 pub(crate) fn solve_held(cash: f64, others: &[HeldAtMark<'_>], size: f64, table: &MarginTable) -> LiquidationPx {
-    let (others_value, others_mm_micro) = others.iter().fold((0.0, 0_i128), |(value, mm), member| {
-        (base_size(member.size_raw, member.size_decimals).mul_add(mark_px(member.mark_raw, member.size_decimals), value), mm + member.maintenance_micro())
-    });
-    solve(cash + others_value, others_mm_micro as f64 / 1e6, size, table)
+    // Both signed notional and held maintenance are exact micro-USD. Net them before converting:
+    // ASTER1196430000 otherwise alternates between zero and a spurious positive price with pool order.
+    let others_net_micro: i128 = others.iter().map(|member| {
+        i128::from(member.size_raw) * i128::from(member.mark_raw) - member.maintenance_micro()
+    }).sum();
+    solve(cash + others_net_micro as f64 / 1e6, 0.0, size, table)
 }
 
 /// Price `p` with `fixed + size * p == others_mm + maintenance(|size| * p)`, the maintenance tier taken at `p`.
@@ -279,6 +280,7 @@ fn micro(value: i64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::checkpoint::base_size;
 
     fn computed(px: &LiquidationPx) -> f64 {
         match px {
@@ -316,6 +318,37 @@ mod tests {
     #[test]
     fn over_collateralized_long_has_no_positive_price() {
         assert_eq!(solve(20.0, 0.0, 1.0, &MarginTable::single(10).unwrap()), LiquidationPx::NoPositiveSolution);
+    }
+
+    #[test]
+    fn recorded_aster_zero_boundary_is_independent_of_pool_iteration_order() {
+        let case: serde_json::Value = serde_json::from_str(include_str!("aster_zero_boundary_golden.json")).unwrap();
+        let rows = case["positions"].as_array().unwrap();
+        let tables: Vec<_> = rows.iter().map(|row| MarginTable::listed(row["tiers"].as_array().unwrap().iter()
+            .map(|tier| (tier[0].as_i64().unwrap(), u32::try_from(tier[1].as_u64().unwrap()).unwrap(), tier[2].as_i64().unwrap()))).unwrap()).collect();
+        let target = rows.iter().position(|row| row["coin"] == "ASTER").unwrap();
+        let mut others: Vec<_> = rows.iter().zip(&tables).enumerate().filter(|(index, _)| *index != target)
+            .map(|(_, (row, table))| HeldAtMark { size_raw: row["size_raw"].as_i64().unwrap(),
+                mark_raw: row["mark_raw"].as_u64().unwrap(), table }).collect();
+        let cash = micro(case["cash_micro"].as_i64().unwrap());
+        let size = base_size(rows[target]["size_raw"].as_i64().unwrap(),
+            u32::try_from(rows[target]["size_decimals"].as_u64().unwrap()).unwrap());
+        assert_eq!(others.len(), 39);
+        for reverse in [false, true] {
+            if reverse { others.reverse(); }
+            for rotation in 0..others.len() {
+                assert_eq!(solve_held(cash, &others, size, &tables[target]), LiquidationPx::NoPositiveSolution,
+                    "reverse={reverse}, rotation={rotation}");
+                // One actual USDC wei below the zero numerator must still yield a positive price.
+                let price = computed(&solve_held(cash - 1e-8, &others, size, &tables[target]));
+                assert!((price - 1e-8 / 4.5).abs() < 1e-14);
+                assert_eq!(solve_held(cash + 1e-8, &others, size, &tables[target]), LiquidationPx::NoPositiveSolution);
+                let short = computed(&solve_held(cash + 1e-8, &others, -size, &tables[target]));
+                assert!((short - 1e-8 / 5.5).abs() < 1e-14);
+                assert_eq!(solve_held(cash - 1e-8, &others, -size, &tables[target]), LiquidationPx::NoPositiveSolution);
+                others.rotate_left(1);
+            }
+        }
     }
 }
 

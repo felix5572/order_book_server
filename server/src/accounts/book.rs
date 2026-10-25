@@ -2082,7 +2082,7 @@ mod tests {
         let shared = view_at(&book, holder, &both).replayed.expect("both members have a mark");
         // -12000 less 0.001 BTC bought at 1.0; BTC opened from zero takes the coin's current table
         let btc_table = fixture_table(CURRENT_TABLE);
-        let btc = HeldAtMark { size_raw: 100, size_decimals: 5, mark_raw: 828_576, table: &btc_table };
+        let btc = HeldAtMark { size_raw: 100, mark_raw: 828_576, table: &btc_table };
         let expected = solve_held(-12_000.001, &[btc], 1_000_000.0, &fixture_table(ANCHOR_TABLE));
         assert_eq!(shared.row, ReplayedRow { isolated: false, pool_positions: 2, liquidation_px: expected.clone(), cash_estimated: false });
         assert_eq!(shared.mark, RowMark::of(1_000_000, 0, Some(4_000), &expected));
@@ -2109,8 +2109,8 @@ mod tests {
         book.apply_block_actions(block_actions(1_000, &[]));
         book.install_anchor(anchor_at(1_000));
         let table = fixture_table(ANCHOR_TABLE);
-        let pump = HeldAtMark { size_raw: 1_000_000, size_decimals: 0, mark_raw: 4_477, table: &table };
-        let btc = HeldAtMark { size_raw: 10_000, size_decimals: 5, mark_raw: 828_576, table: &table };
+        let pump = HeldAtMark { size_raw: 1_000_000, mark_raw: 4_477, table: &table };
+        let btc = HeldAtMark { size_raw: 10_000, mark_raw: 828_576, table: &table };
         let with_rows = |mut anchor: Anchor| {
             for (name, mark_raw, liquidation_px) in [
                 (PUMP, 4_477, solve_held(-12_000.0, &[btc], 1_000_000.0, &table)),

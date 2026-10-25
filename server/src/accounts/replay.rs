@@ -1020,7 +1020,6 @@ impl MarginStates {
             }
             others.push(HeldAtMark {
                 size_raw: other.size_raw,
-                size_decimals: other_market.size_decimals,
                 mark_raw: mark_of(other.coin)?,
                 table: self.markets.tables[other_market.dex].get(&other.table_id?)?,
             });
@@ -1821,7 +1820,7 @@ pub(crate) mod tests {
         let shared = row(&[PUMP_COIN, "BTC"], &btc_mark).expect("BTC has a mark");
         // BTC 0.1 at 82,857.6 held at 20x: value 8,285.76, maintenance 207.144
         let btc_table = MarginTable::single(20).unwrap();
-        let btc = HeldAtMark { size_raw: 10_000, size_decimals: 5, mark_raw: 828_576, table: &btc_table };
+        let btc = HeldAtMark { size_raw: 10_000, mark_raw: 828_576, table: &btc_table };
         assert_eq!(shared, ReplayedRow { isolated: false, pool_positions: 2, liquidation_px: solve_held(pool, &[btc], 1_000_000.0, &pump_table), cash_estimated: false });
         let (LiquidationPx::Computed(price), LiquidationPx::Computed(by_hand)) =
             (shared.liquidation_px, solve(pool + 8_285.76, 207.144, 1_000_000.0, &pump_table))

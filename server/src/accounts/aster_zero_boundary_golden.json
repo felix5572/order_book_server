@@ -1,0 +1,780 @@
+{
+  "user": "0x9e86d5adbb060e9125b2d5563f07195f9d4d0496",
+  "anchor_height": 1196430000,
+  "cash_micro": -60628952,
+  "positions": [
+    {
+      "coin": "BTC",
+      "asset": 0,
+      "size_raw": 9,
+      "size_decimals": 5,
+      "mark_raw": 805080,
+      "tiers": [
+        [
+          0,
+          40,
+          0
+        ],
+        [
+          150000000000000,
+          20,
+          1875000000000
+        ]
+      ],
+      "notional_micro": 7245720,
+      "maintenance_micro": 90571
+    },
+    {
+      "coin": "ETH",
+      "asset": 1,
+      "size_raw": 22,
+      "size_decimals": 4,
+      "mark_raw": 234680,
+      "tiers": [
+        [
+          0,
+          25,
+          0
+        ],
+        [
+          100000000000000,
+          15,
+          1333333333333
+        ]
+      ],
+      "notional_micro": 5162960,
+      "maintenance_micro": 103259
+    },
+    {
+      "coin": "ATOM",
+      "asset": 2,
+      "size_raw": -81,
+      "size_decimals": 2,
+      "mark_raw": 16153,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": -1308393,
+      "maintenance_micro": 130839
+    },
+    {
+      "coin": "SOL",
+      "asset": 5,
+      "size_raw": 1,
+      "size_decimals": 2,
+      "mark_raw": 1017000,
+      "tiers": [
+        [
+          0,
+          20,
+          0
+        ],
+        [
+          70000000000000,
+          10,
+          1750000000000
+        ]
+      ],
+      "notional_micro": 1017000,
+      "maintenance_micro": 25425
+    },
+    {
+      "coin": "AVAX",
+      "asset": 6,
+      "size_raw": 28,
+      "size_decimals": 2,
+      "mark_raw": 88702,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 2483656,
+      "maintenance_micro": 124182
+    },
+    {
+      "coin": "BNB",
+      "asset": 7,
+      "size_raw": 11,
+      "size_decimals": 3,
+      "mark_raw": 744130,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          3000000000000,
+          5,
+          150000000000
+        ]
+      ],
+      "notional_micro": 8185430,
+      "maintenance_micro": 409271
+    },
+    {
+      "coin": "LTC",
+      "asset": 10,
+      "size_raw": 9,
+      "size_decimals": 2,
+      "mark_raw": 563110,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 5067990,
+      "maintenance_micro": 253399
+    },
+    {
+      "coin": "ARB",
+      "asset": 11,
+      "size_raw": 4,
+      "size_decimals": 1,
+      "mark_raw": 16586,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          3000000000000,
+          5,
+          150000000000
+        ]
+      ],
+      "notional_micro": 66344,
+      "maintenance_micro": 3317
+    },
+    {
+      "coin": "DOGE",
+      "asset": 12,
+      "size_raw": 19,
+      "size_decimals": 0,
+      "mark_raw": 76905,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 1461195,
+      "maintenance_micro": 73059
+    },
+    {
+      "coin": "SUI",
+      "asset": 14,
+      "size_raw": 11,
+      "size_decimals": 1,
+      "mark_raw": 91989,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 1011879,
+      "maintenance_micro": 50593
+    },
+    {
+      "coin": "LINK",
+      "asset": 18,
+      "size_raw": 5,
+      "size_decimals": 1,
+      "mark_raw": 1140400,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 5702000,
+      "maintenance_micro": 285100
+    },
+    {
+      "coin": "BCH",
+      "asset": 26,
+      "size_raw": 5,
+      "size_decimals": 3,
+      "mark_raw": 274050,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 1370250,
+      "maintenance_micro": 68512
+    },
+    {
+      "coin": "APT",
+      "asset": 27,
+      "size_raw": 294,
+      "size_decimals": 2,
+      "mark_raw": 7027,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 2065938,
+      "maintenance_micro": 103296
+    },
+    {
+      "coin": "AAVE",
+      "asset": 28,
+      "size_raw": 4,
+      "size_decimals": 2,
+      "mark_raw": 1366950,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 5467800,
+      "maintenance_micro": 273390
+    },
+    {
+      "coin": "WLD",
+      "asset": 31,
+      "size_raw": 10,
+      "size_decimals": 1,
+      "mark_raw": 46352,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 463520,
+      "maintenance_micro": 23176
+    },
+    {
+      "coin": "TRX",
+      "asset": 37,
+      "size_raw": -6,
+      "size_decimals": 0,
+      "mark_raw": 328580,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          3000000000000,
+          5,
+          150000000000
+        ]
+      ],
+      "notional_micro": -1971480,
+      "maintenance_micro": 98574
+    },
+    {
+      "coin": "UNI",
+      "asset": 39,
+      "size_raw": 4,
+      "size_decimals": 1,
+      "mark_raw": 675660,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 2702640,
+      "maintenance_micro": 135132
+    },
+    {
+      "coin": "DOT",
+      "asset": 48,
+      "size_raw": -32,
+      "size_decimals": 1,
+      "mark_raw": 102940,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          3000000000000,
+          5,
+          150000000000
+        ]
+      ],
+      "notional_micro": -3294080,
+      "maintenance_micro": 164704
+    },
+    {
+      "coin": "KAS",
+      "asset": 60,
+      "size_raw": 85,
+      "size_decimals": 0,
+      "mark_raw": 35487,
+      "tiers": [
+        [
+          0,
+          3,
+          0
+        ]
+      ],
+      "notional_micro": 3016395,
+      "maintenance_micro": 502732
+    },
+    {
+      "coin": "ADA",
+      "asset": 65,
+      "size_raw": 16,
+      "size_decimals": 0,
+      "mark_raw": 205620,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 3289920,
+      "maintenance_micro": 164496
+    },
+    {
+      "coin": "NEAR",
+      "asset": 74,
+      "size_raw": 6,
+      "size_decimals": 1,
+      "mark_raw": 442450,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 2654700,
+      "maintenance_micro": 132735
+    },
+    {
+      "coin": "FIL",
+      "asset": 80,
+      "size_raw": 19,
+      "size_decimals": 1,
+      "mark_raw": 92196,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": 1751724,
+      "maintenance_micro": 175172
+    },
+    {
+      "coin": "JUP",
+      "asset": 90,
+      "size_raw": 19,
+      "size_decimals": 0,
+      "mark_raw": 283365,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          3000000000000,
+          5,
+          150000000000
+        ]
+      ],
+      "notional_micro": 5383935,
+      "maintenance_micro": 269196
+    },
+    {
+      "coin": "CAKE",
+      "asset": 99,
+      "size_raw": 14,
+      "size_decimals": 1,
+      "mark_raw": 207490,
+      "tiers": [
+        [
+          0,
+          3,
+          0
+        ]
+      ],
+      "notional_micro": 2904860,
+      "maintenance_micro": 484143
+    },
+    {
+      "coin": "ETC",
+      "asset": 102,
+      "size_raw": 11,
+      "size_decimals": 2,
+      "mark_raw": 75525,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": 830775,
+      "maintenance_micro": 83077
+    },
+    {
+      "coin": "ONDO",
+      "asset": 106,
+      "size_raw": -5,
+      "size_decimals": 0,
+      "mark_raw": 404000,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          3000000000000,
+          5,
+          150000000000
+        ]
+      ],
+      "notional_micro": -2020000,
+      "maintenance_micro": 101000
+    },
+    {
+      "coin": "TAO",
+      "asset": 116,
+      "size_raw": 9,
+      "size_decimals": 3,
+      "mark_raw": 248800,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": 2239200,
+      "maintenance_micro": 223920
+    },
+    {
+      "coin": "ENA",
+      "asset": 122,
+      "size_raw": 32,
+      "size_decimals": 0,
+      "mark_raw": 191900,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 6140800,
+      "maintenance_micro": 307040
+    },
+    {
+      "coin": "MNT",
+      "asset": 123,
+      "size_raw": 48,
+      "size_decimals": 1,
+      "mark_raw": 51138,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": 2454624,
+      "maintenance_micro": 245462
+    },
+    {
+      "coin": "HBAR",
+      "asset": 127,
+      "size_raw": 5,
+      "size_decimals": 0,
+      "mark_raw": 77651,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": 388255,
+      "maintenance_micro": 38825
+    },
+    {
+      "coin": "RENDER",
+      "asset": 140,
+      "size_raw": -6,
+      "size_decimals": 1,
+      "mark_raw": 168443,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": -1010658,
+      "maintenance_micro": 101065
+    },
+    {
+      "coin": "POL",
+      "asset": 142,
+      "size_raw": -30,
+      "size_decimals": 0,
+      "mark_raw": 88772,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": -2663160,
+      "maintenance_micro": 266316
+    },
+    {
+      "coin": "XLM",
+      "asset": 154,
+      "size_raw": -3,
+      "size_decimals": 0,
+      "mark_raw": 169870,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": -509610,
+      "maintenance_micro": 50961
+    },
+    {
+      "coin": "ALGO",
+      "asset": 158,
+      "size_raw": 39,
+      "size_decimals": 0,
+      "mark_raw": 102730,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": 4006470,
+      "maintenance_micro": 400647
+    },
+    {
+      "coin": "HYPE",
+      "asset": 159,
+      "size_raw": 3,
+      "size_decimals": 2,
+      "mark_raw": 759400,
+      "tiers": [
+        [
+          0,
+          10,
+          0
+        ],
+        [
+          20000000000000,
+          5,
+          1000000000000
+        ]
+      ],
+      "notional_micro": 2278200,
+      "maintenance_micro": 113910
+    },
+    {
+      "coin": "MORPHO",
+      "asset": 173,
+      "size_raw": -13,
+      "size_decimals": 1,
+      "mark_raw": 209570,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": -2724410,
+      "maintenance_micro": 272441
+    },
+    {
+      "coin": "VVV",
+      "asset": 178,
+      "size_raw": -9,
+      "size_decimals": 2,
+      "mark_raw": 245931,
+      "tiers": [
+        [
+          0,
+          3,
+          0
+        ]
+      ],
+      "notional_micro": -2213379,
+      "maintenance_micro": 368896
+    },
+    {
+      "coin": "SKY",
+      "asset": 206,
+      "size_raw": -48,
+      "size_decimals": 0,
+      "mark_raw": 68600,
+      "tiers": [
+        [
+          0,
+          3,
+          0
+        ]
+      ],
+      "notional_micro": -3292800,
+      "maintenance_micro": 548800
+    },
+    {
+      "coin": "ASTER",
+      "asset": 207,
+      "size_raw": 5,
+      "size_decimals": 0,
+      "mark_raw": 706560,
+      "tiers": [
+        [
+          0,
+          5,
+          0
+        ]
+      ],
+      "notional_micro": 3532800,
+      "maintenance_micro": 353280
+    },
+    {
+      "coin": "CC",
+      "asset": 218,
+      "size_raw": 25,
+      "size_decimals": 0,
+      "mark_raw": 100290,
+      "tiers": [
+        [
+          0,
+          3,
+          0
+        ]
+      ],
+      "notional_micro": 2507250,
+      "maintenance_micro": 417875
+    }
+  ],
+  "exact": {
+    "other_signed_notional_micro": 68313460,
+    "other_maintenance_micro": 7684508,
+    "net_cash_and_other_equity_minus_maintenance_micro": 0,
+    "expected_target_status": "NoPositiveSolution"
+  },
+  "provenance": {
+    "selected_source": "1196430000_selected_states.json",
+    "selected_source_sha256": "90e321956dab073f84ebf0369e2468504dc50c29440e42d391fb4f08d432fe6b",
+    "native_checkpoint": "/home/ubuntu/hl/data/periodic_abci_states/20261025/1196430000.rmp",
+    "journal_window": [
+      1196420000,
+      1196430000
+    ],
+    "old_anchor_computed_price": 4.5395785895784175e-15,
+    "old_replay_status": "NoPositiveSolution",
+    "scope": "Both prices are OB derivations from checkpoint/replayed state, not a node-supplied liquidation price. Integer size*mark and per-position maintenance prove a zero numerator. No epsilon/tolerance correction and no claim about native floating evaluation."
+  }
+}
