@@ -70,25 +70,64 @@ enum BookWalkDto {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WalkPartDto {
     vwap_px: Option<String>,
+    /// The first level it takes, from where its walk starts (a cumulative walk's may lie below the book's best).
+    first_px: Option<String>,
     deepest_px: Option<String>,
     /// How far the deepest level is from the mid, bp; `null` without a mid or a fill.
     deepest_bps_from_mid: Option<f64>,
+    /// From `firstPx` to `deepestPx`, bp, never negative (0 for one level); `null` without a fill (design 000486).
+    span_bps: Option<f64>,
     filled_size: String,
     levels: usize,
     /// `filled`, `bookExhausted`, or `truncatedAtLevels` (the copy stopped at 2,000 levels, the book may hold more).
     end: &'static str,
+    /// The levels it takes, best first, at most 100 (`levels` stays the whole count): only the forced flow's walks
+    /// carry them, `[]` when it took nothing; absent in the candidates (design 000486).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    steps: Option<Vec<WalkStepDto>>,
+}
+
+/// One level a walk takes, sizes in the coin's units.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WalkStepDto {
+    px: String,
+    /// The level's whole size in the copy the walk read.
+    level_size: String,
+    /// What the walk takes of it.
+    taken_size: String,
 }
 
 impl WalkPartDto {
+    /// A candidate's walk, without steps.
     pub(crate) fn new(part: &WalkPart, mid_px: Option<f64>) -> Self {
-        let deepest = part.deepest_px.map(|px| px.value() as f64 / 1e8);
+        Self::of(part, mid_px, None)
+    }
+
+    /// A forced flow entry's walk with the steps it recorded.
+    pub(crate) fn with_steps(part: &WalkPart, mid_px: Option<f64>) -> Self {
+        let steps = part
+            .steps
+            .iter()
+            .map(|step| WalkStepDto { px: step.px.to_str(), level_size: Sz::new(step.level_sz).to_str(), taken_size: Sz::new(step.taken).to_str() })
+            .collect();
+        Self::of(part, mid_px, Some(steps))
+    }
+
+    fn of(part: &WalkPart, mid_px: Option<f64>, steps: Option<Vec<WalkStepDto>>) -> Self {
+        let usd = |px: crate::order_book::Px| px.value() as f64 / 1e8;
+        let deepest = part.deepest_px.map(usd);
+        let first = part.first_px.map(usd);
         Self {
             vwap_px: part.vwap_px.map(|px| px.to_string()),
+            first_px: part.first_px.map(crate::order_book::Px::to_str),
             deepest_px: part.deepest_px.map(crate::order_book::Px::to_str),
             deepest_bps_from_mid: deepest.zip(mid_px).map(|(deepest, mid)| (deepest - mid).abs() / mid * 10_000.0),
+            span_bps: first.zip(deepest).map(|(first, deepest)| (deepest - first).abs() / first * 10_000.0),
             filled_size: Sz::new(part.filled).to_str(),
             levels: part.levels,
             end: part.end.label(),
+            steps,
         }
     }
 }
@@ -400,9 +439,11 @@ mod tests {
         let part = |vwap_px: f64, deepest: u64| WalkPart {
             filled: 2 * unit,
             vwap_px: Some(vwap_px),
+            first_px: Some(crate::order_book::Px::new(100 * unit)),
             deepest_px: Some(crate::order_book::Px::new(deepest)),
             levels: 2,
             end: WalkEnd::Filled,
+            steps: Vec::new(),
         };
         let walk = BookWalk::Walked {
             share: crate::accounts::walk::WalkShare { ahead: unit, together: part(100.75, 101 * unit), alone: part(100.25, 1005 * unit / 10) },
@@ -417,6 +458,9 @@ mod tests {
         let parts = (&walked["together"], &walked["alone"]);
         assert_eq!((parts.0["deepestBpsFromMid"].as_f64(), parts.1["deepestBpsFromMid"].as_f64()), (Some(100.0), Some(50.0)));
         assert_eq!((parts.0["vwapPx"].as_str(), parts.1["deepestPx"].as_str(), parts.1["end"].as_str()), (Some("100.75"), Some("100.5"), Some("filled")));
+        // design 000486: the span from the first level taken; the candidates carry no steps
+        assert_eq!((parts.0["firstPx"].as_str(), parts.0["spanBps"].as_f64(), parts.1["spanBps"].as_f64()), (Some("100"), Some(100.0), Some(50.0)));
+        assert!(parts.0.get("steps").is_none() && parts.1.get("steps").is_none());
         let BookWalk::Walked { share, .. } = walk else { unreachable!() };
         let no_mid = BookWalk::Walked { share, unknown_cooldown_as_full: false, book_height: 9, book_time: 10, withheld_periods: 0, mid_px: None };
         assert_eq!(serde_json::to_value(BookWalkDto::new(&no_mid)).unwrap()["alone"]["deepestBpsFromMid"], serde_json::Value::Null);

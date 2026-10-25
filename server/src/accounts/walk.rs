@@ -30,6 +30,8 @@ use crate::{
 
 /// Levels copied per request at most; a walk that does not fill within them is `TruncatedAtLevels`.
 pub(crate) const MAX_WALK_LEVELS: usize = 2_000;
+/// A forced flow walk's steps published at most (design 000486): its first levels; `levels` stays the whole count.
+pub(crate) const MAX_PUBLISHED_STEPS: usize = 100;
 /// The listener's fixed-point unit: sizes and prices are integers of 1e-8.
 const FIXED_POINT_DECIMALS: u32 = 8;
 
@@ -89,11 +91,26 @@ pub(crate) struct WalkPart {
     pub(crate) filled: u64,
     /// Size-weighted price of what it filled; `None` when nothing.
     pub(crate) vwap_px: Option<f64>,
+    /// The first level it took (from where its cursor stood); `None` when nothing.
+    pub(crate) first_px: Option<Px>,
     /// The last level it reached; `None` when nothing.
     pub(crate) deepest_px: Option<Px>,
     /// Levels it touched.
     pub(crate) levels: usize,
     pub(crate) end: WalkEnd,
+    /// The levels it took, best first, when the walk records them (the forced flow's, at most `MAX_PUBLISHED_STEPS`;
+    /// design 000486); empty otherwise.
+    pub(crate) steps: Vec<WalkStep>,
+}
+
+/// One level a walk took; sizes in 1e-8 units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WalkStep {
+    pub(crate) px: Px,
+    /// The level's whole size in the copy the walk read.
+    pub(crate) level_sz: u64,
+    /// What this walk takes of it.
+    pub(crate) taken: u64,
 }
 
 /// One candidate's walks; sizes in 1e-8 units.
@@ -131,8 +148,8 @@ pub(crate) fn allocate(levels: &[(Px, Sz)], sizes: &[u64], truncated: bool) -> V
     for &size in sizes {
         let share = WalkShare {
             ahead,
-            together: together.take(levels, size, None, truncated),
-            alone: LevelCursor::default().take(levels, size, None, truncated),
+            together: together.take(levels, size, None, truncated, None),
+            alone: LevelCursor::default().take(levels, size, None, truncated, None),
         };
         shares.push(share);
         ahead += size;
@@ -141,9 +158,9 @@ pub(crate) fn allocate(levels: &[(Px, Sz)], sizes: &[u64], truncated: bool) -> V
 }
 
 /// Each item's size walked alone from the best level, up to its limit when it has one (a trigger order's; a liquidation
-/// takes any price); `truncated` when the levels stop at the copy limit.
+/// takes any price), with its first `MAX_PUBLISHED_STEPS` steps; `truncated` when the levels stop at the copy limit.
 pub(crate) fn alone_walks(levels: &[(Px, Sz)], items: &[(u64, Option<Limit>)], truncated: bool) -> Vec<WalkPart> {
-    items.iter().map(|&(size, limit)| LevelCursor::default().take(levels, size, limit, truncated)).collect()
+    items.iter().map(|&(size, limit)| LevelCursor::default().take(levels, size, limit, truncated, Some(MAX_PUBLISHED_STEPS))).collect()
 }
 
 /// Where a walk stands in the levels: the level and what of it is already taken.
@@ -154,9 +171,10 @@ struct LevelCursor {
 }
 
 impl LevelCursor {
-    /// Takes `size` from here on, no level beyond `limit`.
-    fn take(&mut self, levels: &[(Px, Sz)], size: u64, limit: Option<Limit>, truncated: bool) -> WalkPart {
-        let (mut filled, mut notional, mut touched, mut deepest) = (0_u64, 0.0_f64, 0, None);
+    /// Takes `size` from here on, no level beyond `limit`, recording its first `record_steps` steps when given.
+    fn take(&mut self, levels: &[(Px, Sz)], size: u64, limit: Option<Limit>, truncated: bool, record_steps: Option<usize>) -> WalkPart {
+        let (mut filled, mut notional, mut touched, mut first, mut deepest) = (0_u64, 0.0_f64, 0, None, None);
+        let mut steps = Vec::new();
         let mut limit_reached = false;
         while filled < size && self.level < levels.len() {
             let (px, level_sz) = levels[self.level];
@@ -168,7 +186,11 @@ impl LevelCursor {
             filled += take;
             notional = (px.value() as f64).mul_add(take as f64, notional);
             touched += 1;
+            first = first.or(Some(px));
             deepest = Some(px);
+            if record_steps.is_some_and(|cap| steps.len() < cap) {
+                steps.push(WalkStep { px, level_sz: level_sz.value(), taken: take });
+            }
             self.used_in_level += take;
             if self.used_in_level == level_sz.value() {
                 self.level += 1;
@@ -185,7 +207,7 @@ impl LevelCursor {
             WalkEnd::BookExhausted
         };
         let vwap_px = (filled > 0).then(|| notional / filled as f64 / fixed_point_scale());
-        WalkPart { filled, vwap_px, deepest_px: deepest, levels: touched, end }
+        WalkPart { filled, vwap_px, first_px: first, deepest_px: deepest, levels: touched, end, steps }
     }
 }
 
@@ -384,6 +406,35 @@ mod tests {
         assert_eq!(truncated[1].together.end, WalkEnd::TruncatedAtLevels, "the copy stopped, not the book");
         let empty = allocate(&[], &[unit], false);
         assert_eq!((empty[0].together.filled, empty[0].together.vwap_px, empty[0].alone.deepest_px), (0, None, None));
+    }
+
+    /// Design 000486: a forced flow walk records each level it takes, best first, the deepest possibly in part; up to
+    /// its limit; at most its cap of steps while `levels` stays whole; a candidate's walk records none.
+    #[test]
+    fn an_alone_walk_records_the_levels_it_takes() {
+        let unit = 100_000_000;
+        let bids = [level(100, 1), level(99, 2), level(98, 5)];
+        let sale = &alone_walks(&bids, &[(4 * unit, None)], false)[0];
+        assert_eq!((sale.first_px, sale.deepest_px, sale.levels, sale.filled), (Some(Px::new(100 * unit)), Some(Px::new(98 * unit)), 3, 4 * unit));
+        let steps: Vec<_> = sale.steps.iter().map(|step| (step.px.value() / unit, step.level_sz / unit, step.taken / unit)).collect();
+        assert_eq!(steps, [(100, 1, 1), (99, 2, 2), (98, 5, 1)], "the deepest level taken in part");
+        let limited = &alone_walks(&bids, &[(4 * unit, Some(Limit { taker: Side::Ask, px: Px::new(99 * unit) }))], false)[0];
+        assert_eq!(limited.steps.iter().map(|step| step.px.value() / unit).collect::<Vec<_>>(), [100, 99], "none beyond its limit");
+        let capped = LevelCursor::default().take(&bids, 4 * unit, None, false, Some(2));
+        assert_eq!((capped.steps.len(), capped.levels, capped.deepest_px), (2, 3, Some(Px::new(98 * unit))), "the steps a prefix, the walk whole");
+        let shares = allocate(&bids, &[unit, unit], false);
+        assert!(shares.iter().all(|share| share.together.steps.is_empty() && share.alone.steps.is_empty()), "a candidate's walk records none");
+        assert_eq!(shares[1].together.first_px, Some(Px::new(99 * unit)), "a cumulative walk starts where the one before it stopped");
+    }
+
+    /// Design 000486: the deepest level's own size changing, the fill alike, is a different walk (a frame goes out).
+    #[test]
+    fn the_deepest_levels_size_tells_walks_apart() {
+        let unit = 100_000_000;
+        let before = &alone_walks(&[level(100, 1), level(99, 5)], &[(2 * unit, None)], false)[0];
+        let after = &alone_walks(&[level(100, 1), level(99, 6)], &[(2 * unit, None)], false)[0];
+        assert_eq!((before.filled, before.vwap_px, before.deepest_px), (after.filled, after.vwap_px, after.deepest_px));
+        assert_ne!(before, after);
     }
 
     #[test]

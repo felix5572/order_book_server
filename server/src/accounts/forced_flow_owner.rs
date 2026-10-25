@@ -833,7 +833,7 @@ mod tests {
             let sides = sides
                 .into_iter()
                 .map(|(taker, items)| {
-                    let walks = items.iter().map(|(size, _)| WalkPart { filled: *size, vwap_px: Some(0.0124), deepest_px: None, levels: 1, end: WalkEnd::Filled }).collect();
+                    let walks = items.iter().map(|(size, _)| WalkPart { filled: *size, vwap_px: Some(0.0124), first_px: None, deepest_px: None, levels: 1, end: WalkEnd::Filled, steps: Vec::new() }).collect();
                     SideWalks { taker, book: Some(book), walks }
                 })
                 .collect();
@@ -1008,7 +1008,7 @@ mod tests {
         drop(local);
         owner.local(true, now + Duration::from_millis(10));
         let book = BookAt { height: 7, time: 5, trusted: true, withheld_periods: 0, mid_px: None };
-        let walked = sides.into_iter().map(|(taker, items)| SideWalks { taker, book: Some(book), walks: items.iter().map(|_| WalkPart { filled: 0, vwap_px: None, deepest_px: None, levels: 0, end: WalkEnd::BookExhausted }).collect() }).collect();
+        let walked = sides.into_iter().map(|(taker, items)| SideWalks { taker, book: Some(book), walks: items.iter().map(|_| WalkPart { filled: 0, vwap_px: None, first_px: None, deepest_px: None, levels: 0, end: WalkEnd::BookExhausted, steps: Vec::new() }).collect() }).collect();
         let late = owner.read(FlowRead::Walk { coin: "BTC".to_string(), tier: Tier::Far, version: walk_version, sides: walked }, now);
         assert_eq!(late.frames.len(), 0, "the walks of the voided read are not taken");
         let frame = owner.answer("BTC", Tier::Far, read.clone(), now).frames.remove(0);
@@ -1033,7 +1033,7 @@ mod tests {
         drop(owner.read(FlowRead::Band { coin: "BTC".to_string(), tier: Tier::Far, version, read: Some(read) }, now));
         let ((_, _, _), FlowJob::Walk { version, sides }) = owner.job() else { panic!("a walk job") };
         local.send_replace(Arc::new(withheld.snapshot(NOW_MS)));
-        let walked = sides.into_iter().map(|(taker, items)| SideWalks { taker, book: Some(book), walks: items.iter().map(|_| WalkPart { filled: 0, vwap_px: None, deepest_px: None, levels: 0, end: WalkEnd::BookExhausted }).collect() }).collect();
+        let walked = sides.into_iter().map(|(taker, items)| SideWalks { taker, book: Some(book), walks: items.iter().map(|_| WalkPart { filled: 0, vwap_px: None, first_px: None, deepest_px: None, levels: 0, end: WalkEnd::BookExhausted, steps: Vec::new() }).collect() }).collect();
         let early = owner.read(FlowRead::Walk { coin: "BTC".to_string(), tier: Tier::Far, version, sides: walked }, now);
         assert_eq!(early.frames.len(), 0, "the local leg is no longer as the read found it");
         assert!(matches!(owner.job(), ((_, _, FlowJobKind::Band), FlowJob::Band { .. })), "started again");

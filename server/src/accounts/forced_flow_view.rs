@@ -326,7 +326,7 @@ fn ready_dto<'a>(ready: &'a ReadyFlow, heights: &FlowHeights, filter: &FlowFilte
         .entries
         .iter()
         .filter(|flow_entry| filter.takes(&flow_entry.entry))
-        .map(|flow_entry| entry_dto(&flow_entry.entry, flow_entry.walk.as_ref().map(|walk| WalkPartDto::new(walk, mid_of(flow_entry.entry.side))), ready.size_decimals))
+        .map(|flow_entry| entry_dto(&flow_entry.entry, flow_entry.walk.as_ref().map(|walk| WalkPartDto::with_steps(walk, mid_of(flow_entry.entry.side))), ready.size_decimals))
         .collect();
     let mut unplaced: BTreeMap<&'static str, u64> = BTreeMap::new();
     for (_, reason) in &ready.unplaced {
@@ -511,6 +511,43 @@ mod tests {
         let narrow_data = &view(&frame, &narrow)["data"];
         assert_eq!(narrow_data["entries"].as_array().unwrap().len(), 1, "85 bp, no notional floor");
         assert!(narrow_data["bands"]["node"][0]["bands"].as_array().unwrap().iter().all(|band| band["edgeBps"].as_u64().unwrap() <= 85));
+    }
+
+    /// Design 000486: a walked entry carries the levels it takes and its span from the first; one walked that took
+    /// nothing an empty list and no span.
+    #[test]
+    fn a_walked_entry_carries_its_steps_and_span() {
+        use crate::{
+            accounts::walk::{WalkEnd, WalkPart, WalkStep},
+            order_book::Px,
+        };
+        let unit = 100_000_000;
+        let mut walked = liquidation(1, 1_000_000, 0.0124, 1.0);
+        walked.walk = Some(WalkPart {
+            filled: 1_000_000 * unit,
+            vwap_px: Some(0.012_36),
+            first_px: Some(Px::new(1_240_000)),
+            deepest_px: Some(Px::new(1_230_000)),
+            levels: 2,
+            end: WalkEnd::Filled,
+            steps: vec![
+                WalkStep { px: Px::new(1_240_000), level_sz: 600_000 * unit, taken: 600_000 * unit },
+                WalkStep { px: Px::new(1_230_000), level_sz: 1_000_000 * unit, taken: 400_000 * unit },
+            ],
+        });
+        let mut untouched = liquidation(2, 2_000_000, 0.0124, 2.0);
+        untouched.walk = Some(WalkPart { filled: 0, vwap_px: None, first_px: None, deepest_px: None, levels: 0, end: WalkEnd::BookExhausted, steps: Vec::new() });
+        let filter = FlowFilter::of(None, 100, None, None, Some(0)).unwrap();
+        let data = view(&frame(vec![walked, untouched]), &filter);
+        let entries = data["data"]["entries"].as_array().unwrap();
+        let walk = &entries[0]["walk"];
+        assert_eq!((walk["firstPx"].as_str(), walk["deepestPx"].as_str(), walk["levels"].as_u64()), (Some("0.0124"), Some("0.0123"), Some(2)));
+        assert!((walk["spanBps"].as_f64().unwrap() - 80.645_161).abs() < 1e-3, "0.0124 to 0.0123");
+        assert_eq!(
+            walk["steps"],
+            serde_json::json!([{"px": "0.0124", "levelSize": "600000", "takenSize": "600000"}, {"px": "0.0123", "levelSize": "1000000", "takenSize": "400000"}])
+        );
+        assert_eq!((&entries[1]["walk"]["steps"], &entries[1]["walk"]["spanBps"]), (&serde_json::json!([]), &serde_json::Value::Null), "walked, nothing taken");
     }
 
     #[test]

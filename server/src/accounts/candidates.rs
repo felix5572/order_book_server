@@ -877,7 +877,7 @@ mod walk_tests {
     }
 
     fn result(key: &WalkKey, version: u64, withheld_periods: u64) -> WalkResult {
-        let part = WalkPart { filled: 7, vwap_px: Some(0.012), deepest_px: Some(Px::new(1)), levels: 3, end: WalkEnd::Filled };
+        let part = WalkPart { filled: 7, vwap_px: Some(0.012), first_px: None, deepest_px: Some(Px::new(1)), levels: 3, end: WalkEnd::Filled, steps: Vec::new() };
         let share = WalkShare { ahead: 0, together: part.clone(), alone: part };
         let mid_px = Some(0.0125);
         WalkResult { key: key.clone(), version, book_height: 9, book_time: 10, trusted: true, withheld_periods, mid_px, shares: vec![share] }
@@ -967,7 +967,7 @@ mod walk_tests {
         let key: WalkKey = (PUMP.to_string(), Side::Ask);
         let request = mailbox.drain().remove(&key).unwrap();
         assert_eq!(request.sequence.iter().map(|(user, _, _)| *user).collect::<Vec<_>>(), [x, a, b], "from the highest price");
-        let part = WalkPart { filled: 1, vwap_px: Some(1.0), deepest_px: None, levels: 1, end: WalkEnd::Filled };
+        let part = WalkPart { filled: 1, vwap_px: Some(1.0), first_px: None, deepest_px: None, levels: 1, end: WalkEnd::Filled, steps: Vec::new() };
         let share = WalkShare { ahead: 0, together: part.clone(), alone: part };
         let walked = WalkResult {
             key: key.clone(),
