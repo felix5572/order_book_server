@@ -184,6 +184,10 @@ struct EntryDto {
     cash_estimated: Option<bool>,
     /// `null` unless the walks are `walked`.
     walk: Option<WalkPartDto>,
+    /// Its prefix walked from the side's best level: the market trigger orders and liquidations of its path at its level
+    /// or nearer, itself included, every one of them whatever the subscription's sources or notional (no limit, no
+    /// steps); `null` for a limit trigger order, for a prefix of nothing, and as `walk`.
+    cumulative_walk: Option<WalkPartDto>,
 }
 
 #[derive(Serialize)]
@@ -331,7 +335,12 @@ fn ready_dto<'a>(ready: &'a ReadyFlow, heights: &FlowHeights, filter: &FlowFilte
         .entries
         .iter()
         .filter(|flow_entry| filter.takes(&flow_entry.entry))
-        .map(|flow_entry| entry_dto(&flow_entry.entry, flow_entry.walk.as_ref().map(|walk| WalkPartDto::with_steps(walk, mid_of(flow_entry.entry.side))), ready.size_decimals))
+        .map(|flow_entry| {
+            let mid_px = mid_of(flow_entry.entry.side);
+            let walk = flow_entry.walk.as_ref().map(|walk| WalkPartDto::with_steps(walk, mid_px));
+            let cumulative = flow_entry.cumulative.as_ref().map(|walk| WalkPartDto::new(walk, mid_px));
+            entry_dto(&flow_entry.entry, walk, cumulative, ready.size_decimals)
+        })
         .collect();
     let mut unplaced: BTreeMap<&'static str, u64> = BTreeMap::new();
     for (_, reason) in &ready.unplaced {
@@ -370,7 +379,7 @@ fn ready_dto<'a>(ready: &'a ReadyFlow, heights: &FlowHeights, filter: &FlowFilte
     }
 }
 
-fn entry_dto(entry: &Entry, walk: Option<WalkPartDto>, size_decimals: u32) -> EntryDto {
+fn entry_dto(entry: &Entry, walk: Option<WalkPartDto>, cumulative_walk: Option<WalkPartDto>, size_decimals: u32) -> EntryDto {
     let size = |raw: u64| format_size_raw(raw.cast_signed(), size_decimals);
     let (trigger, expected_order, cash_estimated) = match &entry.source {
         Source::Trigger { order, .. } => (
@@ -411,6 +420,7 @@ fn entry_dto(entry: &Entry, walk: Option<WalkPartDto>, size_decimals: u32) -> En
         expected_order,
         cash_estimated,
         walk,
+        cumulative_walk,
     }
 }
 
@@ -490,7 +500,7 @@ mod tests {
             limit_px: None,
             trailing: false,
         };
-        FlowEntry { entry, walk: None }
+        FlowEntry { entry, walk: None, cumulative: None }
     }
 
     fn frame(entries: Vec<FlowEntry>) -> FlowFrame {
@@ -616,6 +626,39 @@ mod tests {
         ready.walks = WalkStatus::Walked(vec![(Side::Bid, Some(0.0125))]);
         let bands = view(&buys_only, &filter)["data"]["bands"]["node"][0]["bands"].clone();
         assert!(bands.as_array().unwrap().iter().all(|band| band["cumulativeWalk"].is_null()), "the other side's book");
+    }
+
+    /// User 2026-10-25: an entry carries its prefix's walk, without steps; one without a prefix walk none.
+    #[test]
+    fn an_entry_carries_its_prefix_walk() {
+        use crate::{
+            accounts::walk::{WalkEnd, WalkPart},
+            order_book::Px,
+        };
+        let unit = 100_000_000;
+        let mut nearer = liquidation(1, 1_000_000, 0.0124, 80.0);
+        nearer.cumulative = Some(WalkPart {
+            filled: 1_000_000 * unit,
+            vwap_px: Some(0.012_35),
+            first_px: Some(Px::new(1_240_000)),
+            deepest_px: Some(Px::new(1_230_000)),
+            levels: 2,
+            end: WalkEnd::Filled,
+            steps: Vec::new(),
+        });
+        let without = liquidation(2, 1_000_000, 0.0123, 90.0);
+        let mut walked = frame(vec![nearer, without]);
+        walked.heights.sell_walk_book = Some((7, 5));
+        let FlowContent::Ready(ready) = &mut walked.content else { unreachable!("a ready frame") };
+        ready.walks = WalkStatus::Walked(vec![(Side::Ask, Some(0.0125))]);
+        // the 100 bp band's size, as the owner walks every band's
+        ready.cumulative.insert((Side::Ask, 2_000_000 * unit), WalkPart { filled: 2_000_000 * unit, ..ready.entries[0].cumulative.clone().unwrap() });
+        let filter = FlowFilter::of(None, 100, None, None, Some(0)).unwrap();
+        let data = view(&walked, &filter);
+        let entries = data["data"]["entries"].as_array().unwrap();
+        let prefix = &entries[0]["cumulativeWalk"];
+        assert_eq!((prefix["filledSize"].as_str(), prefix["deepestPx"].as_str(), prefix.get("steps")), (Some("1000000"), Some("0.0123"), None));
+        assert_eq!(entries[1]["cumulativeWalk"], serde_json::Value::Null);
     }
 
     #[test]

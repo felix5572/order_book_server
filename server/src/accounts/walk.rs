@@ -164,10 +164,41 @@ pub(crate) fn alone_walks(levels: &[(Px, Sz)], items: &[(u64, Option<Limit>)], t
     items.iter().map(|&(size, limit)| LevelCursor::default().take(levels, size, limit, truncated, Some(MAX_PUBLISHED_STEPS))).collect()
 }
 
-/// Each size walked from the best level without a limit or steps: a forced flow band's market trigger orders and
-/// liquidations together (`forced_flow::Band::cumulative_raw`); `truncated` when the levels stop at the copy limit.
+/// Each size walked from the best level without a limit or steps: a forced flow band's or entry's market trigger orders
+/// and liquidations together (`forced_flow::cumulative_sizes`); `truncated` when the levels stop at the copy limit.
+/// One pass over the levels for every size (review 000490 P3: an entry's prefix each makes a size), so `sizes` come
+/// ascending; each result is `LevelCursor::take` of that size from the best level, to the bit.
 pub(crate) fn cumulative_walks(levels: &[(Px, Sz)], sizes: &[u64], truncated: bool) -> Vec<WalkPart> {
-    sizes.iter().map(|&size| LevelCursor::default().take(levels, size, None, truncated, None)).collect()
+    assert!(sizes.is_sorted(), "cumulative sizes are walked in ascending order");
+    // the levels wholly within the current size, their size and notional, accumulated as `take` does
+    let (mut passed, mut held, mut notional) = (0_usize, 0_u64, 0.0_f64);
+    let mut walks = Vec::with_capacity(sizes.len());
+    for &size in sizes {
+        while passed < levels.len() && held + levels[passed].1.value() < size {
+            let (px, level_sz) = levels[passed];
+            held += level_sz.value();
+            notional = (px.value() as f64).mul_add(level_sz.value() as f64, notional);
+            passed += 1;
+        }
+        walks.push(match levels.get(passed) {
+            _ if size == 0 => WalkPart { filled: 0, vwap_px: None, first_px: None, deepest_px: None, levels: 0, end: WalkEnd::Filled, steps: Vec::new() },
+            Some(&(px, _)) => {
+                let total = (px.value() as f64).mul_add((size - held) as f64, notional);
+                let vwap_px = Some(total / size as f64 / fixed_point_scale());
+                WalkPart { filled: size, vwap_px, first_px: Some(levels[0].0), deepest_px: Some(px), levels: passed + 1, end: WalkEnd::Filled, steps: Vec::new() }
+            }
+            None => WalkPart {
+                filled: held,
+                vwap_px: (held > 0).then(|| notional / held as f64 / fixed_point_scale()),
+                first_px: levels.first().map(|level| level.0),
+                deepest_px: levels.last().map(|level| level.0),
+                levels: levels.len(),
+                end: if truncated { WalkEnd::TruncatedAtLevels } else { WalkEnd::BookExhausted },
+                steps: Vec::new(),
+            },
+        });
+    }
+    walks
 }
 
 /// Where a walk stands in the levels: the level and what of it is already taken.
@@ -426,6 +457,22 @@ mod tests {
         assert_eq!((walks[2].filled, walks[2].end), (8 * unit, WalkEnd::BookExhausted));
         assert!(walks.iter().all(|walk| walk.steps.is_empty()));
         assert_eq!(cumulative_walks(&bids, &[9 * unit], true)[0].end, WalkEnd::TruncatedAtLevels);
+    }
+
+    /// Review 000490 P3: the one pass gives every size exactly what a walk of it alone from the best level gives -
+    /// within a level, at a level's end, past the copy (exhausted or truncated), zero, an empty book.
+    #[test]
+    fn the_one_pass_equals_a_walk_per_size() {
+        let unit = 100_000_000;
+        let books = [vec![level(100, 1), level(99, 2), level(98, 5)], vec![(Px::new(97 * unit), Sz::new(unit / 3)), level(96, 1)], Vec::new()];
+        for book in &books {
+            let total: u64 = book.iter().map(|(_, sz)| sz.value()).sum();
+            let sizes: Vec<u64> = (0..=12).map(|step| step * unit / 2).chain([total, total + 1, unit / 3]).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            for truncated in [false, true] {
+                let alone: Vec<WalkPart> = sizes.iter().map(|&size| LevelCursor::default().take(book, size, None, truncated, None)).collect();
+                assert_eq!(cumulative_walks(book, &sizes, truncated), alone, "{book:?} truncated {truncated}");
+            }
+        }
     }
 
     /// Design 000486: a forced flow walk records each level it takes, best first, the deepest possibly in part; up to

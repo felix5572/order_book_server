@@ -10,7 +10,9 @@
 //! its market trigger orders and liquidations together. The node runs the trigger orders a mark move fires in one block
 //! in an order of its own, neither by trigger price nor by oid (bm 10-23 ZEC, 10-24 NEAR, 10-25 WLD, up to 1,282
 //! orders in a block), so the flow walks no entry after another: only the sum, which does not depend on the order. The
-//! limit trigger orders are left out, each stopping at its own limit in that unknown order.
+//! limit trigger orders are left out, each stopping at its own limit in that unknown order. Likewise an entry's prefix
+//! (`prefix_sizes`): the market trigger orders and liquidations of its path at its level or nearer, what a mark move
+//! reaching its level fires with it.
 
 use std::{
     cmp::Ordering,
@@ -206,6 +208,14 @@ impl Entry {
             Calibre::Local => self.distance_local_bps,
         }
     }
+
+    /// A market trigger order or a liquidation: what walks the book together with the others (the module's doc).
+    pub(crate) const fn walks_together(&self) -> bool {
+        match &self.source {
+            Source::Liquidation { .. } => true,
+            Source::Trigger { kind, .. } => matches!(kind, OrderKind::Market),
+        }
+    }
 }
 
 /// A trigger order the flow cannot place.
@@ -367,8 +377,7 @@ fn listener_px(px: Px) -> f64 {
 }
 
 fn path_order(left: &Entry, right: &Entry) -> Ordering {
-    let by_level = left.level_px.total_cmp(&right.level_px);
-    let by_level = if left.direction == Direction::Down { by_level.reverse() } else { by_level };
+    let by_level = nearest_first(left.direction, left.level_px, right.level_px);
     left.direction.cmp(&right.direction).then(by_level).then(left.source.kind().cmp(&right.source.kind())).then_with(|| {
         match (&left.source, &right.source) {
             (Source::Trigger { order: left, .. }, Source::Trigger { order: right, .. }) => left.oid.cmp(&right.oid),
@@ -423,8 +432,8 @@ impl Band {
 /// Every source set a subscription can take (`FlowFilter::sources`: either kind, or both).
 pub(crate) const SOURCE_SETS: [&[SourceKind]; 3] = [&[SourceKind::Trigger], &[SourceKind::Liquidation], &[SourceKind::Trigger, SourceKind::Liquidation]];
 
-/// Per taker side, every band's cumulative size (raw, none zero) a subscription up to `max_bps` can show: by either
-/// calibre and every source set.
+/// Per taker side, every cumulative size (raw, none zero) a frame up to `max_bps` can show: each band's of any
+/// subscription (either calibre, every source set) and each entry's prefix.
 pub(crate) fn cumulative_sizes(entries: &[Entry], max_bps: u32) -> BTreeMap<Side, BTreeSet<u128>> {
     let mut sizes: BTreeMap<Side, BTreeSet<u128>> = BTreeMap::new();
     for calibre in [Calibre::Node, Calibre::Local] {
@@ -434,8 +443,48 @@ pub(crate) fn cumulative_sizes(entries: &[Entry], max_bps: u32) -> BTreeMap<Side
             }
         }
     }
+    for (entry, prefix) in entries.iter().zip(prefix_sizes(entries)) {
+        sizes.entry(entry.side).or_default().extend(prefix.filter(|raw| *raw > 0));
+    }
     sizes.retain(|_, side_sizes| !side_sizes.is_empty());
     sizes
+}
+
+/// Each entry's prefix (raw), in the entries' order: the market trigger orders and liquidations of its (direction,
+/// side) at its level or nearer the mark, itself and every equal level included - what a mark move reaching its level
+/// fires with it, whichever the node runs first. `None` for a limit trigger order. Every entry of the path counts,
+/// whatever a subscription's sources or notional.
+pub(crate) fn prefix_sizes(entries: &[Entry]) -> Vec<Option<u128>> {
+    let mut paths: BTreeMap<(Direction, Side), Vec<(f64, u128)>> = BTreeMap::new();
+    for entry in entries.iter().filter(|entry| entry.walks_together()) {
+        paths.entry((entry.direction, entry.side)).or_default().push((entry.level_px, u128::from(entry.size_raw)));
+    }
+    for ((direction, _), levels) in &mut paths {
+        levels.sort_by(|left, right| nearest_first(*direction, left.0, right.0));
+        let mut running = 0;
+        for level in levels.iter_mut() {
+            running += level.1;
+            level.1 = running;
+        }
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            if !entry.walks_together() {
+                return None;
+            }
+            let levels = &paths[&(entry.direction, entry.side)];
+            // the levels at or nearer than the entry's: the last of them sums its equal levels too
+            let reached = levels.partition_point(|(level, _)| nearest_first(entry.direction, *level, entry.level_px) != Ordering::Greater);
+            Some(levels[reached - 1].1)
+        })
+        .collect()
+}
+
+/// Nearer the mark first: a fall reaches the highest level first, a rise the lowest.
+fn nearest_first(direction: Direction, left: f64, right: f64) -> Ordering {
+    let by_level = left.total_cmp(&right);
+    if direction == Direction::Down { by_level.reverse() } else { by_level }
 }
 
 /// The bands up to `max_bps` of every (direction, side) by `calibre`, of the entries of `sources`; not filtered by
@@ -685,13 +734,55 @@ mod tests {
         // sales: the stop alone (2), the liquidation alone (5), both (7); buys: the stop (4)
         assert_eq!(sizes[&Side::Ask].iter().copied().collect::<Vec<_>>(), [2, 5, 7]);
         assert_eq!(sizes[&Side::Bid].iter().copied().collect::<Vec<_>>(), [4]);
-        // within 50 bp: the stops, 50 bp away; the liquidation is 100 bp away
-        let near = cumulative_sizes(&flow.entries, 50);
+        // within 50 bp, as the owner hands in a tier's entries: the stops, 50 bp away; the liquidation is 100 bp away
+        let in_tier = |flow: &CoinFlow| flow.entries.iter().filter(|entry| entry.in_range(50)).cloned().collect::<Vec<_>>();
+        let near = cumulative_sizes(&in_tier(&flow), 50);
         assert_eq!((near[&Side::Ask].iter().copied().collect::<Vec<_>>(), near[&Side::Bid].iter().copied().collect::<Vec<_>>()), (vec![2], vec![4]));
         // a local mark at 99.4: the liquidation is 40.2 bp away by it (100 bp by the node mark), the sale stop past it
         let local = CoinInputs { local_mark_raw: Some(99_400_000), ..inputs };
         let flow = coin_flow(&local, |account| if account == user(1) { 10 } else { -10 }).unwrap();
-        assert_eq!(cumulative_sizes(&flow.entries, 50)[&Side::Ask].iter().copied().collect::<Vec<_>>(), [2, 5, 7], "the local bands' sizes too");
+        assert_eq!(cumulative_sizes(&in_tier(&flow), 50)[&Side::Ask].iter().copied().collect::<Vec<_>>(), [2, 5, 7], "the local bands' sizes too");
+    }
+
+    /// User 2026-10-25: an entry's prefix sums the market trigger orders and liquidations of its path at its level or
+    /// nearer, equal levels together, whatever comes first in the flow's order; a limit trigger order has none and adds
+    /// to none; the other side and the other direction are other paths.
+    #[test]
+    fn a_prefix_sums_its_path_up_to_its_level() {
+        let orders = [
+            stop(1, 1, Side::Ask, "Price below 99.9", 0, 2 * UNIT),
+            stop(1, 2, Side::Ask, "Price below 99.5", 0, 3 * UNIT),
+            Order { order_type: "Stop Limit", ..stop(1, 3, Side::Ask, "Price below 99.7", 0, 4 * UNIT) },
+            stop(2, 4, Side::Bid, "Price above 100.5", 0, 6 * UNIT),
+        ];
+        let mut triggers: Vec<TriggerInput> = orders.iter().map(input).collect();
+        for (trigger, px) in triggers.iter_mut().zip([9_990_000_000, 9_950_000_000, 9_970_000_000, 10_050_000_000]) {
+            trigger.trigger_px = Px::new(px);
+        }
+        // a liquidation at the second stop's level fires with it
+        let liquidations = [liquidation(3, 1, 99.5)];
+        let inputs = CoinInputs { size_decimals: 0, node_mark_raw: MARK_RAW, local_mark_raw: None, triggers: &triggers, liquidations: &liquidations };
+        let flow = coin_flow(&inputs, |account| if account == user(1) { 10 } else { -10 }).unwrap();
+        let prefixes: Vec<(u64, Option<u128>)> = flow
+            .entries
+            .iter()
+            .zip(prefix_sizes(&flow.entries))
+            .map(|(entry, prefix)| (if let Source::Trigger { order, .. } = &entry.source { order.oid } else { 0 }, prefix))
+            .collect();
+        assert_eq!(prefixes, [(1, Some(2)), (3, None), (2, Some(6)), (0, Some(6)), (4, Some(6))]);
+    }
+
+    /// Two stops between the same band edges (20 and 22 bp): the 25 bp band sums both, the nearer one's prefix is only
+    /// itself - a size of no band, walked too.
+    #[test]
+    fn a_prefix_between_band_edges_is_walked_too() {
+        let orders = [stop(1, 1, Side::Ask, "Price below 99.8", 0, 2 * UNIT), stop(1, 2, Side::Ask, "Price below 99.78", 0, 3 * UNIT)];
+        let mut triggers: Vec<TriggerInput> = orders.iter().map(input).collect();
+        triggers[0].trigger_px = Px::new(9_980_000_000);
+        triggers[1].trigger_px = Px::new(9_978_000_000);
+        let inputs = CoinInputs { size_decimals: 0, node_mark_raw: MARK_RAW, local_mark_raw: None, triggers: &triggers, liquidations: &[] };
+        let flow = coin_flow(&inputs, |_| 10).unwrap();
+        assert_eq!(cumulative_sizes(&flow.entries, 50)[&Side::Ask].iter().copied().collect::<Vec<_>>(), [2, 5]);
     }
 
     #[test]

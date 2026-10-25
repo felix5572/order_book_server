@@ -19,7 +19,7 @@ use tokio::sync::{oneshot, watch};
 use super::{
     book::AccountBook,
     candidates::Candidates,
-    forced_flow::{CoinFlow, CoinInputs, Entry, Tier, TriggerInput, Unplaced, coin_flow, cumulative_sizes},
+    forced_flow::{CoinFlow, CoinInputs, Entry, Tier, TriggerInput, Unplaced, coin_flow, cumulative_sizes, prefix_sizes},
     forced_flow_reader::{FlowJob, FlowJobKind, FlowMailbox, FlowRead, SideJob, SideWalks, WalkItem},
     marks::MarksAt,
     walk::{Limit, WalkPart, walk_units},
@@ -110,6 +110,9 @@ pub(crate) struct FlowEntry {
     pub(crate) entry: Entry,
     /// `None` unless the walks are `Walked` (and for a side without a book).
     pub(crate) walk: Option<WalkPart>,
+    /// Its prefix walked (`forced_flow::prefix_sizes`, from the side's best level): `None` for a limit trigger order,
+    /// and as `walk`.
+    pub(crate) cumulative: Option<WalkPart>,
 }
 
 /// What a frame says of a coin; compared to decide whether a frame goes out.
@@ -182,6 +185,8 @@ struct Walking {
     trust: (bool, u64),
     /// The cumulative sizes posted per side (1e-8 units), in the job's order.
     cumulative: Vec<(Side, Vec<u64>)>,
+    /// Each entry's prefix (1e-8 units), in the entries' order.
+    prefixes: Vec<Option<u64>>,
 }
 
 enum Stage {
@@ -560,11 +565,12 @@ impl ForcedFlow {
             sides.push(SideJob { taker, items, cumulative });
         }
         let cumulative = sides.iter().map(|side| (side.taker, side.cumulative.clone())).collect();
+        let prefixes = prefix_units(&ready.entries, ready.size_decimals);
         self.version += 1;
         let version = self.version;
         self.post((key.0.clone(), key.1, FlowJobKind::Walk), FlowJob::Walk { version, sides });
         if let Some(pipeline) = self.pipelines.get_mut(key) {
-            pipeline.stage = Stage::Walking(Box::new(Walking { version, heights, ready, trust, cumulative }));
+            pipeline.stage = Stage::Walking(Box::new(Walking { version, heights, ready, trust, cumulative, prefixes }));
         }
     }
 
@@ -589,7 +595,7 @@ impl ForcedFlow {
         }
         let Some(pipeline) = self.pipelines.get_mut(&key) else { unreachable!("found above") };
         let Stage::Walking(walking) = std::mem::replace(&mut pipeline.stage, Stage::Idle) else { unreachable!("matched above") };
-        let Walking { mut heights, mut ready, trust, cumulative, .. } = *walking;
+        let Walking { mut heights, mut ready, trust, cumulative, prefixes, .. } = *walking;
         let link_trust = self.link.as_ref().map(|link| (link.trust.is_trusted(), link.trust.withheld_periods()));
         let read_trusted = sides.iter().filter_map(|side| side.book).all(|book| (book.trusted, book.withheld_periods) == trust);
         if link_trust != Some(trust) || !read_trusted {
@@ -600,6 +606,7 @@ impl ForcedFlow {
         } else {
             attach_walks(&mut ready.entries, &sides);
             ready.cumulative = cumulative_walks(&cumulative, &sides);
+            attach_prefix_walks(&mut ready.entries, &prefixes, &ready.cumulative, &sides);
             for side in &sides {
                 let at = side.book.map(|book| (book.height, book.time));
                 match side.taker {
@@ -693,7 +700,8 @@ fn trigger_status(read: &TriggerBandAt) -> TriggerStatus {
 }
 
 fn ready_flow(flow: CoinFlow, tier: Tier, size_decimals: u32, node_mark_raw: u64, local: LocalCalibre, triggers: TriggerStatus) -> ReadyFlow {
-    let entries = flow.entries.into_iter().filter(|entry| entry.in_range(tier.bps())).map(|entry| FlowEntry { entry, walk: None }).collect();
+    let entries =
+        flow.entries.into_iter().filter(|entry| entry.in_range(tier.bps())).map(|entry| FlowEntry { entry, walk: None, cumulative: None }).collect();
     ReadyFlow { size_decimals, node_mark_raw, local, triggers, walks: WalkStatus::NoBook, entries, unplaced: flow.unplaced, cumulative: BTreeMap::new() }
 }
 
@@ -703,6 +711,26 @@ fn cumulative_units(entries: &[FlowEntry], max_bps: u32, size_decimals: u32) -> 
     #[expect(clippy::expect_used, reason = "a coin's summed sizes stay far below 2^63 raw units")]
     let units = |raw: u128| walk_units(u64::try_from(raw).expect("a band's cumulative size fits u64"), size_decimals);
     cumulative_sizes(&entries, max_bps).into_iter().map(|(side, sizes)| (side, sizes.into_iter().map(units).collect())).collect()
+}
+
+/// Each entry's prefix (`forced_flow::prefix_sizes`) in 1e-8 units, in the entries' order; `None` too for a prefix of
+/// nothing (every order of it reduces a position that is not there), which walks nothing.
+fn prefix_units(entries: &[FlowEntry], size_decimals: u32) -> Vec<Option<u64>> {
+    let entries: Vec<Entry> = entries.iter().map(|flow_entry| flow_entry.entry.clone()).collect();
+    #[expect(clippy::expect_used, reason = "a coin's summed sizes stay far below 2^63 raw units")]
+    let units = |raw: u128| walk_units(u64::try_from(raw).expect("a prefix fits u64"), size_decimals);
+    prefix_sizes(&entries).into_iter().map(|prefix| prefix.filter(|raw| *raw > 0).map(units)).collect()
+}
+
+/// Each entry's prefix walk from the cumulative walks of its side, when that side was walked.
+fn attach_prefix_walks(entries: &mut [FlowEntry], prefixes: &[Option<u64>], walks: &BTreeMap<(Side, u64), WalkPart>, sides: &[SideWalks]) {
+    for (flow_entry, prefix) in entries.iter_mut().zip(prefixes) {
+        let side = flow_entry.entry.side;
+        let walked = sides.iter().any(|walked| walked.taker == side && walked.book.is_some());
+        flow_entry.cumulative = prefix.filter(|_| walked).map(|units| {
+            walks.get(&(side, units)).cloned().unwrap_or_else(|| unreachable!("every prefix is among its side's cumulative sizes"))
+        });
+    }
 }
 
 /// The cumulative sizes' walks by (side, size), from each walked side's results in the job's order.
@@ -932,6 +960,9 @@ mod tests {
         assert_eq!(ready(&changed.frames[0]).entries[0].entry.source.kind(), SourceKind::Trigger);
         // 40 and 80 bp: the 50 bp band holds one stop, the 100 bp band both
         assert_eq!(ready(&changed.frames[0]).cumulative.keys().copied().collect::<Vec<_>>(), [(Side::Ask, 100 * UNIT), (Side::Ask, 200 * UNIT)]);
+        // the nearer stop's prefix is itself, the farther one's both
+        let prefixes: Vec<_> = ready(&changed.frames[0]).entries.iter().map(|flow_entry| flow_entry.cumulative.as_ref().map(|walk| walk.filled)).collect();
+        assert_eq!(prefixes, [Some(100 * UNIT), Some(200 * UNIT)]);
     }
 
     /// A read of an older version is dropped; a band the current marks moved past is read again (r2 revision 2).
