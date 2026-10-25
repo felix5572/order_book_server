@@ -78,6 +78,12 @@ const CHECKPOINT_LEAD_BLOCKS: u64 = 30;
 const CACHE_WINDOW_MARGIN_BLOCKS: u64 = 150;
 /// Poll cadence while waiting for the cache window and for the checkpoint file.
 const CHECKPOINT_POLL: Duration = Duration::from_millis(500);
+/// An empirical threshold for a suspicious gap between two batches of one book stream, not a protocol bound on loss. A
+/// block without lines of a stream is normal: bm 2026-10-25 08 UTC, the diffs stepped by 2 in 1,061 of 20,980 steps
+/// and the statuses in 260 of 5,412, never by more. A source resuming further above its last height skipped blocks,
+/// e.g. a node restarted from a newer state (bm 2026-10-25: both streams stalled ~1.6 h at 1196574xxx, then resumed at
+/// 1196640001).
+const MAX_BOOK_STREAM_HEIGHT_STEP: u64 = 10;
 
 /// Run one snapshot fetch + install cycle in the background and report the
 /// outcome on `tx`. Any error releases this cycle's replay cache (loss marks
@@ -1414,6 +1420,31 @@ impl OrderBookListener {
     /// HFT mode: events are applied the instant they arrive, without block-level
     /// synchronization, with order-level caching for status/diff pairing.
     /// Runs under the listener lock; everything here must stay cheap.
+    /// The height a book batch continues from: its stream's last one, or the installed snapshot's when higher (the
+    /// snapshot holds every block up to its height). `None` for the other streams.
+    fn book_stream_continues_from(&self, event_batch: &EventBatch) -> Option<u64> {
+        let last = match event_batch {
+            EventBatch::Orders(_) => self.last_status_height,
+            EventBatch::BookDiffs(_) => self.last_diff_height,
+            EventBatch::Fills(_) | EventBatch::OracleUpdates(_) => return None,
+        };
+        Some(last.max(self.installed_snapshot_height.unwrap_or(0)))
+    }
+
+    /// A book stream resuming more than `MAX_BOOK_STREAM_HEIGHT_STEP` above where it continues from skipped blocks
+    /// whose book events are lost. The batch itself is new and applies (or is cached); the loss bound (the stream
+    /// height already raised) makes the install take a checkpoint past it. It counts for a live book and for an open
+    /// replay cache, the first install's included (review 000484 r1 P1): a jump inside the cache window would
+    /// otherwise replay onto a checkpoint that cannot cover it.
+    fn mark_book_stream_gap(&mut self, source_label: &str, previous: u64, height: u64) {
+        let book_or_cache = self.is_ready() || self.fetched_snapshot_cache.is_some();
+        if previous == 0 || height <= previous + MAX_BOOK_STREAM_HEIGHT_STEP || !book_or_cache {
+            return;
+        }
+        error!("{source_label} resumed at block {height} after block {previous}: {} blocks without book events", height - previous - 1);
+        self.mark_desynced("stream_height_gap");
+    }
+
     fn apply_event_batch(&mut self, height: u64, event_batch: EventBatch, event_source: EventSource) {
         /// Largest batch we'll process. Each event is a few hundred bytes; a 100k-event
         /// batch would already block the listener for seconds and pin hundreds of MB.
@@ -1429,6 +1460,7 @@ impl OrderBookListener {
         if !matches!(event_batch, EventBatch::OracleUpdates(_)) {
             self.last_seen_height = self.last_seen_height.max(height);
         }
+        let continued_from = self.book_stream_continues_from(&event_batch);
         match &event_batch {
             EventBatch::Orders(_) => self.last_status_height = self.last_status_height.max(height),
             EventBatch::BookDiffs(_) => self.last_diff_height = self.last_diff_height.max(height),
@@ -1461,6 +1493,9 @@ impl OrderBookListener {
                 REGRESSING_BOOK_BATCHES_SKIPPED_TOTAL.with_label_values(&[source_label]).inc();
                 return;
             }
+        }
+        if let Some(previous) = continued_from {
+            self.mark_book_stream_gap(source_label, previous, height);
         }
         let is_book_batch = matches!(event_batch, EventBatch::Orders(_) | EventBatch::BookDiffs(_));
         if is_book_batch {
@@ -2703,20 +2738,36 @@ mod tests {
         assert_eq!(listener.replay_cache_status(), (0, false), "no cache before a fetch opens its window");
 
         // Before the window: not ready and not cached - the checkpoint covers it.
-        feed_order(&mut listener, "OLD", 2, 100);
+        feed_order(&mut listener, "OLD", 2, 149);
         assert_eq!(listener.replay_cache_status(), (0, false));
 
         // Window for checkpoint 150 opens (both streams tracking, within the margin).
         assert_eq!(listener.try_open_cache_window(150), CacheWindow::Opened);
-        feed_order(&mut listener, "NEW", 1, 200);
+        feed_order(&mut listener, "NEW", 1, 151);
 
-        // The checkpoint-150 snapshot lands: height-200 events are replayed.
+        // The checkpoint-150 snapshot lands: height-151 events are replayed.
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 150);
         assert!(listener.is_ready());
         let universe = listener.universe();
         assert!(universe.contains("NEW"), "events above the snapshot height must be replayed");
         assert!(!universe.contains("OLD"), "events at/below the snapshot height must not be double-applied");
         assert!(!listener.needs_resync(), "a clean snapshot + replay is in sync");
+    }
+
+    /// Review 000484 r1 P1: before the first install, a stream jumping while the replay cache is open lost the blocks
+    /// between; a checkpoint below the jump cannot come up trusted.
+    #[test]
+    fn test_a_stream_gap_inside_the_first_cache_window_keeps_the_installed_book_withheld() {
+        let (tx, _rx) = tokio::sync::broadcast::channel(32);
+        let mut listener = OrderBookListener::new(Some(tx), false, ActiveL2Params::new(), (true, true, true));
+        feed_order(&mut listener, "OLD", 1, 990);
+        assert_eq!(listener.try_open_cache_window(1_000), CacheWindow::Opened);
+        feed_order(&mut listener, "NEW", 2, 1_020);
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1_000);
+        assert!(listener.universe().contains("NEW"), "the jumped batch is new and replays");
+        assert!(listener.is_ready() && !listener.book_trusted(), "checkpoint 1000 cannot cover the lost 991..1019");
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), listener.max_loss_height);
+        assert!(listener.book_trusted(), "a checkpoint past the loss bound restores trust");
     }
 
     #[test]
@@ -3021,7 +3072,7 @@ mod tests {
         listener.mark_desynced("test_reason");
         let loss_bound = listener.max_loss_height;
         listener.open_cache_window_for_test();
-        feed_order(&mut listener, "ETH", 2, 120);
+        feed_order(&mut listener, "ETH", 2, 105);
 
         listener.release_cache_window();
         assert_eq!(listener.replay_cache_status(), (0, false), "the next cycle opens a fresh window");
@@ -3110,6 +3161,26 @@ mod tests {
         }
     }
 
+    /// BM 2026-10-25: the node stalled ~1.6 h and resumed from a newer state; both book streams skipped ~66,000
+    /// blocks, and the book kept serving as trusted without them.
+    #[test]
+    fn test_a_book_stream_resuming_far_above_its_last_height_withholds_the_book() {
+        let (mut listener, _rx) = ready_listener();
+        feed_order(&mut listener, "BTC", 1, 100);
+        feed_order(&mut listener, "BTC", 2, 102);
+        assert!(listener.book_trusted(), "a block without book lines is normal");
+        feed_order(&mut listener, "BTC", 3, 102 + MAX_BOOK_STREAM_HEIGHT_STEP);
+        assert!(listener.book_trusted(), "the largest step that loses nothing");
+        let resumed = 102 + 2 * MAX_BOOK_STREAM_HEIGHT_STEP + 1;
+        feed_order(&mut listener, "BTC", 4, resumed);
+        assert!(!listener.book_trusted(), "a longer jump lost book events");
+        assert!(listener.max_loss_height > resumed, "only a checkpoint past the resume height restores trust");
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), resumed - 1);
+        assert!(!listener.book_trusted(), "a snapshot inside the gap cannot restore trust");
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), listener.max_loss_height);
+        assert!(listener.book_trusted(), "a covering snapshot does");
+    }
+
     #[test]
     fn test_book_regression_guard_preserves_same_block_chunks_and_drift_opt_out() {
         let (mut listener, _rx) = ready_listener();
@@ -3177,7 +3248,7 @@ mod tests {
         let (mut listener, _rx) = ready_listener();
         feed_order(&mut listener, "BTC", 1, 1);
         for i in 0..50_u64 {
-            feed_fallback_order(&mut listener, 100 + i, 500 + i);
+            feed_fallback_order(&mut listener, 100 + i, 2 + i);
         }
         assert!(!listener.needs_resync(), "fallbacks never mark");
         assert_eq!(listener.max_loss_height, 0, "queue-priority fallbacks are not data loss");
@@ -3318,9 +3389,9 @@ mod tests {
         listener.mark_desynced(REASON);
         assert_eq!((marks(), listener.max_loss_height), (1, 600));
 
-        apply_booked_order(&mut listener, 2, 700);
+        apply_booked_order(&mut listener, 2, 505);
         listener.mark_desynced(REASON);
-        assert_eq!((marks(), listener.max_loss_height), (2, 800), "a loss past the bound raises it");
+        assert_eq!((marks(), listener.max_loss_height), (2, 605), "a loss past the bound raises it");
     }
 
     #[test]
@@ -3640,22 +3711,23 @@ mod tests {
         assert!(rx.try_recv().is_err());
         // More than a full 16,384-message ring of genuine deep-level changes.
         // They must not consume any BBO capacity or cause a receiver gap.
-        for height in 3..20_003 {
-            let (old, new) = if height % 2 == 1 { ("1.0", "2.0") } else { ("2.0", "1.0") };
-            let batch = make_diff_batch("BTC", 2, height, serde_json::json!({"update": {"origSz": old, "newSz": new}}));
-            listener.apply_event_batch(height, EventBatch::BookDiffs(batch), EventSource::OrderDiffs);
+        // at one height: the statuses stream has no lines meanwhile, and a long silence of it is a loss
+        for change in 0..20_000_u64 {
+            let (old, new) = if change % 2 == 0 { ("1.0", "2.0") } else { ("2.0", "1.0") };
+            let batch = make_diff_batch("BTC", 2, 3, serde_json::json!({"update": {"origSz": old, "newSz": new}}));
+            listener.apply_event_batch(3, EventBatch::BookDiffs(batch), EventSource::OrderDiffs);
         }
-        feed_order(&mut listener, "ETH", 3, 20_003);
+        feed_order(&mut listener, "ETH", 3, 4);
         assert_eq!(rx.len(), 0, "deep BTC churn and unsubscribed ETH never enter the BBO ring");
         assert!(listener.book_trusted());
         // A second client must receive the same quote on its first book event.
         let mut second_rx = listener.bbo_sender().subscribe();
         let second_guards = listener.active_subs().acquire_for(&subscription);
-        feed_order(&mut listener, "BTC", 4, 20_004);
+        feed_order(&mut listener, "BTC", 4, 5);
         assert!(second_rx.try_recv().is_ok());
         drop(second_guards);
         drop(guards);
-        feed_order(&mut listener, "BTC", 5, 20_005);
+        feed_order(&mut listener, "BTC", 5, 6);
         assert_eq!(second_rx.len(), 0, "last unsubscribe turns publication off");
     }
 
