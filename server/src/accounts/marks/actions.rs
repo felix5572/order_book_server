@@ -61,6 +61,8 @@ pub(crate) struct BookAnchors {
     pub(crate) ordinary_order: bool,
     /// Exactly one ordinary IOC request; successful receipt count alone cannot exclude another rejected order.
     pub(crate) single_ioc_order: bool,
+    /// Full identity of one ordinary reduce-only GTC request with an unambiguous resting receipt.
+    pub(crate) resting_reduce_only: Option<Box<ReceiptedOrder>>,
     pub(crate) created: Vec<u64>,
     /// The created orders that carry a cloid: (cloid, oid).
     pub(crate) created_cloids: Vec<(String, u64)>,
@@ -80,6 +82,13 @@ pub(crate) struct BookAnchors {
     pub(crate) ioc_pairing_mismatch: Option<IocPairingMismatch>,
     /// Successful single modify with a default receipt: old order known, replacement oid only in statuses.
     pub(crate) unreceipted_modify: Option<Box<ReplacementRequest>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReceiptedOrder {
+    pub(crate) oid: u64,
+    pub(crate) asset: u32,
+    pub(crate) key: OrderKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +168,7 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
             let statuses = statuses()?;
             let mut anchors = order_anchors(&orders, &statuses)?;
             anchors.ordinary_order = true;
+            anchors.resting_reduce_only = resting_reduce_only(user, &orders, &statuses)?;
             anchors.single_ioc_order = orders.len() == 1 && orders[0].t.limit.as_ref().is_some_and(|limit| limit.tif == "Ioc");
             (category(orders.iter().all(WireOrder::is_alo)), MarkAction::Book(anchors))
         }
@@ -258,6 +268,19 @@ fn hip3_oracle(action: &crate::accounts::replica::Action<'_>) -> Result<MarkActi
     let SetOracle { dex } = action.field(action.set_oracle.as_ref(), "setOracle")?;
     if dex.is_empty() || dex.contains(':') { return Err("setOracle with invalid dex".into()); }
     Ok(MarkAction::Hip3Oracle { dex, execution_index: None })
+}
+
+/// Preserve this narrow receipt proof separately from the broader list of placed oids.
+fn resting_reduce_only(user: Option<Address>, orders: &[WireOrder], statuses: &[WireStatus])
+    -> Result<Option<Box<ReceiptedOrder>>, String>
+{
+    let (Some(user), [order], [WireStatus::Object(status)]) = (user, orders, statuses) else { return Ok(None) };
+    if !order.r || order.t.limit.as_ref().is_none_or(|limit| limit.tif != "Gtc")
+        || status.error.is_some() || status.filled.is_some() { return Ok(None); }
+    let Some(receipt) = &status.resting else { return Ok(None) };
+    if receipt.cloid != order.c { return Ok(None); }
+    let Some(key) = OrderKey::requested(user, order)? else { return Ok(None) };
+    Ok(Some(Box::new(ReceiptedOrder { oid: receipt.oid, asset: order.a, key })))
 }
 
 /// Request/response pairing is optional evidence for no-fill IOC attribution, not a protocol invariant for an
@@ -565,6 +588,7 @@ pub(crate) mod tests {
         let modified = BookAnchors {
             ordinary_order: false,
             single_ioc_order: false,
+            resting_reduce_only: None,
             created: vec![8],
             created_cloids: vec![("0xfe63".to_string(), 8)],
             cancelled: vec![],

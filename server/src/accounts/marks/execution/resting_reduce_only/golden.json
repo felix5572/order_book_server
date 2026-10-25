@@ -1,0 +1,194 @@
+{
+  "source": "BM raw block 1196468228; statuses 645..646 and diffs 313..314 (zero-based); new GTC reduce-only resting receipt before bundle 1 SetGlobalAction. No fills in the block. Filtered wire fields remain unchanged.",
+  "height": 1196468228,
+  "coin": "ZEC",
+  "asset": 214,
+  "block_time": "2026-10-25T07:25:04.735278050",
+  "action": {
+    "type": "order",
+    "orders": [
+      {
+        "a": 214,
+        "b": false,
+        "p": "1192",
+        "s": "0.02",
+        "r": true,
+        "t": {
+          "limit": {
+            "tif": "Gtc"
+          }
+        },
+        "c": "0x115a14307cdc52008002f38268f35fab"
+      }
+    ],
+    "grouping": "na",
+    "builder": {
+      "b": "0x9b451f8941240db8bedc99bff8917a2ed9550074",
+      "f": 10
+    }
+  },
+  "response": {
+    "user": "0xc99ce538a514dd520996e06ed7a85acd2ff4f13c",
+    "res": {
+      "status": "ok",
+      "response": {
+        "type": "order",
+        "data": {
+          "statuses": [
+            {
+              "resting": {
+                "oid": 585152654719,
+                "cloid": "0x115a14307cdc52008002f38268f35fab"
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "statuses": [
+    {
+      "time": "2026-10-25T07:25:04.735278050",
+      "user": "0xc99ce538a514dd520996e06ed7a85acd2ff4f13c",
+      "hash": "0x4469ebd6dc4ce06945e3044750a80402012800bc774fff3be83297299b40ba53",
+      "builder": {
+        "b": "0x9b451f8941240db8bedc99bff8917a2ed9550074",
+        "f": 10
+      },
+      "status": "open",
+      "order": {
+        "coin": "ZEC",
+        "side": "A",
+        "limitPx": "1192.0",
+        "sz": "0.02",
+        "oid": 585152654719,
+        "timestamp": 1792913104735,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Limit",
+        "origSz": "0.02",
+        "tif": "Gtc",
+        "cloid": "0x115a14307cdc52008002f38268f35fab"
+      }
+    },
+    {
+      "time": "2026-10-25T07:25:04.735278050",
+      "user": "0xc99ce538a514dd520996e06ed7a85acd2ff4f13c",
+      "hash": null,
+      "builder": {
+        "b": "0x9b451f8941240db8bedc99bff8917a2ed9550074",
+        "f": 10
+      },
+      "status": "reduceOnlyCanceled",
+      "order": {
+        "coin": "ZEC",
+        "side": "A",
+        "limitPx": "1191.7",
+        "sz": "0.02",
+        "oid": 585152587104,
+        "timestamp": 1792913098427,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": true,
+        "orderType": "Limit",
+        "origSz": "0.02",
+        "tif": "Alo",
+        "cloid": "0xd6cdd8e6dc935946bb22e55388e28eb4"
+      }
+    }
+  ],
+  "diffs": [
+    {
+      "user": "0xc99ce538a514dd520996e06ed7a85acd2ff4f13c",
+      "oid": 585152654719,
+      "coin": "ZEC",
+      "side": "A",
+      "px": "1192.0",
+      "raw_book_diff": {
+        "new": {
+          "sz": "0.02"
+        }
+      }
+    },
+    {
+      "user": "0xc99ce538a514dd520996e06ed7a85acd2ff4f13c",
+      "oid": 585152587104,
+      "coin": "ZEC",
+      "side": "A",
+      "px": "1191.7",
+      "raw_book_diff": "remove"
+    }
+  ],
+  "fills": [],
+  "provenance": {
+    "height": 1196468228,
+    "files": [
+      {
+        "stream": "node_raw_book_diffs_streaming",
+        "rows": 315,
+        "raw_bytes": 86187,
+        "raw_sha256": "e399b811f234e03a4f0e78d5d6bab4c2fd80a52a2a032b39cd6bce87c2a103b9",
+        "source": "/home/ubuntu/hl/data/node_raw_book_diffs_streaming/hourly/20261025/7"
+      },
+      {
+        "stream": "node_order_statuses_streaming",
+        "rows": 650,
+        "raw_bytes": 395653,
+        "raw_sha256": "e70cbd508a1e063c598b28f7b4da534f1f504ea50b4b7b89cae0c7684f7727f6",
+        "source": "/home/ubuntu/hl/data/node_order_statuses_streaming/hourly/20261025/7"
+      },
+      {
+        "stream": "node_fills_streaming",
+        "rows": 0,
+        "raw_bytes": 0,
+        "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source": "/home/ubuntu/hl/data/node_fills_streaming/hourly/20261025/7"
+      },
+      {
+        "stream": "system_and_core_writer_actions_streaming",
+        "rows": 0,
+        "raw_bytes": 0,
+        "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source": "/home/ubuntu/hl/data/system_and_core_writer_actions_streaming/hourly/20261025/7"
+      },
+      {
+        "stream": "hip3_oracle_updates_streaming",
+        "rows": 0,
+        "raw_bytes": 0,
+        "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source": "/home/ubuntu/hl/data/hip3_oracle_updates_streaming/hourly/20261025/7"
+      },
+      {
+        "stream": "replica_cmds",
+        "rows": 1,
+        "raw_bytes": 249578,
+        "raw_sha256": "0c212e8251b0f0b5b4cea9f875e8534395c3c355b34f5623f0f235828ef4089c",
+        "source": "/home/ubuntu/hl/data/replica_cmds/2026-10-25T04:07:53Z/20261025/1196460000"
+      }
+    ],
+    "scope": "Full original focal block; no user/coin filtering. Original checkpoint user states are separate.",
+    "window": [
+      1196460000,
+      1196470000
+    ],
+    "wire_indices": {
+      "bundle": 0,
+      "action": 281,
+      "statuses_zero_based": [
+        645,
+        646
+      ],
+      "diffs_zero_based": [
+        313,
+        314
+      ]
+    }
+  }
+}

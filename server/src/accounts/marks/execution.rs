@@ -53,6 +53,7 @@
 pub(crate) mod fill_order;
 mod self_trade;
 mod filled_ioc;
+mod resting_reduce_only;
 mod vault;
 mod replacement;
 mod action_position;
@@ -123,6 +124,8 @@ pub(crate) struct BlockStatuses {
     rejected_iocs: IocRejections,
     /// Completed IOC status runs with explicit receipt and fill evidence.
     filled_iocs: filled_ioc::FilledIocs,
+    /// No-fill resting reduce-only placements and their contiguous old-order cleanup.
+    resting_reduce_only: resting_reduce_only::RestingReduceOnly,
     /// Automatic close orders produced by vault withdrawals, not ordinary order receipts.
     vault_closes: vault::VaultCloses,
     replacements: replacement::Replacements,
@@ -159,9 +162,11 @@ impl BlockStatuses {
     /// A status whose limit price does not read breaks the contract.
     pub(crate) fn of(statuses: impl IntoIterator<Item = NodeDataOrderStatus>) -> Result<Self, String> {
         let mut out = Self::default();
+        let mut resting_reduce_only = resting_reduce_only::StatusRuns::default();
         for status in statuses {
             out.rejected_iocs.observe(&status)?;
             out.filled_iocs.observe(&status)?;
+            resting_reduce_only.observe(&status)?;
             out.vault_closes.observe(&status);
             out.replacements.observe(&status)?;
             out.interleaved_triggers.observe(&status);
@@ -179,6 +184,7 @@ impl BlockStatuses {
                 _ => {}
             }
         }
+        out.resting_reduce_only = resting_reduce_only.finish();
         Ok(out)
     }
 
@@ -196,7 +202,7 @@ impl BlockStatuses {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len() + self.vault_closes.len() + self.replacements.len() + self.filled_iocs.len() + self.interleaved_triggers.len()
+        self.cancelled_cloids.len() + self.triggered.len() + self.self_trade_cancelled.len() + self.rejected_iocs.len() + self.vault_closes.len() + self.replacements.len() + self.filled_iocs.len() + self.interleaved_triggers.len() + self.resting_reduce_only.len()
     }
 }
 
@@ -313,6 +319,8 @@ fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses, f
     }
     let mut attributed = statuses.rejected_iocs.attributed(actions, &order_asset);
     attributed.extend(statuses.filled_iocs.attributed(actions, fills, &order_asset, system));
+    attributed.extend(statuses.resting_reduce_only.attributed(actions, fills, &statuses.triggered_orders,
+        &order_asset, system, &|oid| out.iter().any(|action| action.cancelled.contains(&oid))));
     for (rank, oids) in &attributed {
         if let Some(action) = out.iter_mut().find(|action| action.rank == *rank) {
             action.cancelled.extend(oids.iter().filter(|oid| !system.competing_ioc_cancels.contains(oid)));
