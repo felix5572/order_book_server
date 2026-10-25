@@ -7,6 +7,7 @@
 //! compared before `seq`, which numbers the published contents); the heights it carries are those of its inputs.
 
 use std::{
+    collections::BTreeMap,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Instant,
 };
@@ -18,8 +19,8 @@ use tokio::sync::{oneshot, watch};
 use super::{
     book::AccountBook,
     candidates::Candidates,
-    forced_flow::{CoinFlow, CoinInputs, Entry, Tier, TriggerInput, Unplaced, coin_flow},
-    forced_flow_reader::{FlowJob, FlowJobKind, FlowMailbox, FlowRead, SideWalks, WalkItem},
+    forced_flow::{CoinFlow, CoinInputs, Entry, Tier, TriggerInput, Unplaced, coin_flow, cumulative_sizes},
+    forced_flow_reader::{FlowJob, FlowJobKind, FlowMailbox, FlowRead, SideJob, SideWalks, WalkItem},
     marks::MarksAt,
     walk::{Limit, WalkPart, walk_units},
 };
@@ -129,6 +130,9 @@ pub(crate) struct ReadyFlow {
     /// Within the tier by either calibre, in the flow's order.
     pub(crate) entries: Vec<FlowEntry>,
     pub(crate) unplaced: Vec<(u64, Unplaced)>,
+    /// Each band's cumulative size walked (`forced_flow::cumulative_sizes`), by taker side and size in 1e-8 units; empty
+    /// unless the walks are `Walked` (and for a side without a book).
+    pub(crate) cumulative: BTreeMap<(Side, u64), WalkPart>,
 }
 
 /// Where a frame's inputs stood; not compared.
@@ -176,6 +180,8 @@ struct Walking {
     heights: FlowHeights,
     ready: ReadyFlow,
     trust: (bool, u64),
+    /// The cumulative sizes posted per side (1e-8 units), in the job's order.
+    cumulative: Vec<(Side, Vec<u64>)>,
 }
 
 enum Stage {
@@ -327,6 +333,9 @@ impl ForcedFlow {
             flow_entry.entry.distance_local_bps = None;
         }
         ready.entries.retain(|flow_entry| flow_entry.entry.in_range(key.1.bps()));
+        // the node calibre's sizes stay, walked on the same books; the local calibre's go with its distances
+        let kept = cumulative_units(&ready.entries, key.1.bps(), ready.size_decimals);
+        ready.cumulative.retain(|(side, units), _| kept.get(side).is_some_and(|sizes| sizes.contains(units)));
         let heights = FlowHeights { local_published_ms, ..frame.heights };
         self.publish(key, heights, FlowContent::Ready(ready), false, output);
     }
@@ -531,7 +540,8 @@ impl ForcedFlow {
             ready.walks = WalkStatus::Walked(Vec::new());
             return self.finish(key, heights, FlowContent::Ready(Box::new(ready)), output);
         }
-        let mut sides: Vec<(Side, Vec<WalkItem>)> = Vec::new();
+        let mut cumulative_by_side = cumulative_units(&ready.entries, key.1.bps(), ready.size_decimals);
+        let mut sides: Vec<SideJob> = Vec::new();
         for taker in [Side::Ask, Side::Bid] {
             let items: Vec<WalkItem> = ready
                 .entries
@@ -542,15 +552,19 @@ impl ForcedFlow {
                     (walk_units(entry.size_raw, ready.size_decimals), entry.limit_px.map(|px| Limit { taker, px }))
                 })
                 .collect();
-            if !items.is_empty() {
-                sides.push((taker, items));
+            if items.is_empty() {
+                continue;
             }
+            // a side of only limit trigger orders has no cumulative size
+            let cumulative = cumulative_by_side.remove(&taker).unwrap_or_default();
+            sides.push(SideJob { taker, items, cumulative });
         }
+        let cumulative = sides.iter().map(|side| (side.taker, side.cumulative.clone())).collect();
         self.version += 1;
         let version = self.version;
         self.post((key.0.clone(), key.1, FlowJobKind::Walk), FlowJob::Walk { version, sides });
         if let Some(pipeline) = self.pipelines.get_mut(key) {
-            pipeline.stage = Stage::Walking(Box::new(Walking { version, heights, ready, trust }));
+            pipeline.stage = Stage::Walking(Box::new(Walking { version, heights, ready, trust, cumulative }));
         }
     }
 
@@ -575,7 +589,7 @@ impl ForcedFlow {
         }
         let Some(pipeline) = self.pipelines.get_mut(&key) else { unreachable!("found above") };
         let Stage::Walking(walking) = std::mem::replace(&mut pipeline.stage, Stage::Idle) else { unreachable!("matched above") };
-        let Walking { mut heights, mut ready, trust, .. } = *walking;
+        let Walking { mut heights, mut ready, trust, cumulative, .. } = *walking;
         let link_trust = self.link.as_ref().map(|link| (link.trust.is_trusted(), link.trust.withheld_periods()));
         let read_trusted = sides.iter().filter_map(|side| side.book).all(|book| (book.trusted, book.withheld_periods) == trust);
         if link_trust != Some(trust) || !read_trusted {
@@ -585,6 +599,7 @@ impl ForcedFlow {
             ready.walks = WalkStatus::NoBook;
         } else {
             attach_walks(&mut ready.entries, &sides);
+            ready.cumulative = cumulative_walks(&cumulative, &sides);
             for side in &sides {
                 let at = side.book.map(|book| (book.height, book.time));
                 match side.taker {
@@ -679,7 +694,26 @@ fn trigger_status(read: &TriggerBandAt) -> TriggerStatus {
 
 fn ready_flow(flow: CoinFlow, tier: Tier, size_decimals: u32, node_mark_raw: u64, local: LocalCalibre, triggers: TriggerStatus) -> ReadyFlow {
     let entries = flow.entries.into_iter().filter(|entry| entry.in_range(tier.bps())).map(|entry| FlowEntry { entry, walk: None }).collect();
-    ReadyFlow { size_decimals, node_mark_raw, local, triggers, walks: WalkStatus::NoBook, entries, unplaced: flow.unplaced }
+    ReadyFlow { size_decimals, node_mark_raw, local, triggers, walks: WalkStatus::NoBook, entries, unplaced: flow.unplaced, cumulative: BTreeMap::new() }
+}
+
+/// The bands' cumulative sizes to walk (`forced_flow::cumulative_sizes`) per taker side, in 1e-8 units, ascending.
+fn cumulative_units(entries: &[FlowEntry], max_bps: u32, size_decimals: u32) -> BTreeMap<Side, Vec<u64>> {
+    let entries: Vec<Entry> = entries.iter().map(|flow_entry| flow_entry.entry.clone()).collect();
+    #[expect(clippy::expect_used, reason = "a coin's summed sizes stay far below 2^63 raw units")]
+    let units = |raw: u128| walk_units(u64::try_from(raw).expect("a band's cumulative size fits u64"), size_decimals);
+    cumulative_sizes(&entries, max_bps).into_iter().map(|(side, sizes)| (side, sizes.into_iter().map(units).collect())).collect()
+}
+
+/// The cumulative sizes' walks by (side, size), from each walked side's results in the job's order.
+fn cumulative_walks(posted: &[(Side, Vec<u64>)], sides: &[SideWalks]) -> BTreeMap<(Side, u64), WalkPart> {
+    let mut walks = BTreeMap::new();
+    for walked in sides.iter().filter(|walked| walked.book.is_some()) {
+        let (_, posted_sizes) = posted.iter().find(|(taker, _)| *taker == walked.taker).unwrap_or_else(|| unreachable!("the reader answers the posted sides"));
+        assert_eq!(posted_sizes.len(), walked.cumulative.len(), "the reader walks every posted cumulative size of a side with a book");
+        walks.extend(posted_sizes.iter().zip(&walked.cumulative).map(|(size, walk)| ((walked.taker, *size), walk.clone())));
+    }
+    walks
 }
 
 /// Each entry's walk from its side's results, in the order the job listed them.
@@ -828,13 +862,16 @@ mod tests {
         }
 
         /// A walk job answered with a fill of each entry over the book at `book_height`.
-        fn answer_walks(&mut self, coin: &str, tier: Tier, version: u64, sides: Vec<(Side, Vec<WalkItem>)>, now: Instant, book_height: u64) -> FlowOutput {
+        fn answer_walks(&mut self, coin: &str, tier: Tier, version: u64, sides: Vec<SideJob>, now: Instant, book_height: u64) -> FlowOutput {
             let book = BookAt { height: book_height, time: 5, trusted: true, withheld_periods: 0, mid_px: Some(0.0125) };
+            let fill = |size: u64| WalkPart { filled: size, vwap_px: Some(0.0124), first_px: None, deepest_px: None, levels: 1, end: WalkEnd::Filled, steps: Vec::new() };
             let sides = sides
                 .into_iter()
-                .map(|(taker, items)| {
-                    let walks = items.iter().map(|(size, _)| WalkPart { filled: *size, vwap_px: Some(0.0124), first_px: None, deepest_px: None, levels: 1, end: WalkEnd::Filled, steps: Vec::new() }).collect();
-                    SideWalks { taker, book: Some(book), walks }
+                .map(|side| SideWalks {
+                    taker: side.taker,
+                    book: Some(book),
+                    walks: side.items.iter().map(|(size, _)| fill(*size)).collect(),
+                    cumulative: side.cumulative.iter().map(|size| fill(*size)).collect(),
                 })
                 .collect();
             self.read(FlowRead::Walk { coin: coin.to_string(), tier, version, sides }, now)
@@ -881,6 +918,8 @@ mod tests {
         assert_eq!((entry.entry.size_raw, entry.walk.as_ref().map(|walk| walk.filled)), (100, Some(100 * UNIT)));
         assert!((entry.entry.distance_node_bps - 40.0).abs() < 1e-6);
         assert_eq!(flow.local, LocalCalibre::Withheld { code: "localMarksOff", reason: "the server runs without --local-marks".to_string() });
+        // the 50 and 100 bp bands hold the stop: one cumulative size, walked
+        assert_eq!(flow.cumulative.iter().map(|((side, size), walk)| (*side, *size, walk.filled)).collect::<Vec<_>>(), [(Side::Ask, 100 * UNIT, 100 * UNIT)]);
         owner.tick(start + Duration::from_millis(500));
         assert!(owner.mailbox.drain().is_empty(), "within the tier's second");
         owner.tick(start + Duration::from_secs(1));
@@ -891,6 +930,8 @@ mod tests {
         let changed = owner.answer(PUMP, Tier::Mid, another, start + Duration::from_secs(2));
         assert_eq!((changed.frames.len(), changed.frames[0].seq, ready(&changed.frames[0]).entries.len()), (1, 2, 2));
         assert_eq!(ready(&changed.frames[0]).entries[0].entry.source.kind(), SourceKind::Trigger);
+        // 40 and 80 bp: the 50 bp band holds one stop, the 100 bp band both
+        assert_eq!(ready(&changed.frames[0]).cumulative.keys().copied().collect::<Vec<_>>(), [(Side::Ask, 100 * UNIT), (Side::Ask, 200 * UNIT)]);
     }
 
     /// A read of an older version is dropped; a band the current marks moved past is read again (r2 revision 2).
@@ -935,7 +976,7 @@ mod tests {
         let ((_, _, _), FlowJob::Walk { version, sides }) = owner.job() else { panic!("a walk job") };
         owner.trust.set_for_test(false);
         let book = BookAt { height: 7, time: 5, trusted: true, withheld_periods: 0, mid_px: None };
-        let sides = sides.into_iter().map(|(taker, _)| SideWalks { taker, book: Some(book), walks: Vec::new() }).collect();
+        let sides = sides.into_iter().map(|side| SideWalks { taker: side.taker, book: Some(book), walks: Vec::new(), cumulative: Vec::new() }).collect();
         // the same content as the withheld read above: nothing goes out, the kept frame says it
         assert_eq!(owner.read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Mid, version, sides }, now).frames.len(), 0);
         let kept = owner.flow.pipelines[&(PUMP.to_string(), Tier::Mid)].frame.clone().unwrap();
@@ -1008,7 +1049,15 @@ mod tests {
         drop(local);
         owner.local(true, now + Duration::from_millis(10));
         let book = BookAt { height: 7, time: 5, trusted: true, withheld_periods: 0, mid_px: None };
-        let walked = sides.into_iter().map(|(taker, items)| SideWalks { taker, book: Some(book), walks: items.iter().map(|_| WalkPart { filled: 0, vwap_px: None, first_px: None, deepest_px: None, levels: 0, end: WalkEnd::BookExhausted, steps: Vec::new() }).collect() }).collect();
+        let walked = sides
+            .into_iter()
+            .map(|side| SideWalks {
+                taker: side.taker,
+                book: Some(book),
+                walks: side.items.iter().map(|_| WalkPart { filled: 0, vwap_px: None, first_px: None, deepest_px: None, levels: 0, end: WalkEnd::BookExhausted, steps: Vec::new() }).collect(),
+                cumulative: side.cumulative.iter().map(|_| WalkPart { filled: 0, vwap_px: None, first_px: None, deepest_px: None, levels: 0, end: WalkEnd::BookExhausted, steps: Vec::new() }).collect(),
+            })
+            .collect();
         let late = owner.read(FlowRead::Walk { coin: "BTC".to_string(), tier: Tier::Far, version: walk_version, sides: walked }, now);
         assert_eq!(late.frames.len(), 0, "the walks of the voided read are not taken");
         let frame = owner.answer("BTC", Tier::Far, read.clone(), now).frames.remove(0);
@@ -1033,7 +1082,15 @@ mod tests {
         drop(owner.read(FlowRead::Band { coin: "BTC".to_string(), tier: Tier::Far, version, read: Some(read) }, now));
         let ((_, _, _), FlowJob::Walk { version, sides }) = owner.job() else { panic!("a walk job") };
         local.send_replace(Arc::new(withheld.snapshot(NOW_MS)));
-        let walked = sides.into_iter().map(|(taker, items)| SideWalks { taker, book: Some(book), walks: items.iter().map(|_| WalkPart { filled: 0, vwap_px: None, first_px: None, deepest_px: None, levels: 0, end: WalkEnd::BookExhausted, steps: Vec::new() }).collect() }).collect();
+        let walked = sides
+            .into_iter()
+            .map(|side| SideWalks {
+                taker: side.taker,
+                book: Some(book),
+                walks: side.items.iter().map(|_| WalkPart { filled: 0, vwap_px: None, first_px: None, deepest_px: None, levels: 0, end: WalkEnd::BookExhausted, steps: Vec::new() }).collect(),
+                cumulative: side.cumulative.iter().map(|_| WalkPart { filled: 0, vwap_px: None, first_px: None, deepest_px: None, levels: 0, end: WalkEnd::BookExhausted, steps: Vec::new() }).collect(),
+            })
+            .collect();
         let early = owner.read(FlowRead::Walk { coin: "BTC".to_string(), tier: Tier::Far, version, sides: walked }, now);
         assert_eq!(early.frames.len(), 0, "the local leg is no longer as the read found it");
         assert!(matches!(owner.job(), ((_, _, FlowJobKind::Band), FlowJob::Band { .. })), "started again");

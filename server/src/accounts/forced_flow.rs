@@ -5,8 +5,18 @@
 //!
 //! Pure: the owner hands in the coin's trigger orders of the band, its liquidation candidates of both calibres and the
 //! positions at the marks' height. Sizes are raw, 10^-szDecimals of the coin; prices USD.
+//!
+//! A band's cumulative size (`Band::cumulative_raw`) is what of it walks the book whatever the order (user 2026-10-25):
+//! its market trigger orders and liquidations together. The node runs the trigger orders a mark move fires in one block
+//! in an order of its own, neither by trigger price nor by oid (bm 10-23 ZEC, 10-24 NEAR, 10-25 WLD, up to 1,282
+//! orders in a block), so the flow walks no entry after another: only the sum, which does not depend on the order. The
+//! limit trigger orders are left out, each stopping at its own limit in that unknown order.
 
-use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use alloy::primitives::Address;
 
@@ -403,6 +413,31 @@ pub(crate) struct Band {
     pub(crate) other_triggers: Totals,
 }
 
+impl Band {
+    /// What walks the book together, raw: the market trigger orders and the liquidations (see the module's doc).
+    pub(crate) const fn cumulative_raw(&self) -> u128 {
+        self.market_triggers.size_raw + self.liquidations.size_raw
+    }
+}
+
+/// Every source set a subscription can take (`FlowFilter::sources`: either kind, or both).
+pub(crate) const SOURCE_SETS: [&[SourceKind]; 3] = [&[SourceKind::Trigger], &[SourceKind::Liquidation], &[SourceKind::Trigger, SourceKind::Liquidation]];
+
+/// Per taker side, every band's cumulative size (raw, none zero) a subscription up to `max_bps` can show: by either
+/// calibre and every source set.
+pub(crate) fn cumulative_sizes(entries: &[Entry], max_bps: u32) -> BTreeMap<Side, BTreeSet<u128>> {
+    let mut sizes: BTreeMap<Side, BTreeSet<u128>> = BTreeMap::new();
+    for calibre in [Calibre::Node, Calibre::Local] {
+        for sources in SOURCE_SETS {
+            for ((_, side), side_bands) in bands(entries, calibre, max_bps, sources) {
+                sizes.entry(side).or_default().extend(side_bands.iter().map(Band::cumulative_raw).filter(|raw| *raw > 0));
+            }
+        }
+    }
+    sizes.retain(|_, side_sizes| !side_sizes.is_empty());
+    sizes
+}
+
 /// The bands up to `max_bps` of every (direction, side) by `calibre`, of the entries of `sources`; not filtered by
 /// notional (r4 revision 10). An entry without a distance in the calibre (no local mark) is in none.
 pub(crate) fn bands(entries: &[Entry], calibre: Calibre, max_bps: u32, sources: &[SourceKind]) -> BTreeMap<(Direction, Side), Vec<Band>> {
@@ -631,6 +666,32 @@ mod tests {
         assert!(bands(&flow.entries, Calibre::Local, 200, &all).is_empty(), "no local mark");
         let liquidations_only = bands(&flow.entries, Calibre::Node, 200, &[SourceKind::Liquidation]);
         assert_eq!(liquidations_only[&(Direction::Down, Side::Ask)][6].triggers.count, 0);
+        // the market stop and the liquidation walk together, the limit take profit not
+        assert_eq!(down.iter().map(Band::cumulative_raw).collect::<Vec<_>>(), [2, 2, 2, 2, 2, 2, 7]);
+        assert_eq!(liquidations_only[&(Direction::Down, Side::Ask)].iter().map(Band::cumulative_raw).collect::<Vec<_>>(), [0, 0, 0, 0, 0, 0, 5]);
+    }
+
+    /// Every cumulative size any subscription's bands show, by side: both source sets alone and together, none zero.
+    #[test]
+    fn the_cumulative_sizes_cover_every_source_set_and_calibre() {
+        let orders = [stop(1, 1, Side::Ask, "Price below 99.5", 0, 2 * UNIT), stop(2, 2, Side::Bid, "Price above 100.5", 0, 4 * UNIT)];
+        let mut triggers: Vec<TriggerInput> = orders.iter().map(input).collect();
+        triggers[0].trigger_px = Px::new(9_950_000_000);
+        triggers[1].trigger_px = Px::new(10_050_000_000);
+        let liquidations = [liquidation(3, 5, 99.0)];
+        let inputs = CoinInputs { size_decimals: 0, node_mark_raw: MARK_RAW, local_mark_raw: Some(MARK_RAW), triggers: &triggers, liquidations: &liquidations };
+        let flow = coin_flow(&inputs, |account| if account == user(1) { 10 } else { -10 }).unwrap();
+        let sizes = cumulative_sizes(&flow.entries, 200);
+        // sales: the stop alone (2), the liquidation alone (5), both (7); buys: the stop (4)
+        assert_eq!(sizes[&Side::Ask].iter().copied().collect::<Vec<_>>(), [2, 5, 7]);
+        assert_eq!(sizes[&Side::Bid].iter().copied().collect::<Vec<_>>(), [4]);
+        // within 50 bp: the stops, 50 bp away; the liquidation is 100 bp away
+        let near = cumulative_sizes(&flow.entries, 50);
+        assert_eq!((near[&Side::Ask].iter().copied().collect::<Vec<_>>(), near[&Side::Bid].iter().copied().collect::<Vec<_>>()), (vec![2], vec![4]));
+        // a local mark at 99.4: the liquidation is 40.2 bp away by it (100 bp by the node mark), the sale stop past it
+        let local = CoinInputs { local_mark_raw: Some(99_400_000), ..inputs };
+        let flow = coin_flow(&local, |account| if account == user(1) { 10 } else { -10 }).unwrap();
+        assert_eq!(cumulative_sizes(&flow.entries, 50)[&Side::Ask].iter().copied().collect::<Vec<_>>(), [2, 5, 7], "the local bands' sizes too");
     }
 
     #[test]

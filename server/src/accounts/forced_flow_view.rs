@@ -1,6 +1,7 @@
 //! `extForcedFlow` frames (design 000451 r4 revisions 9–10): one coin's frame of a tier, as one subscription sees it -
 //! its entries within the subscription's distance, of its sources and at least its notional, and the summary bands
-//! of its sources (by either calibre, not filtered by notional). Prices in USD, sizes in the coin's units.
+//! of its sources (by either calibre, not filtered by notional), each with its cumulative walk (user 2026-10-25).
+//! Prices in USD, sizes in the coin's units.
 
 use std::collections::BTreeMap;
 
@@ -13,6 +14,7 @@ use super::{
     forced_flow_owner::{FlowContent, FlowFrame, FlowHeights, LocalCalibre, ReadyFlow, TriggerStatus, WalkStatus},
     size::format_size_raw,
     view::user_text,
+    walk::walk_units,
 };
 use crate::{listeners::order_book::triggers::Direction, order_book::Side, types::subscription::EXT_FORCED_FLOW};
 
@@ -221,6 +223,9 @@ struct BandDto {
     limit_triggers: TotalsDto,
     reduce_only_triggers: TotalsDto,
     other_triggers: TotalsDto,
+    /// The band's market trigger orders and liquidations together, walked from the side's best level (no limit, no
+    /// steps); `null` with neither, or unless the walks are `walked` with this side's book.
+    cumulative_walk: Option<WalkPartDto>,
 }
 
 #[derive(Serialize)]
@@ -360,10 +365,7 @@ fn ready_dto<'a>(ready: &'a ReadyFlow, heights: &FlowHeights, filter: &FlowFilte
             WalkStatus::NoBook => WalksDto::NoBook,
         },
         entries,
-        bands: BandsDto {
-            node: side_bands(&in_range, Calibre::Node, filter, ready.size_decimals),
-            local: side_bands(&in_range, Calibre::Local, filter, ready.size_decimals),
-        },
+        bands: BandsDto { node: side_bands(&in_range, Calibre::Node, filter, ready), local: side_bands(&in_range, Calibre::Local, filter, ready) },
         unplaced,
     }
 }
@@ -412,14 +414,15 @@ fn entry_dto(entry: &Entry, walk: Option<WalkPartDto>, size_decimals: u32) -> En
     }
 }
 
-fn side_bands(entries: &[Entry], calibre: Calibre, filter: &FlowFilter, size_decimals: u32) -> Vec<SideBandsDto> {
+fn side_bands(entries: &[Entry], calibre: Calibre, filter: &FlowFilter, ready: &ReadyFlow) -> Vec<SideBandsDto> {
+    let size_decimals = ready.size_decimals;
     #[expect(clippy::expect_used, reason = "a coin's summed sizes stay far below 2^63 raw units")]
     let totals = |totals: Totals| TotalsDto {
         count: totals.count,
         size: format_size_raw(i64::try_from(totals.size_raw).expect("a band's total size fits i64"), size_decimals),
         notional_usd: totals.notional,
     };
-    let band = |band: &Band| BandDto {
+    let band = |side: Side, band: &Band| BandDto {
         edge_bps: band.edge_bps,
         triggers: totals(band.triggers),
         liquidations: totals(band.liquidations),
@@ -427,11 +430,30 @@ fn side_bands(entries: &[Entry], calibre: Calibre, filter: &FlowFilter, size_dec
         limit_triggers: totals(band.limit_triggers),
         reduce_only_triggers: totals(band.reduce_only_triggers),
         other_triggers: totals(band.other_triggers),
+        cumulative_walk: cumulative_walk(ready, side, band),
     };
     bands(entries, calibre, filter.max_distance_bps, &filter.sources)
         .iter()
-        .map(|((direction, side), side_bands)| SideBandsDto { direction: direction_text(*direction), side: side_text(*side), bands: side_bands.iter().map(band).collect() })
+        .map(|((direction, side), side_bands)| SideBandsDto {
+            direction: direction_text(*direction),
+            side: side_text(*side),
+            bands: side_bands.iter().map(|one| band(*side, one)).collect(),
+        })
         .collect()
+}
+
+/// The band's cumulative size as the owner walked it (it walks every band's of every subscription up to the tier).
+fn cumulative_walk(ready: &ReadyFlow, side: Side, band: &Band) -> Option<WalkPartDto> {
+    let WalkStatus::Walked(books) = &ready.walks else { return None };
+    let (_, mid_px) = books.iter().find(|(taker, _)| *taker == side)?;
+    let raw = band.cumulative_raw();
+    if raw == 0 {
+        return None;
+    }
+    #[expect(clippy::expect_used, reason = "a coin's summed sizes stay far below 2^63 raw units")]
+    let units = walk_units(u64::try_from(raw).expect("a band's cumulative size fits u64"), ready.size_decimals);
+    let walk = ready.cumulative.get(&(side, units)).unwrap_or_else(|| unreachable!("the owner walks every band's cumulative size of a walked side"));
+    Some(WalkPartDto::new(walk, *mid_px))
 }
 
 #[cfg(test)]
@@ -480,6 +502,7 @@ mod tests {
             walks: WalkStatus::NoBook,
             entries,
             unplaced: vec![(9, Unplaced::TrailingStopWaiting)],
+            cumulative: BTreeMap::new(),
         };
         FlowFrame { coin: "PUMP".to_string(), tier: Tier::Mid, seq: 4, heights: FlowHeights::default(), content: FlowContent::Ready(Box::new(ready)) }
     }
@@ -548,6 +571,51 @@ mod tests {
             serde_json::json!([{"px": "0.0124", "levelSize": "600000", "takenSize": "600000"}, {"px": "0.0123", "levelSize": "1000000", "takenSize": "400000"}])
         );
         assert_eq!((&entries[1]["walk"]["steps"], &entries[1]["walk"]["spanBps"]), (&serde_json::json!([]), &serde_json::Value::Null), "walked, nothing taken");
+    }
+
+    /// User 2026-10-25: each band carries the walk of its market trigger orders and liquidations together, as the
+    /// owner walked that size; a band with neither, a source set without them, or unwalked books carry none.
+    #[test]
+    fn a_band_carries_its_cumulative_walk() {
+        use crate::{
+            accounts::walk::{WalkEnd, WalkPart},
+            order_book::Px,
+        };
+        let unit = 100_000_000;
+        let mut walked = frame(vec![liquidation(1, 100_000, 0.0124, 80.0), liquidation(2, 1_000_000, 0.0123, 90.0)]);
+        walked.heights.sell_walk_book = Some((7, 5));
+        let FlowContent::Ready(ready) = &mut walked.content else { unreachable!("a ready frame") };
+        ready.walks = WalkStatus::Walked(vec![(Side::Ask, Some(0.0125))]);
+        let both = WalkPart {
+            filled: 1_100_000 * unit,
+            vwap_px: Some(0.012_3),
+            first_px: Some(Px::new(1_240_000)),
+            deepest_px: Some(Px::new(1_220_000)),
+            levels: 3,
+            end: WalkEnd::Filled,
+            steps: Vec::new(),
+        };
+        ready.cumulative.insert((Side::Ask, 1_100_000 * unit), both);
+        let filter = FlowFilter::of(None, 100, None, None, Some(0)).unwrap();
+        let bands = view(&walked, &filter)["data"]["bands"]["node"][0]["bands"].clone();
+        let at = |edge: u64| bands.as_array().unwrap().iter().find(|band| band["edgeBps"] == edge).unwrap()["cumulativeWalk"].clone();
+        assert_eq!(at(50), serde_json::Value::Null, "nothing within 50 bp");
+        let hundred = at(100);
+        assert_eq!((hundred["filledSize"].as_str(), hundred["firstPx"].as_str(), hundred["deepestPx"].as_str()), (Some("1100000"), Some("0.0124"), Some("0.0122")));
+        assert_eq!((hundred["levels"].as_u64(), hundred["end"].as_str(), hundred.get("steps")), (Some(3), Some("filled"), None));
+        assert!((hundred["deepestBpsFromMid"].as_f64().unwrap() - 240.0).abs() < 1e-6, "0.0122 against the mid 0.0125");
+        let only_triggers = FlowFilter::of(None, 100, Some(vec!["trigger".to_string()]), None, Some(0)).unwrap();
+        assert_eq!(view(&walked, &only_triggers)["data"]["bands"]["node"], serde_json::json!([]), "no trigger order, no band");
+        let unwalked = frame(vec![liquidation(2, 1_000_000, 0.0123, 90.0)]);
+        let bands = view(&unwalked, &filter)["data"]["bands"]["node"][0]["bands"].clone();
+        assert!(bands.as_array().unwrap().iter().all(|band| band["cumulativeWalk"].is_null()), "no book walked");
+        // only the asks the buys take were walked: the sales' bands have no walk
+        let mut buys_only = frame(vec![liquidation(2, 1_000_000, 0.0123, 90.0)]);
+        buys_only.heights.buy_walk_book = Some((7, 5));
+        let FlowContent::Ready(ready) = &mut buys_only.content else { unreachable!("a ready frame") };
+        ready.walks = WalkStatus::Walked(vec![(Side::Bid, Some(0.0125))]);
+        let bands = view(&buys_only, &filter)["data"]["bands"]["node"][0]["bands"].clone();
+        assert!(bands.as_array().unwrap().iter().all(|band| band["cumulativeWalk"].is_null()), "the other side's book");
     }
 
     #[test]

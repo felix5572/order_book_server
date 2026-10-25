@@ -3,7 +3,8 @@
 //! long's sale first at the highest liquidation price, a short's buy at the lowest; equal prices by address), each
 //! takes its walk size from where the ones before it stopped. Each also walks its size alone from the best level (the
 //! book as if no other candidate sold first). Static: no cascade, no refill. The forced flow (design 000451 r4
-//! revision 7) walks each entry alone only, up to its limit price (`alone_walks`).
+//! revision 7) walks each entry alone only, up to its limit price (`alone_walks`), and each band's cumulative size from
+//! the best level (`cumulative_walks`, user 2026-10-25).
 //!
 //! The account owner sends a request per (coin, side) whose ordered sizes changed; a mailbox keeps only the newest of
 //! each. The walk task copies the side's levels under the listener lock (`PriceLevel::total_sz`, at most
@@ -161,6 +162,12 @@ pub(crate) fn allocate(levels: &[(Px, Sz)], sizes: &[u64], truncated: bool) -> V
 /// takes any price), with its first `MAX_PUBLISHED_STEPS` steps; `truncated` when the levels stop at the copy limit.
 pub(crate) fn alone_walks(levels: &[(Px, Sz)], items: &[(u64, Option<Limit>)], truncated: bool) -> Vec<WalkPart> {
     items.iter().map(|&(size, limit)| LevelCursor::default().take(levels, size, limit, truncated, Some(MAX_PUBLISHED_STEPS))).collect()
+}
+
+/// Each size walked from the best level without a limit or steps: a forced flow band's market trigger orders and
+/// liquidations together (`forced_flow::Band::cumulative_raw`); `truncated` when the levels stop at the copy limit.
+pub(crate) fn cumulative_walks(levels: &[(Px, Sz)], sizes: &[u64], truncated: bool) -> Vec<WalkPart> {
+    sizes.iter().map(|&size| LevelCursor::default().take(levels, size, None, truncated, None)).collect()
 }
 
 /// Where a walk stands in the levels: the level and what of it is already taken.
@@ -406,6 +413,19 @@ mod tests {
         assert_eq!(truncated[1].together.end, WalkEnd::TruncatedAtLevels, "the copy stopped, not the book");
         let empty = allocate(&[], &[unit], false);
         assert_eq!((empty[0].together.filled, empty[0].together.vwap_px, empty[0].alone.deepest_px), (0, None, None));
+    }
+
+    /// User 2026-10-25: a band's cumulative size walks from the best level, through any price, recording no steps.
+    #[test]
+    fn a_cumulative_walk_takes_its_whole_size_from_the_best_level() {
+        let unit = 100_000_000;
+        let bids = [level(100, 1), level(99, 2), level(98, 5)];
+        let walks = cumulative_walks(&bids, &[unit, 4 * unit, 9 * unit], false);
+        assert_eq!((walks[0].vwap_px, walks[0].levels, walks[0].end), (Some(100.0), 1, WalkEnd::Filled));
+        assert_eq!((walks[1].first_px, walks[1].deepest_px, walks[1].vwap_px), (Some(Px::new(100 * unit)), Some(Px::new(98 * unit)), Some(99.0)));
+        assert_eq!((walks[2].filled, walks[2].end), (8 * unit, WalkEnd::BookExhausted));
+        assert!(walks.iter().all(|walk| walk.steps.is_empty()));
+        assert_eq!(cumulative_walks(&bids, &[9 * unit], true)[0].end, WalkEnd::TruncatedAtLevels);
     }
 
     /// Design 000486: a forced flow walk records each level it takes, best first, the deepest possibly in part; up to
