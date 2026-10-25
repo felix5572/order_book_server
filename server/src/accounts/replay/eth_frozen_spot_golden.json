@@ -1,0 +1,195 @@
+{
+  "window": [
+    1196960000,
+    1196970000
+  ],
+  "height": 1196963557,
+  "coin": "ETH",
+  "user": "0x3a8224ab0e1cb0cf2436ec1cb05564e76f948ab4",
+  "native_binary_sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+  "runtime_binary_is_different": true,
+  "position_before": {
+    "s": 1726,
+    "l": {
+      "I": {
+        "l": 25,
+        "u": -386112040
+      }
+    },
+    "M": 55,
+    "f": {
+      "a": -89723,
+      "o": 40334
+    },
+    "e": 401963535
+  },
+  "position_after": {
+    "s": -7141,
+    "l": {
+      "I": {
+        "l": 25,
+        "u": 1748119899
+      }
+    },
+    "M": 55,
+    "f": {
+      "a": -89723
+    },
+    "e": 1681491270
+  },
+  "recorded_fill": {
+    "coin": "ETH",
+    "px": "2354.7",
+    "sz": "0.8867",
+    "side": "A",
+    "time": 1792948856305,
+    "startPosition": "0.1726",
+    "dir": "Long > Short",
+    "closedPnl": "4.458258",
+    "hash": "0x8eb304ef0c4ab7af902c04475836e50103001cd4a74dd681327bb041cb4e919a",
+    "oid": 585437722781,
+    "crossed": true,
+    "fee": "0.901978",
+    "tid": 486658762260606,
+    "feeToken": "USDC",
+    "twapId": null
+  },
+  "spot_before": {
+    "t": 19195642707,
+    "h": 14473500000
+  },
+  "spot_after": {
+    "t": 14473500007,
+    "h": 14473500000
+  },
+  "derived_free_spot_micro": 47221427,
+  "closed_leg_net_release_micro": 19407202,
+  "new_leg_cap_micro": 66628629,
+  "new_leg_minimum_requirement_micro": 67259650,
+  "native_cases": [
+    {
+      "supplied_mark_raw": 230000,
+      "supplied_capacity_micro": 47221427,
+      "isolated_cash_micro": 1748119899,
+      "size_raw": -7141,
+      "cross_cash_micro": 0
+    },
+    {
+      "supplied_mark_raw": 235470,
+      "supplied_capacity_micro": 47221427,
+      "isolated_cash_micro": 1748119899,
+      "size_raw": -7141,
+      "cross_cash_micro": 0
+    },
+    {
+      "supplied_mark_raw": 235480,
+      "supplied_capacity_micro": 47221427,
+      "isolated_cash_micro": 1748119899,
+      "size_raw": -7141,
+      "cross_cash_micro": 0
+    },
+    {
+      "supplied_mark_raw": 240000,
+      "supplied_capacity_micro": 47221427,
+      "isolated_cash_micro": 1748119899,
+      "size_raw": -7141,
+      "cross_cash_micro": 0
+    }
+  ],
+  "aggregate_including_hold_control": {
+    "mark_raw": 235480,
+    "mark_scope": "Numerical control inferred to reproduce OB result; not claimed as an independently observed execution mark. Correct cap is below minimum requirement and result is mark-independent.",
+    "isolated_cash_micro": 1748825187,
+    "size_raw": -7141,
+    "cross_cash_micro": 144029712
+  },
+  "split_error_micro": 705288,
+  "scope": "Single account has one recorded ETH trailing-stop taker flip; no selected ledger/system events or user-address replica commands in window. Checkpoint spot USDC hold144.735 unchanged; free cash fully consumed. Native archived arithmetic under observed free-capacity input exactly matches both endpoint balances; mark sweep is synthetic sensitivity, not live-version native instruction equivalence or full transfer scheduler execution. Production fix still needs hold lifecycle projection, including same-block spot cancellation/fill boundary; never subtract a stale checkpoint hold unconditionally.",
+  "statuses": [
+    {
+      "time": "2026-10-25T17:20:56.305986712",
+      "user": "0x3a8224ab0e1cb0cf2436ec1cb05564e76f948ab4",
+      "hash": null,
+      "builder": null,
+      "status": "triggered",
+      "order": {
+        "coin": "ETH",
+        "side": "A",
+        "limitPx": "2119.4",
+        "sz": "0.8867",
+        "oid": 585437722781,
+        "timestamp": 1792948388236,
+        "triggerCondition": "Activation immediate, retracement 2, best 2356.81",
+        "isTrigger": true,
+        "triggerPx": "2354.81",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Trailing Stop Market",
+        "origSz": "0.8867",
+        "tif": null,
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-25T17:20:56.305986712",
+      "user": "0x3a8224ab0e1cb0cf2436ec1cb05564e76f948ab4",
+      "hash": null,
+      "builder": null,
+      "status": "filled",
+      "order": {
+        "coin": "ETH",
+        "side": "A",
+        "limitPx": "2119.4",
+        "sz": "0.0",
+        "oid": 585437722781,
+        "timestamp": 1792948856305,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Trailing Stop Market",
+        "origSz": "0.8867",
+        "tif": "Gtc",
+        "cloid": null
+      }
+    },
+    {
+      "time": "2026-10-25T17:20:56.305986712",
+      "user": "0x3a8224ab0e1cb0cf2436ec1cb05564e76f948ab4",
+      "hash": null,
+      "builder": null,
+      "status": "reduceOnlyCanceled",
+      "order": {
+        "coin": "ETH",
+        "side": "A",
+        "limitPx": "2095.9",
+        "sz": "0.0",
+        "oid": 585438015992,
+        "timestamp": 1792948422944,
+        "triggerCondition": "Price below 2328.8",
+        "isTrigger": true,
+        "triggerPx": "2328.8",
+        "children": [],
+        "isPositionTpsl": true,
+        "reduceOnly": true,
+        "orderType": "Stop Market",
+        "origSz": "0.0",
+        "tif": null,
+        "cloid": null
+      }
+    }
+  ],
+  "source_hashes": {
+    "node_fills_streaming": [
+      "6a5a7a9df9692cf0ed14e62d23d98cda40eb6bf22bf13a725b4fbde6f4abef50"
+    ],
+    "node_order_statuses_streaming": [
+      "082f9257738d717713b491fc6fca0c3bc4b33814e4177f576a119b173d132200",
+      "950e1f50c4d76e19cfdda99b6a22031f3eed912647938db22ea43262677ccc12",
+      "cd4751a95d1057f388018366cc42e9a28c6da552b7167ba8e311508c161e87a1"
+    ]
+  }
+}

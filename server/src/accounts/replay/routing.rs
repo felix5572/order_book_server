@@ -14,6 +14,7 @@ use crate::{accounts::{checkpoint::{AccountMode, CheckpointAccounts, PositionMar
 use super::{AccountMargin, FillEvent, Markets, Pools};
 
 mod other_dex;
+mod frozen_spot;
 mod anchor_cross;
 mod reserved_maker;
 
@@ -23,6 +24,8 @@ pub(crate) enum RoutingUpdate {
     Orders { changes: Vec<OrderChange>, mark_raw: Option<u64>, prefund: bool },
     /// Receipt/status-backed ordinary IOC; only the other-dex reservation bound survives this boundary.
     OrdinaryIoc,
+    /// One status-backed automatic trailing-stop fill; only an untouched frozen-spot bound may survive.
+    TriggeredTaker { tid: u64 },
     /// Competing cash/order events or missing attribution: forget capacity and tracker until the next anchor.
     Unavailable,
 }
@@ -39,6 +42,8 @@ pub(crate) struct OrderChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FundingPath {
     RestingMaker,
+    /// Spot hold at the checkpoint, usable once at an attributed trigger boundary. Never a live hold cache.
+    FrozenSpot { held_wei: i64, execution: Option<(u64, u64)> },
     /// Lower bound on already retained cash; never predicts a replenishment or sweep timestamp.
     ReservedMaker,
     /// Checkpoint executing-dex cash, valid only until its first observed routing boundary/fill.
@@ -66,7 +71,11 @@ impl RoutingProjection {
         // Old archive fixtures omit this entire section. Missing is not an empty tracker.
         if checkpoint.order_trackers.iter().any(Option::is_none) { return result; }
         for (user, account) in &checkpoint.accounts {
-            if account.mode != AccountMode::Unified || checkpoint.spot_usdc_holds.get(user).copied().unwrap_or(0) != 0 { continue; }
+            if account.mode != AccountMode::Unified { continue; }
+            if checkpoint.spot_usdc_holds.get(user).copied().unwrap_or(0) != 0 {
+                if let Some(route) = Self::frozen_spot_seed(checkpoint, markets, user, account) { result.insert(*user, route); }
+                continue;
+            }
             if let Some(route) = Self::anchored_cross_seed(checkpoint, markets, user, account) {
                 result.insert(*user, route);
                 continue;
@@ -118,7 +127,7 @@ impl RoutingProjection {
     pub(super) fn coin(&self) -> &str { &self.coin }
 
     pub(super) fn expires_on_funding(&self, coin: &str) -> bool {
-        self.coin != coin || matches!(self.path, FundingPath::AnchoredCrossMaker { .. } | FundingPath::ReservedMaker)
+        self.coin != coin || matches!(self.path, FundingPath::AnchoredCrossMaker { .. } | FundingPath::ReservedMaker | FundingPath::FrozenSpot { .. })
     }
 
     pub(super) const fn invalidate(&mut self) { self.tracker_trusted = false; self.cash_micro = None; }
@@ -154,6 +163,10 @@ impl RoutingProjection {
     pub(super) fn capacity(&mut self, block: u64, fill: &FillEvent, cash_before: i64, aggregate_wei: i64) -> Option<i64> {
         if !self.tracker_trusted { self.cash_micro = None; return None; }
         let capacity = match self.path {
+            FundingPath::FrozenSpot { held_wei, execution: Some((height, tid)) }
+                if height == block && tid == fill.tid && fill.coin == self.coin && fill.crossed && !fill.backstop =>
+                aggregate_wei.checked_sub(held_wei).map(|cash| cash.max(0) / WEI_PER_MICRO),
+            FundingPath::FrozenSpot { .. } => None,
             FundingPath::RestingMaker => self.maker_capacity(block, fill, cash_before, aggregate_wei),
             FundingPath::ReservedMaker => self.reserved_maker_capacity(fill, cash_before),
             FundingPath::OtherDexReserve { locked_micro, ioc_block: Some(height) }
@@ -190,7 +203,9 @@ impl RoutingProjection {
 
     pub(super) fn filled(&mut self, block: u64, fill: &FillEvent, end: i64, cross_delta_wei: i64) -> Option<()> {
         if !self.tracker_trusted || fill.coin != self.coin || cross_delta_wei % WEI_PER_MICRO != 0 { return None; }
-        if matches!(self.path, FundingPath::AnchoredCrossMaker { .. }) { return None; }
+        // Consume the one observed trigger boundary, including on an unrecognized fill. A later fill must not
+        // inherit checkpoint holds after physical routing has changed.
+        if matches!(self.path, FundingPath::AnchoredCrossMaker { .. } | FundingPath::FrozenSpot { .. }) { return None; }
         if let FundingPath::OtherDexReserve { ioc_block, .. } = self.path {
             return (ioc_block == Some(block) && fill.crossed && !fill.backstop).then_some(());
         }
@@ -240,6 +255,10 @@ pub(super) fn apply_update(account: &mut AccountMargin, block: u64, update: &Rou
         RoutingUpdate::Orders { changes, mark_raw, prefund } => route.orders(changes, *mark_raw, *prefund, *total).is_some(),
         RoutingUpdate::OrdinaryIoc => match &mut route.path {
             FundingPath::OtherDexReserve { ioc_block, .. } if route.tracker_trusted => { *ioc_block = Some(block); true },
+            _ => false,
+        },
+        RoutingUpdate::TriggeredTaker { tid } => match &mut route.path {
+            FundingPath::FrozenSpot { execution, .. } if route.tracker_trusted => { *execution = Some((block, *tid)); true },
             _ => false,
         },
         RoutingUpdate::Unavailable => false,

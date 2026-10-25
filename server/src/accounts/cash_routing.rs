@@ -35,8 +35,13 @@ impl RoutingBlock {
                 own.entry(user).or_default().push(action);
             }
         }
-        let users: FxHashSet<_> = statuses.keys().chain(own.keys()).chain(executions.keys()).copied().collect();
+        let mut users: FxHashSet<_> = statuses.keys().chain(own.keys()).chain(executions.keys()).copied().collect();
         let mut cash_users: FxHashSet<_> = cash_actions.actions.iter().map(|(_, user)| *user).collect();
+        // System requests are not receipts and can execute on a different phase. Without a complete hold
+        // lifecycle, discard any affected account's routing bound, including when it has no status/fill.
+        for action in inputs.system_actions.iter().flat_map(Batch::events_ref) {
+            if book.routing_coin(&action.user()).is_some() { users.insert(action.user()); cash_users.insert(action.user()); }
+        }
         let mut unknown_cash = false;
         for event in misc.iter().flat_map(Batch::events_ref) {
             match event {
@@ -59,7 +64,7 @@ impl RoutingBlock {
             let rows = statuses.remove(&user).unwrap_or_default();
             let acts = own.remove(&user).unwrap_or_default();
             let coin = book.routing_coin(&user).expect("selected routing account remains present during read-only projection");
-            if executions.get(&user).is_some_and(|fills| fills.iter().any(|fill| fill.coin != coin)) {
+            if rows.iter().any(|row| row.order.coin != coin) || executions.get(&user).is_some_and(|fills| fills.iter().any(|fill| fill.coin != coin)) {
                 result.before.push((user, RoutingUpdate::Unavailable));
                 continue;
             }
@@ -68,6 +73,7 @@ impl RoutingBlock {
             if changes.is_empty() && acts.is_empty() { continue; }
             if executions.contains_key(&user) {
                 let update = if ordinary_ioc(coin, &rows, &acts, &executions[&user]) { RoutingUpdate::OrdinaryIoc }
+                    else if let Some(tid) = triggered_taker(coin, &rows, &acts, &executions[&user]) { RoutingUpdate::TriggeredTaker { tid } }
                     else { RoutingUpdate::Unavailable };
                 result.before.push((user, update));
             } else {
@@ -137,6 +143,34 @@ fn ordinary_ioc(coin: &str, rows: &[&NodeDataOrderStatus], actions: &[&RankedAct
     if rows.iter().any(|row| row.order.oid != *oid || row.order.coin != coin || row.order.is_trigger || row.order.reduce_only
         || row.order.order_type != "Limit" || row.order.tif.as_deref() != Some("Ioc")) { return false; }
     !fills.is_empty() && fills.iter().all(|fill| fill.oid == *oid && fill.coin == coin && fill.side == open.order.side && fill.crossed && fill.liquidation.is_none())
+}
+
+/// The captured ETH boundary has one automatic trailing stop and one full taker fill. Zero-size position
+/// TP/SL cancellations cannot reserve spot USDC. Reject all other actions/statuses rather than replaying a
+/// partial hold lifecycle or guessing system-action ordering. This is a numerical bound, still estimated.
+fn triggered_taker(coin: &str, rows: &[&NodeDataOrderStatus], actions: &[&RankedAction], fills: &[&crate::types::Fill]) -> Option<u64> {
+    if !actions.is_empty() { return None; }
+    let [fill] = fills else { return None; };
+    if fill.coin != coin || !fill.crossed || fill.liquidation.is_some() || fill.twap_id.is_some() || fill.fee_token != "USDC" { return None; }
+    let [trigger, terminal, cancellations @ ..] = rows else { return None; };
+    if trigger.status != "triggered" || terminal.status != "filled" || !trigger.order.is_trigger || terminal.order.is_trigger
+        || trigger.order.tif.is_some() || terminal.order.tif.as_deref() != Some("Gtc") { return None; }
+    if [trigger, terminal].iter().any(|row| row.order.oid != fill.oid || row.order.coin != coin || row.order.side != fill.side
+        || row.order.order_type != "Trailing Stop Market" || row.order.reduce_only || row.order.is_position_tpsl
+        || !row.order.children.is_empty()) { return None; }
+    // Compare canonical raw quantities using the existing wire-size parser, not textual formatting.
+    let quantity = |value: &str| super::size::parse_size_raw(value, 8).ok();
+    let filled = quantity(&fill.sz)?;
+    if filled <= 0 || quantity(&trigger.order.sz) != Some(filled) || quantity(&trigger.order.orig_sz) != Some(filled)
+        || quantity(&terminal.order.orig_sz) != Some(filled) || quantity(&terminal.order.sz) != Some(0) { return None; }
+    let mut cancelled = FxHashSet::default();
+    for row in cancellations {
+        let order = &row.order;
+        if row.status != "reduceOnlyCanceled" || order.coin != coin || order.oid == fill.oid || !cancelled.insert(order.oid)
+            || !order.is_trigger || !order.reduce_only || !order.is_position_tpsl || order.order_type != "Stop Market"
+            || !order.children.is_empty() || quantity(&order.sz) != Some(0) || quantity(&order.orig_sz) != Some(0) { return None; }
+    }
+    Some(fill.tid)
 }
 
 #[cfg(test)]
@@ -270,6 +304,73 @@ mod tests {
         response["res"]["response"]["data"]["statuses"].as_array_mut().unwrap().push(serde_json::json!({"error":"Insufficient margin"}));
         let parsed = mark_actions(&replica_line(1_194_477_717, &[&[(&request.to_string(), &response.to_string())]]));
         assert!(!valid(&rows, &parsed.actions, &fills));
+    }
+
+    #[test]
+    fn recorded_trailing_stop_needs_complete_identity_and_no_competing_orders() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("replay/eth_frozen_spot_golden.json")).unwrap();
+        let rows: Vec<NodeDataOrderStatus> = serde_json::from_value(golden["statuses"].clone()).unwrap();
+        let fill: crate::types::Fill = serde_json::from_value(golden["recorded_fill"].clone()).unwrap();
+        let valid = |rows: &[NodeDataOrderStatus], actions: &[RankedAction], fills: &[crate::types::Fill]| triggered_taker("ETH",
+            &rows.iter().collect::<Vec<_>>(), &actions.iter().collect::<Vec<_>>(), &fills.iter().collect::<Vec<_>>());
+        assert_eq!(valid(&rows, &[], std::slice::from_ref(&fill)), Some(fill.tid));
+        for variant in 0..14 {
+            let mut rows = rows.clone(); let mut fills = vec![fill.clone()]; let mut actions = vec![];
+            match variant {
+                0 => { rows.remove(0); },
+                1 => rows.swap(0, 1),
+                2 => rows[1].order.oid += 1,
+                3 => rows[0].order.sz = "0.8".into(),
+                4 => rows[1].order.sz = "0.0001".into(),
+                5 => rows[2].order.coin = "@0".into(),
+                6 => rows[2].order.sz = "1".into(),
+                7 => fills[0].crossed = false,
+                8 => fills[0].oid += 1,
+                9 => fills.push(fill.clone()),
+                10 => rows.push(rows[2].clone()),
+                11 => actions.push(action()),
+                12 => rows[2].order.is_position_tpsl = false,
+                13 => fills[0].fee_token = "HYPE".into(),
+                _ => unreachable!(),
+            }
+            assert_eq!(valid(&rows, &actions, &fills), None, "variant {variant}");
+        }
+    }
+
+    #[test]
+    fn frozen_spot_adapter_invalidates_cash_spot_system_and_stream_boundaries() {
+        let (mut cp, _, who) = checkpoint();
+        cp.accounts.get_mut(&who).unwrap().dex_states[0].cash_micro = 0;
+        cp.spot_usdc_holds.insert(who, 14_473_500_000);
+        let mut book = AccountBook::new(0);
+        book.install_anchor(Anchor::from_checkpoint(&cp).unwrap());
+        assert_eq!(book.routing_coin(&who), Some("xyz:TSLA"));
+        let golden: serde_json::Value = serde_json::from_str(include_str!("replay/eth_frozen_spot_golden.json")).unwrap();
+        let mut rows: Vec<NodeDataOrderStatus> = serde_json::from_value(golden["statuses"].clone()).unwrap();
+        for row in &mut rows { row.user = who; row.order.coin = "xyz:TSLA".into(); }
+        let mut fill: crate::types::Fill = serde_json::from_value(golden["recorded_fill"].clone()).unwrap();
+        fill.coin = "xyz:TSLA".into();
+        let height = cp.height + 1;
+        let inputs = || MarkInputs { order_statuses: rows.iter().map(|row|
+            sonic_rs::from_str(&batch_line(height, &serde_json::to_string(row).unwrap())).unwrap()).collect(), ..MarkInputs::default() };
+        let trades = [sonic_rs::from_str(&batch_line(height, &serde_json::to_string(&(who, &fill)).unwrap())).unwrap()];
+        let cash = block_actions(height, &[]);
+        let plain = RoutingBlock::of(&book, &inputs(), &trades, &marks(), &cash, &[]);
+        assert_eq!(plain.before, [(who, RoutingUpdate::TriggeredTaker { tid: fill.tid })]);
+        let mut lost = plain; lost.require_trusted(false, &book);
+        assert_eq!(lost.before, [(who, RoutingUpdate::Unavailable)]);
+        let own_cash = block_actions(height, &[(crate::accounts::actions::BlockAction::Withdraw { amount_wei: 100 }, who)]);
+        assert_eq!(RoutingBlock::of(&book, &inputs(), &trades, &marks(), &own_cash, &[]).before, [(who, RoutingUpdate::Unavailable)]);
+        let mut spot = rows[2].clone(); spot.order.coin = "@0".into(); spot.status = "filled".into();
+        let mut mixed = inputs(); mixed.order_statuses.push(sonic_rs::from_str(&batch_line(height, &serde_json::to_string(&spot).unwrap())).unwrap());
+        assert_eq!(RoutingBlock::of(&book, &mixed, &trades, &marks(), &cash, &[]).before, [(who, RoutingUpdate::Unavailable)]);
+        // Even a terminal spot status without a paired fill must not leave a frozen hold usable later.
+        mixed.order_statuses.remove(0); mixed.order_statuses.remove(1);
+        assert_eq!(RoutingBlock::of(&book, &mixed, &[], &marks(), &cash, &[]).before, [(who, RoutingUpdate::Unavailable)]);
+        let system = serde_json::json!({"user":who,"evm_tx_hash":null,"nonce":null,"action":{"type":"cancel","cancels":[]}});
+        let mut system_inputs = MarkInputs::default();
+        system_inputs.system_actions.push(sonic_rs::from_str(&batch_line(height, &system.to_string())).unwrap());
+        assert_eq!(RoutingBlock::of(&book, &system_inputs, &[], &marks(), &cash, &[]).before, [(who, RoutingUpdate::Unavailable)]);
     }
 
 }

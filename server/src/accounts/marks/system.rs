@@ -57,6 +57,8 @@ pub(crate) struct DelayedSend {
 }
 
 impl SystemAction {
+    pub(crate) const fn user(&self) -> Address { self.user }
+
     pub(crate) fn spot_to_main_usdc(&self) -> Option<DelayedSend> {
         self.evm_tx_hash?;
         let Action::SendAsset { destination, from_sub_account: None, source: None, destination_dex: Some(0), token: 0, wei } = self.action else { return None; };
