@@ -529,6 +529,11 @@ impl MarginStates {
         self.accounts.iter().filter(|(_, account)| account.routing.is_some()).map(|(user, _)| *user)
     }
 
+    /// Resolve a successful action with the same checkpoint universe used by cash replay.
+    pub(crate) fn action_coin(&self, asset: u32) -> Option<&str> {
+        self.markets.action_assets.get(&asset).map(String::as_str)
+    }
+
     pub(crate) fn routing_coin(&self, user: &Address) -> Option<&str> {
         self.accounts.get(user)?.routing.as_ref().map(routing::RoutingProjection::coin)
     }

@@ -1,0 +1,262 @@
+{
+  "user": "0x05fba0485cf0e5f10f95a1a7b985ad4498c12b82",
+  "coin": "SEI",
+  "window": [
+    1196990000,
+    1197000000
+  ],
+  "position_before": {
+    "s": 16,
+    "l": {
+      "I": {
+        "l": 1,
+        "u": 155836
+      }
+    },
+    "M": 51,
+    "f": {
+      "a": 100732,
+      "o": -193709,
+      "c": -145949
+    },
+    "e": 2569600
+  },
+  "position_after": {
+    "s": 384,
+    "l": {
+      "I": {
+        "l": 3,
+        "u": -12943648
+      }
+    },
+    "M": 5,
+    "f": {
+      "a": 100988,
+      "o": -193453,
+      "c": 256
+    },
+    "e": 22213808
+  },
+  "current_asset_metadata": {
+    "szDecimals": 0,
+    "name": "SEI",
+    "marginTableId": 5,
+    "marginMode": "normal"
+  },
+  "successful_leverage_action": {
+    "height": 1196992387,
+    "action": {
+      "type": "updateLeverage",
+      "asset": 40,
+      "isCross": false,
+      "leverage": 3
+    },
+    "response": {
+      "user": "0x05fba0485cf0e5f10f95a1a7b985ad4498c12b82",
+      "res": {
+        "status": "ok",
+        "response": {
+          "type": "default"
+        }
+      }
+    },
+    "source_sha256": "77cb046f06bfdeb6989adaf0d6ddce57021b3814509d502de8c8bea17ee5ed3e"
+  },
+  "fills": [
+    {
+      "height": 1196992681,
+      "fill": {
+        "coin": "SEI",
+        "px": "0.053381",
+        "sz": "368.0",
+        "side": "B",
+        "time": 1792950962909,
+        "startPosition": "16.0",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xf95b32dd22a3cbf6fad4044758a8a902088500c2bda6eac99d23de2fe1a7a5e1",
+        "oid": 585459361277,
+        "crossed": true,
+        "fee": "0.008486",
+        "tid": 427442828730831,
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    }
+  ],
+  "replayed_liquidation_px": 0.03548149122807018,
+  "checkpoint_liquidation_px": 0.03745268518518518,
+  "native_probe": {
+    "sha256": "6911b7929f7848b2cc2a54b1d2ad5cf0d2510db3e05560083441715b263f4b36",
+    "native_range": [
+      "0x425ed67",
+      "0x425ee77"
+    ],
+    "cases": [
+      {
+        "before": [
+          1,
+          1,
+          155836,
+          16,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          51,
+          0
+        ],
+        "after": [
+          1,
+          3,
+          155836,
+          16,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          5,
+          0
+        ],
+        "M_at56": 5
+      },
+      {
+        "before": [
+          1,
+          1,
+          155836,
+          16,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          51,
+          0
+        ],
+        "after": [
+          1,
+          1,
+          155836,
+          16,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          5,
+          0
+        ],
+        "M_at56": 5
+      },
+      {
+        "before": [
+          1,
+          3,
+          155836,
+          384,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          5,
+          0
+        ],
+        "after": [
+          1,
+          3,
+          155836,
+          384,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          5,
+          0
+        ],
+        "M_at56": 5
+      },
+      {
+        "before": [
+          0,
+          3,
+          155836,
+          16,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          51,
+          0
+        ],
+        "after": [
+          0,
+          3,
+          155836,
+          16,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          5,
+          0
+        ],
+        "M_at56": 5
+      },
+      {
+        "before": [
+          1,
+          3,
+          155836,
+          16,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          5,
+          0
+        ],
+        "after": [
+          1,
+          1,
+          155836,
+          16,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          51,
+          0
+        ],
+        "M_at56": 51
+      },
+      {
+        "before": [
+          1,
+          1,
+          155836,
+          0,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          51,
+          0
+        ],
+        "after": [
+          1,
+          3,
+          155836,
+          0,
+          2569600,
+          100732,
+          -193709,
+          -145949,
+          5,
+          0
+        ],
+        "M_at56": 5
+      }
+    ],
+    "scope": "Archived accepted updateLeverage write block; no live node, no admission claim.\nFull handler dataflow is retained as disassembly separately. This probe executes\n0x425ed67..0x425ee77 with a supplied resolved position/table/setting. Hash bound;\nskips map navigation before the block and bookkeeping/admission outside it.\n"
+  },
+  "scope": "Recorded action/receipt and endpoints, derived-price golden conditional on already reconciled cash; native archived write block only, not live-version admission or full historical cash replay."
+}

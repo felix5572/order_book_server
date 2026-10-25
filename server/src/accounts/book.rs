@@ -268,11 +268,11 @@ struct PositionRecord {
     /// The anchor's row for this position; `None` when the anchor held no such position (`pending`).
     anchor_row: Option<AnchorRow>,
     /// The margin table of the position the record holds (design 000437): the anchor's `M`, or the coin's current
-    /// table for a position opened from zero; a flip keeps it (research: 4/4 telling samples). `None` when unknown (a
+    /// table after an open from zero or a successful leverage setting; a flip keeps it. `None` when unknown (a
     /// first fill that does not start from zero, a later anchor contradicting the record).
     table_id: Option<u32>,
-    /// The block after the anchor where this position was opened from zero; `None` for one the anchor holds.
-    opened_after: Option<u64>,
+    /// Latest open/leverage action that selected the table after the anchor. Independent of the size version.
+    table_set_after: Option<u64>,
 }
 
 /// A fill applied to a position: its block, identity, the size before and after it, and the coin's current table.
@@ -292,7 +292,7 @@ impl PositionRecord {
             applied: Applied::Anchor,
             anchor_row: Some(position.row),
             table_id: Some(position.table_id),
-            opened_after: None,
+            table_set_after: None,
         }
     }
 
@@ -303,7 +303,7 @@ impl PositionRecord {
             applied: Applied::Fills(vec![change.identity]),
             anchor_row: None,
             table_id: None,
-            opened_after: None,
+            table_set_after: None,
         };
         record.set_size(change);
         record
@@ -335,18 +335,28 @@ impl PositionRecord {
     /// A position opened from zero takes the coin's current table; any other change keeps the position's.
     const fn set_size(&mut self, change: &SizeChange) {
         if change.start == 0 && change.size_after != 0 {
-            self.table_id = Some(change.current_table);
-            self.opened_after = Some(change.block);
+            self.set_table(change.block, change.current_table);
         }
         self.size_raw = change.size_after;
     }
 
-    /// The record of a position set after anchor `height` meets that anchor: its row is the anchor's, and so is its
-    /// table unless this position was opened after the anchor (an anchor without it leaves the table unknown).
+    /// Selects the current table without changing size or its fill deduplication watermark.
+    const fn set_table(&mut self, block: u64, table_id: u32) {
+        if let Some(newer) = self.table_set_after && newer > block { return; }
+        self.table_id = Some(table_id);
+        self.table_set_after = Some(block);
+    }
+
+    fn moved_after(&self, height: u64) -> bool {
+        self.version_block > height || self.table_set_after.is_some_and(|block| block > height)
+    }
+
+    /// A later size meets an earlier anchor: retain any table selection after that anchor.
+    /// Without a later selection, take the anchor's table (or unknown for an absent position).
     fn meet_earlier_anchor(&mut self, height: u64, anchored: Option<AnchorPosition>) {
-        if self.opened_after.is_none_or(|block| block <= height) {
+        if self.table_set_after.is_none_or(|block| block <= height) {
             self.table_id = anchored.as_ref().map(|position| position.table_id);
-            self.opened_after = None;
+            self.table_set_after = None;
         }
         self.anchor_row = anchored.map(|position| position.row);
     }
@@ -355,7 +365,7 @@ impl PositionRecord {
 #[derive(Debug)]
 struct CoinBook {
     size_decimals: u32,
-    /// The anchor's current table of the coin: a position opened from zero takes it.
+    /// The anchor's current table: an open from zero or a successful leverage setting takes it.
     table_id: u32,
     records: FxHashMap<Address, PositionRecord>,
     /// Bumped by every frame pushed for this coin (a `changes` batch or the snapshot after an anchor install); a new
@@ -398,6 +408,20 @@ impl CoinBook {
             silent(*user, None, position.size_raw);
         }
         self.records.extend(positions.into_iter().map(|(user, position)| (user, PositionRecord::anchored(height, position))));
+    }
+}
+
+/// Successful updateLeverage writes the current table even without a fill or a leverage-value change.
+/// Archived client 6911b792: metadata read 0x3c92f7a -> accepted commit 0x3c93693 -> M write 0x425ee2e.
+/// Admission is owned by the node's successful receipt, not re-evaluated from our replayed cash.
+fn apply_leverage_table(
+    coins: &mut FxHashMap<String, CoinBook>, margins: &MarginStates, user: Address, event: &AccountEvent, block: u64,
+) {
+    let AccountEvent::Action(super::actions::BlockAction::Leverage { asset, .. }) = event else { return; };
+    let Some(name) = margins.action_coin(*asset) else { return; };
+    let Some(coin) = coins.get_mut(name) else { return; };
+    if let Some(record) = coin.records.get_mut(&user) {
+        record.set_table(block, coin.table_id);
     }
 }
 
@@ -923,6 +947,9 @@ impl AccountBook {
             self.events_dropped = true;
             *dropped += 1;
         }
+        if let Some(replay) = &self.replay {
+            apply_leverage_table(&mut self.coins, &replay.anchored, user, &event, block);
+        }
         let replaying = self.replay.as_mut().is_some_and(|replay| replay.current.apply(block, user, &event));
         let routing_only = matches!(event, AccountEvent::Routing(_));
         let marked = !routing_only && self.accounts.entry(user).or_default().marks.mark(MarkKind::of(&event), block);
@@ -1126,6 +1153,13 @@ impl AccountBook {
             self.checkpoint_failure = None;
         }
         self.replay_held_fills(height, &mut report);
+        // Reuse the bounded event log after a late/first anchor and its held fills have installed. A later open
+        // keeps precedence; covered actions were removed by rebuild_marks. No second action log is maintained.
+        if let Some(replay) = &self.replay {
+            for logged in &self.events {
+                apply_leverage_table(&mut self.coins, &replay.anchored, logged.user, &logged.event, logged.block);
+            }
+        }
         self.holdings = Holdings::rebuild(&self.coins);
         report
     }
@@ -1187,10 +1221,10 @@ impl AccountBook {
         for (name, coin) in anchor_coins {
             for (user, position) in &coin.positions {
                 let record = self.coins.get(name).and_then(|book| book.records.get(user));
-                if record.is_some_and(|record| record.version_block > height) {
+                if record.is_some_and(|record| record.moved_after(height)) {
                     moved.insert(*user);
                 }
-                let table_id = record.filter(|record| record.version_block <= height).and_then(|record| record.table_id);
+                let table_id = record.filter(|record| !record.moved_after(height)).and_then(|record| record.table_id);
                 held.entry(*user).or_default().push(HeldPosition { coin: name, size_raw: position.size_raw, table_id });
             }
         }
@@ -1202,7 +1236,7 @@ impl AccountBook {
                 let Some(record) = self.coins.get(name).and_then(|book| book.records.get(user)) else {
                     continue;
                 };
-                if record.version_block > height {
+                if record.moved_after(height) {
                     check.moved_after += 1;
                     continue;
                 }
@@ -2643,3 +2677,7 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "book/leverage_tests.rs"]
+mod leverage_tests;
