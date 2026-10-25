@@ -268,6 +268,13 @@ lazy_static! {
         &["stream"]
     ).expect("metric can be created");
 
+    /// Book batches below their own source's high-water height and above the installed checkpoint.
+    /// Their identity is unproven, so the book is withheld until a covering snapshot; not a trade count.
+    pub static ref REGRESSING_BOOK_BATCHES_SKIPPED_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_regressing_book_batches_skipped_total", "Regressing book batches skipped pending a covering snapshot"),
+        &["stream"]
+    ).expect("metric can be created");
+
     /// Target checkpoints that never appeared on the node's grid in time.
     pub static ref CHECKPOINT_MISSED_TOTAL: IntCounter = IntCounter::new(
         "orderbook_checkpoint_missed_total",
@@ -758,6 +765,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(INSERT_BEFORE_FALLBACK_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(DIFF_TARGET_MISSING_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(STALE_BATCHES_SKIPPED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(REGRESSING_BOOK_BATCHES_SKIPPED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(CHECKPOINT_MISSED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(SNAPSHOT_CHECKPOINT_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(INSERT_BEFORE_HONORED_TOTAL.clone())).ok();

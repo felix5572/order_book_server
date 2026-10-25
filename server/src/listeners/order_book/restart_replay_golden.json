@@ -1,0 +1,115 @@
+{
+  "original_status": {
+    "local_time": "2026-10-25T03:13:17.038908728",
+    "block_time": "2026-10-25T03:12:46.509337495",
+    "block_number": 1196260001,
+    "events": [
+      {
+        "time": "2026-10-25T03:12:46.509337495",
+        "user": "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+        "hash": "0xe69e7ca700ebbdf5e81804474d7aa1013100948c9beedcc78a6727f9bfef97e0",
+        "builder": null,
+        "status": "open",
+        "order": {
+          "coin": "FET",
+          "side": "A",
+          "limitPx": "0.17758",
+          "sz": "806.0",
+          "oid": 585043346872,
+          "timestamp": 1792897966509,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "806.0",
+          "tif": "Alo",
+          "cloid": "0x00000000000000002cb79479c76b39ab"
+        }
+      }
+    ]
+  },
+  "original_diff": {
+    "local_time": "2026-10-25T03:13:17.038903708",
+    "block_time": "2026-10-25T03:12:46.509337495",
+    "block_number": 1196260001,
+    "events": [
+      {
+        "user": "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+        "oid": 585043346872,
+        "coin": "FET",
+        "side": "A",
+        "px": "0.17758",
+        "raw_book_diff": {
+          "new": {
+            "sz": "806.0"
+          }
+        }
+      }
+    ]
+  },
+  "replay_status": {
+    "local_time": "2026-10-25T03:23:09.197711626",
+    "block_time": "2026-10-25T03:12:46.509337495",
+    "block_number": 1196260001,
+    "events": [
+      {
+        "time": "2026-10-25T03:12:46.509337495",
+        "user": "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+        "hash": "0xe69e7ca700ebbdf5e81804474d7aa1013100948c9beedcc78a6727f9bfef97e0",
+        "builder": null,
+        "status": "open",
+        "order": {
+          "coin": "FET",
+          "side": "A",
+          "limitPx": "0.17758",
+          "sz": "806.0",
+          "oid": 585043346872,
+          "timestamp": 1792897966509,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "806.0",
+          "tif": "Alo",
+          "cloid": "0x00000000000000002cb79479c76b39ab"
+        }
+      }
+    ]
+  },
+  "replay_diff": {
+    "local_time": "2026-10-25T03:23:09.197691428",
+    "block_time": "2026-10-25T03:12:46.509337495",
+    "block_number": 1196260001,
+    "events": [
+      {
+        "user": "0xe1fa3c336d43a3b2e8934fe0bd0492124c3e4d81",
+        "oid": 585043346872,
+        "coin": "FET",
+        "side": "A",
+        "px": "0.17758",
+        "raw_book_diff": {
+          "new": {
+            "sz": "806.0"
+          }
+        }
+      }
+    ]
+  },
+  "previous_stream_height": 1196267216,
+  "recovery_checkpoint": 1196270000,
+  "provenance": {
+    "node_restart_utc": "2026-10-25T03:22:50Z",
+    "original_and_replay_blocks": [
+      1196260001,
+      1196260003
+    ],
+    "scope": "One actual open/new pair retained from three complete blocks whose canonical facts match; wire fields unchanged. Previous stream height is the account assembler released bound evidenced by last late_or_dropped range, used as representative already-consumed height.",
+    "source_evidence": "/home/ubuntu/research_data/ob_hourly_watch_20261021/heartbeat_20261025T032810Z/node_restart_evidence"
+  }
+}

@@ -12,7 +12,7 @@ use crate::{
         ORDERBOOK_STREAM_SKEW_BLOCKS, ORDERBOOK_TIME_MS, ORDERBOOK_UNTRIGGERED_TOTAL, PARSE_ERRORS_TOTAL,
         PENDING_DIFFS_CACHE, PENDING_ORDERS_CACHE,
         CHECKPOINT_MISSED_TOTAL, RESYNC_PHASE_DURATION, SNAPSHOT_CHECKPOINT_HEIGHT, STALE_BATCHES_SKIPPED_TOTAL,
-        TRADES_UNPAIRED_FILLS_TOTAL,
+        TRADES_UNPAIRED_FILLS_TOTAL, REGRESSING_BOOK_BATCHES_SKIPPED_TOTAL,
     },
     order_book::{
         Coin, Px, PxBand, Side, Snapshot, Sz,
@@ -1443,6 +1443,24 @@ impl OrderBookListener {
         {
             STALE_BATCHES_SKIPPED_TOTAL.with_label_values(&[source_label]).inc();
             return;
+        }
+        // Node restarts can append already-emitted blocks to the same hour file. Below-checkpoint
+        // batches were covered above; other same-source regressions have no identity proof. Withhold
+        // before mutating the book or caching these facts, then let a covering snapshot restore trust.
+        // Each source owns its height: ordinary status/diff skew and same-block chunks remain valid.
+        let regressed = match &event_batch {
+            EventBatch::Orders(_) => height < self.last_status_height,
+            EventBatch::BookDiffs(_) => height < self.last_diff_height,
+            EventBatch::Fills(_) | EventBatch::OracleUpdates(_) => false,
+        };
+        // Before the first snapshot nothing has been applied to a live book. Its existing replay
+        // path decides which cached batches the installed checkpoint covers.
+        if regressed && self.is_ready() {
+            self.mark_desynced("stream_height_regression");
+            if !self.tolerate_drift {
+                REGRESSING_BOOK_BATCHES_SKIPPED_TOTAL.with_label_values(&[source_label]).inc();
+                return;
+            }
         }
         let is_book_batch = matches!(event_batch, EventBatch::Orders(_) | EventBatch::BookDiffs(_));
         if is_book_batch {
@@ -3050,6 +3068,57 @@ mod tests {
         listener.apply_event_batch(101, EventBatch::Orders(make_status_batch("NEW", 3, 101)), EventSource::OrderStatuses);
         assert!(listener.universe().contains("NEW"), "batches above B from the lagging stream apply");
         assert_ne!(btc_size(&listener), original, "an update above B applies");
+    }
+
+    /// BM 2026-10-25: the restarted node appended old open/new facts to the same hour files.
+    #[test]
+    fn test_node_restart_regression_withholds_before_applying_or_caching_old_book_batches() {
+        let g: serde_json::Value = serde_json::from_str(include_str!("restart_replay_golden.json")).unwrap();
+        let height = g["original_status"]["block_number"].as_u64().unwrap();
+        let high = g["previous_stream_height"].as_u64().unwrap();
+        let checkpoint = g["recovery_checkpoint"].as_u64().unwrap();
+        assert_eq!(g["original_status"]["events"], g["replay_status"]["events"]);
+        assert_eq!(g["original_diff"]["events"], g["replay_diff"]["events"]);
+        for statuses_first in [true, false] {
+            let (mut listener, mut rx) = ready_listener();
+            let batch = |key: &str| serde_json::from_value(g[key].clone()).unwrap();
+            listener.apply_event_batch(height, EventBatch::Orders(batch("original_status")), EventSource::OrderStatuses);
+            let diff: Batch<NodeDataOrderDiff> = serde_json::from_value(g["original_diff"].clone()).unwrap();
+            listener.apply_event_batch(height, EventBatch::BookDiffs(diff), EventSource::OrderDiffs);
+            // Each source has already reached the old node's later height before the restart replay arrives.
+            let mut status = g["original_status"].clone(); status["events"] = serde_json::json!([]); status["block_number"] = high.into();
+            let mut diff = g["original_diff"].clone(); diff["events"] = serde_json::json!([]); diff["block_number"] = high.into();
+            listener.apply_event_batch(high, EventBatch::Orders(serde_json::from_value(status).unwrap()), EventSource::OrderStatuses);
+            listener.apply_event_batch(high, EventBatch::BookDiffs(serde_json::from_value(diff).unwrap()), EventSource::OrderDiffs);
+            listener.open_cache_window_for_test();
+            while rx.try_recv().is_ok() {}
+            let status = EventBatch::Orders(batch("replay_status"));
+            let diff = EventBatch::BookDiffs(serde_json::from_value(g["replay_diff"].clone()).unwrap());
+            let pair = if statuses_first { [(status, EventSource::OrderStatuses), (diff, EventSource::OrderDiffs)] }
+                else { [(diff, EventSource::OrderDiffs), (status, EventSource::OrderStatuses)] };
+            for (event, source) in pair {
+                listener.apply_event_batch(height, event, source);
+                assert!(!listener.book_trusted(), "the first regressing source must withdraw the book");
+                assert_eq!(listener.replay_cache_status(), (0, true), "uncertain old facts cannot enter the fetch cache");
+                assert!(rx.try_recv().is_err(), "no old book changes may escape");
+            }
+            let bound = listener.max_loss_height;
+            listener.init_from_snapshot(Snapshots::new(HashMap::new()), bound - 1);
+            assert!(!listener.book_trusted(), "an insufficient snapshot cannot restore trust");
+            listener.init_from_snapshot(Snapshots::new(HashMap::new()), checkpoint);
+            assert!(listener.book_trusted(), "the existing covering-snapshot recovery still works");
+        }
+    }
+
+    #[test]
+    fn test_book_regression_guard_preserves_same_block_chunks_and_drift_opt_out() {
+        let (mut listener, _rx) = ready_listener();
+        feed_order(&mut listener, "BTC", 1, 100);
+        feed_order(&mut listener, "ETH", 2, 100);
+        assert!(listener.book_trusted() && listener.universe().contains("ETH"), "same-height chunks are valid");
+        listener.set_tolerate_drift(true);
+        feed_order(&mut listener, "OLD", 3, 99);
+        assert!(listener.book_trusted() && listener.universe().contains("OLD"), "explicit drift mode retains its existing behavior");
     }
 
     // ==================== Resync damping ====================
