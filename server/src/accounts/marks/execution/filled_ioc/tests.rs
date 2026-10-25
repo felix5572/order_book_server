@@ -164,11 +164,15 @@ fn close_golden() -> Golden { serde_json::from_str(include_str!("reduce_only_clo
 
 #[test]
 fn full_reduce_only_ioc_cleanup_precedes_the_next_price_action() {
-    let g = close_golden();
-    assert_eq!(g.statuses.iter().map(|s| s.status.as_str()).collect::<Vec<_>>(),
-        ["open", "filled", "reduceOnlyCanceled"]);
-    assert_eq!(cut(&g, &actions(&g, false), &SystemAnchors::default()), Cut { lo: 2, hi: 2, fills_lo: 2 });
-    assert_eq!(cut(&g, &actions(&g, true), &SystemAnchors::default()), Cut { lo: 0, hi: 0, fills_lo: 0 });
+    let strk: Golden = serde_json::from_str(include_str!("strk_reduce_only_close_golden.json")).unwrap();
+    for g in [close_golden(), strk] {
+        assert_eq!(g.statuses.iter().map(|s| s.status.as_str()).collect::<Vec<_>>(),
+            ["open", "filled", "reduceOnlyCanceled"]);
+        assert_eq!(cut(&g, &actions(&g, false), &SystemAnchors::default()),
+            Cut { lo: 2, hi: 2, fills_lo: 2 }, "{} before SGA", g.coin);
+        assert_eq!(cut(&g, &actions(&g, true), &SystemAnchors::default()),
+            Cut { lo: 0, hi: 0, fills_lo: 0 }, "{} after SGA", g.coin);
+    }
     let mut with_boundary = close_golden();
     let mut boundary = with_boundary.statuses[0].clone(); boundary.status = "futureStatus".into();
     with_boundary.statuses.push(boundary);
