@@ -219,3 +219,72 @@ fn reduce_only_cleanup_requires_complete_contiguous_identity_and_paired_quantity
         assert!(!attributed.iter().any(|(_, oids)| oids.contains(&584_547_511_107)), "{case}");
     }
 }
+
+fn margin_golden() -> Golden { serde_json::from_str(include_str!("margin_cancel_golden.json")).unwrap() }
+
+#[test]
+fn partially_filled_maker_margin_cancel_runs_inside_frontend_market_taker() {
+    let g = margin_golden();
+    assert_eq!(g.statuses[7].status, "marginCanceled");
+    assert_eq!(g.statuses[7].order.sz, "0.00008");
+    assert_eq!(cut(&g, &actions(&g, false), &SystemAnchors::default()),
+        Cut { lo: g.diffs.len(), hi: g.diffs.len(), fills_lo: g.fills.len() });
+    assert_eq!(cut(&g, &actions(&g, true), &SystemAnchors::default()), Cut { lo: 0, hi: 0, fills_lo: 0 });
+    // The same witnessed immediate execution also applies to ordinary limit IOC presentation.
+    let mut limit = margin_golden();
+    for i in [0, 8] { limit.statuses[i].order.order_type = "Limit".into(); limit.statuses[i].order.tif = Some("Ioc".into()); }
+    limit.action["orders"][0]["t"]["limit"]["tif"] = "Ioc".into();
+    assert_eq!(cut(&limit, &actions(&limit, false), &SystemAnchors::default()).lo, limit.diffs.len());
+}
+
+#[test]
+fn maker_margin_cancel_requires_an_uninterrupted_unique_run_and_complete_paired_fills() {
+    let oid = 584_936_839_855;
+    for case in ["head", "terminal", "interrupted", "duplicateHead", "duplicateCancel", "unknownStatus",
+        "wrongCoin", "wrongSide", "trigger", "unreachedPrice", "makerPrice", "zeroRemainder", "unfilled",
+        "terminalTif", "terminalUser", "terminalOrderType", "partialTerminal", "partialTaker", "noReceipt", "duplicateReceipt",
+        "systemOwner", "systemCancel", "competingCancel", "noFills", "noMaker", "duplicateMaker",
+        "duplicateTaker", "makerQuantity", "makerTwap", "unrelatedMaker", "noPair"] {
+        let mut g = margin_golden();
+        let mut a = actions(&g, false);
+        let mut system = SystemAnchors::default();
+        match case {
+            "head" => { g.statuses.remove(0); },
+            "terminal" => { g.statuses.pop(); },
+            "interrupted" => { let mut s = g.statuses[0].clone(); s.status = "futureStatus".into(); g.statuses.insert(7, s); },
+            "duplicateHead" => g.statuses.push(g.statuses[0].clone()),
+            "duplicateCancel" => g.statuses.insert(7, g.statuses[7].clone()),
+            "unknownStatus" => g.statuses[7].status = "canceled".into(),
+            "wrongCoin" => g.statuses[7].order.coin = "ETH".into(),
+            "wrongSide" => g.statuses[7].order.side = OrderSide::Ask,
+            "trigger" => g.statuses[7].order.is_trigger = true,
+            "unreachedPrice" => g.statuses[7].order.limit_px = "1".into(),
+            "makerPrice" => { for f in &mut g.fills { if f.1.tid == 650_604_234_805_654 { f.1.px = "80586".into(); } } },
+            "zeroRemainder" => g.statuses[7].order.sz = "0".into(),
+            "unfilled" => g.statuses[7].order.sz = g.statuses[7].order.orig_sz.clone(),
+            "terminalTif" => g.statuses[8].order.tif = Some("Ioc".into()),
+            "terminalUser" => g.statuses[8].user = alloy::primitives::Address::repeat_byte(9),
+            "terminalOrderType" => g.statuses[8].order.order_type = "Limit".into(),
+            "partialTerminal" => g.statuses[8].order.sz = "0.00001".into(),
+            "partialTaker" => { g.statuses[8].order.sz = "0.00001".into(); g.fills[14].1.sz = "0.00069".into(); g.fills[15].1.sz = "0.00069".into(); },
+            "noReceipt" => { let MarkAction::Book(b) = &mut a.actions[0].action else { panic!() }; b.created.clear(); },
+            "duplicateReceipt" => { let mut b = a.actions[0].clone(); b.rank = (2, 3, 0); a.actions.push(b); },
+            "systemOwner" => system.before.created.push(g.statuses[0].order.oid),
+            "systemCancel" => system.before.cancelled.push(oid),
+            "competingCancel" => { system.competing_orders.insert(oid); },
+            "noFills" => g.fills.clear(),
+            "noMaker" => g.fills.retain(|f| f.1.oid != oid),
+            "duplicateMaker" => g.fills.push(g.fills[12].clone()),
+            "duplicateTaker" => g.fills.push(g.fills[13].clone()),
+            "makerQuantity" => g.fills[12].1.sz = "0.00095".into(),
+            "makerTwap" => g.fills[12].1.twap_id = Some(1),
+            "unrelatedMaker" => g.fills[12].1.oid += 1,
+            "noPair" => g.fills[12].1.tid += 1,
+            _ => unreachable!(),
+        }
+        let statuses = BlockStatuses::of(g.statuses).unwrap();
+        let fills = g.fills.iter().map(BlockFill::of).collect::<Vec<_>>();
+        let attributed = statuses.filled_iocs.attributed(&a, &fills, &|coin| (coin == "BTC").then_some(0), &system);
+        assert!(!attributed.iter().any(|(_, oids)| oids.contains(&oid)), "{case}");
+    }
+}

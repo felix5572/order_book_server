@@ -1,4 +1,4 @@
-//! Full-field limit-order identity shared by status-based mark attribution.
+//! Full-field order identity shared by status-based mark attribution.
 //! Asset IDs belong to requests; a status supplies a coin which the seeded book maps to that ID.
 
 use alloy::primitives::Address;
@@ -28,7 +28,7 @@ impl OrderKey {
         let order = &status.order;
         if order.is_trigger { return Ok(None); }
         let Some(tif) = &order.tif else { return Ok(None) };
-        if !matches!(tif.as_str(), "Alo" | "Ioc" | "Gtc") { return Ok(None); }
+        if !matches!(tif.as_str(), "Alo" | "Ioc" | "Gtc" | "FrontendMarket") { return Ok(None); }
         Ok(Some(Self { user: status.user, is_buy: order.side == Side::Bid,
             limit_px: ExactDecimal::parse(&order.limit_px)?, sz: ExactDecimal::parse(&order.orig_sz)?,
             reduce_only: order.reduce_only, cloid: order.cloid.clone(), tif: tif.clone() }))
