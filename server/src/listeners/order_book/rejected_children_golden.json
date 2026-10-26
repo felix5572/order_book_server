@@ -1,0 +1,305 @@
+[
+  {
+    "height": 1197862127,
+    "source": "BM node_order_statuses_streaming 20261026/11; matching replica requests retained in hourly watch evidence",
+    "source_line_sha256": [
+      "9a08c3c946e843a1c7d18dd11e7ef82cb497c5e0f22792026768b4443a8a3782",
+      "51bd4a641479b1a9a7c76f054f9bb9603953f360d54c582ddfdee451f1f10a71",
+      "21a4f6c046f20a074c4e5188376a3c69942cc53a5766ddd3d83d6ad50f33d69a"
+    ],
+    "request_source_sha256": [
+      "9ca9ca712926b93f5549b7d9dd9c6269f5e2acfc5ac04f692430d52a075e133a"
+    ],
+    "events": [
+      {
+        "time": "2026-10-26T11:15:49.773673602",
+        "user": "0xa49be8caeb440a07795a1486c5c019e81f669a01",
+        "hash": "0xca15946abe3c7195cb8f044765ecef0205c80050593f90676dde3fbd7d304b80",
+        "builder": {
+          "b": "0xe1f55f2f25884c2ddc86b6f7efa5f45b2ef04221",
+          "f": 50
+        },
+        "status": "open",
+        "order": {
+          "coin": "xyz:EWZ",
+          "side": "A",
+          "limitPx": "32.089",
+          "sz": "0.34",
+          "oid": 586158796600,
+          "timestamp": 1793013349773,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [
+            {
+              "coin": "xyz:EWZ",
+              "side": "B",
+              "limitPx": "38.122",
+              "sz": "0.34",
+              "oid": 586158796600,
+              "timestamp": 1793013349773,
+              "triggerCondition": "Price above 35.298",
+              "isTrigger": true,
+              "triggerPx": "35.298",
+              "children": [],
+              "isPositionTpsl": false,
+              "reduceOnly": true,
+              "orderType": "Stop Market",
+              "origSz": "0.34",
+              "tif": null,
+              "cloid": null
+            },
+            {
+              "coin": "xyz:EWZ",
+              "side": "B",
+              "limitPx": "24.259",
+              "sz": "0.34",
+              "oid": 586158796600,
+              "timestamp": 1793013349773,
+              "triggerCondition": "Price below 22.462",
+              "isTrigger": true,
+              "triggerPx": "22.462",
+              "children": [],
+              "isPositionTpsl": false,
+              "reduceOnly": true,
+              "orderType": "Take Profit Market",
+              "origSz": "0.34",
+              "tif": null,
+              "cloid": null
+            }
+          ],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "0.34",
+          "tif": "Gtc",
+          "cloid": "0xfeec15fc833d26631f04bb38173d6055"
+        }
+      },
+      {
+        "time": "2026-10-26T11:15:49.773673602",
+        "user": "0xa49be8caeb440a07795a1486c5c019e81f669a01",
+        "hash": null,
+        "builder": {
+          "b": "0xe1f55f2f25884c2ddc86b6f7efa5f45b2ef04221",
+          "f": 50
+        },
+        "status": "tooManyOpenOrdersRejected",
+        "order": {
+          "coin": "xyz:EWZ",
+          "side": "B",
+          "limitPx": "38.122",
+          "sz": "0.34",
+          "oid": 586158796601,
+          "timestamp": 1793013349773,
+          "triggerCondition": "Price above 35.298",
+          "isTrigger": true,
+          "triggerPx": "35.298",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": true,
+          "orderType": "Stop Market",
+          "origSz": "0.34",
+          "tif": null,
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-26T11:15:49.773673602",
+        "user": "0xa49be8caeb440a07795a1486c5c019e81f669a01",
+        "hash": null,
+        "builder": {
+          "b": "0xe1f55f2f25884c2ddc86b6f7efa5f45b2ef04221",
+          "f": 50
+        },
+        "status": "tooManyOpenOrdersRejected",
+        "order": {
+          "coin": "xyz:EWZ",
+          "side": "B",
+          "limitPx": "24.259",
+          "sz": "0.34",
+          "oid": 586158796602,
+          "timestamp": 1793013349773,
+          "triggerCondition": "Price below 22.462",
+          "isTrigger": true,
+          "triggerPx": "22.462",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": true,
+          "orderType": "Take Profit Market",
+          "origSz": "0.34",
+          "tif": null,
+          "cloid": null
+        }
+      }
+    ],
+    "expected_active_oids": []
+  },
+  {
+    "height": 1197862378,
+    "source": "BM node_order_statuses_streaming 20261026/11; matching replica requests retained in hourly watch evidence",
+    "source_line_sha256": [
+      "4dffe6c3a6e350c77ea4f473b3bfd5bc9d2d994e96976eb1e946f6458b3f7087",
+      "b81c90dd5ef8ce1d4ccac642d73dc52884a1c8ab3e02aa665e6e47ca787a8ad6",
+      "0cd6e403500c6b01866e3b6b3824e2f276ba5ca316adc5c5e1e18cf35cbe4938",
+      "af907346d625e5904441615018120c1cd3dad850879e5675d55fc8d57a53f69e"
+    ],
+    "request_source_sha256": [
+      "b7f07081d49a055a74d73ff1a50a0e54df5703d1185e2a1155191753cfad235e"
+    ],
+    "events": [
+      {
+        "time": "2026-10-26T11:16:07.538431477",
+        "user": "0xa49be8caeb440a07795a1486c5c019e81f669a01",
+        "hash": "0x5c49b5a670c0c7475dc3044765edea0201b2008c0bc3e619001260f92fc4a132",
+        "builder": {
+          "b": "0xe1f55f2f25884c2ddc86b6f7efa5f45b2ef04221",
+          "f": 50
+        },
+        "status": "open",
+        "order": {
+          "coin": "xyz:EWZ",
+          "side": "A",
+          "limitPx": "29.152",
+          "sz": "0.34",
+          "oid": 586158987522,
+          "timestamp": 1793013367538,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [
+            {
+              "coin": "xyz:EWZ",
+              "side": "B",
+              "limitPx": "37.644",
+              "sz": "0.34",
+              "oid": 586158987522,
+              "timestamp": 1793013367538,
+              "triggerCondition": "Price above 34.856",
+              "isTrigger": true,
+              "triggerPx": "34.856",
+              "children": [],
+              "isPositionTpsl": false,
+              "reduceOnly": true,
+              "orderType": "Stop Market",
+              "origSz": "0.34",
+              "tif": null,
+              "cloid": null
+            },
+            {
+              "coin": "xyz:EWZ",
+              "side": "B",
+              "limitPx": "23.955",
+              "sz": "0.34",
+              "oid": 586158987522,
+              "timestamp": 1793013367538,
+              "triggerCondition": "Price below 22.181",
+              "isTrigger": true,
+              "triggerPx": "22.181",
+              "children": [],
+              "isPositionTpsl": false,
+              "reduceOnly": true,
+              "orderType": "Take Profit Market",
+              "origSz": "0.34",
+              "tif": null,
+              "cloid": null
+            }
+          ],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Market",
+          "origSz": "0.34",
+          "tif": "FrontendMarket",
+          "cloid": "0xc635407e0bab8ef697426e0f4c706634"
+        }
+      },
+      {
+        "time": "2026-10-26T11:16:07.538431477",
+        "user": "0xa49be8caeb440a07795a1486c5c019e81f669a01",
+        "hash": null,
+        "builder": {
+          "b": "0xe1f55f2f25884c2ddc86b6f7efa5f45b2ef04221",
+          "f": 50
+        },
+        "status": "filled",
+        "order": {
+          "coin": "xyz:EWZ",
+          "side": "A",
+          "limitPx": "29.152",
+          "sz": "0.0",
+          "oid": 586158987522,
+          "timestamp": 1793013367538,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Market",
+          "origSz": "0.34",
+          "tif": "FrontendMarket",
+          "cloid": "0xc635407e0bab8ef697426e0f4c706634"
+        }
+      },
+      {
+        "time": "2026-10-26T11:16:07.538431477",
+        "user": "0xa49be8caeb440a07795a1486c5c019e81f669a01",
+        "hash": "0x5c49b5a670c0c7475dc3044765edea0201b2008c0bc3e619001260f92fc4a132",
+        "builder": {
+          "b": "0xe1f55f2f25884c2ddc86b6f7efa5f45b2ef04221",
+          "f": 50
+        },
+        "status": "open",
+        "order": {
+          "coin": "xyz:EWZ",
+          "side": "B",
+          "limitPx": "37.644",
+          "sz": "0.34",
+          "oid": 586158987523,
+          "timestamp": 1793013367538,
+          "triggerCondition": "Price above 34.856",
+          "isTrigger": true,
+          "triggerPx": "34.856",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": true,
+          "orderType": "Stop Market",
+          "origSz": "0.34",
+          "tif": null,
+          "cloid": null
+        }
+      },
+      {
+        "time": "2026-10-26T11:16:07.538431477",
+        "user": "0xa49be8caeb440a07795a1486c5c019e81f669a01",
+        "hash": null,
+        "builder": {
+          "b": "0xe1f55f2f25884c2ddc86b6f7efa5f45b2ef04221",
+          "f": 50
+        },
+        "status": "tooManyOpenOrdersRejected",
+        "order": {
+          "coin": "xyz:EWZ",
+          "side": "B",
+          "limitPx": "23.955",
+          "sz": "0.34",
+          "oid": 586158987524,
+          "timestamp": 1793013367538,
+          "triggerCondition": "Price below 22.181",
+          "isTrigger": true,
+          "triggerPx": "22.181",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": true,
+          "orderType": "Take Profit Market",
+          "origSz": "0.34",
+          "tif": null,
+          "cloid": null
+        }
+      }
+    ],
+    "expected_active_oids": [
+      586158987523
+    ]
+  }
+]

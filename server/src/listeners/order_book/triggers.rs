@@ -15,6 +15,8 @@
 //! - `canceled`: 226 children got their own `canceled` in the block, 78 a modify moved to the parent's successor
 //!   (listed in its later statuses under their own oids; its `open` lists none), none triggered later;
 //! - a rejected parent's children never opened.
+//! A live parent can also have children rejected individually (bm 10-26, EWZ, tooManyOpenOrdersRejected).
+//! Their explicit rejection resolves the announcement without inserting a trigger or making the table incomplete.
 //!
 //! Hyperliquid's TP/SL documentation says the same: a parent's full fill activates its children, a partial fill keeps
 //! them waiting, canceling the parent cancels them, a cancel for insufficient margin after a partial fill activates
@@ -360,6 +362,7 @@ impl ParentSuccessor {
 
 /// A child as its parent's live `open` lists it - under the parent's oid -, to be told by its own `open` line, which
 /// follows in the same block (bm 10-21 hour 09: 1,745 children, each after its parent, each matched by these fields).
+/// An individually rejected child has the same identity fields and its own oid (bm 10-26 EWZ).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ChildKey {
     user: Address,
@@ -398,9 +401,30 @@ struct ExpectedChildren {
     /// market, IOC or crossing order fills in its own block and its children's `open` lines follow its `filled` (bm
     /// 10-21 14:35-15:07: 84 children, 47 of market orders, 28 of IOC, 9 of GTC). Those children take part at once.
     released: FxHashSet<u64>,
+    /// Matched terminal receipts in this block: a duplicate must not consume another identical announcement.
+    rejected_children: FxHashSet<u64>,
 }
 
 impl ExpectedChildren {
+    fn take_parent(&mut self, user: Address, order: &L4Order) -> Option<u64> {
+        let key = ChildKey::of(user, order);
+        let parents = self.parents.get_mut(&key)?;
+        let parent = parents.remove(0);
+        if parents.is_empty() {
+            self.parents.remove(&key);
+        }
+        Some(parent)
+    }
+
+    fn reject_child(&mut self, user: Address, order: &L4Order) {
+        if self.parents.is_empty() || self.rejected_children.contains(&order.oid) {
+            return;
+        }
+        if self.take_parent(user, order).is_some() {
+            self.rejected_children.insert(order.oid);
+        }
+    }
+
     /// `parent` left releasing its children: those it announced in the block and not yet opened take part as they open.
     fn note_release(&mut self, parent: u64) {
         if self.parents.values().any(|parents| parents.contains(&parent)) {
@@ -600,6 +624,11 @@ impl TriggerTable {
             }
             return false;
         }
+        // A successful parent can have rejected children. Consume only the observed, explicit rejection path;
+        // missing or unfamiliar statuses still leave the announcement unresolved and fail closed at block end.
+        if status == "tooManyOpenOrdersRejected" && order.is_trigger {
+            self.expected.reject_child(user, order);
+        }
         match status {
             "filled" | "marginCanceled" => {
                 self.release_children(order);
@@ -673,12 +702,7 @@ impl TriggerTable {
         if self.expected.parents.is_empty() || self.families.parent_of.contains_key(&order.oid) {
             return false;
         }
-        let key = ChildKey::of(user, order);
-        let Some(parents) = self.expected.parents.get_mut(&key) else { return false };
-        let parent = parents.remove(0);
-        if parents.is_empty() {
-            self.expected.parents.remove(&key);
-        }
+        let Some(parent) = self.expected.take_parent(user, order) else { return false };
         if self.expected.released.contains(&parent) {
             return true;
         }
@@ -695,6 +719,7 @@ impl TriggerTable {
         if !self.expected.released.is_empty() {
             self.expected.released.clear();
         }
+        self.expected.rejected_children.clear();
         if self.expected.parents.is_empty() {
             return;
         }
@@ -1271,6 +1296,53 @@ mod tests {
             assert_eq!((oids(&band(&unmodified, "BTC", "100", "120", 10)), held(&unmodified)), (Vec::<u64>::new(), vec![61]), "{case}");
             assert!(unmodified.on_status(8, USER, "canceled", None, &wire(&child)), "{case}");
         }
+    }
+
+    /// EWZ1197862127: resting parent, both children rejected; EWZ1197862378: filled parent,
+    /// one active child and one rejected. Explicit terminal statuses are not missing stream facts.
+    #[test]
+    fn rejected_children_from_native_statuses_do_not_make_the_table_incomplete() {
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("rejected_children_golden.json")).unwrap();
+        for case in cases {
+            let height = case["height"].as_u64().unwrap();
+            let mut table = table(TriggerSection::Complete(Vec::new()));
+            for event in case["events"].as_array().unwrap() {
+                let user: Address = event["user"].as_str().unwrap().parse().unwrap();
+                let order: L4Order = serde_json::from_value(event["order"].clone()).unwrap();
+                table.on_status(height, user, event["status"].as_str().unwrap(), event["hash"].as_str(), &order);
+            }
+            assert!(table.expected.parents.is_empty(), "all announced children have a status at {height}");
+            table.expire_expected(height + 1);
+            let expected: Vec<u64> = serde_json::from_value(case["expected_active_oids"].clone()).unwrap();
+            assert_eq!(oids(&band(&table, "xyz:EWZ", "0", "10000", 10)), expected);
+            assert_eq!(table.count(), expected.len());
+            assert_eq!(table.availability(None), TriggerAvailability::Complete);
+            assert!(table.families.parent_of.is_empty() && table.families.waiting.is_empty());
+        }
+    }
+
+    #[test]
+    fn rejected_child_matching_is_exact_and_duplicate_statuses_do_not_consume_siblings() {
+        let (first, second) = (stop("BTC", 11, "105"), stop("BTC", 12, "105"));
+        let mut table = table(TriggerSection::Complete(Vec::new()));
+        table.on_status(7, USER, "open", HASH, &parent(10, &[&first, &second], Some(10)));
+        let pending = |table: &TriggerTable| table.expected.parents.values().map(Vec::len).sum::<usize>();
+        table.on_status(7, USER, "tooManyOpenOrdersRejected", None, &wire(&first));
+        assert_eq!(pending(&table), 1);
+        table.on_status(7, USER, "tooManyOpenOrdersRejected", None, &wire(&first));
+        assert_eq!(pending(&table), 1, "duplicate oid is not another sibling's rejection");
+        table.on_status(7, Address::new([3; 20]), "tooManyOpenOrdersRejected", None, &wire(&second));
+        table.on_status(7, USER, "tooManyOpenOrdersRejected", None, &wire(&stop("BTC", 12, "106")));
+        table.on_status(7, USER, "canceled", None, &wire(&second));
+        table.on_status(7, USER, "unrecognizedRejected", None, &wire(&second));
+        assert_eq!(pending(&table), 1, "wrong identity or an unproven terminal path must not hide a missing child");
+        table.on_status(7, USER, "tooManyOpenOrdersRejected", None, &wire(&second));
+        assert_eq!(pending(&table), 0);
+        table.expire_expected(8);
+        assert!(table.expected.rejected_children.is_empty(), "rejection dedup is bounded to one block");
+        assert_eq!(table.availability(None), TriggerAvailability::Complete);
+        assert_eq!(table.count(), 0);
+        assert!(table.families.parent_of.is_empty() && table.families.waiting.is_empty());
     }
 
     /// A trigger order with children keeps them waiting through its `triggered`; a child the block announced but whose
