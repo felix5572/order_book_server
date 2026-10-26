@@ -257,6 +257,14 @@ impl OrderBookState {
         self.triggers.count()
     }
 
+    pub(super) fn untriggered_incomplete_coins(&self) -> usize {
+        self.triggers.incomplete_coins()
+    }
+
+    pub(super) fn untriggered_install_complete(&self) -> bool {
+        self.triggers.install_complete()
+    }
+
     /// This install's trigger table replaces the previous state's (`TriggerTable::succeed`): the next generation, and
     /// the previous orders kept when the dump carried no trigger section. Call BEFORE replaying cached events so
     /// evictions recorded during the fetch window still apply to the kept entries.

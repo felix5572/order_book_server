@@ -40,7 +40,10 @@
 //!
 //! Complete means: the last install's dump carried the section for every market and every order of it converted
 //! (an empty section is a complete empty table), and every live trigger order since parsed. Anything else is a gap,
-//! kept until the next complete install; the orders the table does hold are still served (`/untriggeredOrders`).
+//! kept until the next complete install; the orders the table does hold are still served (`/untriggeredOrders`). A
+//! section missing or not fully converted is the whole table's gap; an order known to miss is its coin's alone - one
+//! of the section that did not convert, a live trigger order or a parent's children that did not parse, an announced
+//! child that never opened (bm 10-26: one EWZ child had kept every coin incomplete for 7 hours).
 
 use std::{borrow::Borrow, collections::BTreeMap, ops::Bound, sync::Arc};
 
@@ -416,6 +419,10 @@ impl ExpectedChildren {
         Some(parent)
     }
 
+    fn announces(&self, user: Address, order: &L4Order) -> bool {
+        self.parents.contains_key(&ChildKey::of(user, order))
+    }
+
     fn reject_child(&mut self, user: Address, order: &L4Order) {
         if self.parents.is_empty() || self.rejected_children.contains(&order.oid) {
             return;
@@ -445,7 +452,10 @@ pub(crate) struct TriggerTable {
     /// Kept when a coin's orders are all gone, so a coin that gets orders again does not reuse a version.
     versions: FxHashMap<Coin, u64>,
     generation: u64,
+    /// The install's trigger section's: a section missing or not fully converted is every coin's gap.
     availability: TriggerAvailability,
+    /// The coins whose orders the table may miss since the install, each with its first gap.
+    coin_gaps: BTreeMap<Coin, TriggerGap>,
     /// The install's dump carried no trigger section at all: the previous table's orders stand in (`succeed`).
     section_absent: bool,
 }
@@ -480,6 +490,7 @@ impl TriggerTable {
             versions: FxHashMap::default(),
             generation: 0,
             availability,
+            coin_gaps: BTreeMap::new(),
             section_absent: matches!(section, TriggerSection::Absent),
         };
         if !track {
@@ -512,16 +523,20 @@ impl TriggerTable {
         if self.ignore_spot && order.coin.is_spot() {
             return;
         }
+        let coin = order.coin.clone();
         if self.insert(order).is_err() {
-            self.mark_gap(TriggerGap::SnapshotParseFailed);
+            self.mark_coin_gap(coin.borrow(), TriggerGap::SnapshotParseFailed);
         }
     }
 
-    /// Records a gap; the first one stands until the next complete install.
-    fn mark_gap(&mut self, gap: TriggerGap) {
-        if self.availability == TriggerAvailability::Complete {
-            self.availability = TriggerAvailability::Gap(gap);
+    /// Records a gap of one coin's orders; its first one stands until the next complete install.
+    fn mark_coin_gap(&mut self, coin: &str, gap: TriggerGap) {
+        if self.coin_gaps.contains_key(coin) {
+            return;
         }
+        crate::metrics::UNTRIGGERED_COIN_GAPS_TOTAL.with_label_values(&[gap.label()]).inc();
+        log::warn!("Untriggered trigger orders of {coin} incomplete ({}) until the next complete install", gap.label());
+        self.coin_gaps.insert(Coin::new(coin), gap);
     }
 
     /// Adds or replaces an order, waiting while it has a live parent; its trigger price must parse (the index needs
@@ -561,7 +576,7 @@ impl TriggerTable {
     }
 
     /// How the table held an order the node triggers, read before its `triggered` status applies: wrong when it was
-    /// waiting for a parent, or not held at all while the table is complete (forced flow acceptance found each of the
+    /// waiting for a parent, or not held at all while its coin's are complete (forced flow acceptance found each of the
     /// parent and child cases of 000463-000469 only so). An order held for one status (a successor) opens as it comes.
     pub(crate) fn misread_triggered(&self, order: &L4Order) -> Option<TriggerMisread> {
         if !self.tracks(&order.coin) || self.successor.as_ref().is_some_and(|successor| successor.oid == order.oid) {
@@ -571,7 +586,7 @@ impl TriggerTable {
             return Some(TriggerMisread::Waiting { parent: self.families.parent_of.get(&order.oid).copied() });
         }
         let indexed = self.coins.get(order.coin.as_str()).is_some_and(|coin| coin.place_of.contains_key(&Oid::new(order.oid)));
-        (!indexed && self.availability == TriggerAvailability::Complete).then_some(TriggerMisread::NotHeld)
+        (!indexed && self.kept_gap(Some(order.coin.as_str())).is_none()).then_some(TriggerMisread::NotHeld)
     }
 
     /// Whether a trigger order of `coin` is kept: not with the table off, nor for a spot coin under the spot filter.
@@ -590,7 +605,7 @@ impl TriggerTable {
                 // the table under-reports this oid until a complete install: counted and marked
                 crate::metrics::PARSE_ERRORS_TOTAL.with_label_values(&["untriggered"]).inc();
                 log::warn!("Skipping unparseable untriggered trigger order oid={oid:?}: {err}");
-                self.mark_gap(TriggerGap::LiveParseFailed);
+                self.mark_coin_gap(coin, TriggerGap::LiveParseFailed);
             }
         }
     }
@@ -624,10 +639,8 @@ impl TriggerTable {
             }
             return false;
         }
-        // A successful parent can have rejected children. Consume only the observed, explicit rejection path;
-        // missing or unfamiliar statuses still leave the announcement unresolved and fail closed at block end.
-        if status == "tooManyOpenOrdersRejected" && order.is_trigger {
-            self.expected.reject_child(user, order);
+        if order.is_trigger && !self.expected.parents.is_empty() {
+            self.expected_child_status(user, status, order);
         }
         match status {
             "filled" | "marginCanceled" => {
@@ -664,7 +677,7 @@ impl TriggerTable {
             Err(err) => {
                 crate::metrics::PARSE_ERRORS_TOTAL.with_label_values(&["untriggered"]).inc();
                 log::warn!("Unparseable children of oid={}: {err}", parent.oid);
-                self.mark_gap(TriggerGap::LiveParseFailed);
+                self.mark_coin_gap(&parent.coin, TriggerGap::LiveParseFailed);
                 Vec::new()
             }
         };
@@ -682,7 +695,7 @@ impl TriggerTable {
                 // its children may be served as active until a complete install: counted and marked
                 crate::metrics::PARSE_ERRORS_TOTAL.with_label_values(&["untriggered"]).inc();
                 log::warn!("Unparseable children of oid={}: {err}", parent.oid);
-                self.mark_gap(TriggerGap::LiveParseFailed);
+                self.mark_coin_gap(&parent.coin, TriggerGap::LiveParseFailed);
                 return;
             }
         };
@@ -710,8 +723,21 @@ impl TriggerTable {
         false
     }
 
-    /// A status of another block: the announcements of the previous one end; a child never seen is counted, and the
-    /// table is a gap until a complete install.
+    /// A trigger order's status other than `open` while children of the block are expected. A successful parent can
+    /// have rejected children: only the observed, explicit rejection resolves its announcement. Another status of an
+    /// announced child leaves it unresolved - it fails closed at block end - and is logged, so the coin's gap names it.
+    fn expected_child_status(&mut self, user: Address, status: &str, order: &L4Order) {
+        if status == "tooManyOpenOrdersRejected" {
+            self.expected.reject_child(user, order);
+            return;
+        }
+        if self.expected.announces(user, order) {
+            log::warn!("A child announced in block {} got `{status}` before any open: oid={} coin={}", self.expected.height, order.oid, order.coin);
+        }
+    }
+
+    /// A status of another block: the announcements of the previous one end; a child never seen is counted, and its
+    /// coin is a gap until a complete install.
     fn expire_expected(&mut self, height: u64) {
         if self.expected.height == height {
             return;
@@ -723,12 +749,14 @@ impl TriggerTable {
         if self.expected.parents.is_empty() {
             return;
         }
-        let unmatched: usize = self.expected.parents.values().map(Vec::len).sum();
-        crate::metrics::UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.inc_by(unmatched as u64);
-        log::warn!("{unmatched} children announced in block {} never opened: {:?}", self.expected.height, self.expected.parents);
-        self.expected.parents.clear();
-        // review 000463 r1 P2-2: the table no longer knows its active set
-        self.mark_gap(TriggerGap::ChildUnmatched);
+        let unmatched = std::mem::take(&mut self.expected.parents);
+        let count: usize = unmatched.values().map(Vec::len).sum();
+        crate::metrics::UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.inc_by(count as u64);
+        log::warn!("{count} children announced in block {} never opened: {unmatched:?}", self.expected.height);
+        // review 000463 r1 P2-2: the table no longer knows the coin's active set
+        for child in unmatched.keys() {
+            self.mark_coin_gap(&child.coin, TriggerGap::ChildUnmatched);
+        }
     }
 
     /// Any other status of an oid: the order leaves the table. Whether it was held. Allocation-free unless it was (the
@@ -779,14 +807,36 @@ impl TriggerTable {
     /// does not keep is never complete; all coins means all of the kept markets.
     pub(crate) fn availability(&self, coin: Option<&Coin>) -> TriggerAvailability {
         let held_back = |coin: &str| self.successor.as_ref().is_some_and(|successor| successor.coin == coin);
-        match coin {
-            Some(coin) if !self.tracks(coin.borrow()) => TriggerAvailability::Gap(TriggerGap::TrackingDisabled),
-            // a kept gap stands over a pending one
-            _ if self.availability != TriggerAvailability::Complete => self.availability,
-            Some(coin) if held_back(coin.borrow()) => TriggerAvailability::Gap(TriggerGap::SuccessorPending),
-            None if self.successor.is_some() => TriggerAvailability::Gap(TriggerGap::SuccessorPending),
-            _ => self.availability,
+        // a kept gap stands over a pending one
+        match (coin, self.kept_gap(coin.map(Borrow::<str>::borrow))) {
+            (Some(coin), _) if !self.tracks(coin.borrow()) => TriggerAvailability::Gap(TriggerGap::TrackingDisabled),
+            (_, Some(gap)) => TriggerAvailability::Gap(gap),
+            (Some(coin), None) if held_back(coin.borrow()) => TriggerAvailability::Gap(TriggerGap::SuccessorPending),
+            (None, None) if self.successor.is_some() => TriggerAvailability::Gap(TriggerGap::SuccessorPending),
+            _ => TriggerAvailability::Complete,
         }
+    }
+
+    /// The gap that stands until the next complete install over `coin`'s orders: the table's, else the coin's own;
+    /// all coins (`None`): any coin's, the first by name.
+    fn kept_gap(&self, coin: Option<&str>) -> Option<TriggerGap> {
+        if let TriggerAvailability::Gap(gap) = self.availability {
+            return Some(gap);
+        }
+        match coin {
+            Some(coin) => self.coin_gaps.get(coin).copied(),
+            None => self.coin_gaps.values().next().copied(),
+        }
+    }
+
+    /// Whether the install's trigger section was complete.
+    pub(crate) fn install_complete(&self) -> bool {
+        self.availability == TriggerAvailability::Complete
+    }
+
+    /// The coins with a gap of their own since the install.
+    pub(crate) fn incomplete_coins(&self) -> usize {
+        self.coin_gaps.len()
     }
 
     /// All coins' orders, or one coin's, the waiting children with them.
@@ -868,6 +918,13 @@ mod tests {
 
     fn band(table: &TriggerTable, coin: &str, lo: &str, hi: &str, max: usize) -> TriggerBand {
         table.in_band(&Coin::new(coin), px(lo), px(hi), max)
+    }
+
+    /// The tests that make announced children go unmatched take turns: one reads the global counters the others move.
+    static UNMATCHED_COUNTERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn unmatched_counters() -> std::sync::MutexGuard<'static, ()> {
+        UNMATCHED_COUNTERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A rise's order (`Price above`): `stop` with the condition flipped.
@@ -1198,7 +1255,7 @@ mod tests {
         table.on_status(9, USER, "filled", None, &parent(1, &[&successor], None));
         assert_eq!(oids(&band(&table, "BTC", "100", "120", 10)), vec![24]);
         // a kept gap stands while an order is held, and after
-        table.mark_gap(TriggerGap::LiveParseFailed);
+        table.mark_coin_gap("BTC", TriggerGap::LiveParseFailed);
         table.on_status(10, USER, "open", HASH, &parent(30, &[&stop("BTC", 31, "110")], Some(30)));
         table.on_status(10, USER, "open", HASH, &wire(&stop("BTC", 31, "110")));
         table.on_status(10, USER, "open", HASH, &wire(&stop("BTC", 32, "109")));
@@ -1349,6 +1406,7 @@ mod tests {
     /// own `open` never came is counted when the next block's status arrives; a child canceled alone is gone for good.
     #[test]
     fn a_triggered_parent_keeps_its_children_and_an_unmatched_announcement_is_counted() {
+        let _counters = unmatched_counters();
         let child = stop("BTC", 31, "110");
         let mut trigger_parent = wire(&stop("BTC", 30, "100"));
         trigger_parent.children = vec![serde_json::to_value(wire(&child)).unwrap()];
@@ -1379,5 +1437,65 @@ mod tests {
         spot_parent.coin = "@107".to_string();
         table.on_status(30, USER, "open", HASH, &spot_parent);
         assert!(table.expected.parents.is_empty());
+    }
+
+    /// bm 10-26: one EWZ child that never opened had kept every coin incomplete for 7 hours. An order the table knows
+    /// it misses is its coin's gap alone - an announced child that never opened, a live order or a parent's children
+    /// that did not parse, an order of the section that did not convert -, the coin's first gap standing until the
+    /// next complete install.
+    #[test]
+    fn a_known_missing_order_is_its_coins_gap_alone() {
+        let _counters = unmatched_counters();
+        let complete = |table: &TriggerTable, coin: &str| band(table, coin, "100", "120", 10).availability == TriggerAvailability::Complete;
+        let gap = |table: &TriggerTable, coin: &str| band(table, coin, "100", "120", 10).availability;
+        let gaps = |label: &str| crate::metrics::UNTRIGGERED_COIN_GAPS_TOTAL.with_label_values(&[label]).get();
+        let unmatched_gaps = gaps("childUnmatched");
+        let mut table = table(TriggerSection::Complete(vec![stop("ETH", 1, "110")]));
+        table.on_status(7, USER, "open", HASH, &parent(10, &[&stop("BTC", 11, "110")], Some(10)));
+        table.on_status(8, USER, "open", HASH, &wire(&stop("BTC", 20, "105")));
+        assert_eq!(gap(&table, "BTC"), TriggerAvailability::Gap(TriggerGap::ChildUnmatched));
+        assert!(complete(&table, "ETH"));
+        assert_eq!((oids(&band(&table, "BTC", "100", "120", 10)), table.incomplete_coins()), (vec![20], 1), "its orders still served");
+        // the coin's first gap stands; another coin's live gaps are their own
+        table.open(Err(Error::from("bad order")), "BTC", &Oid::new(21));
+        table.open(Err(Error::from("bad order")), "SOL", &Oid::new(30));
+        let mut unparseable_children = parent(40, &[], None);
+        (unparseable_children.coin, unparseable_children.children) = ("AVAX".to_string(), vec![serde_json::json!({"oid": "x"})]);
+        table.on_status(9, USER, "open", HASH, &unparseable_children);
+        assert_eq!(
+            (gap(&table, "BTC"), gap(&table, "SOL"), gap(&table, "AVAX")),
+            (TriggerAvailability::Gap(TriggerGap::ChildUnmatched), TriggerAvailability::Gap(TriggerGap::LiveParseFailed), TriggerAvailability::Gap(TriggerGap::LiveParseFailed))
+        );
+        assert!(complete(&table, "ETH"));
+        assert_eq!((table.incomplete_coins(), table.install_complete(), gaps("childUnmatched")), (3, true, unmatched_gaps + 1));
+        // all coins: incomplete while any coin is, by the first coin's gap
+        assert_eq!(table.availability(None), TriggerAvailability::Gap(TriggerGap::LiveParseFailed), "AVAX first by name");
+        // a node trigger of an order not held is a misread only where the coin's orders are complete
+        assert_eq!(table.misread_triggered(&wire(&stop("BTC", 99, "100"))), None);
+        assert_eq!(table.misread_triggered(&wire(&stop("ETH", 99, "100"))), Some(TriggerMisread::NotHeld));
+        // an order of the section that did not convert
+        let seeded = self::table(TriggerSection::Complete(vec![stop("BTC", 2, "x"), stop("ETH", 3, "110")]));
+        assert_eq!((gap(&seeded, "BTC"), complete(&seeded, "ETH")), (TriggerAvailability::Gap(TriggerGap::SnapshotParseFailed), true));
+        assert!(seeded.install_complete());
+        // only a complete install recovers
+        let mut next = self::table(TriggerSection::Complete(Vec::new()));
+        next.succeed(&table);
+        assert_eq!((next.availability(None), next.incomplete_coins()), (TriggerAvailability::Complete, 0));
+    }
+
+    /// The status a child got instead of its `open` names the coin's gap: an explicit rejection resolves the child, any
+    /// other status leaves it unresolved.
+    #[test]
+    fn an_announced_child_with_another_status_before_any_open_stays_unresolved() {
+        let _counters = unmatched_counters();
+        let child = stop("BTC", 11, "110");
+        let mut table = table(TriggerSection::Complete(Vec::new()));
+        table.on_status(7, USER, "open", HASH, &parent(10, &[&child], Some(10)));
+        assert!(table.expected.announces(USER, &wire(&child)));
+        assert!(!table.expected.announces(USER, &wire(&stop("BTC", 11, "111"))));
+        table.on_status(7, USER, "perpMarginRejected", None, &wire(&child));
+        assert!(table.expected.announces(USER, &wire(&child)), "an unproven terminal path does not resolve it");
+        table.on_status(8, USER, "open", HASH, &wire(&stop("BTC", 20, "105")));
+        assert_eq!(table.availability(Some(&Coin::new("BTC"))), TriggerAvailability::Gap(TriggerGap::ChildUnmatched));
     }
 }

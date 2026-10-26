@@ -336,6 +336,25 @@ lazy_static! {
         "Children announced by a parent's open whose own open did not follow in the block"
     ).expect("metric can be created");
 
+    /// Coins whose trigger orders the table may miss, counted at each coin's first gap since the install, by the gap:
+    /// one coin's gap leaves the other coins complete (bm 10-26: one EWZ child had kept every coin incomplete).
+    pub static ref UNTRIGGERED_COIN_GAPS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_untriggered_coin_gaps_total", "Coins whose untriggered trigger orders became incomplete until the next install, by gap"),
+        &["gap"]
+    ).expect("metric can be created");
+
+    /// Coins whose trigger orders the table may miss now (their own gap, kept until the next install).
+    pub static ref ORDERBOOK_UNTRIGGERED_INCOMPLETE_COINS: IntGauge = IntGauge::new(
+        "orderbook_untriggered_incomplete_coins",
+        "Coins whose untriggered trigger orders the table may miss until the next install"
+    ).expect("metric can be created");
+
+    /// 1 when the install's trigger section was complete; 0 when every coin's trigger orders are a gap.
+    pub static ref ORDERBOOK_UNTRIGGERED_INSTALL_COMPLETE: IntGauge = IntGauge::new(
+        "orderbook_untriggered_install_complete",
+        "1 when the last install's trigger section was complete (0: every coin's untriggered orders may miss)"
+    ).expect("metric can be created");
+
     /// Live node triggers of orders the trigger table held otherwise (`TriggerMisread`): `waiting` for a parent, out
     /// of every band, or `notHeld` while the table was complete - forced flow orders the bands missed. Findings of the
     /// check, not distinct orders: a `triggered` line delivered again at the top height counts again (review 000470).
@@ -829,6 +848,9 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ORDERBOOK_UNTRIGGERED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(UNTRIGGERED_EVICTIONS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(UNTRIGGERED_COIN_GAPS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(ORDERBOOK_UNTRIGGERED_INCOMPLETE_COINS.clone())).ok();
+    REGISTRY.register(Box::new(ORDERBOOK_UNTRIGGERED_INSTALL_COMPLETE.clone())).ok();
     REGISTRY.register(Box::new(UNTRIGGERED_MISREAD_TRIGGERS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(BBO_CHANGES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(BBO_PUBLICATION_QUOTES_TOTAL.clone())).ok();
