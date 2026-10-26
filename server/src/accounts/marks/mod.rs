@@ -23,6 +23,7 @@ pub(crate) mod decimal;
 pub(crate) mod execution;
 pub(crate) mod fill_prices;
 pub(crate) mod native;
+pub(crate) mod refresh;
 mod orders;
 pub(crate) mod pairing;
 pub(crate) mod rules;
@@ -190,18 +191,15 @@ impl MarkState {
     /// Applies block `height`; coins outside the seed's universe (listed since) are counted and skipped, a value that
     /// does not convert, a diff that does not fit or a price action that contradicts the block breaks the contract.
     fn apply(&mut self, height: u64, inputs: &BlockInputs, report: &mut MarksBlockReport) {
+        let automatic_main_refresh = self.begin_block(height, inputs, report);
         let mut fill_prices = FillPriceBuilder::new(&inputs.fills);
         fill_prices.collateral(&self.hip3, &self.prices, inputs);
         fill_prices.hip3(&self.hip3, inputs);
         self.apply_hip3(height, &inputs.hip3, report);
-        if let Some(actions) = &inputs.actions {
-            self.prices.begin_block(actions.time_ns);
-            self.time_ms = actions.time_ns / 1_000_000;
-        }
         let cuts = self.apply_diffs(height, &inputs.diffs, report);
         let trades = self.block_trades(height, &inputs.fills, report);
         if let Some(actions) = inputs.actions.as_ref().filter(|_| !self.books_broken && !self.prices_broken)
-            && let Err((stream, err)) = self.apply_prices(actions, inputs, &cuts, &trades, report, &mut fill_prices)
+            && let Err((stream, err)) = self.apply_prices(actions, inputs, &cuts, &trades, report, &mut fill_prices, automatic_main_refresh)
         {
             report.errors.push((stream, format!("block {height}: {err}")));
             self.prices_broken = true;
@@ -213,6 +211,24 @@ impl MarkState {
         }
         report.fill_prices = fill_prices.finish(height, &inputs.fills);
         self.height = height;
+    }
+
+    fn begin_block(&mut self, height: u64, inputs: &BlockInputs, report: &mut MarksBlockReport) -> bool {
+        let Some(actions) = &inputs.actions else { return false };
+        self.time_ms = actions.time_ns / 1_000_000;
+        self.prices.begin_block(actions.time_ns);
+        if self.books_broken || self.prices_broken { return false; }
+        let books = &self.books;
+        match self.prices.refresh_stale(height, actions.time_ns, |asset| CoinCut {
+            best: books.best(asset), spot_reference: books.spot_reference(asset).map(|book| books.best(book)), block_trade: None,
+        }) {
+            Ok(refreshed) => refreshed,
+            Err(err) => {
+                self.prices_broken = true;
+                report.errors.push((Stream::BlockActions, format!("block {height}: {err}")));
+                false
+            }
+        }
     }
 
     fn apply_hip3(&mut self, height: u64, updates: &[Hip3PriceUpdate], report: &mut MarksBlockReport) {
@@ -277,11 +293,12 @@ impl MarkState {
         trades: &FxHashMap<usize, Vec<(usize, u64)>>,
         report: &mut MarksBlockReport,
         fill_prices: &mut FillPriceBuilder,
+        automatic_main_refresh: bool,
     ) -> Result<(), (Stream, String)> {
         let books = &self.books;
         let system = inputs.system.anchors(actions, &inputs.statuses, self.system_timing, |coin| books.order_asset(coin)).map_err(|err| (Stream::SystemActions, err))?;
         let mut fills_from = 0;
-        for point in execution::price_points_with_system(actions, &inputs.statuses, &inputs.diffs, &inputs.fills, &system, |coin| books.order_asset(coin)).map_err(|err| (Stream::BlockActions, err))? {
+        for point in execution::price_points_with_system(actions, &inputs.statuses, &inputs.diffs, &inputs.fills, &system, |coin| books.order_asset(coin), automatic_main_refresh).map_err(|err| (Stream::BlockActions, err))? {
             fill_prices.native_segment(&inputs.fills, &self.prices, fills_from, point.fills_hi);
             fills_from = point.cut.fills_lo;
             if point.cut.lo < point.cut.hi {

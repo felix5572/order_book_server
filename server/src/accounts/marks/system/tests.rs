@@ -23,7 +23,7 @@ fn archived_eth_corewriter_trade_precedes_sga_but_the_zec_trigger_does_not() {
     assert_eq!(anchors.after.created, Vec::<u64>::new());
     let diffs: Vec<_> = g.diffs.iter().map(|d| BookDiff::of(d).unwrap()).collect();
     let fills: Vec<_> = g.fills.iter().map(BlockFill::of).collect();
-    let points = price_points_with_system(&actions, &statuses, &diffs, &fills, &anchors, asset).unwrap();
+    let points = price_points_with_system(&actions, &statuses, &diffs, &fills, &anchors, asset, false).unwrap();
     let cut = points[0].cut;
     assert_eq!(cut.fills_lo, 2, "the two ETH legs precede SGA, the ZEC trigger legs follow it");
     assert_eq!((cut.lo, cut.hi), (1, 1));
@@ -138,7 +138,7 @@ fn a_competing_corewriter_rejection_cannot_be_assigned_to_a_native_ioc() {
     let diff = BookDiff::of(&serde_json::from_value::<NodeDataOrderDiff>(serde_json::json!({
         "user":user,"coin":"ETH","oid":7,"side":"B","px":"2441","raw_book_diff":"remove"
     })).unwrap()).unwrap();
-    let points = price_points_with_system(&a, &statuses, &[diff], &[], &anchors, asset).unwrap();
+    let points = price_points_with_system(&a, &statuses, &[diff], &[], &anchors, asset, false).unwrap();
     assert_eq!((points[0].cut.lo, points[0].cut.hi), (0, 1), "neither competing request owns the cancel");
 }
 
@@ -217,7 +217,7 @@ fn archived_corewriter_cancel_without_flag_precedes_the_price_action() {
     assert!(anchors.after.cancelled.is_empty() && anchors.after.created.is_empty());
     let diffs: Vec<_> = g.diffs.iter().map(|d| BookDiff::of(d).unwrap()).collect();
     let fills: Vec<_> = g.fills.iter().map(BlockFill::of).collect();
-    let points = price_points_with_system(&actions, &statuses, &diffs, &fills, &anchors, asset).unwrap();
+    let points = price_points_with_system(&actions, &statuses, &diffs, &fills, &anchors, asset, false).unwrap();
     assert_eq!((points[0].cut.lo, points[0].cut.hi, points[0].cut.fills_lo), (2, 2, 2));
 }
 

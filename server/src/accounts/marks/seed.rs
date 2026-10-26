@@ -212,6 +212,7 @@ pub(crate) struct WireNativePrices {
     pub(crate) spot_books: Vec<WireBook>,
     /// (ordinary order delay in seconds, delay scale); absent on older archives.
     pub(crate) system_timing: Option<(f64, f64)>,
+    pub(crate) refresh: super::refresh::WireRefreshSeed,
 }
 
 // ─── domain ─────────────────────────────────────────────────────────────────
@@ -230,6 +231,7 @@ pub(crate) struct MarkSeed {
 /// The main dex's price state, by asset index.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativeSeed {
+    pub(crate) refresh: super::refresh::RefreshState,
     pub(crate) system_timing: Option<(f64, f64)>,
     pub(crate) assets: Vec<NativeAsset>,
     /// The spot books `oracle.psro` names, in its order.
@@ -367,7 +369,7 @@ impl MarkSeed {
 
 impl NativeSeed {
     fn from_wire(wire: WireNativePrices, main: &DexMeta, spot_pairs: &[SpotPair]) -> Result<Self, String> {
-        let WireNativePrices { oracle, halted_assets, books, spot_books, system_timing } = wire;
+        let WireNativePrices { oracle, halted_assets, books, spot_books, system_timing, refresh } = wire;
         let count = main.assets.len();
         let halted_assets = halted_assets.ok_or("halted_assets is missing")?;
         let mut halted = vec![false; count];
@@ -413,7 +415,8 @@ impl NativeSeed {
                 orders,
             });
         }
-        Ok(Self { system_timing, assets, spot_references })
+        let refresh = super::refresh::RefreshState::from_wire(refresh, count)?;
+        Ok(Self { system_timing, assets, spot_references, refresh })
     }
 }
 

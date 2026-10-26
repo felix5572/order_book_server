@@ -83,6 +83,18 @@ mod tests {
         assert_eq!(transfer(10, 100, Side::Bid, 1, 0, Some(range(90, 110)), Some(i64::MAX)).unwrap(), Transfer { micro_usdc: 1_000, estimated: false });
     }
 
+    // SAND 1197481585, taker 0x5e678540..., 255 @ .047053, isolated leverage 4.
+    // Native checkpoint 1197490000 stores -9.008269 USDC; the stale mark .047046
+    // overfunded it by 1,339 micro. Production marks' 10k-block golden checks the new mark.
+    #[test]
+    fn sand_automatic_mark_removes_the_1339_micro_isolated_error() {
+        let corrected = transfer(255, 47053, Side::Bid, 4, 0, Some(range(47053, 47053)), Some(i64::MAX)).unwrap();
+        let stale = transfer(255, 47053, Side::Bid, 4, 0, Some(range(47046, 47046)), Some(i64::MAX)).unwrap();
+        assert!(!corrected.estimated);
+        assert_eq!(corrected.micro_usdc - 255 * 47053 - 9382, -9008269);
+        assert_eq!(stale.micro_usdc - corrected.micro_usdc, 1339);
+    }
+
     #[test]
     fn one_floor_and_invalid_inputs() {
         assert_eq!(transfer(9, 10, Side::Bid, 3, 0, Some(range(9, 9)), Some(i64::MAX)).unwrap().micro_usdc, 36);

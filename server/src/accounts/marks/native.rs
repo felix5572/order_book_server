@@ -235,8 +235,7 @@ impl CoinPrices {
     }
 
     /// A `SetGlobalAction`'s submitted (oracle, mark) for this coin.
-    fn set_global(&mut self, oracle: &str, mark: &str, time_ns: u64, cut: CoinCut) -> Result<(), String> {
-        let (submitted_oracle, submitted_mark) = (wire_units(oracle, self.size_decimals)?, wire_units(mark, self.size_decimals)?);
+    fn set_global(&mut self, submitted_oracle: u64, submitted_mark: u64, time_ns: u64, cut: CoinCut) -> Result<(), String> {
         let Some((bid, ask, local)) = self.local(cut) else { return Ok(()) };
         let (Some(spot_median), Some(mark_median), Some(emas)) = (self.spot.median, self.marks.median, self.emas.as_ref()) else {
             self.unsupported.get_or_insert("noCacheOrEma");
@@ -259,6 +258,7 @@ impl CoinPrices {
 /// Every main-dex coin's prices, by asset index.
 #[derive(Debug, Clone)]
 pub(crate) struct NativePrices {
+    refresh: super::refresh::RefreshState,
     coins: Vec<CoinPrices>,
     by_name: FxHashMap<String, usize>,
     /// The assets `psro` names: every reference action gives them a Spot input.
@@ -308,13 +308,25 @@ impl NativePrices {
             .collect();
         let by_name = coins.iter().enumerate().map(|(index, coin)| (coin.name.clone(), index)).collect();
         let spot_referenced = native.spot_references.iter().map(|spot| spot.asset).collect();
-        Self { coins, by_name, spot_referenced }
+        Self { coins, by_name, spot_referenced, refresh: native.refresh.clone() }
     }
 
     pub(crate) fn begin_block(&mut self, block_ns: u64) {
         for coin in &mut self.coins {
             coin.begin_block(block_ns);
         }
+    }
+
+    /// Automatic selector at block start, before this block's book effects or fills.
+    pub(crate) fn refresh_stale(&mut self, height: u64, time_ns: u64, cut_of: impl Fn(usize) -> CoinCut) -> Result<bool, String> {
+        if !self.refresh.due(height, time_ns) { return Ok(false); }
+        for (asset, pair) in self.refresh.submitted.iter().enumerate() {
+            let Some((oracle, mark)) = *pair else { continue };
+            let coin = &mut self.coins[asset];
+            if coin.halted { continue; }
+            coin.set_global(oracle, mark, time_ns, cut_of(asset)).map_err(|err| format!("{} automatic refresh: {err}", coin.name))?;
+        }
+        Ok(true)
     }
 
     /// A crossed fill of the coin moved the last trade.
@@ -378,10 +390,14 @@ impl NativePrices {
         match action {
             MarkAction::Book(_) | MarkAction::VaultWithdraw { .. } | MarkAction::Hip3Oracle { .. } => Ok(()),
             MarkAction::SetGlobal(pxs) => {
+                self.refresh.check_coverage(pxs.iter().map(Option::is_some))?;
+                self.refresh.explicit(time_ns);
                 for (asset, pair) in pxs.iter().enumerate() {
                     let Some((oracle, mark)) = pair else { continue };
                     let coin = self.coins.get_mut(asset).ok_or_else(|| format!("SetGlobalAction prices asset {asset} outside the universe"))?;
-                    coin.set_global(oracle, mark, time_ns, cut_of(asset)).map_err(|err| format!("{}: {err}", coin.name))?;
+                    let pair = (wire_units(oracle, coin.size_decimals)?, wire_units(mark, coin.size_decimals)?);
+                    self.refresh.submitted[asset] = Some(pair);
+                    coin.set_global(pair.0, pair.1, time_ns, cut_of(asset)).map_err(|err| format!("{}: {err}", coin.name))?;
                 }
                 Ok(())
             }
@@ -690,7 +706,7 @@ mod tests {
             coin.emas = Some(NativeEmas { basis: case.basis.state(), local_price: case.local_price_ema.state() });
             coin.spot.median = Some(case.spot_cache_units);
             coin.marks.median = Some(case.mark_cache_units);
-            coin.set_global(&case.submitted_oracle, &case.submitted_mark, case.time_ns,
+            coin.set_global(wire_units(&case.submitted_oracle, coin.size_decimals).unwrap(), wire_units(&case.submitted_mark, coin.size_decimals).unwrap(), case.time_ns,
                 cut(case.bid_units, case.ask_units, case.last_trade_units)).unwrap();
             assert_eq!(coin.unsupported, None, "block {}", case.block);
             assert_eq!(coin.mark, StoredMark { px: wire_units(&case.expected_mark, case.sz_decimals).unwrap(), time_ns: case.time_ns }, "block {}", case.block);

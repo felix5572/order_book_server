@@ -27,7 +27,7 @@ fn cut(g: &Golden, a: &MarkActions, system: &SystemAnchors) -> Cut {
     let diffs = g.diffs.iter().map(BookDiff::of).collect::<Result<Vec<_>, _>>().unwrap();
     let fills = g.fills.iter().map(BlockFill::of).collect::<Vec<_>>();
     price_points_with_system(a, &statuses, &diffs, &fills, system,
-        |coin| (coin == g.coin).then_some(g.asset)).unwrap()[0].cut
+        |coin| (coin == g.coin).then_some(g.asset), false).unwrap()[0].cut
 }
 
 #[test]

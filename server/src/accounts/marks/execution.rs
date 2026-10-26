@@ -10,7 +10,7 @@
 //! An anchor of a later action before one of an earlier action contradicts the line order: the block breaks the
 //! contract.
 //!
-//! A trigger order's placement is not its activation. Only a main-dex trigger with exactly one `SetGlobalAction`
+//! A trigger order's placement is not its activation. Only a main-dex trigger with no automatic block-start refresh and exactly one `SetGlobalAction`
 //! is placed by the rule above. HIP-3 triggers, and native triggers with zero/multiple `SetGlobalAction`s, stay
 //! unplaced instead of falling back to their initial order's rank (bm xyz:SP500 1191957330).
 //!
@@ -239,7 +239,7 @@ pub(crate) fn price_points<'b>(
     fills: &[BlockFill],
     order_asset: impl Fn(&str) -> Option<u32>,
 ) -> Result<Vec<PricePoint<'b>>, String> {
-    price_points_with_system(actions, statuses, diffs, fills, &super::system::SystemAnchors::default(), order_asset)
+    price_points_with_system(actions, statuses, diffs, fills, &super::system::SystemAnchors::default(), order_asset, false)
 }
 
 pub(crate) fn price_points_with_system<'b>(
@@ -249,6 +249,7 @@ pub(crate) fn price_points_with_system<'b>(
     fills: &[BlockFill],
     system: &super::system::SystemAnchors,
     order_asset: impl Fn(&str) -> Option<u32>,
+    automatic_main_refresh: bool,
 ) -> Result<Vec<PricePoint<'b>>, String> {
     let mut points: Vec<&RankedAction> = actions.actions.iter().filter(|action| action.action.is_price()).collect();
     if points.is_empty() {
@@ -256,7 +257,7 @@ pub(crate) fn price_points_with_system<'b>(
     }
     points.sort_by_key(|action| action.rank);
     let set_globals: Vec<Rank> =
-        points.iter().filter(|action| matches!(action.action, MarkAction::SetGlobal(_))).map(|action| action.rank).collect();
+        points.iter().filter(|action| !automatic_main_refresh && matches!(action.action, MarkAction::SetGlobal(_))).map(|action| action.rank).collect();
     // A native SetGlobalAction cannot trigger a HIP-3 (or spot) order. HIP-3 setOracle can execute in an earlier
     // bundle: treating its fills as native post-SGA fills manufactured a contradiction at bm block 1191473229.
     let native_triggered = statuses.triggered_orders.iter()
@@ -640,6 +641,8 @@ mod tests {
         let btc = |coin: &str| (coin == "BTC").then_some(0);
         let points = price_points(&actions, &statuses, &diffs, &[], btc).unwrap();
         assert_eq!((points[0].cut.lo, points[0].cut.hi), (0, 1));
+        let automatic = price_points_with_system(&actions, &statuses, &diffs, &[], &crate::accounts::marks::system::SystemAnchors::default(), btc, true).unwrap();
+        assert_eq!((automatic[0].cut.lo, automatic[0].cut.hi), (0, 2), "automatic refresh is another possible trigger writer");
         let without = price_points(&actions, &BlockStatuses::default(), &diffs, &[], no_asset).unwrap();
         assert_eq!(without[0].cut.lo, 2, "as the placing action's");
     }

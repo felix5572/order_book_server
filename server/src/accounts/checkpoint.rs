@@ -303,6 +303,10 @@ struct WireCheckpoint {
 /// `locus` precedes `perp_dexs` on disk (1190680000); the order does not matter to the parse.
 #[derive(Deserialize)]
 struct WireExchange {
+    msc: Option<super::marks::refresh::WireRefreshConfig>,
+    begin_block_logic_guard: Option<super::marks::refresh::BucketGuard>,
+    post_only_until_time: Option<String>,
+    post_only_until_height: Option<u64>,
     pt: Option<WirePriority>,
     action_delayer: Option<WireDelayer>,
     locus: ParsedLocus,
@@ -313,12 +317,14 @@ struct WireExchange {
 
 #[derive(Deserialize)]
 struct WireCtx {
+    hardfork_height: Option<u64>,
     height: u64,
     time: String,
 }
 
 #[derive(Deserialize)]
 struct WireClearinghouse {
+    lnsgt: Option<String>,
     meta: WireMeta,
     oracle: WireOracle,
     user_states: WireUserStates,
@@ -739,25 +745,31 @@ pub(crate) fn parse_checkpoint_bytes(bytes: &[u8]) -> Result<CheckpointAccounts>
 }
 
 fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, String> {
-    let WireExchange { locus, perp_dexs, spot_books, pt, action_delayer } = exchange;
+    let WireExchange { locus, perp_dexs, spot_books, pt, action_delayer, msc, begin_block_logic_guard, post_only_until_time, post_only_until_height } = exchange;
     let time_ms = node_time_ns(&locus.ctx.time).map_err(|err| format!("ctx.time: {err}"))? / 1_000_000;
     let mut dexes = Vec::with_capacity(locus.cls.len());
     let mut dex_users = Vec::with_capacity(locus.cls.len());
     let mut order_trackers: Vec<Option<FxHashMap<Address, OrderTrackerSnapshot>>> = Vec::with_capacity(locus.cls.len());
     let mut first_oracle = None;
     let mut native_halted_assets = None;
-    for WireClearinghouse { meta, oracle, mut user_states, halted_assets } in locus.cls {
+    let mut last_explicit_time = None;
+    for WireClearinghouse { meta, oracle, mut user_states, halted_assets, lnsgt } in locus.cls {
         order_trackers.push(user_states.open_order_tracker.take().map(|tracker| tracker.user_to_data.into_iter().collect()));
         let pdi = meta.pdi;
         let (meta, users) = build_dex(meta, &oracle.pxs2, user_states).map_err(|err| format!("dex pdi {pdi}: {err}"))?;
         if first_oracle.is_none() {
             native_halted_assets = halted_assets;
+            last_explicit_time = lnsgt;
         }
         first_oracle.get_or_insert(oracle);
         dexes.push(meta);
         dex_users.push(users);
     }
-    let native_prices = WireNativePrices { oracle: first_oracle.ok_or("locus.cls is empty")?, halted_assets: native_halted_assets, books: perp_dexs.0, spot_books, system_timing: pt.zip(action_delayer).map(|(pt, delayer)| (pt.prp.order_delay_s, delayer.delay_scale)) };
+    let refresh = super::marks::refresh::WireRefreshSeed {
+        config: msc, outer: begin_block_logic_guard, post_only_until_time, post_only_until_height,
+        hardfork_height: locus.ctx.hardfork_height, last_explicit_time,
+    };
+    let native_prices = WireNativePrices { refresh, oracle: first_oracle.ok_or("locus.cls is empty")?, halted_assets: native_halted_assets, books: perp_dexs.0, spot_books, system_timing: pt.zip(action_delayer).map(|(pt, delayer)| (pt.prp.order_delay_s, delayer.delay_scale)) };
     let holders: Vec<Address> = {
         let mut holders: Vec<Address> = dex_users
             .iter()
@@ -1147,6 +1159,12 @@ pub(crate) mod tests {
             }
         });
         let mut checkpoint = checkpoint;
+        checkpoint["exchange"]["msc"] = json!({"sgd": null, "sog": {"last_bucket": 0, "bucket_millis": 3000}, "mou": {"u": [[], [], []]}});
+        checkpoint["exchange"]["begin_block_logic_guard"] = json!({"last_bucket": 0, "bucket_millis": 1000});
+        checkpoint["exchange"]["post_only_until_time"] = json!("2026-10-19T00:00:00");
+        checkpoint["exchange"]["post_only_until_height"] = json!(0);
+        checkpoint["exchange"]["locus"]["ctx"]["hardfork_height"] = json!(0);
+        checkpoint["exchange"]["locus"]["cls"][0]["lnsgt"] = json!("2026-10-19T06:40:00");
         checkpoint["exchange"]["locus"]["blp"] = lending_fixture();
         // token_infos is indexed by token id; USDC's 8 size decimals make its stored reserve price 1 mean 1.0
         let token_infos: Vec<serde_json::Value> = (0..=360)
