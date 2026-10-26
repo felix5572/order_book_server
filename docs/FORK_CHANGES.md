@@ -289,7 +289,10 @@ metrics.rs、心跳、OOM 修复、共享渲染帧、per-price-level 聚合、tr
 - **区块交易标记**(设计 000429 r2): 第三个流读 `replica_cmds`(每块一行, 一行最大实测 6.4 MB, 上限 64 MiB), 回执先按
   bundle hash 找、再按 bundle 内下标配对(找不到、重复、条数不等即契约违规); 只取成功的 `updateIsolatedMargin` /
   `updateLeverage`(→ `margin`)、`userSetAbstraction` / `agentSetAbstraction`(→ `accountMode`)、`withdraw3`
-  (→ `withdrawal`), 账户取回执 `user`(带 `vaultAddress` 时即子账户 / 金库)。每块都有一行, 块高跳号按丢到最后一个
+  (→ `withdrawal`), 通常取回执 `user`(带 `vaultAddress` 时即子账户 / 金库)。`userSetAbstraction` 则取动作内的
+  `user`: H1198440715 的成功回执是主账户, 动作目标是子账户。漏掉此区别会让子账户在统一保证金关闭后仍合并现货现金;
+  H1198440000→H1198450000 的 LIT 清算价差来自残留现货 0.006715 USDC。修复只将模式切换标记和
+  `accountModeSwitch` 停止回放作用到正确目标, 不声称支持完整模式切换现金回放。每块都有一行, 块高跳号按丢到最后一个
   缺失块记丢失; 与成交 / 杂项流同一套丢失界与覆盖规则, 丢失未被锚点覆盖时视图 503。标记日志溢出时按被挤掉那条的
   来源记丢失。没做设计里的按字节预筛: 本地 400 个真实块(132 MB)全量解析 2.3 GB/s, 只读块高 2.4 GB/s, 预筛省不出
   东西。

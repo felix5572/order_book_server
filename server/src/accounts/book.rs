@@ -1986,6 +1986,34 @@ mod tests {
         assert_eq!(view.changes.account_mode, Some(1_001), "the marks show again");
     }
 
+    /// Replay the observed parent/subaccount distinction with the two fixture accounts and block height.
+    #[test]
+    fn user_abstraction_withdraws_the_targets_replay_without_stopping_the_signer() {
+        let target = checkpoint_user(HOLDER);
+        let signer = checkpoint_user(ISOLATED);
+        let mut case: serde_json::Value = serde_json::from_str(include_str!("user_abstraction_subaccount_golden.json")).unwrap();
+        case["height"] = serde_json::json!(1_001);
+        case["action"]["user"] = serde_json::json!(format!("{target:#x}"));
+        case["receipt"]["user"] = serde_json::json!(format!("{signer:#x}"));
+        let mut book = replay_book(1_000, 1_000, &[(target, 1_000_000), (signer, -2_000_000)]);
+        let signer_before = view_of(&book, signer).replayed.unwrap();
+        let actions = crate::accounts::actions::parse_block_actions(
+            &crate::accounts::actions::tests::action_line(&case)).unwrap();
+        book.apply_block_actions(actions.clone());
+        book.apply_block_actions(actions);
+        let changed = view_of(&book, target);
+        assert!(changed.replayed.is_none());
+        assert_eq!(changed.replay_stop, Some(Stop { block: Some(1_001), reason: StopReason::AccountModeSwitch }));
+        assert_eq!(changed.changes.account_mode, Some(1_001));
+        let unchanged = view_of(&book, signer);
+        let signer_after = unchanged.replayed.unwrap();
+        assert_eq!(signer_after.height, 1_001);
+        assert_eq!(signer_after.row, signer_before.row);
+        assert_eq!(signer_after.mark, signer_before.mark);
+        assert_eq!(unchanged.replay_stop, None);
+        assert_eq!(unchanged.changes.account_mode, None);
+    }
+
     /// Review 000437 r1 P2: a position closed and reopened after the anchor takes the coin's current table, and a late
     /// anchor from before the close (holding the old position at table 20) does not take it back.
     #[test]

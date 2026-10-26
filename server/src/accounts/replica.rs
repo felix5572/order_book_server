@@ -3,8 +3,9 @@
 //!
 //! `{"abci_block": {"time", "signed_action_bundles": [[hash, {"signed_actions": [{"action": {"type", ...}, ...}], ...}]],
 //! ...}, "resps": {"Full": [[hash, [{"user", "res": {"status", "response"}}]]]}, "height"}`. A response belongs to the
-//! action at the same index of the bundle with the same hash. Its `user` is the account acted on: the `vaultAddress`
-//! when one is given (bm 2026-10-19: 1,387 of 1,387), `null` when the signer is unknown. Payload fields are read only
+//! action at the same index of the bundle with the same hash. Its `user` normally identifies the acting account:
+//! the `vaultAddress` when given (bm 2026-10-19: 1,387 of 1,387), `null` when the signer is unknown. Some actions
+//! explicitly name another target: `userSetAbstraction.user` can be a subaccount of the receipt user. Payload fields are read only
 //! once the action's type is known (other action types use the same field names with other value types).
 
 use rustc_hash::FxHashMap;
@@ -45,6 +46,9 @@ struct SignedAction<'a> {
 pub(crate) struct Action<'a> {
     #[serde(rename = "type")]
     pub(crate) action_type: &'a str,
+    /// Read by `userSetAbstraction` only; unrelated actions may use a different payload type.
+    #[serde(borrow)]
+    pub(crate) user: Option<LazyValue<'a>>,
     #[serde(borrow)]
     pub(crate) asset: Option<LazyValue<'a>>,
     #[serde(borrow)]

@@ -135,7 +135,8 @@ pub(crate) fn block_actions(replica: &ReplicaLine<'_>) -> Result<BlockActions, S
                 return kept_action(paired.action, paired.response);
             }
             // The outer receipt is the execution result, including failed authorization. Its user is the actual
-            // account (possibly a vault/subaccount), not necessarily payload.multiSigUser or outerSigner.
+            // acting account (possibly a vault/subaccount), not necessarily payload.multiSigUser or outerSigner.
+            // kept_action resolves any action-specific target after checking that receipt.
             match paired.response.res.status {
                 "err" => return Ok(None),
                 "ok" => {}
@@ -155,11 +156,18 @@ fn kept_action(action: &Action<'_>, response: &Response<'_>) -> Result<Option<Ke
     if BlockActionKind::of(action.action_type).is_none() {
         return Ok(None);
     }
-    let Some(user) = succeeded(action.action_type, response)? else { return Ok(None) };
+    let Some(receipt_user) = succeeded(action.action_type, response)? else { return Ok(None) };
+    // H1198440715: a parent authorizes a subaccount's mode switch. The receipt identifies the parent;
+    // only userSetAbstraction explicitly names the affected account. Rejected payloads are not read.
+    let user = if action.action_type == "userSetAbstraction" {
+        action.field(action.user.as_ref(), "user")?
+    } else {
+        receipt_user
+    };
     Ok(Some((BlockAction::read(action)?, user)))
 }
 
-/// The account a kept action acted on; `None` when it failed.
+/// Validate success and the receipt account; the action may name a different target. `None` when it failed.
 fn succeeded(action_type: &str, response: &Response<'_>) -> Result<Option<Address>, String> {
     match response.res.status {
         "err" => Ok(None),
@@ -201,10 +209,9 @@ pub(crate) mod tests {
 
     /// Payloads of real successful actions (bm `replica_cmds`, 2026-10-19), put in the place of the kept one.
     #[test]
-    fn every_kept_type_reads_its_payload() {
+    fn receipt_targeted_types_read_their_payloads() {
         let cases = [
             (r#"{"type":"updateIsolatedMargin","asset":110086,"isBuy":true,"ntli":-4950000}"#, BlockAction::IsolatedMargin { asset: 110_086, ntli_micro: -4_950_000 }),
-            (r#"{"type":"userSetAbstraction","signatureChainId":"0xa4b1","hyperliquidChain":"Mainnet","user":"0x77cb5ed9458def628fdb13e0f9098cc3a454bd04","abstraction":"u","nonce":1792446348734}"#, BlockAction::SetAbstraction),
             (r#"{"type":"agentSetAbstraction","abstraction":"u"}"#, BlockAction::SetAbstraction),
             (r#"{"type":"withdraw3","signatureChainId":"0xa4b1","hyperliquidChain":"Mainnet","destination":"0x619d9addcefccbe3bde5591b72b9cbe1103c5e43","amount":"34.390000","time":1792446358887}"#, BlockAction::Withdraw { amount_wei: 3_439_000_000 }),
         ];
@@ -327,6 +334,34 @@ pub(crate) mod tests {
             }]]},
             "resps": {"Full": [[case["bundle"], [case["receipt"]]]]}
         }).to_string()
+    }
+
+    /// H1198440715: a parent receipt authorizes changing the payload's subaccount.
+    #[test]
+    fn user_abstraction_targets_the_payload_account_only_after_success() {
+        let mut case: serde_json::Value = serde_json::from_str(include_str!("user_abstraction_subaccount_golden.json")).unwrap();
+        let target = address(case["action"]["user"].as_str().unwrap());
+        let signer = address(case["receipt"]["user"].as_str().unwrap());
+        assert_ne!(target, signer);
+        let expected = [(BlockAction::SetAbstraction, target)];
+        assert_eq!(parse_block_actions(&action_line(&case)).unwrap().actions, expected);
+        let action = case["action"].clone();
+        case["action"] = serde_json::json!({"type":"multiSig", "payload":{"action":action.clone()}});
+        assert_eq!(parse_block_actions(&action_line(&case)).unwrap().actions, expected);
+        case["action"] = action;
+        for invalid in [serde_json::Value::Null, serde_json::json!(7), serde_json::json!("not-an-address")] {
+            case["action"]["user"] = invalid;
+            case["receipt"]["res"]["status"] = serde_json::json!("ok");
+            assert!(parse_block_actions(&action_line(&case)).unwrap_err().contains("userSetAbstraction"));
+            case["receipt"]["res"]["status"] = serde_json::json!("err");
+            assert!(parse_block_actions(&action_line(&case)).unwrap().actions.is_empty());
+        }
+        case["receipt"]["res"]["status"] = serde_json::json!("ok");
+        case["action"].as_object_mut().unwrap().remove("user");
+        assert!(parse_block_actions(&action_line(&case)).unwrap_err().contains("without user"));
+        case["action"] = serde_json::json!({"type":"agentSetAbstraction", "abstraction":"i", "user":7});
+        assert_eq!(parse_block_actions(&action_line(&case)).unwrap().actions,
+            [(BlockAction::SetAbstraction, signer)], "agent actions still use the receipt account");
     }
 
     #[test]

@@ -1,0 +1,41 @@
+{
+  "height": 1198440715,
+  "time": "2026-10-26T22:43:36.004734989",
+  "bundle": "0x341376c7a120feea15a273d39588b0b99179e2ae0c2b97bce483f42b48e4369b",
+  "original_wire_position": [
+    0,
+    449
+  ],
+  "source_sha256": "90147e3739b7d1abc9c9880f6f31205988b0690aed0fb048a3a1a43ff682b609",
+  "action": {
+    "type": "userSetAbstraction",
+    "signatureChainId": "0xa4b1",
+    "hyperliquidChain": "Mainnet",
+    "user": "0x40a068bef012a30fd026589af18e19b5fc628d69",
+    "abstraction": "i",
+    "nonce": 1793054603813
+  },
+  "receipt": {
+    "user": "0x36d3ae8585558109186684ca9e77dba6e441a638",
+    "res": {
+      "status": "ok",
+      "response": {
+        "type": "default"
+      }
+    }
+  },
+  "evidence": {
+    "checkpoint_from": 1198440000,
+    "checkpoint_to": 1198450000,
+    "mode_before": "u",
+    "mode_after": "i",
+    "spot_usdc_after_1e8_units": 671500,
+    "node_per_dex_cash_usdc": "6307.318039",
+    "replayed_unified_cash_usdc": "6307.324754",
+    "cash_difference_usdc": "0.006715",
+    "affected_coin": "LIT",
+    "node_liquidation_px": "93.99877852459016",
+    "replayed_liquidation_px": "93.99887859910582",
+    "scope": "Raw successful target differs from receipt user; target changes mode in checkpoint. Exact difference equals excluded spot remainder; no claim of complete mode-switch routing replay."
+  }
+}
