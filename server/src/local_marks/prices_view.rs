@@ -3,8 +3,9 @@
 //!
 //! Schema 2 (the trading system's Python `hl_mark_prices` service wrote 1): the node leg is the OB's own replay, the
 //! local leg is computed here; each venue's quote is in `GET /extMarkInputs`, each reference cache's members in
-//! `GET /extMarkReferenceCaches` (they change at most every 3 s bucket and run to kilobytes a coin, so the frames leave
-//! them out; user 2026-10-27).
+//! `GET /extMarkReferenceCaches`: each reference action updates its validator's member (the median refreshes per 3 s
+//! bucket), and they run to kilobytes a coin, so the frames leave them out (user 2026-10-27); a read samples the state,
+//! not every member update.
 
 use alloy::primitives::Address;
 use serde::Serialize;
