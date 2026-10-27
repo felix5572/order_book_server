@@ -35,6 +35,12 @@ pub(crate) enum Parsed {
     Pong,
     /// A documented control message asking this connection to rotate, not a quote or an acknowledgement.
     ReconnectRequested(String),
+    /// The venue refuses another session of the account (Alpaca 406): retried within a fixed budget (design 000535 r2
+    /// revision 5), then the feed stops.
+    ConnectionLimit(String),
+    /// A documented session failure that ends this connection but not the feed (Alpaca 407 slow client, 500 internal
+    /// error): reconnected after the backoff.
+    SessionFailed(String),
     /// A frame the protocol sends that carries nothing for us (status, welcome, the venue's own heartbeat).
     Ignored,
     /// A frame of no type we know: warned with its text, not taken.
@@ -42,14 +48,36 @@ pub(crate) enum Parsed {
 }
 
 /// What a connection sends after connecting, and what it waits for.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub(crate) struct Session {
     pub(crate) url: String,
+    /// The SIP session's first request carries the Alpaca key and secret: `Debug` shows only how many there are.
     pub(crate) requests: Vec<String>,
     /// Acknowledgements the requests are answered with.
     pub(crate) acks: usize,
-    /// The heartbeat request and its cadence; `None` where the server pings (Binance).
-    pub(crate) heartbeat: Option<(String, Duration)>,
+    /// The heartbeat and its cadence; `None` where the server pings (Binance).
+    pub(crate) heartbeat: Option<(Heartbeat, Duration)>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Session")
+            .field("url", &self.url)
+            .field("requests", &self.requests.len())
+            .field("acks", &self.acks)
+            .field("heartbeat", &self.heartbeat)
+            .finish()
+    }
+}
+
+/// How a connection keeps its heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Heartbeat {
+    /// The venue's text ping, answered with its pong frame.
+    Text(String),
+    /// A WebSocket ping, answered with a Pong frame (Alpaca defines no text ping; a quiet market sends nothing).
+    WsPing,
 }
 
 /// The WS feeds; MEXC spot is polled (its WS is protobuf), Kucoin's URL needs a token first.
@@ -63,7 +91,7 @@ impl Protocol {
     /// The session for `symbols`; `kucoin` is the token handshake's (endpoint with token, ping interval).
     pub(crate) fn session(self, symbols: &[String], now_s: u64, kucoin: Option<(&str, Duration)>) -> Session {
         let json = |value: sonic_rs::Value| value.to_string();
-        let ping = |text: &str| Some((text.to_string(), HEARTBEAT_INTERVAL));
+        let ping = |text: &str| Some((Heartbeat::Text(text.to_string()), HEARTBEAT_INTERVAL));
         match (self.kind, self.venue) {
             (Kind::Spot | Kind::Perp, Venue::Binance) => {
                 let host = if self.kind == Kind::Spot { "wss://stream.binance.com:9443/stream" } else { "wss://fstream.binance.com/public/stream" };
@@ -101,7 +129,7 @@ impl Protocol {
                     url: url.to_string(),
                     requests: vec![json(sonic_rs::json!({"time": now_s, "channel": channel, "event": "subscribe", "payload": symbols}))],
                     acks: 1,
-                    heartbeat: Some((json(sonic_rs::json!({"time": now_s, "channel": ping_channel})), HEARTBEAT_INTERVAL)),
+                    heartbeat: Some((Heartbeat::Text(json(sonic_rs::json!({"time": now_s, "channel": ping_channel}))), HEARTBEAT_INTERVAL)),
                 }
             }
             (Kind::Spot, Venue::Kraken) => Session {
@@ -118,7 +146,7 @@ impl Protocol {
                     .enumerate()
                     .map(|(index, chunk)| json(sonic_rs::json!({"id": index + 1, "type": "subscribe", "topic": format!("/market/ticker:{}", chunk.join(",")), "response": true})))
                     .collect();
-                Session { url: url.to_string(), acks: requests.len(), requests, heartbeat: Some((r#"{"id":"ping","type":"ping"}"#.to_string(), interval)) }
+                Session { url: url.to_string(), acks: requests.len(), requests, heartbeat: Some((Heartbeat::Text(r#"{"id":"ping","type":"ping"}"#.to_string()), interval)) }
             }
             (Kind::Perp, Venue::Mexc) => Session {
                 url: "wss://contract.mexc.com/edge".to_string(),
@@ -127,6 +155,7 @@ impl Protocol {
                 heartbeat: ping(r#"{"method":"ping"}"#),
             },
             (Kind::Spot, Venue::Mexc) | (Kind::Perp, Venue::Kraken | Venue::Kucoin) => unreachable!("not a WS feed: {self:?}"),
+            (Kind::Equity, _) | (_, Venue::Alpaca) => unreachable!("the SIP session carries the credentials: `hip3::protocol::alpaca_session`"),
         }
     }
 
@@ -140,6 +169,7 @@ impl Protocol {
             Venue::Kraken => kraken(text, markets),
             Venue::Kucoin => kucoin(text, markets),
             Venue::Mexc => mexc_perp(text, markets),
+            Venue::Alpaca => super::hip3::protocol::alpaca(text, markets),
         };
         parsed.map_err(|err| format!("{err}; frame: {}", excerpt(text)))
     }
@@ -151,7 +181,7 @@ pub(crate) fn excerpt(text: &str) -> &str {
 }
 
 /// A price field as written: a JSON string or number.
-fn price(value: &LazyValue<'_>) -> Result<Option<VenuePrice>, String> {
+pub(crate) fn price(value: &LazyValue<'_>) -> Result<Option<VenuePrice>, String> {
     let raw = value.as_raw_str();
     let text = raw.strip_prefix('"').and_then(|raw| raw.strip_suffix('"')).unwrap_or(raw);
     if text.is_empty() {
@@ -170,7 +200,7 @@ fn two_sided(symbol: &str, bid: Option<VenuePrice>, ask: Option<VenuePrice>) -> 
     }
 }
 
-fn index(markets: &FeedMarkets, symbol: &str) -> Result<usize, String> {
+pub(crate) fn index(markets: &FeedMarkets, symbol: &str) -> Result<usize, String> {
     markets.index(symbol).ok_or_else(|| format!("a market not subscribed to: {symbol}"))
 }
 
@@ -197,7 +227,7 @@ fn payload<'a>(data: Option<&'a LazyValue<'a>>, what: &str) -> Result<&'a str, S
     data.map(LazyValue::as_raw_str).filter(|raw| *raw != "null").ok_or_else(|| format!("{what} without its payload"))
 }
 
-fn strict<'a, T: Deserialize<'a>>(raw: &'a str, what: &str) -> Result<T, String> {
+pub(crate) fn strict<'a, T: Deserialize<'a>>(raw: &'a str, what: &str) -> Result<T, String> {
     sonic_rs::from_str(raw).map_err(|err| format!("{what}: {err}"))
 }
 
@@ -610,6 +640,8 @@ mod tests {
                 Parsed::Acked(_) => "ack",
                 Parsed::Pong => "pong",
                 Parsed::ReconnectRequested(_) => "reconnect",
+                Parsed::ConnectionLimit(_) => "connectionLimit",
+                Parsed::SessionFailed(_) => "sessionFailed",
                 Parsed::Ignored => "ignored",
                 Parsed::Unknown => "unknown",
             })
@@ -742,7 +774,8 @@ mod tests {
         assert_eq!((kucoin.requests.len(), kucoin.acks, kucoin.heartbeat.unwrap().1), (2, 2, Duration::from_secs(18)));
         // Gate spot and futures ping on their own channels (review 000454 r2 P3)
         let ping = |kind| Protocol { kind, venue: Venue::Gate }.session(&symbols, 7, None).heartbeat.unwrap().0;
-        assert_eq!((ping(Kind::Spot), ping(Kind::Perp)), (r#"{"time":7,"channel":"spot.ping"}"#.to_string(), r#"{"time":7,"channel":"futures.ping"}"#.to_string()));
+        let text = |ping: &str| Heartbeat::Text(ping.to_string());
+        assert_eq!((ping(Kind::Spot), ping(Kind::Perp)), (text(r#"{"time":7,"channel":"spot.ping"}"#), text(r#"{"time":7,"channel":"futures.ping"}"#)));
     }
 
     #[test]

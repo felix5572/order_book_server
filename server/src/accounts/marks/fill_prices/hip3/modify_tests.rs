@@ -21,14 +21,14 @@ fn inputs(g: &Value, systems: Vec<SystemAction>) -> (FxHashMap<String, Hip3Coin>
     assert!(actions.actions.iter().all(|a| !a.action.is_price()), "system competition must work without a native price action");
     let statuses: Vec<NodeDataOrderStatus> = serde_json::from_value(g["statuses"].clone()).unwrap();
     let system = SystemBlock::of(systems, &statuses).unwrap();
-    let coins = FxHashMap::from_iter([(coin.into(), Hip3Coin {
+    let coins = FxHashMap::from_iter([(coin.into(), Hip3Coin { external: None, last_trade: None,
         order_asset: u32::try_from(g["order_asset"].as_u64().unwrap()).unwrap(),
         size_decimals: decimals, oracle: None,
         mark: Some(StoredMark { px: exact_price_units(g["before_mark"].as_str().unwrap(), decimals).unwrap(), time_ns: time_ns - 1 }),
     })]);
     let inputs = BlockInputs { fills: g["legs"].as_array().unwrap().iter().map(|leg|
         BlockFill::of(&serde_json::from_value::<NodeDataFill>(leg.clone()).unwrap())).collect(),
-        hip3: vec![Hip3PriceUpdate { normal: true, oracle: false, coin: coin.into(),
+        hip3: vec![Hip3PriceUpdate { normal: true, kind: Hip3PriceKind::Mark, coin: coin.into(),
             px: g["after_mark"].as_str().unwrap().into(), time_ns }],
         actions: Some(actions), statuses: BlockStatuses::of(statuses).unwrap(), system, ..BlockInputs::default() };
     (coins, inputs)

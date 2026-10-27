@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use super::{BlockInputs, Hip3PriceUpdate, actions::MarkActions, execution::{BlockFill, BlockStatuses}, native::NativePrices, seed::Hip3Coin};
+use super::{BlockInputs, Hip3PriceKind, Hip3PriceUpdate, actions::MarkActions, execution::{BlockFill, BlockStatuses}, native::NativePrices, seed::Hip3Coin};
 
 /// Inclusive price bounds, in 10^-(6-size_decimals) units, from the same block as the fill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +109,7 @@ impl FillPriceBuilder {
                 seen.observe(native.asset(name).and_then(|asset| native.mark(asset).map(|px| (px, native.size_decimals(asset)))));
             }
         }
-        for update in inputs.hip3.iter().filter(|update| !update.oracle) {
+        for update in inputs.hip3.iter().filter(|update| update.kind == Hip3PriceKind::Mark) {
             if let Some(seen) = self.collateral.get_mut(&update.coin) {
                 let price = hip3.get(&update.coin).and_then(|coin|
                     super::seed::exact_price_units(&update.px, coin.size_decimals).ok().map(|px| (px, coin.size_decimals)));

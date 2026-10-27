@@ -46,6 +46,11 @@ impl Entry {
     pub(crate) const fn for_test(quote: Option<Quote>, received_ms: u64, epoch: u64) -> Self {
         Self { quote, received_ms, event_ms: None, epoch }
     }
+
+    /// The same with the venue's time of the quote.
+    pub(crate) const fn for_test_at(quote: Option<Quote>, received_ms: u64, event_ms: Option<u64>, epoch: u64) -> Self {
+        Self { quote, received_ms, event_ms, epoch }
+    }
 }
 
 /// Whether a market's latest observation is a quote that holds now.

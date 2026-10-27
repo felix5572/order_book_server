@@ -2046,6 +2046,7 @@ impl ActiveSubs {
             Subscription::CoinPositions { .. }
             | Subscription::LiquidationCandidates { .. }
             | Subscription::MarkPrices { .. }
+            | Subscription::Hip3MarkPrices { .. }
             | Subscription::ForcedFlow(_) => Vec::new(),
         }
     }

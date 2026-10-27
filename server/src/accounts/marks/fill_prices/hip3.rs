@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 #[cfg(test)]
 use super::BlockFill;
 
-use super::{BlockInputs, BlockStatuses, Hip3Coin, Hip3PriceUpdate, MarkActions, PricesSeen};
+use super::{BlockInputs, BlockStatuses, Hip3Coin, Hip3PriceKind, Hip3PriceUpdate, MarkActions, PricesSeen};
 use crate::accounts::marks::{actions::{MarkAction, Rank}, seed::exact_price_units, execution::fill_order::{Placement, takers}};
 
 struct CoinPrices<'a> {
@@ -92,7 +92,7 @@ pub(super) fn observe(prices: &mut [PricesSeen], coins: &FxHashMap<String, Hip3C
             });
         }
     }
-    for update in updates.iter().filter(|update| !update.oracle) {
+    for update in updates.iter().filter(|update| update.kind == Hip3PriceKind::Mark) {
         if let Some(range) = ranges.get_mut(update.coin.as_str()) {
             let decimals = coins[&update.coin].size_decimals;
             range.all.observe(exact_price_units(&update.px, decimals).ok().map(|px| (px, decimals)));
@@ -186,10 +186,10 @@ pub(crate) fn golden_prices(case: &serde_json::Value, event: &serde_json::Value)
     let decimals = u32::try_from(case["size_decimals"].as_u64().unwrap()).unwrap();
     let height = event["height"].as_u64().unwrap();
     let px = exact_price_units(event["before_mark"].as_str().unwrap(), decimals).unwrap();
-    let coins = FxHashMap::from_iter([(coin.into(), Hip3Coin { order_asset: 110_000, oracle: None, size_decimals: decimals, mark: Some(StoredMark { px, time_ns: 0 }) })]);
+    let coins = FxHashMap::from_iter([(coin.into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, size_decimals: decimals, mark: Some(StoredMark { px, time_ns: 0 }) })]);
     let fills: Vec<_> = event["legs"].as_array().unwrap().iter().map(|leg| BlockFill::of(&serde_json::from_value::<NodeDataFill>(leg.clone()).unwrap())).collect();
     let updates: Vec<_> = event["updates"].as_array().unwrap().iter().map(|u| Hip3PriceUpdate {
-        normal: u[1] == "Normal", oracle: false, coin: coin.into(), px: u[0].as_str().unwrap().into(), time_ns: 1,
+        normal: u[1] == "Normal", kind: Hip3PriceKind::Mark, coin: coin.into(), px: u[0].as_str().unwrap().into(), time_ns: 1,
     }).collect();
     let mut actions = MarkActions { height, time_ns: 1, actions: Vec::new() };
     if let Some(ranks) = event["rank"].as_array() {
@@ -238,9 +238,9 @@ impl TriggerFixture {
         Self {
             height,
             fills: case["legs"].as_array().unwrap().iter().map(|leg| BlockFill::of(&serde_json::from_value::<NodeDataFill>(leg.clone()).unwrap())).collect(),
-            coins: FxHashMap::from_iter([(coin.into(), Hip3Coin { order_asset: 110_000, oracle: None, size_decimals: decimals,
+            coins: FxHashMap::from_iter([(coin.into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, size_decimals: decimals,
                 mark: Some(StoredMark { px: exact_price_units(case["before_mark"].as_str().unwrap(), decimals).unwrap(), time_ns: time_ns - 1 }) })]),
-            updates: vec![Hip3PriceUpdate { normal: case["normal"].as_bool().unwrap(), oracle: false, coin: coin.into(),
+            updates: vec![Hip3PriceUpdate { normal: case["normal"].as_bool().unwrap(), kind: Hip3PriceKind::Mark, coin: coin.into(),
                 px: case["after_mark"].as_str().unwrap().into(), time_ns }],
             actions: MarkActions { height, time_ns, actions: vec![RankedAction {
                 rank: serde_json::from_value(case["oracle_rank"].clone()).unwrap(), user: None,
@@ -278,10 +278,10 @@ mod tests {
         BlockFill { coin: "xyz:X".into(), px: "1".into(), sz: "1".into(), oid, tid, action_position: None, crossed, twap, liquidation_mark_px: None }
     }
     fn update(normal: bool, price: &str) -> Hip3PriceUpdate {
-        Hip3PriceUpdate { normal, oracle: false, coin: "xyz:X".into(), px: price.into(), time_ns: 1 }
+        Hip3PriceUpdate { normal, kind: Hip3PriceKind::Mark, coin: "xyz:X".into(), px: price.into(), time_ns: 1 }
     }
     fn ranges(fills: &[BlockFill], actions: &[RankedAction], updates: &[Hip3PriceUpdate], triggered: &[u64]) -> Vec<FillMarkRange> {
-        let coins = FxHashMap::from_iter([("xyz:X".into(), Hip3Coin { order_asset: 110_000, oracle: None, size_decimals: 6, mark: Some(StoredMark { px: 100, time_ns: 0 }) })]);
+        let coins = FxHashMap::from_iter([("xyz:X".into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, size_decimals: 6, mark: Some(StoredMark { px: 100, time_ns: 0 }) })]);
         let actions = MarkActions { height: 1, time_ns: 1, actions: actions.to_vec() };
         let mut statuses = BlockStatuses::default();
         statuses.triggered.extend(triggered);
@@ -322,11 +322,21 @@ mod tests {
         assert_eq!(ranges(&[fill(10, 1, true, false), fill(10, 1, true, false)], &actions, &[update(true, "110")], &[]), [range(100, 110); 2]);
     }
 
+    /// Review 000535 r1: the stream's stored-oracle and external writes are no mark: fill marks see only the mark writes.
+    #[test]
+    fn oracle_and_external_writes_take_no_part_in_fill_marks() {
+        let actions = [book((0, 3, 1), 10), oracle((0, 3, 2), "xyz"), book((1, 1, 0), 20)];
+        let fills = [fill(99, 1, false, false), fill(10, 1, true, false), fill(20, 2, true, false), fill(98, 2, false, false)];
+        let other = |kind| Hip3PriceUpdate { normal: true, kind, coin: "xyz:X".into(), px: "999".into(), time_ns: 1 };
+        let with = [update(true, "110"), other(Hip3PriceKind::Oracle), other(Hip3PriceKind::External)];
+        assert_eq!(ranges(&fills, &actions, &with, &[]), ranges(&fills, &actions, &[update(true, "110")], &[]));
+    }
+
     #[test]
     fn collateral_uses_the_takers_oracle_phase_and_retains_ambiguous_bounds() {
         let mut coins = FxHashMap::default();
         for (name, px) in [("xyz:X", 100), ("xyz:A", 200)] {
-            coins.insert(name.into(), Hip3Coin { order_asset: 110_000, oracle: None, size_decimals: 6,
+            coins.insert(name.into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, size_decimals: 6,
                 mark: Some(StoredMark { px, time_ns: 0 }) });
         }
         let fills = vec![fill(10, 1, true, false), fill(99, 1, false, false),
@@ -334,7 +344,7 @@ mod tests {
         for normal in [true, false] {
             let actions = MarkActions { height: 1, time_ns: 1,
                 actions: vec![book((0, 3, 1), 10), oracle((0, 3, 2), "xyz"), book((0, 3, 3), 20)] };
-            let updates = vec![update(normal, "110"), Hip3PriceUpdate { normal, oracle: false,
+            let updates = vec![update(normal, "110"), Hip3PriceUpdate { normal, kind: Hip3PriceKind::Mark,
                 coin: "xyz:A".into(), px: "220".into(), time_ns: 1 }];
             let mut builder = FillPriceBuilder::new(&fills);
             let mut collateral = PricesSeen::default();
@@ -363,9 +373,9 @@ mod tests {
             let mut updates = Vec::new();
             for (name, before) in golden["before"].as_object().unwrap() {
                 let decimals = u32::try_from(case["markets"][name]["size_decimals"].as_u64().unwrap()).unwrap();
-                coins.insert(name.clone(), Hip3Coin { order_asset: 110_000, oracle: None, size_decimals: decimals,
+                coins.insert(name.clone(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, size_decimals: decimals,
                     mark: Some(StoredMark { px: before.as_u64().unwrap(), time_ns: time_ns - 1 }) });
-                updates.push(Hip3PriceUpdate { normal: true, oracle: false, coin: name.clone(), time_ns,
+                updates.push(Hip3PriceUpdate { normal: true, kind: Hip3PriceKind::Mark, coin: name.clone(), time_ns,
                     px: crate::accounts::size::format_size_raw(golden["after"][name].as_i64().unwrap(), 6 - decimals) });
             }
             let owner = case["user"].as_str().unwrap().parse().unwrap();

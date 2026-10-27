@@ -436,10 +436,11 @@ impl ForcedFlow {
             LocalLink::Attached(snapshots) => snapshots,
         };
         let snapshot = Arc::clone(&snapshots.borrow());
-        let calibre = snapshot.coin(coin).map_or_else(
+        // the main dex's and the HIP-3 SIP coins' (design 000535) through one entry
+        let calibre = snapshot.local_predicted(coin).map_or_else(
             || withheld("notInSources", "the coin is not in the local marks' sources"),
-            |marks| match &marks.local {
-                Ok(leg) => LocalCalibre::Ready { mark_raw: leg.mark.predicted },
+            |local| match local {
+                Ok(mark_raw) => LocalCalibre::Ready { mark_raw },
                 Err(withheld) => LocalCalibre::Withheld { code: withheld.code, reason: withheld.detail.clone() },
             },
         );

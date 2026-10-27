@@ -21,7 +21,7 @@ type Covered = BTreeMap<String, (u64, u64, u64)>;
 pub async fn run_local_marks_probe(seconds: u64, every: Duration, out: &Path) -> Result<()> {
     std::fs::create_dir_all(out)?;
     let sources = Arc::new(super::sources::MarkSources::embedded()?);
-    let feeds = LocalMarkFeeds::start(Arc::clone(&sources));
+    let feeds = LocalMarkFeeds::start(Arc::clone(&sources), None);
     let started = Instant::now();
     let mut covered: Covered = sources.coins().map(|coin| (coin.to_string(), (0, 0, 0))).collect();
     let mut intervals = 0_u64;

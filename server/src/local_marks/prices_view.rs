@@ -39,7 +39,7 @@ pub(crate) struct CoinMarksView<'a> {
 
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
-enum LegView<T> {
+pub(crate) enum LegView<T> {
     Ready(T),
     #[serde(rename_all = "camelCase")]
     Unavailable { reason_code: &'static str, reason: String },
@@ -139,11 +139,11 @@ struct LocalView {
     book_height: u64,
 }
 
-fn price(units: u64, size_decimals: u32) -> String {
+pub(crate) fn price(units: u64, size_decimals: u32) -> String {
     ExactDecimal::from_units(units, MAX_PERP_DECIMALS - size_decimals).to_string()
 }
 
-fn withheld<T>(withheld: &Withheld) -> LegView<T> {
+pub(crate) fn withheld<T>(withheld: &Withheld) -> LegView<T> {
     let (reason_code, reason) = (withheld.code, withheld.detail.clone());
     match withheld.status {
         Status::Unavailable => LegView::Unavailable { reason_code, reason },
@@ -179,7 +179,7 @@ impl<'a> CoinMarksView<'a> {
 }
 
 /// A ready leg reads a node state: the snapshot has its progress.
-fn node_progress(snapshot: &LocalMarksSnapshot) -> super::snapshot::NodeProgress {
+pub(crate) fn node_progress(snapshot: &LocalMarksSnapshot) -> super::snapshot::NodeProgress {
     snapshot.node.clone().unwrap_or_else(|_| unreachable!("a ready leg reads the node state"))
 }
 

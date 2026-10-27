@@ -119,6 +119,13 @@ struct Args {
     /// price - 12 connections to Binance, OKX, Bybit, Kraken, Kucoin, Gate and MEXC - served at GET /extMarkInputs.
     #[arg(long, default_value = "false")]
     local_marks: bool,
+
+    /// HIP-3 US stocks' local marks (design 000535; needs --local-marks): Alpaca's SIP stream of the stocks in
+    /// server/data/hip3_sip_sources.json, one connection, its key from APCA_API_KEY_ID / APCA_API_SECRET_KEY in the
+    /// environment; served at GET /extHip3MarkPrices, the extHip3MarkPrices subscription and extForcedFlow's local
+    /// distances.
+    #[arg(long, default_value = "false")]
+    hip3_sip_marks: bool,
 }
 
 /// Start the Prometheus metrics HTTP server
@@ -186,6 +193,7 @@ async fn main() -> Result<()> {
         replay_cache_events: args.replay_cache_events,
         accounts: args.accounts,
         local_marks: args.local_marks,
+        hip3_sip_marks: args.hip3_sip_marks,
     };
 
     println!("Orderbook Server v{}", env!("CARGO_PKG_VERSION"));
@@ -211,6 +219,9 @@ async fn main() -> Result<()> {
     }
     if config.local_marks {
         println!("  Local marks: ON (venue feeds, GET /extMarkInputs)");
+    }
+    if config.hip3_sip_marks {
+        println!("  HIP-3 SIP marks: ON (Alpaca SIP feed, GET /extHip3MarkPrices)");
     }
     if config.no_resync {
         println!("  Re-sync: DISABLED (--no-resync) — drift tolerated, book will NOT self-heal");

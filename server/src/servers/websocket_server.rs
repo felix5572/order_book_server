@@ -15,7 +15,12 @@ use crate::{
         ActiveL2Params, ActiveSubGuard, ActiveSubs, BookTrust, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey,
         L2ParamGuard, L2SnapshotParams, OrderBookListener, bbo::{BboKey, key as bbo_key}, hl_listen_hft, triggers::TriggerAvailability,
     },
-    local_marks::{feeds::LocalMarkFeeds, owner::LocalMarks, sources::MarkSources},
+    local_marks::{
+        feeds::{LocalMarkFeeds, SipFeedConfig},
+        hip3::{protocol::AlpacaCredentials, sources::Hip3SipSources},
+        owner::LocalMarks,
+        sources::MarkSources,
+    },
     metrics::{
         BBO_CHANGES_TOTAL, BROADCAST_RECEIVERS, BROADCASTS_TOTAL,
         LAST_EVENT_APPLIED_MS, MESSAGES_SENT_TOTAL, ORDERBOOK_HEIGHT, ORDERBOOK_READY, WS_CONNECTIONS_ACTIVE,
@@ -27,7 +32,7 @@ use crate::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
         subscription::{
-            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_FORCED_FLOW, EXT_FORCED_FLOW_PATH, EXT_MARK_INPUTS_PATH, EXT_MARK_PRICES, EXT_MARK_PRICES_PATH, EXT_MARK_REFERENCE_CACHES_PATH, EXT_LIQUIDATION_CANDIDATES,
+            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_FORCED_FLOW, EXT_FORCED_FLOW_PATH, EXT_MARK_INPUTS_PATH, EXT_HIP3_MARK_PRICES_PATH, EXT_MARK_PRICES_PATH, EXT_MARK_REFERENCE_CACHES_PATH, EXT_LIQUIDATION_CANDIDATES,
             OrderUpdate, ServerResponse, Subscription, SubscriptionManager, UserFills,
         },
     },
@@ -297,6 +302,10 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                 let marks = marks.clone();
                 get(move |query| reference_caches_handler(query, marks.clone()))
             })
+            .route(EXT_HIP3_MARK_PRICES_PATH, {
+                let marks = marks.clone();
+                get(move |query| mark_prices::hip3_mark_prices_handler(query, marks.clone()))
+            })
             .route(EXT_MARK_PRICES_PATH, get(move |query| mark_prices_handler(query, marks.clone()))),
         None => app,
     };
@@ -331,12 +340,22 @@ fn start_local_marks(
     listener: &Arc<Mutex<OrderBookListener>>,
 ) -> Result<Option<LocalMarks>> {
     if !config.local_marks {
+        if config.hip3_sip_marks {
+            return Err("--hip3-sip-marks needs --local-marks: the HIP-3 marks are computed by the local marks' owner".into());
+        }
         return Ok(None);
     }
     let accounts = accounts.ok_or("--local-marks needs --accounts: the local marks read the node replica of the account view")?;
     let sources = MarkSources::embedded()?;
     info!("Local marks: {} coins, venue feeds starting", sources.coins().count());
-    let feeds = Arc::new(LocalMarkFeeds::start(Arc::new(sources)));
+    let sip = if config.hip3_sip_marks {
+        let sources = Hip3SipSources::embedded()?;
+        info!("HIP-3 SIP marks: {} coins, the Alpaca SIP feed starting", sources.coins().count());
+        Some(SipFeedConfig { sources: Arc::new(sources), credentials: AlpacaCredentials::from_env()? })
+    } else {
+        None
+    };
+    let feeds = Arc::new(LocalMarkFeeds::start(Arc::new(sources), sip));
     Ok(Some(LocalMarks::start(feeds, accounts.node_prices(), Arc::clone(listener))))
 }
 
@@ -1012,12 +1031,16 @@ async fn receive_client_message(
         };
         return session.on_forced_flow_message(outbound, manager, client_message, subscription).await;
     }
-    if let Subscription::MarkPrices { coin } = &subscription {
+    if let Some((market, coin)) = match &subscription {
+        Subscription::MarkPrices { coin } => Some((mark_prices::Market::Main, coin)),
+        Subscription::Hip3MarkPrices { coin } => Some((mark_prices::Market::Hip3, coin)),
+        _ => None,
+    } {
         let Some(session) = mark_prices.as_mut() else {
-            let refused = format!("{EXT_MARK_PRICES} needs the server started with --local-marks");
+            let refused = format!("{} needs the server started with --local-marks", subscription.type_label());
             return outbound.send_message(ServerResponse::Error(refused)).await;
         };
-        return session.on_client_message(outbound, manager, client_message, coin).await;
+        return session.on_client_message(outbound, manager, client_message, market, coin).await;
     }
     if let Subscription::LiquidationCandidates { coin, max_distance_bps } = subscription {
         let Some(session) = coin_positions.as_mut() else {

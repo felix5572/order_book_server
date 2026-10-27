@@ -1,6 +1,8 @@
 //! `GET /extMarkInputs` (design 000454 batch 1): every feed's connection, and per coin each listing's latest quote as
 //! the venue wrote it with its multiplier, whether it holds now, and which venues price the oracle and the external
-//! price. For checking the feeds; the marks themselves come in batch 2.
+//! price. For checking the feeds; the marks themselves come in batch 2. With the HIP-3 SIP feed (design 000535 r2
+//! revision 1), a `sip` section: its connection and each HIP-3 coin's latest quote; the main-dex part is unchanged and,
+//! without the feed, so is the whole answer.
 
 use std::collections::BTreeMap;
 
@@ -8,7 +10,7 @@ use serde::Serialize;
 
 use super::{
     feeds::LocalMarkFeeds,
-    slot::{Connection, Validity},
+    slot::{Connection, Entry, Validity},
     subscriptions::{ConnectionProjection, FeedProjection},
     snapshot::Coverage,
     sources::{Feed, FeedMarkets, Kind},
@@ -22,6 +24,24 @@ pub(crate) struct InputsView {
     stopped: Option<String>,
     feeds: Vec<FeedView>,
     coins: Vec<CoinInputs>,
+    /// Absent without the SIP feed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sip: Option<SipInputs>,
+}
+
+/// The SIP feed and its coins' quotes (all, or the queried HIP-3 coin's).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SipInputs {
+    feed: FeedView,
+    coins: Vec<SipCoinInputs>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SipCoinInputs {
+    coin: String,
+    sip: ListingView,
 }
 
 #[derive(Serialize)]
@@ -115,30 +135,58 @@ fn feed_connection(connections: &[ConnectionProjection]) -> ConnectionView {
     ConnectionView::Degraded { connected, total: connections.len() }
 }
 
-/// The view now; `coin` narrows the coins (the feeds are always all). `Err` for a coin outside the sources.
+fn feed_view(feed: Feed, markets: &FeedMarkets, reading: &FeedProjection) -> FeedView {
+    FeedView {
+        feed: feed.label(),
+        connection: feed_connection(&reading.connections),
+        connections: reading.connections.iter().map(|part| ShardView {
+            shard: part.shard, markets: part.markets, connection: connection(&part.connection), frames: part.frames, quoting: part.quoting,
+        }).collect(),
+        frames: reading.messages,
+        markets: markets.symbols.len(),
+        quoting: reading.entries.iter().filter(|(_, validity)| *validity == Validity::Valid).count(),
+    }
+}
+
+/// The view now; `coin` narrows the coins (the feeds are always all): a main-dex coin's listings, or a HIP-3 coin's SIP
+/// quote. `Err` for a coin in neither source.
 pub(crate) fn inputs_view(feeds: &LocalMarkFeeds, coin: Option<&str>, now_ms: u64) -> Result<InputsView, String> {
     let readings = feeds.readings(now_ms);
     let by_feed: BTreeMap<Feed, (&FeedMarkets, &FeedProjection)> = readings.iter().map(|(feed, markets, reading)| (*feed, (*markets, reading))).collect();
-    let coins: Vec<&str> = match coin {
-        Some(coin) if feeds.sources.listings(coin).is_none() => return Err(format!("{coin} is not in the local marks' sources")),
-        Some(coin) => vec![coin],
-        None => feeds.sources.coins().collect(),
+    let hip3 = feeds.hip3.as_deref();
+    let is_hip3 = |coin: &str| hip3.is_some_and(|sources| sources.markets.coins.iter().any(|(listed, _)| listed == coin));
+    let (coins, sip_coins): (Vec<&str>, Option<Vec<&str>>) = match coin {
+        Some(coin) if feeds.sources.listings(coin).is_some() => (vec![coin], None),
+        Some(coin) if is_hip3(coin) => (Vec::new(), Some(vec![coin])),
+        Some(coin) => return Err(format!("{coin} is not in the local marks' sources")),
+        None => (feeds.sources.coins().collect(), hip3.map(|sources| sources.coins().collect())),
     };
-    let feed_views = readings
-        .iter()
-        .map(|(feed, markets, reading)| FeedView {
-            feed: feed.label(),
-            connection: feed_connection(&reading.connections),
-            connections: reading.connections.iter().map(|part| ShardView {
-                shard: part.shard, markets: part.markets, connection: connection(&part.connection), frames: part.frames, quoting: part.quoting,
-            }).collect(),
-            frames: reading.messages,
-            markets: markets.symbols.len(),
-            quoting: reading.entries.iter().filter(|(_, validity)| *validity == Validity::Valid).count(),
-        })
-        .collect();
+    let feed_views = readings.iter().map(|(feed, markets, reading)| feed_view(*feed, markets, reading)).collect();
     let coins = coins.into_iter().map(|coin| coin_inputs(feeds, &by_feed, coin)).collect();
-    Ok(InputsView { time_ms: now_ms, stopped: feeds.stopped(), feeds: feed_views, coins })
+    let sip = sip_coins.map(|sip_coins| {
+        let markets = &hip3.unwrap_or_else(|| unreachable!("SIP coins come from the HIP-3 sources")).markets;
+        let reading = feeds.sip_reading(now_ms).unwrap_or_else(|| unreachable!("the HIP-3 sources run the SIP feed"));
+        let coins = sip_coins.into_iter().map(|coin| {
+            let index = markets.coins.iter().position(|(listed, _)| listed == coin).unwrap_or_else(|| unreachable!("a HIP-3 coin"));
+            let (entry, validity) = reading.entries[index];
+            SipCoinInputs { coin: coin.to_string(), sip: listing_view(&markets.symbols[index], "1".to_string(), entry, validity) }
+        }).collect();
+        SipInputs { feed: feed_view(Feed::SIP, markets, &reading), coins }
+    });
+    Ok(InputsView { time_ms: now_ms, stopped: feeds.stopped(), feeds: feed_views, coins, sip })
+}
+
+fn listing_view(symbol: &str, px_multiplier: String, entry: Option<Entry>, validity: Validity) -> ListingView {
+    let quote = entry.and_then(|entry| entry.quote);
+    ListingView {
+        symbol: symbol.to_string(),
+        px_multiplier,
+        bid: quote.map(|quote| quote.bid.to_string()),
+        ask: quote.map(|quote| quote.ask.to_string()),
+        received_ts_ms: entry.map(|entry| entry.received_ms),
+        event_ts_ms: entry.and_then(|entry| entry.event_ms),
+        status: status(validity),
+    }
 }
 
 fn coin_inputs(feeds: &LocalMarkFeeds, by_feed: &BTreeMap<Feed, (&FeedMarkets, &FeedProjection)>, coin: &str) -> CoinInputs {
@@ -149,19 +197,7 @@ fn coin_inputs(feeds: &LocalMarkFeeds, by_feed: &BTreeMap<Feed, (&FeedMarkets, &
         let (markets, reading) = by_feed[feed];
         let index = markets.index(&listing.symbol).unwrap_or_else(|| unreachable!("a listing of the feed's markets"));
         let (entry, validity) = reading.entries[index];
-        let quote = entry.and_then(|entry| entry.quote);
-        views.entry(feed.kind).or_default().insert(
-            feed.venue.name(),
-            ListingView {
-                symbol: listing.symbol.clone(),
-                px_multiplier: listing.px_multiplier.to_string(),
-                bid: quote.map(|quote| quote.bid.to_string()),
-                ask: quote.map(|quote| quote.ask.to_string()),
-                received_ts_ms: entry.map(|entry| entry.received_ms),
-                event_ts_ms: entry.and_then(|entry| entry.event_ms),
-                status: status(validity),
-            },
-        );
+        views.entry(feed.kind).or_default().insert(feed.venue.name(), listing_view(&listing.symbol, listing.px_multiplier.to_string(), entry, validity));
         coverage.entry(feed.kind).or_default().add(*feed, validity);
     }
     let mut take = |kind| coverage.remove(&kind).unwrap_or_else(|| unreachable!("every coin has a spot and a perp listing"));

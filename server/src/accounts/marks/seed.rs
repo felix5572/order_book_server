@@ -167,14 +167,31 @@ struct WireMember {
     v: u64,
 }
 
-/// `exchange.perp_dexs`: only the main dex's books are kept (`perp_dexs[0]`, the main dex on 1190680000: 234 books,
-/// assets 0..233; the HIP-3 dexes' follow).
+/// `exchange.perp_dexs`: the main dex's books (`perp_dexs[0]`, the main dex on 1190680000: 234 books, assets 0..233),
+/// and of the HIP-3 dexes' that follow only each book's last trade price.
 #[derive(Debug)]
-pub(crate) struct WireNativeBooks(pub(crate) Vec<WireBook>);
+pub(crate) struct WireNativeBooks {
+    pub(crate) native: Vec<WireBook>,
+    /// HIP-3 books' `last_trade_px` (integer price units) by book asset `PDI_ASSET_STRIDE * pdi + index` (bm
+    /// 1199490000: dex 1's 139 books are assets 10000..10138, dex 2's 16 are 20000..20015).
+    pub(crate) hip3_last_trades: FxHashMap<u32, u64>,
+}
 
 #[derive(Debug, Deserialize)]
 struct WireNativePerpDex {
     books: Vec<WireBook>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireHip3PerpDex {
+    books: Vec<WireHip3Book>,
+}
+
+/// A HIP-3 book: its orders are not read.
+#[derive(Debug, Deserialize)]
+struct WireHip3Book {
+    asset: u32,
+    last_trade_px: u64,
 }
 
 impl<'de> Deserialize<'de> for WireNativeBooks {
@@ -195,8 +212,15 @@ impl<'de> Visitor<'de> for NativeBooksVisitor {
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         use serde::de::Error as _;
         let native = seq.next_element::<WireNativePerpDex>()?.ok_or_else(|| A::Error::custom("perp_dexs is empty"))?;
-        while seq.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(WireNativeBooks(native.books))
+        let mut hip3_last_trades = FxHashMap::default();
+        while let Some(dex) = seq.next_element::<WireHip3PerpDex>()? {
+            for book in dex.books {
+                if hip3_last_trades.insert(book.asset, book.last_trade_px).is_some() {
+                    return Err(A::Error::custom(format!("perp_dexs lists HIP-3 book asset {} twice", book.asset)));
+                }
+            }
+        }
+        Ok(WireNativeBooks { native: native.books, hip3_last_trades })
     }
 }
 
@@ -419,12 +443,17 @@ pub(crate) struct Hip3Coin {
     pub(crate) size_decimals: u32,
     /// `None` when the asset stores no price.
     pub(crate) mark: Option<StoredMark>,
+    /// The stored external perp price (`pxs2` slot 2, then each written `coin_to_external_perp_px`); `None` before one.
+    pub(crate) external: Option<u64>,
+    /// The book's last trade price (the checkpoint book's `last_trade_px`, then each block's last taker fill); `None`
+    /// before one.
+    pub(crate) last_trade: Option<u64>,
 }
 
 impl MarkSeed {
     /// The seed of a parsed checkpoint, which it consumes (the books are not copied).
     pub(crate) fn from_checkpoint(checkpoint: CheckpointAccounts) -> Result<Self, String> {
-        let CheckpointAccounts { height, time_ms, dexes, native_prices, spot_pairs, .. } = checkpoint;
+        let CheckpointAccounts { height, time_ms, dexes, native_prices, spot_pairs, hip3_last_trades, .. } = checkpoint;
         let (main, hip3_dexes) = dexes.split_first().ok_or("no dex")?;
         if main.pdi != 0 {
             return Err(format!("the first clearinghouse is pdi {}, not the main dex", main.pdi));
@@ -439,7 +468,11 @@ impl MarkSeed {
                     (Some(_), None) => return Err(format!("{}: a stored mark without its time", asset.name)),
                 };
                 let order_asset = dex.action_asset(asset_index).ok_or_else(|| format!("{}: no exchange action asset id", asset.name))?;
-                hip3.insert(asset.name.clone(), Hip3Coin { order_asset, size_decimals: asset.size_decimals, mark, oracle: asset.oracle_raw.map(price_units).transpose().map_err(|err| format!("{}: stored oracle {err}", asset.name))? });
+                let book_asset = order_asset.checked_sub(100_000).ok_or_else(|| format!("{}: action asset {order_asset} below 100000", asset.name))?;
+                let oracle = asset.oracle_raw.map(price_units).transpose().map_err(|err| format!("{}: stored oracle {err}", asset.name))?;
+                let external = asset.external_raw.map(price_units).transpose().map_err(|err| format!("{}: stored external {err}", asset.name))?;
+                let last_trade = hip3_last_trades.get(&book_asset).copied();
+                hip3.insert(asset.name.clone(), Hip3Coin { order_asset, size_decimals: asset.size_decimals, mark, oracle, external, last_trade });
             }
         }
         Ok(Self { height, time_ms, native, hip3 })
@@ -711,9 +744,13 @@ pub(crate) mod tests {
             order_asset: 110_000,
             oracle: Some(357_970),
             size_decimals: 3,
-            mark: Some(StoredMark { px: 358_320, time_ns: 1_792_391_842_000_000_000 })
+            mark: Some(StoredMark { px: 358_320, time_ns: 1_792_391_842_000_000_000 }),
+            external: Some(357_970),
+            last_trade: Some(358_300),
         });
-        assert_eq!(seed.hip3["flx:GOLD"].mark.map(|mark| mark.px), Some(41_883_000));
+        let gold = seed.hip3["flx:GOLD"];
+        assert_eq!((gold.mark.map(|mark| mark.px), gold.external), (Some(41_883_000), Some(41_883_000)));
+        assert_eq!(gold.last_trade, None, "the fixture lists no book of the second HIP-3 dex");
     }
 
     fn seed_error(edit: impl FnOnce(&mut serde_json::Value)) -> String {

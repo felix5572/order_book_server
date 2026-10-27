@@ -4,6 +4,7 @@
 pub(crate) mod compute;
 pub(crate) mod connection;
 pub(crate) mod feeds;
+pub(crate) mod hip3;
 pub(crate) mod owner;
 pub(crate) mod price;
 pub(crate) mod prices_view;

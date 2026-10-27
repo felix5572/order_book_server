@@ -668,3 +668,26 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   `~/ob-snapshotter` 保持官方节点程序的换名副本(节点查到第二个 hl-node 进程会 panic), 按 sha 核对。
 - 删掉本仓库的 `orderbook-server.service`(早已过时的示例, 参数与线上不符)和 `start-server.sh`(tmux 手动启动
   脚本, 参数会与 unit 分叉); 日志改由 journald 保存。
+
+## 2026-10-27 HIP-3 美股本地 mark: Alpaca SIP + 文档三项中位(`--hip3-sip-marks`, 设计 000535 r1–r2)
+
+- **用途**: 被迫成交扩到 HIP-3(用户 10-27)。止损、强平按 mark 触发, HIP-3 原来只有节点 mark。
+- **机制**(trade.xyz mark price 文档, bm 10-27 用原始 setOracle 核对):
+  - mark = median((1) oracle, (2) oracle+150s EMA, (3) median(买, 卖, 最新成交))。
+  - 中继在 `markPxs` 里发 (1)(2), HL 出块时算 (3) 并取中位。
+  - 节点 HIP-3 流的 `mark_px_inputs` 存的是中位之后的值。
+- **计算**(`local_marks/hip3/`):
+  - (1) 用 SIP NBBO 中间价, 按中继发布精度舍入, 限幅到存储 oracle ±50bp;
+  - (2) 是 (1) 加我们自己算的 150 秒 EMA(HL 中间价 − 存储 oracle);
+  - (3) 用 HL 实时盘口;
+  - 输出走独立通道 `extHip3MarkPrices` 和 `GET /extHip3MarkPrices`。`extMarkPrices`(schema 2)主站帧逐字不变, 网关不用升级。
+  - `extForcedFlow` 统一从 `LocalMarksSnapshot::local_predicted` 读本地距离。
+- **节点状态**:
+  - `Hip3Coin` 加 `external` 和 `last_trade`: 节点流的 external 与块内最后一笔吃单成交; 种子读 checkpoint 的 `pxs2` 槽位 2 和 HIP-3 盘口的 `last_trade_px`(盘口 asset = pdi×10000 + 序号, bm 1199490000 实测)。
+  - 价格种类从布尔改成 `Hip3PriceKind`, 成交估值只认 Mark。
+- **数据源**:
+  - Alpaca SIP 一条连接: 认证和订阅一起发, 两次确认; 我们发 WS ping 维持连接。
+  - 错误码按交易系统的分类: 406 有 60 秒预算, 只有订阅成功才清零; 407、500 重连; 其余停 feed。
+  - 交叉的 NBBO 记为当前无报价, 不停 feed。
+  - 对照表 `server/data/hip3_sip_sources.json` 由 `scripts/discover_hip3_sip_sources.py` 生成, 85 个币。
+- **凭证**: 从环境变量读; `ob_ops.py` 经 `bash -ic` 加载 unit 用户的 bashrc(用户定)。可选参数按各版本 `--help` 给, 回滚安全。

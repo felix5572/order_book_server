@@ -1,0 +1,262 @@
+{
+ "coins": {
+  "xyz:AAOI": {
+   "symbol": "AAOI"
+  },
+  "xyz:AAPL": {
+   "symbol": "AAPL"
+  },
+  "xyz:AMAT": {
+   "symbol": "AMAT"
+  },
+  "xyz:AMD": {
+   "symbol": "AMD"
+  },
+  "xyz:AMZN": {
+   "symbol": "AMZN"
+  },
+  "xyz:ARM": {
+   "symbol": "ARM"
+  },
+  "xyz:ASML": {
+   "symbol": "ASML"
+  },
+  "xyz:AVGO": {
+   "symbol": "AVGO"
+  },
+  "xyz:BABA": {
+   "symbol": "BABA"
+  },
+  "xyz:BB": {
+   "symbol": "BB"
+  },
+  "xyz:BE": {
+   "symbol": "BE"
+  },
+  "xyz:BIRD": {
+   "symbol": "BIRD"
+  },
+  "xyz:BMNR": {
+   "symbol": "BMNR"
+  },
+  "xyz:BOT": {
+   "symbol": "BOT"
+  },
+  "xyz:BX": {
+   "symbol": "BX"
+  },
+  "xyz:CBRS": {
+   "symbol": "CBRS"
+  },
+  "xyz:COIN": {
+   "symbol": "COIN"
+  },
+  "xyz:COST": {
+   "symbol": "COST"
+  },
+  "xyz:CRCL": {
+   "symbol": "CRCL"
+  },
+  "xyz:CRWD": {
+   "symbol": "CRWD"
+  },
+  "xyz:CRWV": {
+   "symbol": "CRWV"
+  },
+  "xyz:CVX": {
+   "symbol": "CVX"
+  },
+  "xyz:DELL": {
+   "symbol": "DELL"
+  },
+  "xyz:DKNG": {
+   "symbol": "DKNG"
+  },
+  "xyz:DRAM": {
+   "symbol": "DRAM"
+  },
+  "xyz:EBAY": {
+   "symbol": "EBAY"
+  },
+  "xyz:EWJ": {
+   "symbol": "EWJ"
+  },
+  "xyz:EWT": {
+   "symbol": "EWT"
+  },
+  "xyz:EWY": {
+   "symbol": "EWY"
+  },
+  "xyz:EWZ": {
+   "symbol": "EWZ"
+  },
+  "xyz:GEV": {
+   "symbol": "GEV"
+  },
+  "xyz:GLW": {
+   "symbol": "GLW"
+  },
+  "xyz:GME": {
+   "symbol": "GME"
+  },
+  "xyz:GOOGL": {
+   "symbol": "GOOGL"
+  },
+  "xyz:HIMS": {
+   "symbol": "HIMS"
+  },
+  "xyz:HOOD": {
+   "symbol": "HOOD"
+  },
+  "xyz:IBM": {
+   "symbol": "IBM"
+  },
+  "xyz:INTC": {
+   "symbol": "INTC"
+  },
+  "xyz:IREN": {
+   "symbol": "IREN"
+  },
+  "xyz:KORU": {
+   "symbol": "KORU"
+  },
+  "xyz:KSTR": {
+   "symbol": "KSTR"
+  },
+  "xyz:LITE": {
+   "symbol": "LITE"
+  },
+  "xyz:LLY": {
+   "symbol": "LLY"
+  },
+  "xyz:LRCX": {
+   "symbol": "LRCX"
+  },
+  "xyz:LYTE": {
+   "symbol": "LYTE"
+  },
+  "xyz:MAGS": {
+   "symbol": "MAGS"
+  },
+  "xyz:META": {
+   "symbol": "META"
+  },
+  "xyz:MRNA": {
+   "symbol": "MRNA"
+  },
+  "xyz:MRVL": {
+   "symbol": "MRVL"
+  },
+  "xyz:MSFT": {
+   "symbol": "MSFT"
+  },
+  "xyz:MSTR": {
+   "symbol": "MSTR"
+  },
+  "xyz:MU": {
+   "symbol": "MU"
+  },
+  "xyz:NBIS": {
+   "symbol": "NBIS"
+  },
+  "xyz:NCLD": {
+   "symbol": "NCLD"
+  },
+  "xyz:NET": {
+   "symbol": "NET"
+  },
+  "xyz:NFLX": {
+   "symbol": "NFLX"
+  },
+  "xyz:NOK": {
+   "symbol": "NOK"
+  },
+  "xyz:NOW": {
+   "symbol": "NOW"
+  },
+  "xyz:NVDA": {
+   "symbol": "NVDA"
+  },
+  "xyz:ORCL": {
+   "symbol": "ORCL"
+  },
+  "xyz:PLTR": {
+   "symbol": "PLTR"
+  },
+  "xyz:QCOM": {
+   "symbol": "QCOM"
+  },
+  "xyz:QNT": {
+   "symbol": "QNT"
+  },
+  "xyz:RDDT": {
+   "symbol": "RDDT"
+  },
+  "xyz:RIVN": {
+   "symbol": "RIVN"
+  },
+  "xyz:RKLB": {
+   "symbol": "RKLB"
+  },
+  "xyz:SHAZ": {
+   "symbol": "SHAZ"
+  },
+  "xyz:SKHY": {
+   "symbol": "SKHY"
+  },
+  "xyz:SMH": {
+   "symbol": "SMH"
+  },
+  "xyz:SNDK": {
+   "symbol": "SNDK"
+  },
+  "xyz:SNXX": {
+   "symbol": "SNXX"
+  },
+  "xyz:SOXL": {
+   "symbol": "SOXL"
+  },
+  "xyz:SPCX": {
+   "symbol": "SPCX"
+  },
+  "xyz:STRC": {
+   "symbol": "STRC"
+  },
+  "xyz:TLT": {
+   "symbol": "TLT"
+  },
+  "xyz:TSLA": {
+   "symbol": "TSLA"
+  },
+  "xyz:TSM": {
+   "symbol": "TSM"
+  },
+  "xyz:TWST": {
+   "symbol": "TWST"
+  },
+  "xyz:UMC": {
+   "symbol": "UMC"
+  },
+  "xyz:URNM": {
+   "symbol": "URNM"
+  },
+  "xyz:USAR": {
+   "symbol": "USAR"
+  },
+  "xyz:WDC": {
+   "symbol": "WDC"
+  },
+  "xyz:XBI": {
+   "symbol": "XBI"
+  },
+  "xyz:XLE": {
+   "symbol": "XLE"
+  },
+  "xyz:ZM": {
+   "symbol": "ZM"
+  }
+ },
+ "feed": "sip",
+ "generatedAt": "2026-10-27T19:38:32Z",
+ "tolerance": "0.01"
+}

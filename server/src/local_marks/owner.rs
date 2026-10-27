@@ -10,7 +10,7 @@ use std::{sync::Arc, time::Duration};
 use log::error;
 use tokio::{
     sync::{Mutex, watch},
-    time::MissedTickBehavior,
+    time::{Instant, MissedTickBehavior},
 };
 
 use super::{
@@ -50,10 +50,12 @@ pub(crate) struct LocalMarks {
 impl LocalMarks {
     /// Spawns the owner task, and a watcher logging its end.
     pub(crate) fn start(feeds: Arc<LocalMarkFeeds>, node_prices: watch::Receiver<NodePrices>, book: impl BookPrices) -> Self {
-        let table = Arc::new(CoinTable::new(&feeds.sources));
+        let table = Arc::new(CoinTable::new(&feeds.sources, feeds.hip3.as_deref()));
         let now_ms = now_ms();
         let readings = feeds.readings(now_ms);
-        let initial = assemble(&table, &Tick { now_ms, stopped: None, node: &Err(NOT_TICKED.to_string()), book: None, readings: &readings });
+        let sip = feeds.sip_reading(now_ms);
+        let tick = Tick { now_ms, instant: Instant::now(), stopped: None, node: &Err(NOT_TICKED.to_string()), book: None, readings: &readings, sip: sip.as_ref() };
+        let initial = assemble(&table, &tick, &mut table.hip3_emas());
         let (snapshots, receiver) = watch::channel(Arc::new(initial));
         let owner = tokio::spawn(run_owner(table, Arc::clone(&feeds), node_prices, book, snapshots));
         tokio::spawn(async move {
@@ -97,6 +99,8 @@ async fn run_owner(
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut owner_gone = false;
+    // the HIP-3 EMAs' state lives across ticks (design 000535 r2 revision 4)
+    let mut hip3_emas = table.hip3_emas();
     loop {
         ticker.tick().await;
         if !owner_gone && node_prices.has_changed().is_err() {
@@ -107,8 +111,10 @@ async fn run_owner(
         let best = book.best_prices(table.book_coins()).await;
         let now_ms = now_ms();
         let readings = feeds.readings(now_ms);
+        let sip = feeds.sip_reading(now_ms);
         let stopped = if owner_gone { Some(OWNER_GONE.to_string()) } else { feeds.stopped() };
-        let snapshot = assemble(&table, &Tick { now_ms, stopped, node: &node, book: best.as_ref(), readings: &readings });
+        let tick = Tick { now_ms, instant: Instant::now(), stopped, node: &node, book: best.as_ref(), readings: &readings, sip: sip.as_ref() };
+        let snapshot = assemble(&table, &tick, &mut hip3_emas);
         drop(snapshots.send_replace(Arc::new(snapshot)));
     }
 }
@@ -142,7 +148,7 @@ mod tests {
     fn node_prices() -> Arc<NativePriceSnapshot> {
         let node = btc_state(0.0, now_ms() * 1_000_000);
         let coins = FxHashMap::from_iter([("BTC".to_string(), node)]);
-        Arc::new(NativePriceSnapshot { seed_height: 1, height: 2, block_time_ms: now_ms() + 60_000, coins })
+        Arc::new(NativePriceSnapshot { seed_height: 1, height: 2, block_time_ms: now_ms() + 60_000, coins, hip3: FxHashMap::default() })
     }
 
     async fn next(snapshots: &mut watch::Receiver<Arc<LocalMarksSnapshot>>) -> Arc<LocalMarksSnapshot> {
@@ -155,7 +161,7 @@ mod tests {
     #[tokio::test]
     async fn the_account_owner_gone_withdraws_every_leg_until_restart() {
         let sources = Arc::new(MarkSources::parse(SOURCES).unwrap());
-        let feeds = Arc::new(LocalMarkFeeds::idle_for_test(sources));
+        let feeds = Arc::new(LocalMarkFeeds::idle_for_test(sources, None));
         let (prices, receiver) = watch::channel(Ok(node_prices()));
         let marks = LocalMarks::start(feeds, receiver, FreshBook);
         let mut snapshots = marks.subscribe();

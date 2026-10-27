@@ -34,7 +34,7 @@ impl Fixture {
         }
         Self {
             height,
-            coins: FxHashMap::from_iter([(coin.into(), Hip3Coin {
+            coins: FxHashMap::from_iter([(coin.into(), Hip3Coin { external: None, last_trade: None,
                 order_asset: u32::try_from(event["order_asset"].as_u64().unwrap()).unwrap(), size_decimals: decimals, oracle: None,
                 mark: Some(StoredMark { px: exact_price_units(event["before_mark"].as_str().unwrap(), decimals).unwrap(), time_ns: time_ns - 1 }),
             })]),
@@ -42,7 +42,7 @@ impl Fixture {
                 fills: event["legs"].as_array().unwrap().iter().map(|v| BlockFill::of(&serde_json::from_value::<NodeDataFill>(v.clone()).unwrap())).collect(),
                 actions: Some(actions),
                 statuses: BlockStatuses::of(serde_json::from_value::<Vec<_>>(event["statuses"].clone()).unwrap()).unwrap(),
-                hip3: vec![Hip3PriceUpdate { coin: coin.into(), px: event["after_mark"].as_str().unwrap().into(), normal: true, oracle: false, time_ns }],
+                hip3: vec![Hip3PriceUpdate { coin: coin.into(), px: event["after_mark"].as_str().unwrap().into(), normal: true, kind: Hip3PriceKind::Mark, time_ns }],
                 ..BlockInputs::default()
             },
         }

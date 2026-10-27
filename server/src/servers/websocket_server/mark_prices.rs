@@ -1,6 +1,7 @@
-//! The local marks' side of a WS connection - `extMarkPrices` (design 000454 r1 1.4): every tick, a frame of each
-//! subscribed coin - and the `GET /extMarkPrices` and `GET /extMarkReferenceCaches` handlers. The frames come from the local marks' own snapshot channel,
-//! never the book's broadcast.
+//! The local marks' side of a WS connection - `extMarkPrices` (design 000454 r1 1.4) and `extHip3MarkPrices` (design
+//! 000535 r2 revision 1): every tick, a frame of each subscribed coin - and the `GET /extMarkPrices`,
+//! `GET /extMarkReferenceCaches` and `GET /extHip3MarkPrices` handlers. The frames come from the local marks' own snapshot
+//! channel, never the book's broadcast. The main-dex selectors read only the main-dex coins.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -11,18 +12,57 @@ use tokio::sync::watch::{self, error::RecvError};
 use super::{Outbound, coin_positions::json_response};
 use crate::{
     local_marks::{
+        hip3::view::Hip3MarksView,
         owner::{LocalMarks, OWNER_TASK_ENDED},
         prices_view::{CoinCachesView, CoinMarksView},
         snapshot::{CoinMarks, LocalMarksSnapshot},
     },
-    types::subscription::{ClientMessage, EXT_MARK_PRICES, ServerResponse, Subscription, SubscriptionManager},
+    types::subscription::{ClientMessage, EXT_HIP3_MARK_PRICES, EXT_MARK_PRICES, ServerResponse, Subscription, SubscriptionManager},
 };
 
-/// A connection's `extMarkPrices` subscriptions.
+/// Which channel a subscription is on: the main-dex coins' or the HIP-3 SIP coins'.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Market {
+    Main,
+    Hip3,
+}
+
+impl Market {
+    const fn channel(self) -> &'static str {
+        match self {
+            Self::Main => EXT_MARK_PRICES,
+            Self::Hip3 => EXT_HIP3_MARK_PRICES,
+        }
+    }
+
+    fn subscription(self, coin: &str) -> Subscription {
+        match self {
+            Self::Main => Subscription::MarkPrices { coin: coin.to_string() },
+            Self::Hip3 => Subscription::Hip3MarkPrices { coin: coin.to_string() },
+        }
+    }
+
+    /// The coin's frame; `None` for a coin outside the market's sources.
+    fn frame(self, snapshot: &LocalMarksSnapshot, coin: &str) -> Option<bytes::Bytes> {
+        match self {
+            Self::Main => snapshot.coin(coin).map(|marks| CoinMarksView::of(snapshot, coin, marks).to_wire()),
+            Self::Hip3 => snapshot.hip3_coin(coin).map(|marks| Hip3MarksView::of(snapshot, coin, marks).to_wire()),
+        }
+    }
+
+    const fn sources(self) -> &'static str {
+        match self {
+            Self::Main => "the local marks' sources",
+            Self::Hip3 => "the HIP-3 SIP sources (the server runs with --hip3-sip-marks?)",
+        }
+    }
+}
+
+/// A connection's `extMarkPrices` and `extHip3MarkPrices` subscriptions.
 pub(super) struct MarkPricesSession {
     /// `None` once the owner task ended.
     snapshots: Option<watch::Receiver<Arc<LocalMarksSnapshot>>>,
-    subscribed: BTreeSet<String>,
+    subscribed: BTreeSet<(Market, String)>,
 }
 
 impl MarkPricesSession {
@@ -50,9 +90,9 @@ impl MarkPricesSession {
             self.snapshots = None;
             return self.withdraw_all(outbound, manager).await;
         };
-        for coin in &self.subscribed {
-            let marks = snapshot.coin(coin).unwrap_or_else(|| unreachable!("a subscribed coin is in the sources"));
-            if !outbound.send_frame(CoinMarksView::of(&snapshot, coin, marks).to_wire()).await {
+        for (market, coin) in &self.subscribed {
+            let frame = market.frame(&snapshot, coin).unwrap_or_else(|| unreachable!("a subscribed coin is in the sources"));
+            if !outbound.send_frame(frame).await {
                 return false;
             }
         }
@@ -66,26 +106,27 @@ impl MarkPricesSession {
         outbound: &Outbound,
         manager: &mut SubscriptionManager,
         client_message: ClientMessage,
+        market: Market,
         coin: &str,
     ) -> bool {
-        let subscription = Subscription::MarkPrices { coin: coin.to_string() };
+        let subscription = market.subscription(coin);
         // display only, as for the other subscriptions
         let sub = serde_json::to_string(&subscription).unwrap_or_default();
         if matches!(client_message, ClientMessage::Unsubscribe { .. }) {
             if !manager.unsubscribe(subscription) {
                 return outbound.send_message(ServerResponse::Error(format!("Already unsubscribed: {sub}"))).await;
             }
-            self.subscribed.remove(coin);
+            self.subscribed.remove(&(market, coin.to_string()));
             return outbound.send_message(ServerResponse::SubscriptionResponse(client_message)).await;
         }
-        let refused = |reason: &str| ServerResponse::Error(format!("Unable to grab {EXT_MARK_PRICES} snapshot: {reason}"));
+        let refused = |reason: &str| ServerResponse::Error(format!("Unable to grab {} snapshot: {reason}", market.channel()));
         let Some(snapshots) = self.snapshots.as_ref().filter(|snapshots| snapshots.has_changed().is_ok()) else {
             return outbound.send_message(refused(OWNER_TASK_ENDED)).await;
         };
         // not marked seen: the next tick's frames include this coin's, so no frame is skipped
         let snapshot = Arc::clone(&snapshots.borrow());
-        let Some(marks) = snapshot.coin(coin) else {
-            return outbound.send_message(refused(&format!("{coin} is not in the local marks' sources"))).await;
+        let Some(frame) = market.frame(&snapshot, coin) else {
+            return outbound.send_message(refused(&format!("{coin} is not in {}", market.sources()))).await;
         };
         match manager.subscribe(subscription) {
             Ok(true) => {}
@@ -95,15 +136,15 @@ impl MarkPricesSession {
         if !outbound.send_message(ServerResponse::SubscriptionResponse(client_message)).await {
             return false;
         }
-        self.subscribed.insert(coin.to_string());
-        outbound.send_frame(CoinMarksView::of(&snapshot, coin, marks).to_wire()).await
+        self.subscribed.insert((market, coin.to_string()));
+        outbound.send_frame(frame).await
     }
 
     /// The owner task ended: every subscription ends with the reason.
     async fn withdraw_all(&mut self, outbound: &Outbound, manager: &mut SubscriptionManager) -> bool {
-        for coin in std::mem::take(&mut self.subscribed) {
-            manager.unsubscribe(Subscription::MarkPrices { coin: coin.clone() });
-            let withdrawn = ServerResponse::Error(format!("{EXT_MARK_PRICES} {coin} withdrawn: {OWNER_TASK_ENDED}"));
+        for (market, coin) in std::mem::take(&mut self.subscribed) {
+            manager.unsubscribe(market.subscription(&coin));
+            let withdrawn = ServerResponse::Error(format!("{} {coin} withdrawn: {OWNER_TASK_ENDED}", market.channel()));
             if !outbound.send_message(withdrawn).await {
                 return false;
             }
@@ -148,7 +189,32 @@ pub(super) async fn reference_caches_handler(
     }
 }
 
-/// The queried coin, or every coin; why not for a coin outside the sources.
+/// `GET /extHip3MarkPrices[?coin=]`: as `GET /extMarkPrices`, of the HIP-3 SIP coins; 404 without `--hip3-sip-marks`
+/// (review 000536 P3: off is not an empty set).
+#[expect(clippy::unused_async, reason = "an axum handler")]
+pub(super) async fn hip3_mark_prices_handler(
+    axum::extract::Query(query): axum::extract::Query<MarkPricesQuery>,
+    marks: LocalMarks,
+) -> axum::response::Response {
+    if marks.feeds.hip3.is_none() {
+        return error_response(axum::http::StatusCode::NOT_FOUND, "the server runs without --hip3-sip-marks");
+    }
+    let snapshot = match marks.latest() {
+        Ok(snapshot) => snapshot,
+        Err(reason) => return error_response(axum::http::StatusCode::SERVICE_UNAVAILABLE, reason),
+    };
+    query.coin.as_deref().map_or_else(
+        || rows_response(&snapshot.hip3_coins().map(|(coin, marks)| Hip3MarksView::of(&snapshot, coin, marks)).collect::<Vec<_>>()),
+        |coin| {
+            snapshot.hip3_coin(coin).map_or_else(
+                || error_response(axum::http::StatusCode::NOT_FOUND, &format!("{coin} is not in the HIP-3 SIP sources")),
+                |marks| rows_response(&[Hip3MarksView::of(&snapshot, coin, marks)]),
+            )
+        },
+    )
+}
+
+/// The queried main-dex coin, or every one; why not for a coin outside the sources.
 fn queried<'s>(
     query: &'s MarkPricesQuery,
     snapshot: &'s LocalMarksSnapshot,
@@ -196,8 +262,15 @@ mod tests {
     fn marks() -> (LocalMarks, watch::Sender<Arc<LocalMarksSnapshot>>) {
         let world = World::new();
         let (sender, receiver) = watch::channel(Arc::new(world.snapshot(NOW_MS)));
-        let feeds = Arc::new(LocalMarkFeeds::idle_for_test(Arc::new(world.sources)));
+        let feeds = Arc::new(LocalMarkFeeds::idle_for_test(Arc::new(world.sources), None));
         (LocalMarks::of_snapshots_for_test(feeds, receiver), sender)
+    }
+
+    #[tokio::test]
+    async fn the_hip3_marks_answer_404_without_the_sip_feed() {
+        let (marks, _sender) = marks();
+        let response = hip3_mark_prices_handler(axum::extract::Query(MarkPricesQuery { coin: None }), marks).await;
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -206,7 +279,7 @@ mod tests {
         let (outbound, mut sent) = outbound();
         let mut manager = SubscriptionManager::default();
         let mut session = MarkPricesSession::new(&marks);
-        assert!(session.on_client_message(&outbound, &mut manager, subscribe("BTC"), "BTC").await);
+        assert!(session.on_client_message(&outbound, &mut manager, subscribe("BTC"), Market::Main, "BTC").await);
         assert_eq!(json(&sent.recv().await.unwrap())["channel"], "subscriptionResponse");
         assert_eq!(json(&sent.recv().await.unwrap())["data"]["publishedTsMs"], NOW_MS);
         sender.send_replace(Arc::new(World::new().snapshot(NOW_MS + 50)));
@@ -220,7 +293,7 @@ mod tests {
         let withdrawn = json(&sent.recv().await.unwrap());
         assert_eq!((withdrawn["channel"].as_str(), withdrawn["data"].as_str()), (Some("error"), Some("extMarkPrices BTC withdrawn: the local marks owner task ended")));
         assert!(manager.subscriptions().is_empty());
-        assert!(session.on_client_message(&outbound, &mut manager, subscribe("BTC"), "BTC").await);
+        assert!(session.on_client_message(&outbound, &mut manager, subscribe("BTC"), Market::Main, "BTC").await);
         assert_eq!(json(&sent.recv().await.unwrap())["data"], "Unable to grab extMarkPrices snapshot: the local marks owner task ended");
     }
 
@@ -230,12 +303,12 @@ mod tests {
         let (outbound, mut sent) = outbound();
         let mut manager = SubscriptionManager::default();
         let mut session = MarkPricesSession::new(&marks);
-        assert!(session.on_client_message(&outbound, &mut manager, subscribe("HYPE"), "HYPE").await);
+        assert!(session.on_client_message(&outbound, &mut manager, subscribe("HYPE"), Market::Main, "HYPE").await);
         assert_eq!(json(&sent.recv().await.unwrap())["data"], "Unable to grab extMarkPrices snapshot: HYPE is not in the local marks' sources");
         assert!(manager.subscriptions().is_empty());
-        assert!(session.on_client_message(&outbound, &mut manager, subscribe("ETH"), "ETH").await);
+        assert!(session.on_client_message(&outbound, &mut manager, subscribe("ETH"), Market::Main, "ETH").await);
         let unsubscribe = ClientMessage::Unsubscribe { subscription: Subscription::MarkPrices { coin: "ETH".to_string() } };
-        assert!(session.on_client_message(&outbound, &mut manager, unsubscribe, "ETH").await);
+        assert!(session.on_client_message(&outbound, &mut manager, unsubscribe, Market::Main, "ETH").await);
         let kinds: Vec<_> = (0..3).map(|_| json(&sent.try_recv().unwrap())["channel"].as_str().unwrap().to_string()).collect();
         assert_eq!(kinds, ["subscriptionResponse", "extMarkPrices", "subscriptionResponse"]);
         sender.send_replace(Arc::new(World::new().snapshot(NOW_MS + 50)));

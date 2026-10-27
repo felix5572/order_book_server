@@ -11,7 +11,7 @@ use tokio::time::{Instant, sleep_until, timeout};
 use yawc::{Frame, OpCode, Options, TcpWebSocket, WebSocket};
 
 use super::{
-    protocol::{Parsed, Protocol, Session, excerpt},
+    protocol::{Heartbeat, Parsed, Protocol, Session, excerpt},
     slot::FeedSlot,
     sources::FeedMarkets,
 };
@@ -55,12 +55,27 @@ pub(crate) enum FeedError {
     Transient(String),
     /// The venue requested a planned rotation; the caller withdraws quotes and reconnects with an info log.
     ReconnectRequested(String),
+    /// The venue refuses another session of the account (Alpaca 406): the SIP feed retries it within a fixed budget.
+    ConnectionLimit(String),
     /// Refused or unusable: the feed stops until restart.
     Contract(String),
 }
 
+/// How a connection ended: the error, and whether every request was acknowledged before it (the session was usable).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConnectionEnd {
+    pub(crate) error: FeedError,
+    pub(crate) subscribed: bool,
+}
+
 /// Runs one connection of `session` until it fails.
-pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets: &FeedMarkets, slot: &FeedSlot, timeouts: Timeouts) -> FeedError {
+pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets: &FeedMarkets, slot: &FeedSlot, timeouts: Timeouts) -> ConnectionEnd {
+    let mut subscribed = false;
+    let error = run_session(protocol, &session, markets, slot, timeouts, &mut subscribed).await;
+    ConnectionEnd { error, subscribed }
+}
+
+async fn run_session(protocol: Protocol, session: &Session, markets: &FeedMarkets, slot: &FeedSlot, timeouts: Timeouts, subscribed: &mut bool) -> FeedError {
     let label = slot.feed.label();
     let url = match url::Url::parse(&session.url) {
         Ok(url) => url,
@@ -77,10 +92,11 @@ pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets
     };
     let epoch = slot.connected(now_ms());
     for request in &session.requests {
-        if let Err(error) = send(&mut ws, label, request.clone(), timeouts.send).await {
+        if let Err(error) = send(&mut ws, label, Frame::text(request.clone()), timeouts.send).await {
             return error;
         }
     }
+    *subscribed = session.acks == 0;
     let started = Instant::now();
     let (mut acked, mut unknown) = (0, 0);
     let mut ack_deadline = (session.acks > 0).then_some(started + timeouts.ack);
@@ -103,8 +119,8 @@ pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets
                 if now >= read_deadline {
                     return FeedError::Transient(format!("{label}: no frame for {:?}", timeouts.read));
                 }
-                if let (Some(at), Some((ping, every))) = (next_ping, &session.heartbeat) && now >= at {
-                    if let Err(error) = send(&mut ws, label, ping.clone(), timeouts.send).await {
+                if let (Some(at), Some((heartbeat, every))) = (next_ping, &session.heartbeat) && now >= at {
+                    if let Err(error) = send(&mut ws, label, heartbeat_frame(heartbeat), timeouts.send).await {
                         return error;
                     }
                     next_ping = Some(now + *every);
@@ -123,8 +139,12 @@ pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets
                 Err(err) => return FeedError::Contract(format!("{label}: a text frame not UTF-8: {err}")),
             },
             OpCode::Close => return close_error(label, &frame),
-            // `yawc` answers pings itself
-            OpCode::Ping | OpCode::Pong => continue,
+            // `yawc` answers pings itself; a Pong answers our WebSocket ping only where that is the heartbeat
+            OpCode::Ping => continue,
+            OpCode::Pong => {
+                pong_deadline = pong_deadline.filter(|_| !matches!(session.heartbeat, Some((Heartbeat::WsPing, _))));
+                continue;
+            }
             opcode => return FeedError::Contract(format!("{label}: unexpected {opcode:?} frame")),
         };
         let parsed = protocol.parse(text, markets);
@@ -137,10 +157,13 @@ pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets
                 acked += count;
                 if acked >= session.acks {
                     ack_deadline = None;
+                    *subscribed = true;
                 }
             }
             Ok(Parsed::Pong) => pong_deadline = None,
             Ok(Parsed::ReconnectRequested(reason)) => return FeedError::ReconnectRequested(format!("{label}: {reason}")),
+            Ok(Parsed::ConnectionLimit(reason)) => return FeedError::ConnectionLimit(format!("{label}: {reason}")),
+            Ok(Parsed::SessionFailed(reason)) => return FeedError::Transient(format!("{label}: {reason}")),
             Ok(Parsed::Ignored) => {}
             Ok(Parsed::Unknown) => {
                 LOCAL_MARKS_FEED_UNKNOWN_FRAMES_TOTAL.with_label_values(&[label]).inc();
@@ -154,8 +177,15 @@ pub(crate) async fn run_connection(protocol: Protocol, session: Session, markets
     }
 }
 
-async fn send(ws: &mut TcpWebSocket, label: &str, text: String, within: Duration) -> Result<(), FeedError> {
-    match timeout(within, ws.send(Frame::text(text))).await {
+fn heartbeat_frame(heartbeat: &Heartbeat) -> Frame {
+    match heartbeat {
+        Heartbeat::Text(text) => Frame::text(text.clone()),
+        Heartbeat::WsPing => Frame::ping(Vec::new()),
+    }
+}
+
+async fn send(ws: &mut TcpWebSocket, label: &str, frame: Frame, within: Duration) -> Result<(), FeedError> {
+    match timeout(within, ws.send(frame)).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(err)) => Err(FeedError::Transient(format!("{label}: send: {err}"))),
         Err(_) => Err(FeedError::Transient(format!("{label}: send not done within {within:?}"))),
@@ -258,8 +288,8 @@ mod tests {
         let sources = MarkSources::embedded().unwrap();
         let markets = sources.markets(Feed { kind: Kind::Spot, venue: Venue::Okx }).unwrap();
         let slot = FeedSlot::new(Feed { kind: Kind::Spot, venue: Venue::Okx }, markets.symbols.len(), None);
-        let session = Session { url, requests: vec![r#"{"op":"subscribe"}"#.to_string()], acks, heartbeat: heartbeat.map(|every| ("ping".to_string(), every)) };
-        let error = run_connection(OKX, session, markets, &slot, QUICK).await;
+        let session = Session { url, requests: vec![r#"{"op":"subscribe"}"#.to_string()], acks, heartbeat: heartbeat.map(|every| (Heartbeat::Text("ping".to_string()), every)) };
+        let error = run_connection(OKX, session, markets, &slot, QUICK).await.error;
         (error, slot, markets.index("BTC-USDT").unwrap())
     }
 
@@ -304,7 +334,7 @@ mod tests {
         let slot = FeedSlot::new(feed, markets.symbols.len(), None);
         let protocol = Protocol { kind: feed.kind, venue: feed.venue };
         let session = Session { url, ..protocol.session(&markets.symbols, 1, None) };
-        let error = run_connection(protocol, session, markets, &slot, QUICK).await;
+        let error = run_connection(protocol, session, markets, &slot, QUICK).await.error;
         let FeedError::ReconnectRequested(reason) = error else { panic!("{error:?}") };
         assert!(reason.contains("Gate service upgrade"));
         let index = markets.index("PEPE_USDT").unwrap();

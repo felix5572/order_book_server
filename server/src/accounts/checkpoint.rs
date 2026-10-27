@@ -72,6 +72,8 @@ pub(crate) struct CheckpointAccounts {
     pub(crate) spot_pairs: Vec<SpotPair>,
     /// The first clearinghouse's oracle state and the main dex's books, for `MarkSeed::from_checkpoint`.
     pub(crate) native_prices: WireNativePrices,
+    /// HIP-3 books' last trade prices by book asset (`WireNativeBooks::hip3_last_trades`), for the same.
+    pub(crate) hip3_last_trades: FxHashMap<u32, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,6 +197,9 @@ pub(crate) struct AssetMeta {
     pub(crate) mark_raw: Option<u64>,
     /// `pxs2[asset][1].u`: when the node set the stored mark (block time, unix ns); `None` without one.
     pub(crate) mark_time_ns: Option<u64>,
+    /// `pxs2[asset][2].p`: the stored external perp price, the wire slot as is (validity belongs to the mark seed);
+    /// `None` without the slot.
+    pub(crate) external_raw: Option<i64>,
     pub(crate) margin_mode: AssetMarginMode,
     /// `marginTableId`: the table a position opened from zero takes (research "新开仓位的档位表", 603/603); it resolves
     /// in the dex's tables (checked at parse time).
@@ -746,6 +751,7 @@ pub(crate) fn parse_checkpoint_bytes(bytes: &[u8]) -> Result<CheckpointAccounts>
 
 fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, String> {
     let WireExchange { locus, perp_dexs, spot_books, pt, action_delayer, msc, begin_block_logic_guard, post_only_until_time, post_only_until_height } = exchange;
+    let WireNativeBooks { native: native_books, hip3_last_trades } = perp_dexs;
     let time_ms = node_time_ns(&locus.ctx.time).map_err(|err| format!("ctx.time: {err}"))? / 1_000_000;
     let mut dexes = Vec::with_capacity(locus.cls.len());
     let mut dex_users = Vec::with_capacity(locus.cls.len());
@@ -769,7 +775,7 @@ fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, Stri
         config: msc, outer: begin_block_logic_guard, post_only_until_time, post_only_until_height,
         hardfork_height: locus.ctx.hardfork_height, last_explicit_time,
     };
-    let native_prices = WireNativePrices { refresh, oracle: first_oracle.ok_or("locus.cls is empty")?, halted_assets: native_halted_assets, books: perp_dexs.0, spot_books, system_timing: pt.zip(action_delayer).map(|(pt, delayer)| (pt.prp.order_delay_s, delayer.delay_scale)) };
+    let native_prices = WireNativePrices { refresh, oracle: first_oracle.ok_or("locus.cls is empty")?, halted_assets: native_halted_assets, books: native_books, spot_books, system_timing: pt.zip(action_delayer).map(|(pt, delayer)| (pt.prp.order_delay_s, delayer.delay_scale)) };
     let holders: Vec<Address> = {
         let mut holders: Vec<Address> = dex_users
             .iter()
@@ -803,7 +809,7 @@ fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, Stri
     let spot_pairs = spot_pairs(&locus.spot.pairs, &locus.spot.tokens)?;
     // Routing is only consumed for the same position holders retained above.
     for users in order_trackers.iter_mut().flatten() { users.retain(|user, _| accounts.contains_key(user)); }
-    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral, reserves, accounts, spot_pairs, native_prices, order_trackers, spot_usdc_holds: locus.spot.usdc_holds })
+    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral, reserves, accounts, spot_pairs, native_prices, hip3_last_trades, order_trackers, spot_usdc_holds: locus.spot.usdc_holds })
 }
 
 /// A node time (`2026-10-19T22:09:38.119428098`, UTC, up to nanoseconds) in unix ns.
@@ -968,6 +974,7 @@ fn build_dex(
             };
             // Preserve the wire slot; price validity belongs to the mark seed, not account parsing.
             let oracle_raw = pxs.first().map(|px| px.p);
+            let external_raw = pxs.get(2).map(|px| px.p);
             let margin_mode = AssetMarginMode::of(&asset.margin_mode);
             let margin_table_id = asset.margin_table_id;
             Ok(AssetMeta {
@@ -976,6 +983,7 @@ fn build_dex(
                 mark_raw,
                 mark_time_ns,
                 oracle_raw,
+                external_raw,
                 margin_mode,
                 margin_table_id,
             })

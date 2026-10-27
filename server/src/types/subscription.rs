@@ -27,6 +27,9 @@ pub(crate) const EXT_MARK_INPUTS_PATH: &str = "/extMarkInputs";
 /// batch 2).
 pub(crate) const EXT_MARK_PRICES: &str = "extMarkPrices";
 pub(crate) const EXT_MARK_PRICES_PATH: &str = "/extMarkPrices";
+/// The HIP-3 US stocks' local marks (design 000535 r2 revision 1): their own channel, `extMarkPrices` unchanged.
+pub(crate) const EXT_HIP3_MARK_PRICES: &str = "extHip3MarkPrices";
+pub(crate) const EXT_HIP3_MARK_PRICES_PATH: &str = "/extHip3MarkPrices";
 /// The `GET` path of the node's reference caches with their members, beside `extMarkPrices` (user 2026-10-27).
 pub(crate) const EXT_MARK_REFERENCE_CACHES_PATH: &str = "/extMarkReferenceCaches";
 /// The subscription type and channel of the liquidation candidates.
@@ -82,6 +85,10 @@ pub(crate) enum Subscription {
     /// `extMarkPrices`: one coin's node and local marks every 50 ms (design 000454); needs `--local-marks`.
     #[serde(rename = "extMarkPrices", rename_all = "camelCase")]
     MarkPrices { coin: String },
+    /// `extHip3MarkPrices`: one HIP-3 SIP coin's node and local marks every 50 ms (design 000535); needs
+    /// `--hip3-sip-marks`.
+    #[serde(rename = "extHip3MarkPrices", rename_all = "camelCase")]
+    Hip3MarkPrices { coin: String },
 }
 
 /// `extForcedFlow`'s parameters: an unknown one refuses the subscription (design 000451 r4 revision 9), so a misspelt
@@ -168,7 +175,7 @@ impl Subscription {
             }
             // Coins of the account anchor's universe, or of the local marks' sources, which the book universe does not
             // bound (it is market-filtered): an unknown coin is refused when the subscription takes its first frame.
-            Self::CoinPositions { coin } | Self::MarkPrices { coin } => !coin.is_empty(),
+            Self::CoinPositions { coin } | Self::MarkPrices { coin } | Self::Hip3MarkPrices { coin } => !coin.is_empty(),
             // checked against the forced flow's rules when the subscription takes its first frames
             Self::ForcedFlow(_) => true,
             Self::LiquidationCandidates { coin, max_distance_bps } => {
@@ -205,6 +212,7 @@ impl Subscription {
             Self::CoinPositions { .. } => EXT_COIN_POSITIONS,
             Self::LiquidationCandidates { .. } => EXT_LIQUIDATION_CANDIDATES,
             Self::MarkPrices { .. } => EXT_MARK_PRICES,
+            Self::Hip3MarkPrices { .. } => EXT_HIP3_MARK_PRICES,
             Self::ForcedFlow(_) => EXT_FORCED_FLOW,
         }
     }

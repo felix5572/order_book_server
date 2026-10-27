@@ -10,9 +10,15 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
+use tokio::time::Instant;
 
 use super::{
     compute::{LocalMark, MarkInputs, local_mark, weighted_median},
+    hip3::{
+        ema::Hip3Ema,
+        snapshot::{Hip3CoinMarks, Hip3Gates, Hip3Table, hip3_marks},
+        sources::Hip3SipSources,
+    },
     price::VenuePrice,
     slot::Validity,
     subscriptions::FeedProjection,
@@ -54,11 +60,11 @@ pub(crate) struct Withheld {
 }
 
 impl Withheld {
-    fn unavailable(code: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn unavailable(code: &'static str, detail: impl Into<String>) -> Self {
         Self { status: Status::Unavailable, code, detail: detail.into() }
     }
 
-    const fn stale(code: &'static str, detail: String) -> Self {
+    pub(crate) const fn stale(code: &'static str, detail: String) -> Self {
         Self { status: Status::Stale, code, detail }
     }
 }
@@ -151,6 +157,8 @@ pub(crate) struct LocalMarksSnapshot {
     node_prices: Option<Arc<NativePriceSnapshot>>,
     table: Arc<CoinTable>,
     coins: Vec<CoinMarks>,
+    /// The HIP-3 SIP coins' (design 000535), in `CoinTable::hip3`'s order; none without `--hip3-sip-marks`.
+    hip3: Vec<Hip3CoinMarks>,
 }
 
 impl LocalMarksSnapshot {
@@ -167,6 +175,25 @@ impl LocalMarksSnapshot {
     /// Every coin in the sources' order.
     pub(crate) fn coins(&self) -> impl Iterator<Item = (&str, &CoinMarks)> {
         self.table.names.iter().map(String::as_str).zip(&self.coins)
+    }
+
+    /// `None` for a coin outside the HIP-3 SIP sources.
+    pub(crate) fn hip3_coin(&self, coin: &str) -> Option<&Hip3CoinMarks> {
+        self.table.hip3.index(coin).map(|index| &self.hip3[index])
+    }
+
+    /// Every HIP-3 SIP coin in its sources' order.
+    pub(crate) fn hip3_coins(&self) -> impl Iterator<Item = (&str, &Hip3CoinMarks)> {
+        self.table.hip3.names().iter().map(String::as_str).zip(&self.hip3)
+    }
+
+    /// The coin's local predicted mark (price units) whichever market it is in, why there is none, or `None` for a coin
+    /// in neither source: the one entry the forced flow's local calibre reads.
+    pub(crate) fn local_predicted(&self, coin: &str) -> Option<Result<u64, &Withheld>> {
+        if let Some(marks) = self.coin(coin) {
+            return Some(marks.local.as_ref().map(|leg| leg.mark.predicted));
+        }
+        self.hip3_coin(coin).map(|marks| marks.local.as_ref().map(|leg| leg.mark.predicted))
     }
 }
 
@@ -188,10 +215,12 @@ pub(crate) struct CoinTable {
     by_name: FxHashMap<String, usize>,
     /// The feeds in the readings' order (`LocalMarkFeeds::readings`, the sources' feed order).
     feeds: Vec<Feed>,
+    /// The HIP-3 SIP coins; their books follow the main coins' in `book_coins`.
+    hip3: Hip3Table,
 }
 
 impl CoinTable {
-    pub(crate) fn new(sources: &MarkSources) -> Self {
+    pub(crate) fn new(sources: &MarkSources, hip3: Option<&Hip3SipSources>) -> Self {
         let feeds: Vec<Feed> = sources.feeds().map(|(feed, _)| feed).collect();
         let names: Vec<String> = sources.coins().map(str::to_string).collect();
         let listings = names
@@ -210,8 +239,14 @@ impl CoinTable {
             })
             .collect();
         let by_name = names.iter().enumerate().map(|(index, coin)| (coin.clone(), index)).collect();
-        let book_coins = names.iter().map(|coin| Coin::new(coin)).collect();
-        Self { names, book_coins, listings, by_name, feeds }
+        let hip3 = Hip3Table::new(hip3);
+        let book_coins = names.iter().chain(hip3.names()).map(|coin| Coin::new(coin)).collect();
+        Self { names, book_coins, listings, by_name, feeds, hip3 }
+    }
+
+    /// One EMA per HIP-3 coin, none sampled: the owner's state across ticks.
+    pub(crate) fn hip3_emas(&self) -> Vec<Hip3Ema> {
+        vec![Hip3Ema::default(); self.hip3.names().len()]
     }
 
     /// The coins to read from the HL book, in the table's order.
@@ -223,6 +258,8 @@ impl CoinTable {
 /// What one tick read.
 pub(crate) struct Tick<'a> {
     pub(crate) now_ms: u64,
+    /// The same moment on the monotonic clock (the HIP-3 EMAs' sampling).
+    pub(crate) instant: Instant,
     /// Why every local leg is withheld whatever the node and the book: the feeds stopped, or the account owner is gone.
     pub(crate) stopped: Option<String>,
     pub(crate) node: &'a NodePrices,
@@ -230,23 +267,25 @@ pub(crate) struct Tick<'a> {
     pub(crate) book: Option<&'a BestPricesAt>,
     /// Every feed's reading (`LocalMarkFeeds::readings`).
     pub(crate) readings: &'a [(Feed, &'a FeedMarkets, FeedProjection)],
+    /// The SIP feed's reading; `None` without it.
+    pub(crate) sip: Option<&'a FeedProjection>,
 }
 
-pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>) -> LocalMarksSnapshot {
+/// `hip3_emas`: the owner's, one per HIP-3 coin; this tick samples them.
+pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, hip3_emas: &mut [Hip3Ema]) -> LocalMarksSnapshot {
     assert!(
         tick.readings.iter().map(|(feed, _, _)| *feed).eq(table.feeds.iter().copied()),
         "the readings follow the sources' feeds"
     );
     let node_withheld = node_withheld(tick);
-    let local_withheld = tick
-        .stopped
-        .as_ref()
-        .map(|reason| Withheld::unavailable("stopped", reason.clone()))
-        .or_else(|| node_withheld.clone())
-        .or_else(|| book_withheld(tick));
+    let book_withheld = book_withheld(tick);
+    let stopped = tick.stopped.as_ref().map(|reason| Withheld::unavailable("stopped", reason.clone()));
+    let local_withheld = stopped.clone().or_else(|| node_withheld.clone()).or_else(|| book_withheld.clone());
     let coins = (0..table.names.len())
         .map(|index| coin_marks(table, index, tick, node_withheld.as_ref(), local_withheld.as_ref()))
         .collect();
+    let gates = Hip3Gates { node: node_withheld.as_ref(), book: book_withheld.as_ref(), stopped: stopped.as_ref() };
+    let hip3 = hip3_marks(&table.hip3, tick, table.names.len(), gates, hip3_emas);
     LocalMarksSnapshot {
         computed_ms: tick.now_ms,
         node: tick.node.as_ref().map(|prices| NodeProgress { seed_height: prices.seed_height, height: prices.height, block_time_ms: prices.block_time_ms }).map_err(Clone::clone),
@@ -254,6 +293,7 @@ pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>) -> LocalMarksSna
         node_prices: tick.node.as_ref().ok().map(Arc::clone),
         table: Arc::clone(table),
         coins,
+        hip3,
     }
 }
 
@@ -291,6 +331,7 @@ fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, node_withheld: O
         match listed.feed.kind {
             Kind::Spot => oracle_coverage.add(listed.feed, validity),
             Kind::Perp => external_coverage.add(listed.feed, validity),
+            Kind::Equity => unreachable!("a main-dex coin lists no SIP market (`Feed::ALL`)"),
         }
     }
     let state = match (node_withheld, tick.node) {
@@ -364,7 +405,7 @@ fn venue_median(listings: &[ListedMarket], tick: &Tick<'_>, kind: Kind, size_dec
 }
 
 /// A book price (1e-8) in the coin's price units, `10^-(6 - szDecimals)`; the book holds only prices of that grid.
-fn book_units(px: Px, size_decimals: u32) -> Result<u64, Withheld> {
+pub(crate) fn book_units(px: Px, size_decimals: u32) -> Result<u64, Withheld> {
     let factor = 10_u64.pow(2 + size_decimals);
     if !px.value().is_multiple_of(factor) {
         return Err(Withheld::unavailable("hlBook", format!("HL book price {} (1e-8) is off the grid of szDecimals {size_decimals}", px.value())));
@@ -408,7 +449,7 @@ pub(crate) mod tests {
     impl World {
         pub(crate) fn new() -> Self {
             let sources = MarkSources::parse(SOURCES).unwrap();
-            let table = Arc::new(CoinTable::new(&sources));
+            let table = Arc::new(CoinTable::new(&sources, None));
             let quote = |bid: &str, ask: &str| {
                 (Some(Entry::for_test(Some(Quote { bid: price(bid), ask: price(ask) }), NOW_MS, 1)), Validity::Valid)
             };
@@ -430,7 +471,7 @@ pub(crate) mod tests {
             let mut btc = btc_state(0.0, NOW_MS * 1_000_000 - 1_000_000_000);
             btc.last_trade = 1_000_020;
             let coins = FxHashMap::from_iter([("BTC".to_string(), btc)]);
-            let node = Ok(Arc::new(NativePriceSnapshot { seed_height: 900, height: 1_000, block_time_ms: NOW_MS - 500, coins }));
+            let node = Ok(Arc::new(NativePriceSnapshot { seed_height: 900, height: 1_000, block_time_ms: NOW_MS - 500, coins, hip3: FxHashMap::default() }));
             let book = Some(BestPricesAt {
                 time: NOW_MS - 400,
                 height: 1_001,
@@ -442,7 +483,8 @@ pub(crate) mod tests {
 
         pub(crate) fn snapshot(&self, now_ms: u64) -> LocalMarksSnapshot {
             let readings: Vec<_> = self.sources.feeds().zip(&self.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
-            assemble(&self.table, &Tick { now_ms, stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings })
+            let tick = Tick { now_ms, instant: Instant::now(), stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, sip: None };
+            assemble(&self.table, &tick, &mut [])
         }
 
         fn set(&mut self, feed: Feed, coin: &str, validity: Validity) {
@@ -451,6 +493,26 @@ pub(crate) mod tests {
             let reading = self.sources.feeds().position(|(each, _)| each == feed).unwrap();
             self.readings[reading].entries[index].1 = validity;
         }
+    }
+
+    /// Review 000535 r2: a shared snapshot that also carries HIP-3 coins gives the main dex's output unchanged, frame
+    /// for frame.
+    #[test]
+    fn the_hip3_coins_leave_the_main_output_unchanged() {
+        let world = World::new();
+        let alone = world.snapshot(NOW_MS);
+        let hip3 = Hip3SipSources::parse(r#"{"feed": "sip", "coins": {"xyz:TSLA": {"symbol": "TSLA"}}}"#).unwrap();
+        let table = Arc::new(CoinTable::new(&world.sources, Some(&hip3)));
+        let mut book = world.book.clone().unwrap();
+        book.prices.push((None, None));
+        let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
+        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: None, node: &world.node, book: Some(&book), readings: &readings, sip: None };
+        let shared = assemble(&table, &tick, &mut table.hip3_emas());
+        let frames = |snapshot: &LocalMarksSnapshot| {
+            snapshot.coins().map(|(coin, marks)| super::super::prices_view::CoinMarksView::of(snapshot, coin, marks).to_wire()).collect::<Vec<_>>()
+        };
+        assert_eq!(frames(&shared), frames(&alone));
+        assert_eq!(shared.hip3_coin("xyz:TSLA").unwrap().local.as_ref().unwrap_err().code, "nodeCoin", "and TSLA is there");
     }
 
     fn statuses(snapshot: &LocalMarksSnapshot, coin: &str) -> (Option<&'static str>, Option<&'static str>) {
@@ -509,8 +571,8 @@ pub(crate) mod tests {
         assert_eq!(snapshot.coin("BTC").unwrap().node.as_ref().unwrap_err().detail, "the account view is unavailable: initializing");
         let world = World::new();
         let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
-        let tick = Tick { now_ms: NOW_MS, stopped: Some("gone".to_string()), node: &world.node, book: world.book.as_ref(), readings: &readings };
-        let stopped = assemble(&world.table, &tick);
+        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: Some("gone".to_string()), node: &world.node, book: world.book.as_ref(), readings: &readings, sip: None };
+        let stopped = assemble(&world.table, &tick, &mut []);
         assert_eq!(statuses(&stopped, "BTC"), (None, Some("stopped")), "the node leg does not read the feeds");
     }
 

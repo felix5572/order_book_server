@@ -70,14 +70,24 @@ impl CheckpointGrid {
     }
 }
 
-/// One written HIP-3 mark or stored oracle, its price still the wire decimal: its units need the
+/// Which stored price a HIP-3 oracle-stream entry writes (`oracle_pxs.coin_to_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hip3PriceKind {
+    /// Stored-oracle slot 0.
+    Oracle,
+    /// Mark slot 1: the node's applied mark.
+    Mark,
+    /// External perp slot 2.
+    External,
+}
+
+/// One written HIP-3 mark, stored oracle or external price, its price still the wire decimal: its units need the
 /// coin's `szDecimals`, which only a seed's universe gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Hip3PriceUpdate {
     /// Normal updates can pair with a unique successful setOracle; Fallback remains unplaced.
     normal: bool,
-    /// true for stored-oracle slot 0, false for mark slot 1.
-    oracle: bool,
+    kind: Hip3PriceKind,
     coin: String,
     px: String,
     /// `last_update_time`, unix ns (the block time on all 215,769 entries of 2026-10-20 11 UTC).
@@ -119,11 +129,12 @@ impl BlockInputs {
     fn of(height: u64, inputs: MarkInputs, report: &mut MarksBlockReport) -> Self {
         let mut out = Self::default();
         for event in inputs.hip3_oracle_updates.into_iter().flat_map(Batch::events) {
-            let prices = event.oracle_pxs.coin_to_mark_px.into_iter().map(|(coin, px)| (false, coin, px))
-                .chain(event.oracle_pxs.coin_to_oracle_px.into_iter().map(|(coin, px)| (true, coin, px)));
-            for (oracle, coin, written) in prices {
+            let prices = event.oracle_pxs.coin_to_mark_px.into_iter().map(|(coin, px)| (Hip3PriceKind::Mark, coin, px))
+                .chain(event.oracle_pxs.coin_to_oracle_px.into_iter().map(|(coin, px)| (Hip3PriceKind::Oracle, coin, px)))
+                .chain(event.oracle_pxs.coin_to_external_perp_px.into_iter().map(|(coin, px)| (Hip3PriceKind::External, coin, px)));
+            for (kind, coin, written) in prices {
                 match node_time_ns(&written.last_update_time) {
-                    Ok(time_ns) => out.hip3.push(Hip3PriceUpdate { normal: event.update_class == "Normal", oracle, coin, px: written.px, time_ns }),
+                    Ok(time_ns) => out.hip3.push(Hip3PriceUpdate { normal: event.update_class == "Normal", kind, coin, px: written.px, time_ns }),
                     Err(err) => report.errors.push((Stream::Hip3OracleUpdates, format!("block {height} {coin}: {err}"))),
                 }
             }
@@ -196,6 +207,7 @@ impl MarkState {
         fill_prices.collateral(&self.hip3, &self.prices, inputs);
         fill_prices.hip3(&self.hip3, inputs);
         self.apply_hip3(height, &inputs.hip3, report);
+        self.apply_hip3_trades(height, &inputs.fills, report);
         let cuts = self.apply_diffs(height, &inputs.diffs, report);
         let trades = self.block_trades(height, &inputs.fills, report);
         if let Some(actions) = inputs.actions.as_ref().filter(|_| !self.books_broken && !self.prices_broken)
@@ -237,10 +249,22 @@ impl MarkState {
                 report.unknown_coin_updates += 1;
                 continue;
             };
-            match exact_price_units(&update.px, coin.size_decimals) {
-                Ok(px) if update.oracle => coin.oracle = Some(px),
-                Ok(px) => coin.mark = Some(StoredMark { px, time_ns: update.time_ns }),
-                Err(err) => report.errors.push((Stream::Hip3OracleUpdates, format!("block {height} {}: {err}", update.coin))),
+            match (exact_price_units(&update.px, coin.size_decimals), update.kind) {
+                (Ok(px), Hip3PriceKind::Oracle) => coin.oracle = Some(px),
+                (Ok(px), Hip3PriceKind::Mark) => coin.mark = Some(StoredMark { px, time_ns: update.time_ns }),
+                (Ok(px), Hip3PriceKind::External) => coin.external = Some(px),
+                (Err(err), _) => report.errors.push((Stream::Hip3OracleUpdates, format!("block {height} {}: {err}", update.coin))),
+            }
+        }
+    }
+
+    /// Each HIP-3 coin's last taker fill of the block is its book's last trade (the main dex's: `block_trades`).
+    fn apply_hip3_trades(&mut self, height: u64, fills: &[BlockFill], report: &mut MarksBlockReport) {
+        for fill in fills.iter().filter(|fill| fill.crossed) {
+            let Some(coin) = self.hip3.get_mut(fill.coin.as_ref()) else { continue };
+            match wire_units(&fill.px, coin.size_decimals) {
+                Ok(px) => coin.last_trade = Some(px),
+                Err(err) => report.errors.push((Stream::Fills, format!("block {height} {} tid {}: {err}", fill.coin, fill.tid))),
             }
         }
     }
@@ -532,14 +556,16 @@ pub(crate) struct MarksInstallReport {
     pub(crate) errors: Vec<(Stream, String)>,
 }
 
-/// The main-dex node price state after one applied block, for the local marks (design 000454 r1 1.3): every coin the
-/// replay claims, the checkpoint the state was rebuilt from, and the block's height and time.
+/// The node price state after one applied block, for the local marks (design 000454 r1 1.3, 000535): every main-dex
+/// coin the replay claims, every HIP-3 coin's stored prices, the checkpoint the state was rebuilt from, and the
+/// block's height and time.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativePriceSnapshot {
     pub(crate) seed_height: u64,
     pub(crate) height: u64,
     pub(crate) block_time_ms: u64,
     pub(crate) coins: FxHashMap<String, CoinPriceState>,
+    pub(crate) hip3: FxHashMap<String, Hip3Coin>,
 }
 
 /// The marks of one height, as the account view reads them (design 000442 r1 1): the node marks of the applied height,
@@ -650,7 +676,7 @@ impl NodeMarks {
         self.availability()?;
         let state = self.state.as_ref().ok_or(Unavailable::Initializing)?;
         let coins = state.prices.price_states().map(|(coin, price)| (coin.to_string(), price)).collect();
-        Ok(NativePriceSnapshot { seed_height: state.seed.height, height: state.height, block_time_ms: state.time_ms, coins })
+        Ok(NativePriceSnapshot { seed_height: state.seed.height, height: state.height, block_time_ms: state.time_ms, coins, hip3: state.hip3.clone() })
     }
 
     /// The marks while they are trusted, of their height.
@@ -952,6 +978,30 @@ pub(crate) mod tests {
         }
     }
 
+    /// Design 000535 r2 revision 3: a HIP-3 coin's stored external follows the stream's `coin_to_external_perp_px`, its
+    /// last trade each block's last taker fill; both reach the published price snapshot.
+    #[test]
+    fn hip3_external_and_last_trade_follow_the_stream_and_the_fills() {
+        let mut marks = trusted_marks();
+        let time = "2026-10-19T06:40:00.5";
+        let written = |px: &str| format!(r#"[["xyz:TSLA",{{"px":"{px}","last_update_time":"{time}","daily_px":"{px}"}}]]"#);
+        let event = format!(
+            r#"{{"update_class":"Normal","mark_px_inputs":[],"spot_px_inputs":[],"external_perp_px_inputs":[],"oracle_pxs":{{"coin_to_mark_px":{},"coin_to_oracle_px":{},"coin_to_external_perp_px":{}}}}}"#,
+            written("361.0"), written("361.5"), written("361.5")
+        );
+        let line = sonic_rs::from_str(&format!(r#"{{"local_time":"{time}","block_time":"{time}","block_number":1002,"events":[{event}]}}"#)).unwrap();
+        let tsla_fill = |px: &str, tid, crossed| BlockFill { coin: "xyz:TSLA".into(), px: px.into(), sz: "1".into(), crossed, oid: tid, tid, action_position: None, twap: false, liquidation_mark_px: None };
+        let mut inputs = MarkInputs { hip3_oracle_updates: vec![line], ..MarkInputs::default() };
+        (inputs.fills, inputs.order_statuses) = quiet_fill_and_status(1_002);
+        inputs.book_diffs = no_op_diffs(1_002);
+        inputs.fills.extend([tsla_fill("361.2", 50, true), tsla_fill("361.2", 50, false), tsla_fill("361.4", 51, true), tsla_fill("361.9", 51, false)]);
+        let report = marks.apply_block(1_002, inputs);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let tsla = marks.state.as_ref().unwrap().hip3["xyz:TSLA"];
+        assert_eq!((tsla.mark.map(|mark| mark.px), tsla.oracle, tsla.external, tsla.last_trade), (Some(361_000), Some(361_500), Some(361_500), Some(361_400)), "the last taker fill's price");
+        assert_eq!(marks.price_snapshot().unwrap().hip3["xyz:TSLA"], tsla);
+    }
+
     #[test]
     fn the_grid_holds_its_anchor_and_every_interval_both_ways() {
         assert!([800, 1_000, 1_100, 2_000].into_iter().all(|height| GRID.contains(height)));
@@ -1086,14 +1136,14 @@ pub(crate) mod tests {
         assert_eq!(marks.apply_block(1_001, hip3_only(vec![line(1_001, &[("xyz:NEW", "2.5")])])).unknown_coin_updates, 1);
         assert_eq!(marks.apply_block(1_002, hip3_only(vec![line(1_002, &[("xyz:NEW", "2.75")])])).unknown_coin_updates, 1);
         let mut listing = seed(1_000);
-        listing.hip3.insert("xyz:NEW".to_string(), Hip3Coin { order_asset: 110_001, size_decimals: 4, mark: None, oracle: None });
+        listing.hip3.insert("xyz:NEW".to_string(), Hip3Coin { external: None, last_trade: None, order_asset: 110_001, size_decimals: 4, mark: None, oracle: None });
         let report = marks.install(listing);
         assert_eq!((report.rebuild, report.errors.as_slice()), (Rebuild::Replayed { blocks: 2 }, [].as_slice()));
         assert_eq!(marks.state.as_ref().unwrap().hip3["xyz:NEW"].mark, Some(written(275)), "block 1002, at 2 decimals");
         run(&mut marks, 1_003..=1_100, &[]);
         marks.apply_block(1_101, hip3_only(vec![line(1_101, &[("xyz:NEW", "2.75")])]));
         let mut coarser = seed(1_100);
-        coarser.hip3.insert("xyz:NEW".to_string(), Hip3Coin { order_asset: 110_001, size_decimals: 5, mark: None, oracle: None });
+        coarser.hip3.insert("xyz:NEW".to_string(), Hip3Coin { external: None, last_trade: None, order_asset: 110_001, size_decimals: 5, mark: None, oracle: None });
         let report = marks.install(coarser);
         assert_eq!(report.errors.len(), 1, "2.75 has more than one decimal at szDecimals 5");
         let lost = Unavailable::DataLoss { stream: Stream::Hip3OracleUpdates, bound: LossBound::Block(1_101) };
@@ -1504,7 +1554,7 @@ pub(crate) mod tests {
     fn an_overflowing_log_discards_retained_history_and_starts_over() {
         let mut log = InputLog::new(2);
         log.restart(9);
-        let update = Hip3PriceUpdate { normal: false, oracle: false, coin: "xyz:TSLA".to_string(), px: "1.0".to_string(), time_ns: 1 };
+        let update = Hip3PriceUpdate { normal: false, kind: Hip3PriceKind::Mark, coin: "xyz:TSLA".to_string(), px: "1.0".to_string(), time_ns: 1 };
         assert!(log.push(10, BlockInputs { hip3: vec![update.clone(); 2], ..BlockInputs::default() }));
         assert!(!log.push(11, BlockInputs { hip3: vec![update], ..BlockInputs::default() }), "one more overflows");
         assert_eq!((log.base, log.inputs, log.reaches(10), log.reaches(11)), (Some(11), 0, false, true));
