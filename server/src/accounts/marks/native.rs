@@ -84,9 +84,26 @@ impl MemberCache {
     }
 
     fn text(&self) -> String {
-        let members = self.members.iter().map(|(user, (value, time_ns))| (*user, *value, *time_ns)).collect();
-        cache_text(self.median, self.last_bucket, members)
+        stored_cache_text(&self.snapshot())
     }
+
+    /// The cache as a checkpoint stores it, its members by validator.
+    fn snapshot(&self) -> ReferenceCache {
+        let mut members: Vec<_> = self.members.iter().map(|(user, (value, time_ns))| (*user, *value, *time_ns)).collect();
+        members.sort_unstable();
+        ReferenceCache { last_bucket: self.last_bucket, median: self.median, members }
+    }
+}
+
+/// What last set a coin's stored mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MarkUpdate {
+    /// A validator's `SetGlobalAction`.
+    SetGlobal,
+    /// The automatic refresh from the last submitted prices: no `SetGlobalAction` for the stale window (`refresh.rs`).
+    AutomaticRefresh,
+    /// The seed: a checkpoint does not record which one set it.
+    Checkpoint,
 }
 
 /// A reference cache as evidence text: median, bucket and the members (validator, value, block time ns) by validator.
@@ -116,6 +133,7 @@ struct CoinPrices {
     size_decimals: u32,
     stored_oracle: u64,
     mark: StoredMark,
+    mark_update: MarkUpdate,
     emas: Option<NativeEmas>,
     spot: MemberCache,
     external_perp: MemberCache,
@@ -144,6 +162,7 @@ impl CoinPrices {
             size_decimals: asset.size_decimals,
             stored_oracle: asset.stored_oracle,
             mark: asset.mark,
+            mark_update: MarkUpdate::Checkpoint,
             emas: asset.emas,
             spot: MemberCache::seeded(asset.references.spot),
             external_perp: MemberCache::seeded(asset.references.external_perp),
@@ -238,7 +257,7 @@ impl CoinPrices {
     }
 
     /// A `SetGlobalAction`'s submitted (oracle, mark) for this coin.
-    fn set_global(&mut self, submitted_oracle: u64, submitted_mark: u64, time_ns: u64, cut: CoinCut) -> Result<(), String> {
+    fn set_global(&mut self, submitted_oracle: u64, submitted_mark: u64, time_ns: u64, cut: CoinCut, update: MarkUpdate) -> Result<(), String> {
         let Some((bid, ask, local)) = self.local(cut) else { return Ok(()) };
         let (Some(spot_median), Some(mark_median), Some(emas)) = (self.spot.median, self.marks.median, self.emas.as_ref()) else {
             self.unsupported.get_or_insert("noCacheOrEma");
@@ -254,6 +273,7 @@ impl CoinPrices {
         self.emas = Some(NativeEmas { basis, local_price: local_price_ema });
         self.stored_oracle = stored;
         self.mark = StoredMark { px: new_mark, time_ns };
+        self.mark_update = update;
         Ok(())
     }
 }
@@ -278,16 +298,24 @@ pub(crate) struct PricesCheck {
     pub(crate) samples: Vec<PriceMismatch>,
 }
 
-/// A main-dex coin's node price state at the applied height, as the local marks preview it (design 000454 r1 1.3):
-/// the stored oracle and mark, the EMAs, the Mark reference cache's median and the last trade, in price units.
+/// A main-dex coin's node price state at the applied height, as the local marks preview it (design 000454 r1 1.3) and
+/// `extMarkPrices` shows it: the stored oracle and mark, the EMAs, the last submission, the Spot and Mark reference
+/// caches and the last trade, in price units.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CoinPriceState {
     pub(crate) size_decimals: u32,
     pub(crate) stored_oracle: u64,
     pub(crate) stored_mark: u64,
+    /// When the stored mark was set (block time, unix ns), and by what.
+    pub(crate) mark_time_ns: u64,
+    pub(crate) mark_update: MarkUpdate,
     pub(crate) emas: NativeEmas,
-    /// `None` before the cache has a median.
-    pub(crate) mark_cache: Option<u64>,
+    /// The last `SetGlobalAction`'s (oracle, mark): the first candidates of the stored medians, and what the automatic
+    /// refresh submits again; `None` before the coin has one.
+    pub(crate) submitted: Option<(u64, u64)>,
+    /// The oracle's and the mark's second candidates, members by validator.
+    pub(crate) spot_cache: ReferenceCache,
+    pub(crate) mark_cache: ReferenceCache,
     pub(crate) last_trade: u64,
 }
 
@@ -327,7 +355,8 @@ impl NativePrices {
             let Some((oracle, mark)) = *pair else { continue };
             let coin = &mut self.coins[asset];
             if coin.halted { continue; }
-            coin.set_global(oracle, mark, time_ns, cut_of(asset)).map_err(|err| format!("{} automatic refresh: {err}", coin.name))?;
+            coin.set_global(oracle, mark, time_ns, cut_of(asset), MarkUpdate::AutomaticRefresh)
+                .map_err(|err| format!("{} automatic refresh: {err}", coin.name))?;
         }
         Ok(true)
     }
@@ -353,13 +382,18 @@ impl NativePrices {
 
     /// Every coin's state the replay claims: not one unsupported, nor one without its EMAs.
     pub(crate) fn price_states(&self) -> impl Iterator<Item = (&str, CoinPriceState)> + '_ {
-        self.coins.iter().filter(|coin| coin.unsupported.is_none()).filter_map(|coin| {
+        let coins = self.coins.iter().zip(&self.refresh.submitted);
+        coins.filter(|(coin, _)| coin.unsupported.is_none()).filter_map(|(coin, submitted)| {
             let state = CoinPriceState {
                 size_decimals: coin.size_decimals,
                 stored_oracle: coin.stored_oracle,
                 stored_mark: coin.mark.px,
-                emas: coin.emas.clone()?,
-                mark_cache: coin.marks.median,
+                mark_time_ns: coin.mark.time_ns,
+                mark_update: coin.mark_update,
+                emas: coin.emas?,
+                submitted: *submitted,
+                spot_cache: coin.spot.snapshot(),
+                mark_cache: coin.marks.snapshot(),
                 last_trade: coin.last_trade,
             };
             Some((coin.name.as_str(), state))
@@ -410,7 +444,7 @@ impl NativePrices {
                     };
                     let pair = (wire_units(oracle, coin.size_decimals)?, wire_units(mark, coin.size_decimals)?);
                     self.refresh.submitted[asset] = Some(pair);
-                    coin.set_global(pair.0, pair.1, time_ns, cut_of(asset)).map_err(|err| format!("{}: {err}", coin.name))?;
+                    coin.set_global(pair.0, pair.1, time_ns, cut_of(asset), MarkUpdate::SetGlobal).map_err(|err| format!("{}: {err}", coin.name))?;
                 }
                 Ok(())
             }
@@ -532,6 +566,27 @@ mod tests {
         let dropped = MarkAction::SetGlobal(vec![SubmittedPrices::Unpriced, SubmittedPrices::Unpriced]);
         prices.apply(&dropped, None, T1 + 3_000_000_000, |_| cut(828_500, 828_700, 828_600)).unwrap();
         assert_eq!(prices.mark_of(0).1, Some("submittedCoverageChanged"), "BTC's input dropped");
+    }
+
+    /// `extMarkPrices`' node leg (user 2026-10-27): what last set the mark - the seed's checkpoint, a `SetGlobalAction`,
+    /// the automatic refresh - and the last submission.
+    #[test]
+    fn the_price_state_names_what_set_the_mark_and_the_last_submission() {
+        let mut seed = native_seed();
+        seed.refresh = super::super::refresh::RefreshState::from_wire(super::super::refresh::tests::wire(), 2).unwrap().0;
+        let mut prices = NativePrices::seeded(&seed);
+        let btc = |prices: &NativePrices| prices.price_states().find(|(coin, _)| *coin == "BTC").unwrap().1;
+        assert_eq!((btc(&prices).mark_update, btc(&prices).submitted), (MarkUpdate::Checkpoint, Some((100, 101))));
+        let priced = SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: "82860.0".to_string() };
+        let set_global = MarkAction::SetGlobal(vec![priced, SubmittedPrices::Unpriced]);
+        prices.apply(&set_global, None, T1, |_| cut(828_500, 828_700, 828_600)).unwrap();
+        let state = btc(&prices);
+        assert_eq!((state.mark_update, state.mark_time_ns, state.submitted), (MarkUpdate::SetGlobal, T1, Some((828_900, 828_600))));
+        assert_eq!((state.spot_cache.median, state.mark_cache.median, state.mark_cache.members.len()), (Some(828_720), Some(828_590), 1));
+        // the stale window is 20 s; lmpe's 30 s decay still spans the gap
+        let later = T1 + 21_000_000_000;
+        assert!(prices.refresh_stale(1, later, |_| cut(828_500, 828_700, 828_600)).unwrap(), "no SetGlobalAction for 21 s");
+        assert_eq!((btc(&prices).mark_update, btc(&prices).mark_time_ns), (MarkUpdate::AutomaticRefresh, later));
     }
 
     #[test]
@@ -739,7 +794,7 @@ mod tests {
             coin.spot.median = Some(case.spot_cache_units);
             coin.marks.median = Some(case.mark_cache_units);
             coin.set_global(wire_units(&case.submitted_oracle, coin.size_decimals).unwrap(), wire_units(&case.submitted_mark, coin.size_decimals).unwrap(), case.time_ns,
-                cut(case.bid_units, case.ask_units, case.last_trade_units)).unwrap();
+                cut(case.bid_units, case.ask_units, case.last_trade_units), MarkUpdate::SetGlobal).unwrap();
             assert_eq!(coin.unsupported, None, "block {}", case.block);
             assert_eq!(coin.mark, StoredMark { px: wire_units(&case.expected_mark, case.sz_decimals).unwrap(), time_ns: case.time_ns }, "block {}", case.block);
         }

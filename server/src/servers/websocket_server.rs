@@ -7,7 +7,7 @@ mod mark_prices;
 
 use delivery::{BboDelivery, ConnectionDiagnostics, UserFillsDelivery, record_lag};
 use coin_positions::{AccountsSession, coin_positions_handler};
-use mark_prices::{MarkPricesSession, mark_prices_handler};
+use mark_prices::{MarkPricesSession, mark_prices_handler, reference_caches_handler};
 
 use crate::{
     accounts::runtime::{AccountsHandle, BookSource, start_accounts},
@@ -27,7 +27,7 @@ use crate::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
         subscription::{
-            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_FORCED_FLOW, EXT_FORCED_FLOW_PATH, EXT_MARK_INPUTS_PATH, EXT_MARK_PRICES, EXT_MARK_PRICES_PATH, EXT_LIQUIDATION_CANDIDATES,
+            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_FORCED_FLOW, EXT_FORCED_FLOW_PATH, EXT_MARK_INPUTS_PATH, EXT_MARK_PRICES, EXT_MARK_PRICES_PATH, EXT_MARK_REFERENCE_CACHES_PATH, EXT_LIQUIDATION_CANDIDATES,
             OrderUpdate, ServerResponse, Subscription, SubscriptionManager, UserFills,
         },
     },
@@ -292,6 +292,10 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
             .route(EXT_MARK_INPUTS_PATH, {
                 let feeds = Arc::clone(&marks.feeds);
                 get(move |query| mark_inputs::mark_inputs_handler(query, Arc::clone(&feeds)))
+            })
+            .route(EXT_MARK_REFERENCE_CACHES_PATH, {
+                let marks = marks.clone();
+                get(move |query| reference_caches_handler(query, marks.clone()))
             })
             .route(EXT_MARK_PRICES_PATH, get(move |query| mark_prices_handler(query, marks.clone()))),
         None => app,

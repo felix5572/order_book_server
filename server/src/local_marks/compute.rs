@@ -73,8 +73,13 @@ pub(crate) fn local_mark(inputs: MarkInputs<'_>) -> Result<LocalMark, String> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use alloy::primitives::Address;
+
     use super::*;
-    use crate::accounts::marks::seed::{Ema, NativeEmas};
+    use crate::accounts::marks::{
+        native::MarkUpdate,
+        seed::{Ema, NativeEmas, ReferenceCache},
+    };
 
     fn price(text: &str) -> VenuePrice {
         VenuePrice::parse(text).unwrap()
@@ -91,15 +96,24 @@ pub(crate) mod tests {
         assert_eq!(median(&[]), None);
     }
 
-    /// A warm basis EMA of `ratio`, last sampled at `last_ns`, and BTC's other node state.
+    /// A member of `btc_state`'s reference caches.
+    pub(crate) const VALIDATOR: Address = Address::repeat_byte(0xee);
+
+    /// A warm basis EMA of `ratio`, last sampled at `last_ns` by a `SetGlobalAction`, and BTC's other node state: one
+    /// validator's member in each cache, refreshed in `last_ns`'s bucket.
     pub(crate) fn btc_state(ratio: f64, last_ns: u64) -> CoinPriceState {
         let warm = |numerator: f64| Ema { numerator, denominator_s: 100.0, decay_parameter: 120.0, samples: 1_000, last_sample_ns: Some(last_ns) };
+        let cache = |px: u64| ReferenceCache { last_bucket: last_ns / 3_000_000_000, median: Some(px), members: vec![(VALIDATOR, px, last_ns)] };
         CoinPriceState {
             size_decimals: 5,
             stored_oracle: 1_000_000,
             stored_mark: 1_000_200,
+            mark_time_ns: last_ns,
+            mark_update: MarkUpdate::SetGlobal,
             emas: NativeEmas { basis: warm(ratio * 100.0), local_price: warm(10_000.0) },
-            mark_cache: Some(1_000_100),
+            submitted: Some((1_000_010, 1_000_210)),
+            spot_cache: cache(1_000_050),
+            mark_cache: cache(1_000_100),
             last_trade: 1_000_300,
         }
     }
@@ -107,7 +121,7 @@ pub(crate) mod tests {
     const NOW_NS: u64 = 1_000_000_000_000;
 
     fn inputs(node: &CoinPriceState, oracle: u64, external: u64) -> MarkInputs<'_> {
-        MarkInputs { node, mark_cache: node.mark_cache.unwrap(), bid: 1_000_000, ask: 1_000_400, oracle, external, now_ns: NOW_NS }
+        MarkInputs { node, mark_cache: node.mark_cache.median.unwrap(), bid: 1_000_000, ask: 1_000_400, oracle, external, now_ns: NOW_NS }
     }
 
     /// BTC (prices in 0.1): the basis 2 bp (the book's midpoint keeps it) moves the oracle 100,000.0 to A = 100,020.0;
@@ -137,7 +151,7 @@ pub(crate) mod tests {
     #[test]
     fn the_native_prediction_does_not_apply_the_hip3_step_limit() {
         let mut node = btc_state(0.0, NOW_NS - 1_000_000_000);
-        node.mark_cache = Some(1_200_000);
+        node.mark_cache.median = Some(1_200_000);
         node.last_trade = 1_200_000;
         let mut far = inputs(&node, 1_200_000, 1_200_000);
         (far.bid, far.ask) = (1_199_900, 1_200_100);

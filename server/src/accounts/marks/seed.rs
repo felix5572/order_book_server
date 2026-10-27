@@ -278,7 +278,7 @@ pub(crate) struct NativeAsset {
     pub(crate) unsupported: Option<&'static str>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NativeEmas {
     /// `msoe`: the basis (mid over stored oracle, minus one) EMA.
     pub(crate) basis: Ema,
@@ -287,7 +287,7 @@ pub(crate) struct NativeEmas {
 }
 
 /// An EMA as the node stores it: `numerator / denominator_s` is the average.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Ema {
     pub(crate) numerator: f64,
     pub(crate) denominator_s: f64,
@@ -324,6 +324,13 @@ pub(crate) struct ReferenceCache {
     pub(crate) median: Option<u64>,
     /// Each validator's latest value (integer price units) and its block time (unix ns), in stored order.
     pub(crate) members: Vec<(Address, u64, u64)>,
+}
+
+impl ReferenceCache {
+    /// Unix ms from which a block refreshes the cache: the first one in a newer bucket (`native.rs` `MemberCache`).
+    pub(crate) const fn next_refresh_ms(&self) -> u64 {
+        (self.last_bucket + 1) * REFERENCE_BUCKET_MS
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

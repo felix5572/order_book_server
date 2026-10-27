@@ -19,7 +19,14 @@ use super::{
     sources::{Feed, FeedMarkets, Kind, MarkSources},
 };
 use crate::{
-    accounts::{marks::native::CoinPriceState, publish::NodePrices},
+    accounts::{
+        marks::{
+            NativePriceSnapshot,
+            native::{CoinPriceState, MarkUpdate},
+            seed::NativeEmas,
+        },
+        publish::NodePrices,
+    },
     listeners::order_book::BestPricesAt,
     order_book::{Coin, Px},
 };
@@ -56,14 +63,24 @@ impl Withheld {
     }
 }
 
-/// The node leg: the replay's state of the coin, in its price units.
+/// The node leg: the replay's state of the coin, in its price units. The caches' members stay in the tick's node prices
+/// (`LocalMarksSnapshot::node_prices`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NodeMark {
     pub(crate) size_decimals: u32,
     pub(crate) mark: u64,
+    pub(crate) mark_time_ns: u64,
+    pub(crate) mark_update: MarkUpdate,
     pub(crate) stored_oracle: u64,
-    /// The Mark reference cache median; `None` before it has one.
+    /// The last `SetGlobalAction`'s (oracle, mark); `None` before the coin has one.
+    pub(crate) submitted: Option<(u64, u64)>,
+    /// The Spot and Mark reference caches' medians (`None` before one has a median) and the unix ms from which a block
+    /// refreshes them.
+    pub(crate) spot_cache: Option<u64>,
+    pub(crate) spot_cache_next_refresh_ms: u64,
     pub(crate) mark_cache: Option<u64>,
+    pub(crate) mark_cache_next_refresh_ms: u64,
+    pub(crate) emas: NativeEmas,
     pub(crate) last_trade: u64,
 }
 
@@ -130,11 +147,18 @@ pub(crate) struct LocalMarksSnapshot {
     pub(crate) node: Result<NodeProgress, String>,
     /// `None` before the book's first snapshot.
     pub(crate) book: Option<BookProgress>,
+    /// The node prices the tick read, whose coins' reference cache members `GET /extMarkReferenceCaches` serves.
+    node_prices: Option<Arc<NativePriceSnapshot>>,
     table: Arc<CoinTable>,
     coins: Vec<CoinMarks>,
 }
 
 impl LocalMarksSnapshot {
+    /// The node state a ready node leg of `coin` reads.
+    pub(crate) fn node_state(&self, coin: &str) -> Option<&CoinPriceState> {
+        self.node_prices.as_ref()?.coins.get(coin)
+    }
+
     /// `None` for a coin outside the sources.
     pub(crate) fn coin(&self, coin: &str) -> Option<&CoinMarks> {
         self.table.by_name.get(coin).map(|index| &self.coins[*index])
@@ -227,6 +251,7 @@ pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>) -> LocalMarksSna
         computed_ms: tick.now_ms,
         node: tick.node.as_ref().map(|prices| NodeProgress { seed_height: prices.seed_height, height: prices.height, block_time_ms: prices.block_time_ms }).map_err(Clone::clone),
         book: tick.book.map(|book| BookProgress { time_ms: book.time, height: book.height, trusted: book.trusted }),
+        node_prices: tick.node.as_ref().ok().map(Arc::clone),
         table: Arc::clone(table),
         coins,
     }
@@ -279,8 +304,15 @@ fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, node_withheld: O
     let node = state.clone().map(|state| NodeMark {
         size_decimals: state.size_decimals,
         mark: state.stored_mark,
+        mark_time_ns: state.mark_time_ns,
+        mark_update: state.mark_update,
         stored_oracle: state.stored_oracle,
-        mark_cache: state.mark_cache,
+        submitted: state.submitted,
+        spot_cache: state.spot_cache.median,
+        spot_cache_next_refresh_ms: state.spot_cache.next_refresh_ms(),
+        mark_cache: state.mark_cache.median,
+        mark_cache_next_refresh_ms: state.mark_cache.next_refresh_ms(),
+        emas: state.emas,
         last_trade: state.last_trade,
     });
     let local = match (local_withheld, state) {
@@ -292,7 +324,7 @@ fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, node_withheld: O
 }
 
 fn local_leg(coin: &str, listings: &[ListedMarket], tick: &Tick<'_>, index: usize, node: &CoinPriceState) -> Result<LocalLeg, Withheld> {
-    let mark_cache = node.mark_cache.ok_or_else(|| Withheld::unavailable("markCache", "the node's Mark reference cache has no median yet"))?;
+    let mark_cache = node.mark_cache.median.ok_or_else(|| Withheld::unavailable("markCache", "the node's Mark reference cache has no median yet"))?;
     let book = tick.book.unwrap_or_else(|| unreachable!("a book is read before any local leg"));
     let (Some(bid), Some(ask)) = book.prices[index] else {
         return Err(Withheld::unavailable("hlBook", format!("the HL book of {coin} has an empty side")));
@@ -514,7 +546,7 @@ pub(crate) mod tests {
         assert_eq!(statuses(&world.snapshot(NOW_MS), "BTC"), (None, Some("hlBook")));
         let mut world = World::new();
         let Ok(node) = &mut world.node else { unreachable!() };
-        Arc::make_mut(node).coins.get_mut("BTC").unwrap().mark_cache = None;
+        Arc::make_mut(node).coins.get_mut("BTC").unwrap().mark_cache.median = None;
         assert_eq!(statuses(&world.snapshot(NOW_MS), "BTC"), (None, Some("markCache")));
     }
 

@@ -1,5 +1,5 @@
 //! The local marks' side of a WS connection - `extMarkPrices` (design 000454 r1 1.4): every tick, a frame of each
-//! subscribed coin - and the `GET /extMarkPrices` handler. The frames come from the local marks' own snapshot channel,
+//! subscribed coin - and the `GET /extMarkPrices` and `GET /extMarkReferenceCaches` handlers. The frames come from the local marks' own snapshot channel,
 //! never the book's broadcast.
 
 use std::{collections::BTreeSet, sync::Arc};
@@ -12,8 +12,8 @@ use super::{Outbound, coin_positions::json_response};
 use crate::{
     local_marks::{
         owner::{LocalMarks, OWNER_TASK_ENDED},
-        prices_view::CoinMarksView,
-        snapshot::LocalMarksSnapshot,
+        prices_view::{CoinCachesView, CoinMarksView},
+        snapshot::{CoinMarks, LocalMarksSnapshot},
     },
     types::subscription::{ClientMessage, EXT_MARK_PRICES, ServerResponse, Subscription, SubscriptionManager},
 };
@@ -123,24 +123,49 @@ pub(super) async fn mark_prices_handler(
     axum::extract::Query(query): axum::extract::Query<MarkPricesQuery>,
     marks: LocalMarks,
 ) -> axum::response::Response {
-    use axum::http::StatusCode;
     let snapshot = match marks.latest() {
         Ok(snapshot) => snapshot,
-        Err(reason) => return json_response(StatusCode::SERVICE_UNAVAILABLE, None, json!({"error": reason}).to_string().into()),
+        Err(reason) => return error_response(axum::http::StatusCode::SERVICE_UNAVAILABLE, reason),
     };
-    let views: Vec<CoinMarksView<'_>> = match query.coin.as_deref() {
-        Some(coin) => {
-            let Some(coin_marks) = snapshot.coin(coin) else {
-                let error = format!("{coin} is not in the local marks' sources");
-                return json_response(StatusCode::NOT_FOUND, None, json!({"error": error}).to_string().into());
-            };
-            vec![CoinMarksView::of(&snapshot, coin, coin_marks)]
-        }
-        None => snapshot.coins().map(|(coin, coin_marks)| CoinMarksView::of(&snapshot, coin, coin_marks)).collect(),
+    match queried(&query, &snapshot) {
+        Ok(coins) => rows_response(&coins.map(|(coin, marks)| CoinMarksView::of(&snapshot, coin, marks)).collect::<Vec<_>>()),
+        Err(error) => error_response(axum::http::StatusCode::NOT_FOUND, &error),
+    }
+}
+
+/// `GET /extMarkReferenceCaches[?coin=]`: the reference caches' members of the same snapshot, answered alike.
+pub(super) async fn reference_caches_handler(
+    axum::extract::Query(query): axum::extract::Query<MarkPricesQuery>,
+    marks: LocalMarks,
+) -> axum::response::Response {
+    let snapshot = match marks.latest() {
+        Ok(snapshot) => snapshot,
+        Err(reason) => return error_response(axum::http::StatusCode::SERVICE_UNAVAILABLE, reason),
     };
+    match queried(&query, &snapshot) {
+        Ok(coins) => rows_response(&coins.map(|(coin, marks)| CoinCachesView::of(&snapshot, coin, marks)).collect::<Vec<_>>()),
+        Err(error) => error_response(axum::http::StatusCode::NOT_FOUND, &error),
+    }
+}
+
+/// The queried coin, or every coin; why not for a coin outside the sources.
+fn queried<'s>(
+    query: &'s MarkPricesQuery,
+    snapshot: &'s LocalMarksSnapshot,
+) -> Result<Box<dyn Iterator<Item = (&'s str, &'s CoinMarks)> + 's>, String> {
+    let Some(coin) = query.coin.as_deref() else { return Ok(Box::new(snapshot.coins())) };
+    let coin_marks = snapshot.coin(coin).ok_or_else(|| format!("{coin} is not in the local marks' sources"))?;
+    Ok(Box::new(std::iter::once((coin, coin_marks))))
+}
+
+fn error_response(status: axum::http::StatusCode, error: &str) -> axum::response::Response {
+    json_response(status, None, json!({"error": error}).to_string().into())
+}
+
+fn rows_response(rows: &impl serde::Serialize) -> axum::response::Response {
     #[expect(clippy::expect_used, reason = "string keys and finite numbers only; serializing cannot fail")]
-    let body = serde_json::to_vec(&views).expect("the marks view serializes");
-    json_response(StatusCode::OK, None, body.into())
+    let body = serde_json::to_vec(rows).expect("the marks view serializes");
+    json_response(axum::http::StatusCode::OK, None, body.into())
 }
 
 #[cfg(test)]
@@ -234,8 +259,24 @@ mod tests {
         assert_eq!((status, btc[0]["local"]["referenceMarkPx"].as_str()), (axum::http::StatusCode::OK, Some("100002")));
         let (status, unknown) = get(&marks, Some("HYPE")).await;
         assert_eq!((status, unknown["error"].as_str()), (axum::http::StatusCode::NOT_FOUND, Some("HYPE is not in the local marks' sources")));
+        let (status, caches) = get_caches(&marks, None).await;
+        assert_eq!((status, caches.as_array().unwrap().len()), (axum::http::StatusCode::OK, 2));
+        let (status, btc) = get_caches(&marks, Some("BTC")).await;
+        assert_eq!((status, btc[0]["node"]["markCache"]["medianPx"].as_str()), (axum::http::StatusCode::OK, Some("100010")));
+        let (status, unknown) = get_caches(&marks, Some("HYPE")).await;
+        assert_eq!((status, unknown["error"].as_str()), (axum::http::StatusCode::NOT_FOUND, Some("HYPE is not in the local marks' sources")));
         drop(sender);
         let (status, ended) = get(&marks, Some("BTC")).await;
         assert_eq!((status, ended["error"].as_str()), (axum::http::StatusCode::SERVICE_UNAVAILABLE, Some("the local marks owner task ended")));
+        let (status, ended) = get_caches(&marks, Some("BTC")).await;
+        assert_eq!((status, ended["error"].as_str()), (axum::http::StatusCode::SERVICE_UNAVAILABLE, Some("the local marks owner task ended")));
+    }
+
+    async fn get_caches(marks: &LocalMarks, coin: Option<&str>) -> (axum::http::StatusCode, serde_json::Value) {
+        let query = MarkPricesQuery { coin: coin.map(str::to_string) };
+        let response = reference_caches_handler(axum::extract::Query(query), marks.clone()).await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
     }
 }

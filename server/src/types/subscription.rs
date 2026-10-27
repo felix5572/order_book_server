@@ -27,6 +27,8 @@ pub(crate) const EXT_MARK_INPUTS_PATH: &str = "/extMarkInputs";
 /// batch 2).
 pub(crate) const EXT_MARK_PRICES: &str = "extMarkPrices";
 pub(crate) const EXT_MARK_PRICES_PATH: &str = "/extMarkPrices";
+/// The `GET` path of the node's reference caches with their members, beside `extMarkPrices` (user 2026-10-27).
+pub(crate) const EXT_MARK_REFERENCE_CACHES_PATH: &str = "/extMarkReferenceCaches";
 /// The subscription type and channel of the liquidation candidates.
 pub(crate) const EXT_LIQUIDATION_CANDIDATES: &str = "extLiquidationCandidates";
 /// The subscription type and channel of the forced flow, and the `GET` path of the same (design 000451).
