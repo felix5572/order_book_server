@@ -5,15 +5,20 @@
 //! - A = oracle × (1 + basis), the basis msoe previewed at now with the book's midpoint against the stored oracle, as a
 //!   validator's reference action previews it at its cut; L = median(bid, ask, last trade); C = the external price.
 //! - reference = median(A, L, C): what a validator submitting our venue prices now would store as its Mark member.
-//! - predicted = median(reference, Mark cache, L): a Main-dex `SetGlobalAction` now whose submission is the reference.
+//! - submitted = the reference as a `SetGlobalAction` carries it: to 5 significant figures (members keep the coin's
+//!   price units).
+//! - predicted = median(submitted, Mark cache, L): a Main-dex `SetGlobalAction` now whose submission is the reference.
 //!   Main bypasses the Hip3 1% limit (binary 6911b792, 0x2965e0a..0x2965e1b; `native.rs`). A conditional estimate,
 //!   not the next mark: the cache refreshes per bucket and later submissions and books are unknown. Nothing is written back.
 
-use super::price::VenuePrice;
+use super::price::{MAX_PERP_DECIMALS, VenuePrice};
 use crate::accounts::marks::{
     native::CoinPriceState,
     rules::{internal_round, local_price, median_units},
 };
+
+/// A `SetGlobalAction`'s prices carry at most this many significant figures.
+const SUBMITTED_SIGNIFICANT_FIGURES: u32 = 5;
 
 /// The price where the cumulative weight, ascending, first passes half the total (the trading system's
 /// `hl_mark_prices` `weighted_median`, over the venues quoting now); `None` without a price.
@@ -28,6 +33,23 @@ pub(crate) fn weighted_median(mut prices: Vec<(VenuePrice, u32)>) -> Option<Venu
             cumulative * 2 > total
         })
         .map(|(price, _)| price)
+}
+
+/// A price in the coin's units (10^-(6 - szDecimals)) as a `SetGlobalAction` carries it: to 5 significant figures, half
+/// to even, every integer digit kept (HL's order price rule: an integer price is valid at any length).
+///
+/// bm 10-27 11:00–12:00: every one of 187,792 set-global oracle and mark prices over 176 coins had at most 5 significant
+/// figures, while 15% of the reference members had more; the reference so rounded matched the submitted mark in 39.3% of
+/// them against 36.4% unrounded (ETH 48% against 17%, XRP 52% against 10%). The integer case is HL's documented rule,
+/// unseen in a submission (no coin at 100,000 or above); half to even and half up matched alike (39.3%, 39.2%).
+pub(crate) fn submitted_units(units: u64, size_decimals: u32) -> u64 {
+    let digits = units.checked_ilog10().map_or(1, |log| log + 1);
+    let dropped = digits.saturating_sub(SUBMITTED_SIGNIFICANT_FIGURES).min(MAX_PERP_DECIMALS - size_decimals);
+    let step = 10_u64.pow(dropped);
+    let (quotient, remainder) = (units / step, units % step);
+    let half = step / 2;
+    let up = remainder > half || (step > 1 && remainder == half && quotient % 2 == 1);
+    (quotient + u64::from(up)) * step
 }
 
 /// A coin's inputs now, in its price units.
@@ -47,6 +69,8 @@ pub(crate) struct MarkInputs<'a> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct LocalMark {
     pub(crate) reference: u64,
+    /// The reference as a `SetGlobalAction` would carry it.
+    pub(crate) submitted: u64,
     pub(crate) predicted: u64,
     /// A, L and C.
     pub(crate) basis_adjusted_oracle: u64,
@@ -67,8 +91,9 @@ pub(crate) fn local_mark(inputs: MarkInputs<'_>) -> Result<LocalMark, String> {
     let basis_adjusted_oracle = internal_round(oracle as f64 * (1.0 + basis_ratio))?;
     let local = local_price(bid, ask, node.last_trade);
     let reference = median_units(&[basis_adjusted_oracle, local, external]).ok_or("no reference candidates")?;
-    let predicted = median_units(&[reference, mark_cache, local]).ok_or("no mark candidates")?;
-    Ok(LocalMark { reference, predicted, basis_adjusted_oracle, local, external, oracle, basis_ratio, basis_samples: basis.samples })
+    let submitted = submitted_units(reference, node.size_decimals);
+    let predicted = median_units(&[submitted, mark_cache, local]).ok_or("no mark candidates")?;
+    Ok(LocalMark { reference, submitted, predicted, basis_adjusted_oracle, local, external, oracle, basis_ratio, basis_samples: basis.samples })
 }
 
 #[cfg(test)]
@@ -137,6 +162,39 @@ pub(crate) mod tests {
         assert!((mark.basis_ratio - 0.0002).abs() < 1e-6);
         let high = local_mark(inputs(&node, 1_100_000, 1_100_000)).unwrap();
         assert_eq!((high.reference, high.predicted), (1_100_000, 1_000_300), "the outer median keeps L");
+    }
+
+    /// The prediction takes the reference as a `SetGlobalAction` carries it: A = 100,025.5 is the reference
+    /// (L = 100,030.0, C = 100,020.0), submitted as the integer 100,026 (half to even), which the outer median keeps.
+    #[test]
+    fn the_prediction_takes_the_reference_as_submitted() {
+        let node = btc_state(0.0002, NOW_NS - 1_000_000_000);
+        let mark = local_mark(inputs(&node, 1_000_055, 1_000_200)).unwrap();
+        assert_eq!((mark.basis_adjusted_oracle, mark.local, mark.external), (1_000_255, 1_000_300, 1_000_200));
+        assert_eq!((mark.reference, mark.submitted, mark.predicted), (1_000_255, 1_000_260, 1_000_260));
+    }
+
+    /// Five significant figures in the coin's units, half to even; an integer price keeps its integer digits.
+    #[test]
+    fn a_submitted_price_keeps_five_significant_figures_and_every_integer_digit() {
+        let cases = [
+            // BTC (0.1): 80,169.5 and 80,168.5 to even, 80,169.6 up, 80,169.4 down
+            (801_695, 5, 801_700),
+            (801_685, 5, 801_680),
+            (801_696, 5, 801_700),
+            (801_694, 5, 801_690),
+            // 123,456.7: the integer digits stay; 99,999.9 carries to 100,000
+            (1_234_567, 5, 1_234_570),
+            (999_999, 5, 1_000_000),
+            // ETH (0.01) 2,315.99; INIT (0.000001) 0.158995; HEMI 0.004545 already has 4
+            (231_599, 4, 231_600),
+            (158_995, 0, 159_000),
+            (4_545, 0, 4_545),
+            (7, 0, 7),
+        ];
+        for (units, size_decimals, submitted) in cases {
+            assert_eq!(submitted_units(units, size_decimals), submitted, "{units} at szDecimals {size_decimals}");
+        }
     }
 
     /// The basis gap: an EMA last sampled longer ago than its decay resets, so the oracle stands unadjusted.

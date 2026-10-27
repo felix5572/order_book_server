@@ -7,6 +7,8 @@ use crate::accounts::marks::rules::wire_units;
 
 /// Decimals a price may carry once its exponent is applied (u128 holds 38 digits).
 const MAX_SCALE: u32 = 30;
+/// A coin's price units are 10^-(`MAX_PERP_DECIMALS` - szDecimals).
+pub(crate) const MAX_PERP_DECIMALS: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct VenuePrice {

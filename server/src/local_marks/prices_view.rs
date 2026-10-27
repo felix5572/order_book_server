@@ -10,7 +10,10 @@
 use alloy::primitives::Address;
 use serde::Serialize;
 
-use super::snapshot::{CoinMarks, Coverage, LocalLeg, LocalMarksSnapshot, NodeMark, Status, Withheld};
+use super::{
+    price::MAX_PERP_DECIMALS,
+    snapshot::{CoinMarks, Coverage, LocalLeg, LocalMarksSnapshot, NodeMark, Status, Withheld},
+};
 use crate::accounts::marks::{
     decimal::ExactDecimal,
     native::MarkUpdate,
@@ -20,8 +23,6 @@ use crate::accounts::marks::{
 pub(crate) const SCHEMA_VERSION: u32 = 2;
 /// The owner's tick: a frame of every subscribed coin each tick.
 pub(crate) const INTERVAL_MS: u64 = 50;
-/// A price's decimals are `MAX_PERP_DECIMALS - szDecimals`.
-const MAX_PERP_DECIMALS: u32 = 6;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,7 +116,10 @@ const fn update_label(update: MarkUpdate) -> &'static str {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalView {
+    /// The Mark member a validator submitting our venue prices now would leave.
     reference_mark_px: String,
+    /// The reference as a `SetGlobalAction` carries it (5 significant figures), beside the node leg's submission.
+    submitted_mark_px: String,
     /// A conditional estimate: the mark a `SetGlobalAction` now would store if validators submitted the reference.
     predicted_mark_px: String,
     /// A, L and C of the reference.
@@ -209,6 +213,7 @@ fn local_view(snapshot: &LocalMarksSnapshot, local: &LocalLeg) -> LegView<LocalV
     let mark = &local.mark;
     LegView::Ready(LocalView {
         reference_mark_px: px(mark.reference),
+        submitted_mark_px: px(mark.submitted),
         predicted_mark_px: px(mark.predicted),
         basis_adjusted_oracle_px: px(mark.basis_adjusted_oracle),
         local_px: px(mark.local),
@@ -325,6 +330,7 @@ mod tests {
         assert!(!String::from_utf8_lossy(&wire).contains("members"), "the frames leave the caches' members out");
         let local = &data["local"];
         assert_eq!((local["status"].as_str(), local["referenceMarkPx"].as_str(), local["predictedMarkPx"].as_str()), (Some("ready"), Some("100002"), Some("100002")));
+        assert_eq!(local["submittedMarkPx"].as_str(), Some("100002"), "an integer price keeps every digit");
         assert_eq!((local["oraclePx"].as_str(), local["externalPx"].as_str(), local["bidPx"].as_str()), (Some("100000.1"), Some("100004"), Some("100001")));
         assert_eq!((local["nodeHeight"].as_u64(), local["nodeBlockTimeMs"].as_u64(), local["bookTimeMs"].as_u64()), (Some(1_000), Some(NOW_MS - 500), Some(NOW_MS - 400)));
         assert_eq!(data["oracleCoverage"]["usedVenues"], serde_json::json!(["binance", "okx"]));
