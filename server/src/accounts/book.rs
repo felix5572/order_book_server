@@ -236,6 +236,23 @@ impl ChangeMarks {
 }
 
 /// Raises an optional running maximum.
+/// Moves `state` by the logged `events` up to block `through`, every route withdrawn at the first of `withdrawals`
+/// (ascending, after the state's anchor) before that block's events: the order the live view applied them
+/// (`AccountBook::withdraw_routing`). After the first withdrawal no route stands, so the later ones change nothing.
+/// Every replay of the log goes through here.
+fn replay_log<'a>(state: &mut MarginStates, events: impl Iterator<Item = &'a LoggedEvent>, withdrawals: &[u64], through: u64) {
+    let mut withdrawal = withdrawals.first().copied().filter(|at| *at <= through);
+    for LoggedEvent { block, user, event } in events.take_while(|logged| logged.block <= through) {
+        if let Some(at) = withdrawal.take_if(|at| *at <= *block) {
+            state.withdraw_routing(at);
+        }
+        state.apply(*block, *user, event);
+    }
+    if let Some(at) = withdrawal {
+        state.withdraw_routing(at);
+    }
+}
+
 fn raise(maximum: &mut Option<u64>, value: u64) {
     *maximum = Some(maximum.map_or(value, |current| current.max(value)));
 }
@@ -1115,9 +1132,9 @@ impl AccountBook {
         }
         if !accounts.is_empty() && let Some(replay) = &mut self.replay {
             replay.current.restart_accounts(&replay.anchored, &accounts);
-            for logged in self.events.iter().filter(|logged| accounts.contains(&logged.user)) {
-                replay.current.apply(logged.block, logged.user, &logged.event);
-            }
+            // review 000520 r1 P2: a withdrawal stays (the other accounts' routes are already withdrawn)
+            let events = self.events.iter().filter(|logged| accounts.contains(&logged.user));
+            replay_log(&mut replay.current, events, &self.routing_withdrawals, u64::MAX);
         }
         Touched { accounts: accounts.into_iter().collect(), positions: Vec::new() }
     }
@@ -1223,9 +1240,7 @@ impl AccountBook {
             return ReplayCheck::Skipped("behindTheAnchor");
         }
         let mut replayed = replay.anchored.clone();
-        for LoggedEvent { block, user, event } in self.events.iter().filter(|logged| logged.block <= height) {
-            replayed.apply(*block, *user, event);
-        }
+        replay_log(&mut replayed, self.events.iter(), &self.routing_withdrawals, height);
         let cash = replayed.check_against(anchor, &replay.anchored);
         ReplayCheck::Checked { cash, rows: self.check_rows(&replayed, anchor, anchor_coins, height) }
     }
@@ -1297,18 +1312,8 @@ impl AccountBook {
             anchored.restrict_routing_coverage(self.replay.as_ref().map(|replay| &replay.anchored));
         }
         let mut current = anchored.clone();
-        // after the first withdrawal no route stands, so the later ones change nothing
         self.routing_withdrawals.retain(|block| *block > height);
-        let mut withdrawal = self.routing_withdrawals.first().copied();
-        for LoggedEvent { block, user, event } in &self.events {
-            if let Some(at) = withdrawal.take_if(|at| *at <= *block) {
-                current.withdraw_routing(at);
-            }
-            current.apply(*block, *user, event);
-        }
-        if let Some(at) = withdrawal {
-            current.withdraw_routing(at);
-        }
+        replay_log(&mut current, self.events.iter(), &self.routing_withdrawals, u64::MAX);
         self.replay = Some(Replay { anchored, current });
         self.events_dropped = false;
     }
@@ -2754,6 +2759,41 @@ mod tests {
         assert_eq!((route(&book).as_deref(), book.routing_withdrawals.len()), (Some("xyz:TSLA"), 0));
         book.withdraw_routing(cp.height);
         assert_eq!(route(&book).as_deref(), Some("xyz:TSLA"), "a block the anchor covers withdraws nothing");
+    }
+
+    /// Review 000520 r1 P2 (Codex's reproduction): restoring a fill's execution mark replays the account from the
+    /// anchor, and the withdrawal after it must hold; the replay the anchor check runs ends as the live state did.
+    #[test]
+    fn every_replay_of_the_log_keeps_a_withdrawal_of_every_route() {
+        use crate::accounts::{anchor::Anchor, replay::routing::tests::checkpoint, test_support::fills_line,
+            marks::{MarkInputs, execution::BlockFill, tests::trusted_marks}};
+        let (mut cp, _, who) = checkpoint();
+        cp.height = 1_000;
+        let mut book = AccountBook::new(0);
+        book.install_anchor(Anchor::from_checkpoint(&cp).unwrap());
+        let route = |book: &AccountBook| book.replay.as_ref().unwrap().current.routing_coin(&who).map(str::to_string);
+        assert_eq!(route(&book).as_deref(), Some("xyz:TSLA"));
+        let fill = |block| {
+            let raw = fills_line(block, &[(who, "xyz:TSLA", "B", block, "0.001", "0.001")]).replace("\"px\":\"1.0\"", "\"px\":\"358.32\"");
+            sonic_rs::from_str::<Batch<NodeDataFill>>(&raw).unwrap()
+        };
+        let mut marks = trusted_marks();
+        let unpriced = crate::accounts::marks::fill_prices::FillMarkPrices::default();
+        let batch = fill(1_002);
+        let prices = marks.apply_block(1_002, MarkInputs { fills: batch.events_ref().iter().map(BlockFill::of).collect(), ..MarkInputs::default() }).fill_prices;
+        assert!(prices.get(1_002, "xyz:TSLA", 1_002).is_some());
+        book.apply_block(block_actions(1_002, &[]), vec![batch], Vec::new(), |_| None, &unpriced, Default::default());
+        book.withdraw_routing(1_003);
+        book.apply_block(block_actions(1_004, &[]), vec![fill(1_004)], Vec::new(), |_| None, &unpriced, Default::default());
+        assert_eq!(route(&book), None);
+        assert_eq!(book.restore_execution_marks(&[(1_002, prices)]).accounts, [who]);
+        assert_eq!(route(&book), None, "restoring a fill's mark keeps the withdrawal");
+        let replay = book.replay.as_ref().unwrap();
+        let mut replayed = replay.anchored.clone();
+        replay_log(&mut replayed, book.events.iter(), &book.routing_withdrawals, 1_004);
+        assert_eq!(replayed.routing_coin(&who), None);
+        let check = replayed.check_against(&replay.current, &replay.anchored);
+        assert!(check.compared.values().all(|counts| counts.mismatched == 0), "{:?}", check.compared);
     }
 
 }
