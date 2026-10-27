@@ -756,10 +756,14 @@ fn apply_assembly(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, 
         let ledger_order = super::cash_order::PreBundleLedger::of(&actions, &fills, &misc_events, &inputs,
             marks.delayed_system_before_bundles(height));
         let mark_report = marks.apply_block(height, inputs);
-        routing.require_trusted(marks.availability().is_ok(), book);
-        let (changed, dropped) = book.apply_routing(height, routing.before);
-        touched.absorb(changed);
-        report_dropped_marks(diagnostics, height, dropped);
+        routing.require_trusted(marks.availability().is_ok());
+        if routing.withdraw_all {
+            book.withdraw_routing(height);
+        } else {
+            let (changed, dropped) = book.apply_routing(height, routing.before);
+            touched.absorb(changed);
+            report_dropped_marks(diagnostics, height, dropped);
+        }
         let after_fills = cash_order.defer(&mut actions, marks.availability().is_ok());
         let before_fills = ledger_order.take(&mut misc_events, marks.availability().is_ok());
         let accounts = book.apply_block(actions, fills, misc_events,

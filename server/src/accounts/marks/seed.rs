@@ -268,10 +268,14 @@ pub(crate) struct NativeAsset {
     /// `msoe.e[i]` and `lmpe[i]`; `None` for a coin the node no longer prices (51 delisted coins on 1190010000 have
     /// neither).
     pub(crate) emas: Option<NativeEmas>,
+    /// A cache the checkpoint lacks is empty here, and the coin `unsupported`.
     pub(crate) references: ReferenceCaches,
     /// The book's last trade price, integer price units: the local price's trade input until the coin's next trade.
     pub(crate) last_trade_px: u64,
     pub(crate) orders: Vec<RestingOrder>,
+    /// Why the replay cannot claim the coin from this seed: a price state the node has not fully built (bm 10-27 XTEN,
+    /// listed that day: msoe without lmpe at 1198840000, no Spot reference cache at 1198850000). The other coins seed.
+    pub(crate) unsupported: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -312,7 +316,7 @@ pub(crate) struct ReferenceCaches {
     pub(crate) mark: ReferenceCache,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ReferenceCache {
     /// Block time in ms divided by the 3,000 ms bucket, at the last refresh.
     pub(crate) last_bucket: u64,
@@ -393,15 +397,15 @@ impl NativeSeed {
             let [stored_oracle, mark, ..] = pxs.as_slice() else {
                 return Err(format!("{}: pxs2 has {} slots, the oracle and the mark are slots 0 and 1", asset(), pxs.len()));
             };
-            let emas = match (basis[index].take(), local_price[index].take()) {
-                (None, None) => None,
-                (Some(basis), Some(local_price)) => Some(NativeEmas {
+            let (emas, partial_emas) = match (basis[index].take(), local_price[index].take()) {
+                (None, None) => (None, None),
+                (Some(basis), Some(local_price)) => (Some(NativeEmas {
                     basis: ema(basis).map_err(|err| format!("{}: msoe {err}", asset()))?,
                     local_price: ema(local_price).map_err(|err| format!("{}: lmpe {err}", asset()))?,
-                }),
-                _ => return Err(format!("{}: one of msoe and lmpe without the other", asset())),
+                }), None),
+                _ => (None, Some("partialEmas")),
             };
-            let caches = std::mem::take(&mut references[index]);
+            let (references, missing_cache) = std::mem::take(&mut references[index]).complete();
             let (last_trade_px, orders) = books[index].take().ok_or_else(|| format!("{}: no book", asset()))?;
             assets.push(NativeAsset {
                 name: meta.name.clone(),
@@ -410,9 +414,10 @@ impl NativeSeed {
                 stored_oracle: price_units(stored_oracle.p).map_err(|err| format!("{}: stored oracle {err}", asset()))?,
                 mark: stored_mark(mark).map_err(|err| format!("{}: mark {err}", asset()))?,
                 emas,
-                references: caches.complete().map_err(|err| format!("{}: {err}", asset()))?,
+                references,
                 last_trade_px,
                 orders,
+                unsupported: partial_emas.or(missing_cache),
             });
         }
         let refresh = super::refresh::RefreshState::from_wire(refresh, count)?;
@@ -496,13 +501,17 @@ struct PartialCaches {
 }
 
 impl PartialCaches {
-    fn complete(self) -> Result<ReferenceCaches, String> {
-        let missing = |kind: &str| format!("no {kind} reference cache");
-        Ok(ReferenceCaches {
-            spot: self.spot.ok_or_else(|| missing("Spot"))?,
-            external_perp: self.external_perp.ok_or_else(|| missing("ExternalPerp"))?,
-            mark: self.mark.ok_or_else(|| missing("Mark"))?,
-        })
+    /// The three caches, a missing one empty, and the unsupported reason the first missing one gives the coin.
+    fn complete(self) -> (ReferenceCaches, Option<&'static str>) {
+        let missing = [(self.spot.is_none(), "noSpotReferenceCache"), (self.external_perp.is_none(), "noExternalPerpReferenceCache"),
+            (self.mark.is_none(), "noMarkReferenceCache")];
+        let reason = missing.into_iter().find_map(|(missing, reason)| missing.then_some(reason));
+        let caches = ReferenceCaches {
+            spot: self.spot.unwrap_or_default(),
+            external_perp: self.external_perp.unwrap_or_default(),
+            mark: self.mark.unwrap_or_default(),
+        };
+        (caches, reason)
     }
 }
 
@@ -639,8 +648,7 @@ pub(crate) mod tests {
     #[test]
     fn a_seed_breaking_its_contract_fails_alone() {
         let oracle = "/exchange/locus/cls/0/oracle";
-        let cases: [(&str, serde_json::Value, &str); 6] = [
-            ("/msoe/e", json!([]), "one of msoe and lmpe without the other"),
+        let cases: [(&str, serde_json::Value, &str); 5] = [
             ("/lmpe/0/0", json!(5), "outside the 2 assets"),
             ("/ror/ktm/0/1/b/bucket_millis", json!(1000), "bucket of 1000 ms"),
             ("/ror/ktm/1/0/p/1", json!("Index"), "unknown kind"),
@@ -664,6 +672,35 @@ pub(crate) mod tests {
             checkpoint["exchange"]["locus"]["cls"][1]["oracle"]["pxs2"][0][1].as_object_mut().unwrap().remove("u");
         });
         assert!(error.contains("xyz:TSLA: a stored mark without its time"), "{error}");
+    }
+
+    fn seed_with(edit: impl FnOnce(&mut serde_json::Value)) -> MarkSeed {
+        let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        edit(&mut checkpoint);
+        MarkSeed::from_checkpoint(parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap()).unwrap()
+    }
+
+    /// bm 10-27: XTEN, listed that day, had msoe without lmpe at 1198840000 and no Spot reference cache at 1198850000;
+    /// each failed the whole seed and withheld every coin's marks. Such a coin alone is unsupported now: the replay does
+    /// not claim it, and a checkpoint holding it so is not checked against.
+    #[test]
+    fn a_coin_whose_state_is_not_fully_built_seeds_unsupported_alone() {
+        let oracle = "/exchange/locus/cls/0/oracle";
+        let only_msoe = seed_with(|checkpoint| *checkpoint.pointer_mut(&format!("{oracle}/lmpe")).unwrap() = json!([]));
+        let [btc, pump] = only_msoe.native.assets.as_slice() else { panic!("two main assets") };
+        assert_eq!((btc.unsupported, btc.emas.as_ref(), pump.unsupported), (Some("partialEmas"), None, None));
+        let no_spot = seed_with(|checkpoint| {
+            checkpoint.pointer_mut(&format!("{oracle}/ror/ktm")).unwrap().as_array_mut().unwrap().remove(0);
+        });
+        let [btc, pump] = no_spot.native.assets.as_slice() else { panic!("two main assets") };
+        assert_eq!((btc.unsupported, &btc.references.spot, pump.unsupported), (Some("noSpotReferenceCache"), &ReferenceCache::default(), None));
+        assert_eq!(btc.references.mark.median, Some(828_590), "the caches it has are read");
+        let replay = super::super::native::NativePrices::seeded(&no_spot.native);
+        assert_eq!((replay.stored_oracle(0), replay.mark(0)), (None, None), "BTC is not claimed");
+        let full = MarkSeed::from_checkpoint(parse_checkpoint_bytes(&fixture()).unwrap()).unwrap();
+        let check = super::super::native::NativePrices::seeded(&full.native).check_against(&no_spot.native);
+        assert_eq!(check.unsupported, [("noSpotReferenceCache", vec!["BTC".to_string()])]);
+        assert!(check.samples.is_empty(), "{:?}", check.samples);
     }
 
     #[test]

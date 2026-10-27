@@ -23,8 +23,9 @@
 //! ALT liquidation fills at blocks 1192112978 and 1192114308 confirm the uncapped middle-of-three price.
 //! A checkpoint checks only the end state; later updates can hide a wrong intermediate mark.
 //! A coin whose inputs take a path
-//! never observed (an empty book side, an lmpe gap, a cold lmpe for the third candidate) is `unsupported` until a
-//! seed replaces it: its values are not claimed.
+//! never observed (an empty book side, an lmpe gap, a cold lmpe for the third candidate), or whose seed state the
+//! node has not fully built (`NativeAsset::unsupported`), is `unsupported` until a seed replaces it: its values are not
+//! claimed.
 
 use alloy::primitives::Address;
 use rustc_hash::FxHashMap;
@@ -147,7 +148,7 @@ impl CoinPrices {
             marks: MemberCache::seeded(asset.references.mark),
             last_trade: asset.last_trade_px,
             spot_reference_decimals,
-            unsupported: None,
+            unsupported: asset.unsupported,
         }
     }
 
@@ -431,7 +432,8 @@ impl NativePrices {
                 unsupported.entry("unknownCoin").or_default().push(stored.name.clone());
                 continue;
             };
-            if let Some(reason) = coin.unsupported {
+            // the replay's reason first; a coin the checkpoint does not fully hold has nothing to check against
+            if let Some(reason) = coin.unsupported.or(stored.unsupported) {
                 unsupported.entry(reason).or_default().push(stored.name.clone());
                 continue;
             }

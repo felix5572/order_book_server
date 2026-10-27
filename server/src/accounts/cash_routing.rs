@@ -13,7 +13,9 @@ use crate::types::node_data::{Batch, NodeDataFill, NodeDataOrderStatus};
 pub(crate) struct RoutingBlock {
     pub(crate) before: Vec<(Address, RoutingUpdate)>,
     pub(crate) after: Vec<(Address, RoutingUpdate)>,
-    participants: FxHashSet<Address>,
+    /// Every route is withdrawn at this block (`AccountBook::withdraw_routing`) for an unknown cash event, unparsed
+    /// actions or untrusted marks; `before` and `after` are then empty.
+    pub(crate) withdraw_all: bool,
 }
 
 impl RoutingBlock {
@@ -52,12 +54,11 @@ impl RoutingBlock {
                 MiscEvent::Irrelevant => {},
             }
         }
-        result.participants = users;
         if unknown_cash || inputs.mark_actions.is_err() {
-            result.participants.extend(book.routing_users());
+            return Self::withdrawing_all();
         }
-        for user in result.participants.iter().copied() {
-            if unknown_cash || cash_users.contains(&user) || inputs.mark_actions.is_err() {
+        for user in users {
+            if cash_users.contains(&user) {
                 result.before.push((user, RoutingUpdate::Unavailable));
                 continue;
             }
@@ -121,11 +122,13 @@ impl RoutingBlock {
         RoutingUpdate::Orders { changes, mark_raw, prefund }
     }
 
-    pub(crate) fn require_trusted(&mut self, trusted: bool, book: &AccountBook) {
+    pub(crate) fn require_trusted(&mut self, trusted: bool) {
         if trusted { return; }
-        self.after.clear();
-        self.participants.extend(book.routing_users());
-        self.before = self.participants.iter().map(|user| (*user, RoutingUpdate::Unavailable)).collect();
+        *self = Self::withdrawing_all();
+    }
+
+    fn withdrawing_all() -> Self {
+        Self { withdraw_all: true, ..Self::default() }
     }
 }
 
@@ -247,8 +250,8 @@ mod tests {
         // No own order action: a mark-data gap must still invalidate physical capacity before the maker fill.
         let mut fills_only = RoutingBlock::of(&book, &MarkInputs::default(), &trades, &marks(), &unrelated_cash, &[]);
         assert_eq!(fills_only.before.len(), 0);
-        fills_only.require_trusted(false, &book);
-        assert_eq!(fills_only.before, [(who, RoutingUpdate::Unavailable)]);
+        fills_only.require_trusted(false);
+        assert!(fills_only.withdraw_all && fills_only.before.is_empty() && fills_only.after.is_empty());
         let other_fill = [fills(height, &[(who, "BTC", "A", 2, "1", "0.1")])];
         let foreign = RoutingBlock::of(&book, &MarkInputs::default(), &other_fill, &marks(), &unrelated_cash, &[]);
         assert_eq!(foreign.before, [(who, RoutingUpdate::Unavailable)], "foreign fills invalidate before any own-market execution");
@@ -258,10 +261,10 @@ mod tests {
         assert_eq!(funding_block.before, [(who, RoutingUpdate::Unavailable)]);
         let unknown = crate::accounts::test_support::misc(height, &[r#"{"NewKind":{}}"#]);
         let idle = RoutingBlock::of(&book, &MarkInputs::default(), &[], &marks(), &unrelated_cash, &[unknown]);
-        assert_eq!(idle.before, [(who, RoutingUpdate::Unavailable)], "unknown cash can affect an idle account");
+        assert!(idle.withdraw_all && idle.before.is_empty(), "unknown cash can affect an idle account");
         let mut idle = RoutingBlock::of(&book, &MarkInputs::default(), &[], &marks(), &unrelated_cash, &[]);
-        idle.require_trusted(false, &book);
-        assert_eq!(idle.before, [(who, RoutingUpdate::Unavailable)], "a gap cannot leave idle checkpoint trackers trusted");
+        idle.require_trusted(false);
+        assert!(idle.withdraw_all, "a gap cannot leave idle checkpoint trackers trusted");
     }
 
     #[test]
@@ -357,8 +360,8 @@ mod tests {
         let cash = block_actions(height, &[]);
         let plain = RoutingBlock::of(&book, &inputs(), &trades, &marks(), &cash, &[]);
         assert_eq!(plain.before, [(who, RoutingUpdate::TriggeredTaker { tid: fill.tid })]);
-        let mut lost = plain; lost.require_trusted(false, &book);
-        assert_eq!(lost.before, [(who, RoutingUpdate::Unavailable)]);
+        let mut lost = plain; lost.require_trusted(false);
+        assert!(lost.withdraw_all && lost.before.is_empty());
         let own_cash = block_actions(height, &[(crate::accounts::actions::BlockAction::Withdraw { amount_wei: 100 }, who)]);
         assert_eq!(RoutingBlock::of(&book, &inputs(), &trades, &marks(), &own_cash, &[]).before, [(who, RoutingUpdate::Unavailable)]);
         let mut spot = rows[2].clone(); spot.order.coin = "@0".into(); spot.status = "filled".into();

@@ -524,9 +524,12 @@ impl MarginStates {
         }
     }
 
-    /// All anchor-eligible accounts need an invalidation event on a global input gap, including idle ones.
-    pub(crate) fn routing_users(&self) -> impl Iterator<Item = Address> + '_ {
-        self.accounts.iter().filter(|(_, account)| account.routing.is_some()).map(|(user, _)| *user)
+    /// A global input gap invalidates every route, idle ones included: an `Unavailable` for each
+    /// (`AccountBook::withdraw_routing`).
+    pub(crate) fn withdraw_routing(&mut self, block: u64) {
+        for account in self.accounts.values_mut().filter(|account| account.routing.is_some()) {
+            routing::apply_update(account, block, &routing::RoutingUpdate::Unavailable);
+        }
     }
 
     /// Resolve a successful action with the same checkpoint universe used by cash replay.

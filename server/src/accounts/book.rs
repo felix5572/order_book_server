@@ -777,6 +777,9 @@ pub(crate) struct AccountBook {
     /// Whether the event log dropped events since the anchor (the replay of the interval is then incomplete).
     events_dropped: bool,
     replay: Option<Replay>,
+    /// Blocks after the anchor whose every route was withdrawn (`withdraw_routing`), ascending: the first one above a
+    /// new anchor withdraws the routes it rebuilds there (`rebuild_replay`).
+    routing_withdrawals: Vec<u64>,
     holdings: Holdings,
     fills: StreamProgress,
     misc_events: StreamProgress,
@@ -801,6 +804,7 @@ impl AccountBook {
             events: VecDeque::new(),
             events_dropped: false,
             replay: None,
+            routing_withdrawals: Vec::new(),
             holdings: Holdings::default(),
             fills: StreamProgress::starting(started_ms),
             misc_events: StreamProgress::starting(started_ms),
@@ -827,8 +831,20 @@ impl AccountBook {
         }
     }
 
-    pub(crate) fn routing_users(&self) -> impl Iterator<Item = Address> + '_ {
-        self.replay.iter().flat_map(|replay| replay.anchored.routing_users())
+    /// Withdraws every route at `block`, before the block's events (untrusted marks, unknown cash, unparsed actions):
+    /// the block is remembered, not logged per account, and an anchor below it withdraws the routes it rebuilds at the
+    /// same place (`rebuild_replay`). Before the first anchor no route exists. bm 10-27: an `Unavailable` logged per
+    /// block for every anchored route (~7k accounts) filled the 2M event log in seconds, and its overflow withheld the
+    /// whole view for as long as a new coin withheld the marks.
+    pub(crate) fn withdraw_routing(&mut self, block: u64) {
+        if self.covered(block) {
+            return;
+        }
+        let Some(replay) = &mut self.replay else { return };
+        replay.current.withdraw_routing(block);
+        if self.routing_withdrawals.last() != Some(&block) {
+            self.routing_withdrawals.push(block);
+        }
     }
 
     pub(crate) fn routing_coin(&self, user: &Address) -> Option<&str> {
@@ -1281,8 +1297,17 @@ impl AccountBook {
             anchored.restrict_routing_coverage(self.replay.as_ref().map(|replay| &replay.anchored));
         }
         let mut current = anchored.clone();
+        // after the first withdrawal no route stands, so the later ones change nothing
+        self.routing_withdrawals.retain(|block| *block > height);
+        let mut withdrawal = self.routing_withdrawals.first().copied();
         for LoggedEvent { block, user, event } in &self.events {
+            if let Some(at) = withdrawal.take_if(|at| *at <= *block) {
+                current.withdraw_routing(at);
+            }
             current.apply(*block, *user, event);
+        }
+        if let Some(at) = withdrawal {
+            current.withdraw_routing(at);
         }
         self.replay = Some(Replay { anchored, current });
         self.events_dropped = false;
@@ -2702,6 +2727,33 @@ mod tests {
         assert_eq!(book.routing_coin(&who), Some("xyz:TSLA"));
         assert!(book.accounts[&who].marks.margin.is_none());
         assert_eq!(book.events.len(), 1);
+    }
+
+    /// bm 10-27: an `Unavailable` logged per block for every route overflowed the event log while a new coin withheld
+    /// the marks. A withdrawal logs nothing: the route falls at once, and a later anchor below the withdrawal withdraws
+    /// the route it rebuilds; an anchor above every withdrawal keeps its routes.
+    #[test]
+    fn a_withdrawal_of_every_route_logs_nothing_and_holds_for_a_lower_anchor() {
+        use crate::accounts::{anchor::Anchor, replay::routing::tests::checkpoint};
+        let (mut cp, _, who) = checkpoint();
+        let mut book = AccountBook::new(0);
+        book.install_anchor(Anchor::from_checkpoint(&cp).unwrap());
+        let route = |book: &AccountBook| book.replay.as_ref().unwrap().current.routing_coin(&who).map(str::to_string);
+        assert_eq!(route(&book).as_deref(), Some("xyz:TSLA"));
+        for block in cp.height + 3..cp.height + 1_003 {
+            book.withdraw_routing(block);
+        }
+        assert_eq!(route(&book), None);
+        assert_eq!((book.events.len(), book.routing_withdrawals.len()), (0, 1_000), "nothing logged per account");
+        let first = cp.height + 3;
+        cp.height += 1;
+        book.install_anchor(Anchor::from_checkpoint(&cp).unwrap());
+        assert_eq!((route(&book), book.routing_withdrawals.first()), (None, Some(&first)), "rebuilt, then withdrawn");
+        cp.height += 1_100;
+        book.install_anchor(Anchor::from_checkpoint(&cp).unwrap());
+        assert_eq!((route(&book).as_deref(), book.routing_withdrawals.len()), (Some("xyz:TSLA"), 0));
+        book.withdraw_routing(cp.height);
+        assert_eq!(route(&book).as_deref(), Some("xyz:TSLA"), "a block the anchor covers withdraws nothing");
     }
 
 }
