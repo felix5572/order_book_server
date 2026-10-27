@@ -1468,11 +1468,11 @@ pub(crate) mod tests {
         let mut checkpoint = seed(995);
         checkpoint.time_ms = T0 / 1_000_000;
         for asset in &mut checkpoint.native.assets {
-            for cache in [&mut asset.references.spot, &mut asset.references.external_perp, &mut asset.references.mark] {
+            for cache in [&mut asset.references.spot, &mut asset.references.external_perp, &mut asset.references.mark].into_iter().flatten() {
                 cache.last_bucket = T0 / 3_000_000_000;
             }
         }
-        let spot = &mut checkpoint.native.assets[0].references.spot;
+        let spot = checkpoint.native.assets[0].references.spot.as_mut().unwrap();
         spot.median = Some(828_000);
         spot.members = vec![(Address::repeat_byte(1), 828_720, T0)];
         let mut marks = NodeMarks::new(GRID, 0);
@@ -1487,8 +1487,8 @@ pub(crate) mod tests {
         assert_eq!(marks.apply_block(1_000, empty(1_000, T0)).errors, []);
         assert_eq!(marks.apply_block(1_001, empty(1_001, T1)).errors, []);
         let mut refreshed = checkpoint.native.clone();
-        refreshed.assets[0].references.spot.median = Some(828_720);
-        refreshed.assets[0].references.spot.last_bucket = T1 / 3_000_000_000;
+        refreshed.assets[0].references.spot.as_mut().unwrap().median = Some(828_720);
+        refreshed.assets[0].references.spot.as_mut().unwrap().last_bucket = T1 / 3_000_000_000;
         let spot_cache = |marks: &NodeMarks| {
             let check = marks.state.as_ref().unwrap().prices.check_against(&refreshed);
             check.fields.into_iter().find(|(field, _, _)| *field == "spotCache")

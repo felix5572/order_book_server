@@ -103,7 +103,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::accounts::marks::{
         native::MarkUpdate,
-        seed::{Ema, NativeEmas, ReferenceCache},
+        seed::{Ema, NativeEmas, ReferenceCache, ReferenceModes, ReferenceMode},
     };
 
     fn price(text: &str) -> VenuePrice {
@@ -137,8 +137,9 @@ pub(crate) mod tests {
             mark_update: MarkUpdate::SetGlobal,
             emas: NativeEmas { basis: warm(ratio * 100.0), local_price: warm(10_000.0) },
             submitted: Some((1_000_010, 1_000_210)),
-            spot_cache: cache(1_000_050),
-            mark_cache: cache(1_000_100),
+            reference_modes: ReferenceModes { spot: ReferenceMode::Median, external_perp: ReferenceMode::Median, mark: ReferenceMode::Median },
+            spot_cache: Some(cache(1_000_050)),
+            mark_cache: Some(cache(1_000_100)),
             last_trade: 1_000_300,
         }
     }
@@ -146,7 +147,7 @@ pub(crate) mod tests {
     const NOW_NS: u64 = 1_000_000_000_000;
 
     fn inputs(node: &CoinPriceState, oracle: u64, external: u64) -> MarkInputs<'_> {
-        MarkInputs { node, mark_cache: node.mark_cache.median.unwrap(), bid: 1_000_000, ask: 1_000_400, oracle, external, now_ns: NOW_NS }
+        MarkInputs { node, mark_cache: node.mark_cache.as_ref().unwrap().median.unwrap(), bid: 1_000_000, ask: 1_000_400, oracle, external, now_ns: NOW_NS }
     }
 
     /// BTC (prices in 0.1): the basis 2 bp (the book's midpoint keeps it) moves the oracle 100,000.0 to A = 100,020.0;
@@ -209,7 +210,7 @@ pub(crate) mod tests {
     #[test]
     fn the_native_prediction_does_not_apply_the_hip3_step_limit() {
         let mut node = btc_state(0.0, NOW_NS - 1_000_000_000);
-        node.mark_cache.median = Some(1_200_000);
+        node.mark_cache.as_mut().unwrap().median = Some(1_200_000);
         node.last_trade = 1_200_000;
         let mut far = inputs(&node, 1_200_000, 1_200_000);
         (far.bid, far.ask) = (1_199_900, 1_200_100);

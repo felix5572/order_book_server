@@ -1,0 +1,365 @@
+{
+  "provenance": "BM raw checkpoints and SetGlobalAction bytes captured 2026-10-27. Integer prices use 1e-6; timestamps are node block time. Test projects asset 234 into fixture slot 0; books used in selector tests are deliberate counterexamples, not historical cuts. Raw evidence: research_data/ob_hourly_watch_20261021/xten_support_20261027.",
+  "cases": [
+    {
+      "checkpoint": 1199160000,
+      "asset_index": 234,
+      "source_checkpoint": "/home/ubuntu/hl/data/periodic_abci_states/20261027/1199160000.rmp",
+      "checkpoint_ranges": [
+        {
+          "key": "meta",
+          "offset": 290,
+          "bytes": 14477,
+          "sha256": "971ba089c47864b3bd99e1c83eb6941f49243dab338197d466db6b36f2099df0"
+        },
+        {
+          "key": "oracle",
+          "offset": 341493893,
+          "bytes": 1209279,
+          "sha256": "47578e2cf3baa47ed21d568850853e127f5516ea43d7d27db11d2ae8dea6cb92"
+        }
+      ],
+      "replica_source": "/home/ubuntu/hl/data/replica_cmds/2026-10-25T11:08:30Z/20261027/1199150000",
+      "last_submission": {
+        "height": 1199159960,
+        "time": "2026-10-27T13:03:55.263148890",
+        "bundle": 0,
+        "action": 0,
+        "xten": [
+          "0.26667",
+          "0.27096"
+        ],
+        "sha256": "69dff0b3a0040fa0f08ed37cf4e53c69bf91660d326749b9b0137ed5410a16cd"
+      },
+      "state": {
+        "meta": {
+          "szDecimals": 0,
+          "name": "XTEN",
+          "marginTableId": 3,
+          "marginMode": "strictIsolated"
+        },
+        "pxs2": [
+          {
+            "u": "2026-10-27T13:03:55.263148890",
+            "p": 266670,
+            "d": 250000
+          },
+          {
+            "u": "2026-10-27T13:03:55.263148890",
+            "p": 270960,
+            "d": 250000
+          },
+          {
+            "p": 250000,
+            "d": 250000
+          }
+        ],
+        "msoe": {
+          "num": 6.2762828290203405,
+          "denom": 367.2735513028725,
+          "decay_duration": 120.0,
+          "last_sample_time": "2026-10-27T13:03:55.263148890",
+          "n_samples": 7434
+        },
+        "lmpe": {
+          "num": 24.857958183154086,
+          "denom": 91.80966140607148,
+          "decay_duration": 30.0,
+          "last_sample_time": "2026-10-27T13:03:55.263148890",
+          "n_samples": 7456
+        },
+        "roc": {
+          "d": {
+            "m": "e",
+            "n": 0,
+            "r": 0.05,
+            "k": true,
+            "c": true
+          },
+          "kto": [
+            [
+              {
+                "p": [
+                  234,
+                  "Spot"
+                ]
+              },
+              {
+                "m": "d",
+                "n": null,
+                "r": null
+              }
+            ],
+            [
+              {
+                "p": [
+                  234,
+                  "Mark"
+                ]
+              },
+              {
+                "m": "d",
+                "n": null,
+                "r": null
+              }
+            ],
+            [
+              {
+                "p": [
+                  234,
+                  "ExternalPerp"
+                ]
+              },
+              {
+                "m": "d",
+                "n": null,
+                "r": null
+              }
+            ]
+          ]
+        },
+        "ktm": []
+      }
+    },
+    {
+      "checkpoint": 1199170000,
+      "asset_index": 234,
+      "source_checkpoint": "/home/ubuntu/hl/data/periodic_abci_states/20261027/1199170000.rmp",
+      "checkpoint_ranges": [
+        {
+          "key": "meta",
+          "offset": 290,
+          "bytes": 14477,
+          "sha256": "971ba089c47864b3bd99e1c83eb6941f49243dab338197d466db6b36f2099df0"
+        },
+        {
+          "key": "oracle",
+          "offset": 341498979,
+          "bytes": 1209279,
+          "sha256": "6a52642b8d89505ee69d47d8fe38748c995c53e995eb2dbf4800e9d68a623ac0"
+        }
+      ],
+      "replica_source": "/home/ubuntu/hl/data/replica_cmds/2026-10-25T11:08:30Z/20261027/1199160000",
+      "last_submission": {
+        "height": 1199169967,
+        "time": "2026-10-27T13:15:47.602068446",
+        "bundle": 2,
+        "action": 0,
+        "xten": [
+          "0.26679",
+          "0.2699"
+        ],
+        "sha256": "ab993db28d8f21bb02f582626a23f5a5d5b552226e7eaa3ee35e997c5d9c6c15"
+      },
+      "state": {
+        "meta": {
+          "szDecimals": 0,
+          "name": "XTEN",
+          "marginTableId": 3,
+          "marginMode": "strictIsolated"
+        },
+        "pxs2": [
+          {
+            "u": "2026-10-27T13:15:47.602068446",
+            "p": 266790,
+            "d": 250000
+          },
+          {
+            "u": "2026-10-27T13:15:47.602068446",
+            "p": 269900,
+            "d": 250000
+          },
+          {
+            "p": 250000,
+            "d": 250000
+          }
+        ],
+        "msoe": {
+          "num": 5.074593718365996,
+          "denom": 372.264579602912,
+          "decay_duration": 120.0,
+          "last_sample_time": "2026-10-27T13:15:47.602068446",
+          "n_samples": 7664
+        },
+        "lmpe": {
+          "num": 25.202258258539974,
+          "denom": 93.3434806135434,
+          "decay_duration": 30.0,
+          "last_sample_time": "2026-10-27T13:15:47.602068446",
+          "n_samples": 7686
+        },
+        "roc": {
+          "d": {
+            "m": "e",
+            "n": 0,
+            "r": 0.05,
+            "k": true,
+            "c": true
+          },
+          "kto": [
+            [
+              {
+                "p": [
+                  234,
+                  "Spot"
+                ]
+              },
+              {
+                "m": "d",
+                "n": null,
+                "r": null
+              }
+            ],
+            [
+              {
+                "p": [
+                  234,
+                  "Mark"
+                ]
+              },
+              {
+                "m": "d",
+                "n": null,
+                "r": null
+              }
+            ],
+            [
+              {
+                "p": [
+                  234,
+                  "ExternalPerp"
+                ]
+              },
+              {
+                "m": "d",
+                "n": null,
+                "r": null
+              }
+            ]
+          ]
+        },
+        "ktm": []
+      }
+    },
+    {
+      "checkpoint": 1199180000,
+      "asset_index": 234,
+      "source_checkpoint": "/home/ubuntu/hl/data/periodic_abci_states/20261027/1199180000.rmp",
+      "checkpoint_ranges": [
+        {
+          "key": "meta",
+          "offset": 290,
+          "bytes": 14477,
+          "sha256": "971ba089c47864b3bd99e1c83eb6941f49243dab338197d466db6b36f2099df0"
+        },
+        {
+          "key": "oracle",
+          "offset": 341505382,
+          "bytes": 1209279,
+          "sha256": "f67d390ec74a02b9684d80287235a97c6ad8374c4e049e7939505810337c38e1"
+        }
+      ],
+      "replica_source": "/home/ubuntu/hl/data/replica_cmds/2026-10-25T11:08:30Z/20261027/1199170000",
+      "last_submission": {
+        "height": 1199179976,
+        "time": "2026-10-27T13:27:43.650031400",
+        "bundle": 1,
+        "action": 0,
+        "xten": [
+          "0.2669",
+          "0.26979"
+        ],
+        "sha256": "7a14567694d32cd0a1615157e18b18446769941dc82e4387c3e8e6f7cf238111"
+      },
+      "state": {
+        "meta": {
+          "szDecimals": 0,
+          "name": "XTEN",
+          "marginTableId": 3,
+          "marginMode": "strictIsolated"
+        },
+        "pxs2": [
+          {
+            "u": "2026-10-27T13:27:43.650031400",
+            "p": 266900,
+            "d": 250000
+          },
+          {
+            "u": "2026-10-27T13:27:43.650031400",
+            "p": 269790,
+            "d": 250000
+          },
+          {
+            "p": 250000,
+            "d": 250000
+          }
+        ],
+        "msoe": {
+          "num": 4.9468572194176454,
+          "denom": 368.8449880254734,
+          "decay_duration": 120.0,
+          "last_sample_time": "2026-10-27T13:27:43.650031400",
+          "n_samples": 7896
+        },
+        "lmpe": {
+          "num": 24.70304561313882,
+          "denom": 91.49328541419094,
+          "decay_duration": 30.0,
+          "last_sample_time": "2026-10-27T13:27:43.650031400",
+          "n_samples": 7918
+        },
+        "roc": {
+          "d": {
+            "m": "e",
+            "n": 0,
+            "r": 0.05,
+            "k": true,
+            "c": true
+          },
+          "kto": [
+            [
+              {
+                "p": [
+                  234,
+                  "Spot"
+                ]
+              },
+              {
+                "m": "d",
+                "n": null,
+                "r": null
+              }
+            ],
+            [
+              {
+                "p": [
+                  234,
+                  "Mark"
+                ]
+              },
+              {
+                "m": "d",
+                "n": null,
+                "r": null
+              }
+            ],
+            [
+              {
+                "p": [
+                  234,
+                  "ExternalPerp"
+                ]
+              },
+              {
+                "m": "d",
+                "n": null,
+                "r": null
+              }
+            ]
+          ]
+        },
+        "ktm": []
+      }
+    }
+  ]
+}

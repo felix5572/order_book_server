@@ -1209,7 +1209,7 @@ pub(crate) mod tests {
                 [{"p": [1, "Spot"]}, {"v": [], "m": null, "b": old_bucket}],
                 [{"p": [1, "Mark"]}, {"v": member(4477), "m": null, "b": old_bucket}],
                 [{"p": [1, "ExternalPerp"]}, {"v": [], "m": null, "b": old_bucket}]
-            ], "utl": [], "roc": {}},
+            ], "utl": [], "roc": {"d": {"m": "e", "n": 0, "r": 0.05, "k": true, "c": true}, "kto": []}},
             "msoe": {"e": [[0, ema(-0.04, 371.5, 120.0, 2_244_587)]], "g": 1},
             "lmpe": [[0, ema(7_696_308.0, 93.5, 30.0, 269_229)]],
             "psro": [],

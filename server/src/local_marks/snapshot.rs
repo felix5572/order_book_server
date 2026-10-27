@@ -77,9 +77,9 @@ pub(crate) struct NodeMark {
     /// The Spot and Mark reference caches' medians (`None` before one has a median) and the unix ms from which a block
     /// refreshes them.
     pub(crate) spot_cache: Option<u64>,
-    pub(crate) spot_cache_next_refresh_ms: u64,
+    pub(crate) spot_cache_next_refresh_ms: Option<u64>,
     pub(crate) mark_cache: Option<u64>,
-    pub(crate) mark_cache_next_refresh_ms: u64,
+    pub(crate) mark_cache_next_refresh_ms: Option<u64>,
     pub(crate) emas: NativeEmas,
     pub(crate) last_trade: u64,
 }
@@ -308,10 +308,10 @@ fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, node_withheld: O
         mark_update: state.mark_update,
         stored_oracle: state.stored_oracle,
         submitted: state.submitted,
-        spot_cache: state.spot_cache.median,
-        spot_cache_next_refresh_ms: state.spot_cache.next_refresh_ms(),
-        mark_cache: state.mark_cache.median,
-        mark_cache_next_refresh_ms: state.mark_cache.next_refresh_ms(),
+        spot_cache: state.spot_cache.as_ref().and_then(|cache| cache.median),
+        spot_cache_next_refresh_ms: state.spot_cache.as_ref().map(|cache| cache.next_refresh_ms()),
+        mark_cache: state.mark_cache.as_ref().and_then(|cache| cache.median),
+        mark_cache_next_refresh_ms: state.mark_cache.as_ref().map(|cache| cache.next_refresh_ms()),
         emas: state.emas,
         last_trade: state.last_trade,
     });
@@ -324,7 +324,10 @@ fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, node_withheld: O
 }
 
 fn local_leg(coin: &str, listings: &[ListedMarket], tick: &Tick<'_>, index: usize, node: &CoinPriceState) -> Result<LocalLeg, Withheld> {
-    let mark_cache = node.mark_cache.median.ok_or_else(|| Withheld::unavailable("markCache", "the node's Mark reference cache has no median yet"))?;
+    if !node.reference_modes.ordinary() {
+        return Err(Withheld::unavailable("referenceMode", "this coin takes submitted node prices; the ordinary spot-reference local prediction does not apply"));
+    }
+    let mark_cache = node.mark_cache.as_ref().and_then(|cache| cache.median).ok_or_else(|| Withheld::unavailable("markCache", "the node's Mark reference cache has no median yet"))?;
     let book = tick.book.unwrap_or_else(|| unreachable!("a book is read before any local leg"));
     let (Some(bid), Some(ask)) = book.prices[index] else {
         return Err(Withheld::unavailable("hlBook", format!("the HL book of {coin} has an empty side")));
@@ -546,8 +549,26 @@ pub(crate) mod tests {
         assert_eq!(statuses(&world.snapshot(NOW_MS), "BTC"), (None, Some("hlBook")));
         let mut world = World::new();
         let Ok(node) = &mut world.node else { unreachable!() };
-        Arc::make_mut(node).coins.get_mut("BTC").unwrap().mark_cache.median = None;
+        Arc::make_mut(node).coins.get_mut("BTC").unwrap().mark_cache.as_mut().unwrap().median = None;
         assert_eq!(statuses(&world.snapshot(NOW_MS), "BTC"), (None, Some("markCache")));
+    }
+
+    #[test]
+    fn submitted_node_prices_remain_visible_but_do_not_claim_an_ordinary_local_prediction() {
+        let mut world = World::new();
+        let Ok(node) = &mut world.node else { unreachable!() };
+        let state = Arc::make_mut(node).coins.get_mut("BTC").unwrap();
+        use crate::accounts::marks::seed::{ReferenceMode, ReferenceModes};
+        state.reference_modes = ReferenceModes { spot: ReferenceMode::Submitted, external_perp: ReferenceMode::Submitted, mark: ReferenceMode::Submitted };
+        state.spot_cache = None; state.mark_cache = None;
+        let snapshot = world.snapshot(NOW_MS);
+        assert_eq!(statuses(&snapshot, "BTC"), (None, Some("referenceMode")));
+        let node = snapshot.coin("BTC").unwrap().node.as_ref().unwrap();
+        assert_eq!((node.spot_cache, node.spot_cache_next_refresh_ms, node.mark_cache, node.mark_cache_next_refresh_ms), (None, None, None, None));
+        let row = crate::local_marks::prices_view::CoinCachesView::of(&snapshot, "BTC", snapshot.coin("BTC").unwrap());
+        let wire = serde_json::to_value(row).unwrap();
+        assert_eq!(wire["node"]["status"], "ready");
+        assert!(wire["node"]["spotCache"].is_null() && wire["node"]["markCache"].is_null());
     }
 
     #[test]

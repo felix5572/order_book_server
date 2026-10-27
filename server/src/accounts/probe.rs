@@ -117,7 +117,7 @@ fn native_asset_json(height: u64, index: usize, asset: &NativeAsset) -> serde_js
         "mark": {"px": asset.mark.px, "timeNs": asset.mark.time_ns},
         "basis": asset.emas.as_ref().map(|emas| ema(&emas.basis)),
         "localPrice": asset.emas.as_ref().map(|emas| ema(&emas.local_price)),
-        "references": {"Spot": cache(&references.spot), "ExternalPerp": cache(&references.external_perp), "Mark": cache(&references.mark)},
+        "references": {"Spot": references.spot.as_ref().map(cache), "ExternalPerp": references.external_perp.as_ref().map(cache), "Mark": references.mark.as_ref().map(cache)},
         "lastTradePx": asset.last_trade_px,
         "orders": orders,
     })

@@ -63,10 +63,77 @@ struct WireEma {
     last_sample_time: Option<String>,
 }
 
-/// `ror.ktm`: the validators' reference caches (`utl`, `roc` are not read).
+/// The validator reference caches and their selection modes (`utl` is not read).
 #[derive(Debug, Deserialize)]
 struct WireReferences {
     ktm: Vec<(WireReferenceKey, WireReferenceCache)>,
+    roc: Option<WireReferenceConfigs>,
+}
+
+/// `ror.roc`: defaults and per-key overrides. Null/absent override fields inherit the defaults.
+#[derive(Debug, Deserialize)]
+struct WireReferenceConfigs {
+    d: WireReferenceDefault,
+    kto: Vec<(WireReferenceKey, WireReferenceOverride)>,
+}
+
+#[derive(Debug, Deserialize)]
+// HIP-3 defaults with m:d omit k/c (1199200000); those guards are never read in submitted mode.
+struct WireReferenceDefault { m: String, n: u64, r: f64, k: Option<bool>, c: Option<bool> }
+
+#[derive(Debug, Default, Deserialize)]
+struct WireReferenceOverride { m: Option<String>, n: Option<u64>, r: Option<f64>, k: Option<bool>, c: Option<bool> }
+
+/// Node 3f75c6b0: serializer table 0x6433ce8 maps 0/1/2 to e/a/d; selector 0x38b97a0 returns
+/// the submission for d before consulting any book/cache. Mode a and nonstandard e guards are not replayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReferenceMode { Median, Submitted, Unsupported }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReferenceModes {
+    pub(crate) spot: ReferenceMode,
+    pub(crate) external_perp: ReferenceMode,
+    pub(crate) mark: ReferenceMode,
+}
+
+impl ReferenceModes {
+    pub(crate) fn ordinary(self) -> bool {
+        [self.spot, self.external_perp, self.mark].into_iter().all(|mode| mode == ReferenceMode::Median)
+    }
+
+    fn unsupported(self) -> bool {
+        [self.spot, self.external_perp, self.mark].contains(&ReferenceMode::Unsupported)
+    }
+}
+
+impl WireReferenceConfigs {
+    fn resolve(&self, overrides: &WireReferenceOverride) -> ReferenceMode {
+        match overrides.m.as_deref().unwrap_or(&self.d.m) {
+            "d" => ReferenceMode::Submitted,
+            "e" if overrides.n.unwrap_or(self.d.n) == 0 && overrides.r.unwrap_or(self.d.r) == 0.05
+                && overrides.k.or(self.d.k) == Some(true) && overrides.c.or(self.d.c) == Some(true) => ReferenceMode::Median,
+            _ => ReferenceMode::Unsupported,
+        }
+    }
+
+    fn by_asset(&self, count: usize) -> Result<Vec<ReferenceModes>, String> {
+        let mode = self.resolve(&WireReferenceOverride::default());
+        let mut modes = vec![ReferenceModes { spot: mode, external_perp: mode, mark: mode }; count];
+        let mut seen = std::collections::HashSet::new();
+        for (key, overrides) in &self.kto {
+            let WireReferenceKey::Perp(asset, kind) = key else { continue };
+            let target = modes.get_mut(*asset as usize).ok_or_else(|| format!("ror.roc asset {asset} outside the {count} assets"))?;
+            if !seen.insert((*asset, kind)) { return Err(format!("ror.roc lists asset {asset} {kind} twice")); }
+            let slot = match kind.as_str() {
+                "Spot" => &mut target.spot,
+                "ExternalPerp" => &mut target.external_perp,
+                "Mark" => &mut target.mark,
+                _ => return Err(format!("ror.roc asset {asset} unknown kind {kind:?}")),
+            };
+            *slot = self.resolve(overrides);
+        }
+        Ok(modes)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,13 +335,14 @@ pub(crate) struct NativeAsset {
     /// `msoe.e[i]` and `lmpe[i]`; `None` for a coin the node no longer prices (51 delisted coins on 1190010000 have
     /// neither).
     pub(crate) emas: Option<NativeEmas>,
-    /// A cache the checkpoint lacks is empty here, and the coin `unsupported`.
+    pub(crate) reference_modes: ReferenceModes,
+    /// Absent cache keys stay absent. They are valid when that key uses the submitted price directly.
     pub(crate) references: ReferenceCaches,
     /// The book's last trade price, integer price units: the local price's trade input until the coin's next trade.
     pub(crate) last_trade_px: u64,
     pub(crate) orders: Vec<RestingOrder>,
     /// Why the replay cannot claim the coin from this seed: a price state the node has not fully built (bm 10-27 XTEN,
-    /// listed that day: msoe without lmpe at 1198840000, no Spot reference cache at 1198850000). The other coins seed.
+    /// listed that day: lmpe without msoe at 1198840000). The other coins seed.
     pub(crate) unsupported: Option<&'static str>,
 }
 
@@ -311,9 +379,9 @@ pub(crate) struct StoredMark {
 /// The three validator reference caches of one asset (`ror.ktm` keyed `[asset, kind]`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReferenceCaches {
-    pub(crate) spot: ReferenceCache,
-    pub(crate) external_perp: ReferenceCache,
-    pub(crate) mark: ReferenceCache,
+    pub(crate) spot: Option<ReferenceCache>,
+    pub(crate) external_perp: Option<ReferenceCache>,
+    pub(crate) mark: Option<ReferenceCache>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -393,6 +461,7 @@ impl NativeSeed {
         let spot_references = spot_reference_books(oracle.psro, spot_books, spot_pairs, count)?;
         let mut basis = by_asset(oracle.msoe.e, count, "msoe")?;
         let mut local_price = by_asset(oracle.lmpe, count, "lmpe")?;
+        let modes = oracle.ror.roc.ok_or("missing ror.roc reference configuration")?.by_asset(count)?;
         let mut references = references_by_asset(oracle.ror.ktm, count)?;
         let mut books = books_by_asset(books, count)?;
         if oracle.pxs2.len() != count {
@@ -412,7 +481,7 @@ impl NativeSeed {
                 }), None),
                 _ => (None, Some("partialEmas")),
             };
-            let (references, missing_cache) = std::mem::take(&mut references[index]).complete();
+            let (references, missing_cache) = std::mem::take(&mut references[index]).complete(modes[index]);
             let (last_trade_px, orders) = books[index].take().ok_or_else(|| format!("{}: no book", asset()))?;
             assets.push(NativeAsset {
                 name: meta.name.clone(),
@@ -421,10 +490,11 @@ impl NativeSeed {
                 stored_oracle: price_units(stored_oracle.p).map_err(|err| format!("{}: stored oracle {err}", asset()))?,
                 mark: stored_mark(mark).map_err(|err| format!("{}: mark {err}", asset()))?,
                 emas,
+                reference_modes: modes[index],
                 references,
                 last_trade_px,
                 orders,
-                unsupported: partial_emas.or(missing_cache),
+                unsupported: modes[index].unsupported().then_some("referenceConfigUnsupported").or(partial_emas).or(missing_cache),
             });
         }
         let (refresh, partial) = super::refresh::RefreshState::from_wire(refresh, count)?;
@@ -511,17 +581,15 @@ struct PartialCaches {
 }
 
 impl PartialCaches {
-    /// The three caches, a missing one empty, and the unsupported reason the first missing one gives the coin.
-    fn complete(self) -> (ReferenceCaches, Option<&'static str>) {
-        let missing = [(self.spot.is_none(), "noSpotReferenceCache"), (self.external_perp.is_none(), "noExternalPerpReferenceCache"),
-            (self.mark.is_none(), "noMarkReferenceCache")];
+    /// A missing key is allowed only when its configured selector does not consume a reference cache.
+    fn complete(self, modes: ReferenceModes) -> (ReferenceCaches, Option<&'static str>) {
+        let missing = [
+            (self.spot.is_none() && modes.spot != ReferenceMode::Submitted, "noSpotReferenceCache"),
+            (self.external_perp.is_none() && modes.external_perp != ReferenceMode::Submitted, "noExternalPerpReferenceCache"),
+            (self.mark.is_none() && modes.mark != ReferenceMode::Submitted, "noMarkReferenceCache"),
+        ];
         let reason = missing.into_iter().find_map(|(missing, reason)| missing.then_some(reason));
-        let caches = ReferenceCaches {
-            spot: self.spot.unwrap_or_default(),
-            external_perp: self.external_perp.unwrap_or_default(),
-            mark: self.mark.unwrap_or_default(),
-        };
-        (caches, reason)
+        (ReferenceCaches { spot: self.spot, external_perp: self.external_perp, mark: self.mark }, reason)
     }
 }
 
@@ -628,8 +696,8 @@ pub(crate) mod tests {
         assert_eq!(basis.last_sample_ns, Some(1_792_391_843_000_000_000));
         assert_eq!(btc.emas.as_ref().unwrap().local_price.decay_parameter, 30.0);
         let validator = Address::from_str(VALIDATOR).unwrap();
-        assert_eq!(btc.references.mark.members, [(validator, 828_590, 1_792_391_842_000_000_000)]);
-        assert_eq!((btc.references.mark.median, btc.references.mark.last_bucket), (Some(828_590), 597_463_947));
+        assert_eq!(btc.references.mark.as_ref().unwrap().members, [(validator, 828_590, 1_792_391_842_000_000_000)]);
+        assert_eq!((btc.references.mark.as_ref().unwrap().median, btc.references.mark.as_ref().unwrap().last_bucket), (Some(828_590), 597_463_947));
         assert_eq!(
             btc.orders,
             [
@@ -638,7 +706,7 @@ pub(crate) mod tests {
             ],
             "the free slot is skipped"
         );
-        assert_eq!((pump.emas.as_ref(), pump.references.spot.median, pump.orders.len()), (None, None, 0), "an unpriced coin");
+        assert_eq!((pump.emas.as_ref(), pump.references.spot.as_ref().unwrap().median, pump.orders.len()), (None, None, 0), "an unpriced coin");
         assert_eq!(seed.hip3["xyz:TSLA"], Hip3Coin {
             order_asset: 110_000,
             oracle: Some(357_970),
@@ -690,21 +758,21 @@ pub(crate) mod tests {
         MarkSeed::from_checkpoint(parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap()).unwrap()
     }
 
-    /// bm 10-27: XTEN, listed that day, had msoe without lmpe at 1198840000 and no Spot reference cache at 1198850000;
+    /// bm 10-27: XTEN, listed that day, had lmpe without msoe at 1198840000; an ordinary-mode coin missing its Spot key
     /// each failed the whole seed and withheld every coin's marks. Such a coin alone is unsupported now: the replay does
     /// not claim it, and a checkpoint holding it so is not checked against.
     #[test]
     fn a_coin_whose_state_is_not_fully_built_seeds_unsupported_alone() {
         let oracle = "/exchange/locus/cls/0/oracle";
-        let only_msoe = seed_with(|checkpoint| *checkpoint.pointer_mut(&format!("{oracle}/lmpe")).unwrap() = json!([]));
-        let [btc, pump] = only_msoe.native.assets.as_slice() else { panic!("two main assets") };
+        let only_lmpe = seed_with(|checkpoint| *checkpoint.pointer_mut(&format!("{oracle}/msoe/e")).unwrap() = json!([]));
+        let [btc, pump] = only_lmpe.native.assets.as_slice() else { panic!("two main assets") };
         assert_eq!((btc.unsupported, btc.emas.as_ref(), pump.unsupported), (Some("partialEmas"), None, None));
         let no_spot = seed_with(|checkpoint| {
             checkpoint.pointer_mut(&format!("{oracle}/ror/ktm")).unwrap().as_array_mut().unwrap().remove(0);
         });
         let [btc, pump] = no_spot.native.assets.as_slice() else { panic!("two main assets") };
-        assert_eq!((btc.unsupported, &btc.references.spot, pump.unsupported), (Some("noSpotReferenceCache"), &ReferenceCache::default(), None));
-        assert_eq!(btc.references.mark.median, Some(828_590), "the caches it has are read");
+        assert_eq!((btc.unsupported, &btc.references.spot, pump.unsupported), (Some("noSpotReferenceCache"), &None, None));
+        assert_eq!(btc.references.mark.as_ref().unwrap().median, Some(828_590), "the caches it has are read");
         let cached_mark_alone = seed_with(|checkpoint| checkpoint["exchange"]["msc"]["mou"]["u"][1] = json!([[0, 828_576]]));
         let [btc, pump] = cached_mark_alone.native.assets.as_slice() else { panic!("two main assets") };
         assert_eq!((btc.unsupported, pump.unsupported, &cached_mark_alone.native.refresh.submitted), (Some("partialSubmittedPrices"), None, &vec![None, None]));
@@ -714,6 +782,79 @@ pub(crate) mod tests {
         let check = super::super::native::NativePrices::seeded(&full.native).check_against(&no_spot.native);
         assert_eq!(check.unsupported, [("noSpotReferenceCache", vec!["BTC".to_string()])]);
         assert!(check.samples.is_empty(), "{:?}", check.samples);
+    }
+
+    /// Project the real XTEN state into slot 0 of the small account fixture; slot 1 remains an ordinary coin.
+    pub(crate) fn xten_seed(case: &serde_json::Value) -> MarkSeed {
+        seed_with(|checkpoint| {
+            let state = &case["state"];
+            checkpoint["exchange"]["locus"]["cls"][0]["meta"]["universe"][0] = state["meta"].clone();
+            let oracle = &mut checkpoint["exchange"]["locus"]["cls"][0]["oracle"];
+            oracle["pxs2"][0] = state["pxs2"].clone();
+            oracle["msoe"]["e"] = json!([[0, state["msoe"]]]);
+            oracle["lmpe"] = json!([[0, state["lmpe"]]]);
+            oracle["ror"]["ktm"].as_array_mut().unwrap().retain(|row| row[0]["p"][0] != 0);
+            oracle["ror"]["roc"] = state["roc"].clone();
+            for row in oracle["ror"]["roc"]["kto"].as_array_mut().unwrap() { row[0]["p"][0] = json!(0); }
+        })
+    }
+
+    pub(crate) fn xten_cases() -> Vec<serde_json::Value> {
+        let data: serde_json::Value = serde_json::from_str(include_str!("xten_submitted_prices_golden.json")).unwrap();
+        data["cases"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn configured_submitted_prices_allow_absent_keys_but_missing_configuration_is_not_a_default() {
+        for case in xten_cases() {
+            let seed = xten_seed(&case);
+            let coin = &seed.native.assets[0];
+            assert_eq!(coin.unsupported, None);
+            assert_eq!(coin.reference_modes, ReferenceModes { spot: ReferenceMode::Submitted, external_perp: ReferenceMode::Submitted, mark: ReferenceMode::Submitted });
+            assert_eq!(coin.references, ReferenceCaches { spot: None, external_perp: None, mark: None });
+            assert_eq!(coin.stored_oracle, case["state"]["pxs2"][0]["p"].as_u64().unwrap());
+        }
+        let mut wire: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        wire["exchange"]["locus"]["cls"][0]["oracle"]["ror"].as_object_mut().unwrap().remove("roc");
+        let accounts = parse_checkpoint_bytes(&rmp_serde::to_vec(&wire).unwrap()).unwrap();
+        assert!(MarkSeed::from_checkpoint(accounts).unwrap_err().contains("missing ror.roc"));
+    }
+
+    #[test]
+    fn submitted_mode_accepts_real_hip3_defaults_without_median_guards() {
+        // All ten HIP-3 dexes in 1199200000 use this exact default shape.
+        let mut raw = json!({"d": {"m": "d", "n": 0, "r": 0.05}, "kto": []});
+        let wire: WireReferenceConfigs = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(wire.by_asset(1).unwrap()[0].spot, ReferenceMode::Submitted);
+        raw["d"]["m"] = json!("e");
+        let wire: WireReferenceConfigs = serde_json::from_value(raw.clone()).unwrap();
+        assert!(wire.by_asset(1).unwrap()[0].unsupported(), "missing median guards are not assumed true");
+        seed_with(|checkpoint| {
+            checkpoint["exchange"]["locus"]["cls"][1]["oracle"]["ror"]["roc"] =
+                json!({"d": {"m": "d", "n": 0, "r": 0.05}, "kto": []});
+        });
+    }
+
+    #[test]
+    fn reference_modes_inherit_override_and_fail_closed_per_coin() {
+        let defaults = json!({"d": {"m": "e", "n": 0, "r": 0.05, "k": true, "c": true}, "kto": [
+            [{"p": [0, "Spot"]}, {"m": "d", "n": null, "r": null}],
+            [{"p": [0, "Mark"]}, {"m": null, "n": null, "r": null}],
+            [{"s": "nativePx"}, {"m": "d"}]
+        ]});
+        let wire: WireReferenceConfigs = serde_json::from_value(defaults.clone()).unwrap();
+        let modes = wire.by_asset(2).unwrap();
+        assert_eq!((modes[0].spot, modes[0].mark, modes[1].ordinary()), (ReferenceMode::Submitted, ReferenceMode::Median, true));
+        for change in [json!({"m":"a"}), json!({"m":"new"}), json!({"n":1}), json!({"k":false}), json!({"c":false}), json!({"r":0.1})] {
+            let mut raw = defaults.clone(); raw["kto"][0][1] = change;
+            let wire: WireReferenceConfigs = serde_json::from_value(raw).unwrap();
+            let modes = wire.by_asset(2).unwrap();
+            assert!(modes[0].unsupported());
+            assert!(modes[1].ordinary());
+        }
+        let mut duplicate = defaults.clone();
+        duplicate["kto"].as_array_mut().unwrap().push(defaults["kto"][0].clone());
+        assert!(serde_json::from_value::<WireReferenceConfigs>(duplicate).unwrap().by_asset(2).unwrap_err().contains("twice"));
     }
 
     #[test]

@@ -66,9 +66,9 @@ struct NodeView {
     /// them: the first block of a newer 3 s bucket takes the median of the members under 10 s old, and keeps the old one
     /// when none is.
     spot_cache_px: Option<String>,
-    spot_cache_next_refresh_ms: u64,
+    spot_cache_next_refresh_ms: Option<u64>,
     mark_cache_px: Option<String>,
-    mark_cache_next_refresh_ms: u64,
+    mark_cache_next_refresh_ms: Option<u64>,
     /// The stored msoe (the basis) and lmpe (the local price, in prices).
     basis_ema: EmaView,
     local_price_ema: EmaView,
@@ -244,8 +244,8 @@ pub(crate) struct CoinCachesView<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CachesView {
-    spot_cache: CacheView,
-    mark_cache: CacheView,
+    spot_cache: Option<CacheView>,
+    mark_cache: Option<CacheView>,
     seed_height: u64,
     height: u64,
     block_time_ms: u64,
@@ -289,8 +289,8 @@ impl<'a> CoinCachesView<'a> {
             let state = snapshot.node_state(coin).unwrap_or_else(|| unreachable!("a ready node leg read its node state"));
             let progress = node_progress(snapshot);
             LegView::Ready(CachesView {
-                spot_cache: CacheView::of(&state.spot_cache, state.size_decimals),
-                mark_cache: CacheView::of(&state.mark_cache, state.size_decimals),
+                spot_cache: state.spot_cache.as_ref().map(|cache| CacheView::of(cache, state.size_decimals)),
+                mark_cache: state.mark_cache.as_ref().map(|cache| CacheView::of(cache, state.size_decimals)),
                 seed_height: progress.seed_height,
                 height: progress.height,
                 block_time_ms: progress.block_time_ms,

@@ -16,7 +16,8 @@
 //!      from its spot book's midpoint at the cut instead of the validator, at every reference action (Codex
 //!      `hype_purr_internal_reference_20261020`: 12,819 reference actions, both coins equal at three interval ends);
 //!    - a `SetGlobalAction` stores the oracle median(submitted, Spot cache, L with the basis undone) and the mark
-//!      median(submitted, Mark cache, L), then samples msoe with the new oracle and lmpe with L.
+//!      median(submitted, Mark cache, L), then samples msoe with the new oracle and lmpe with L. A key configured
+//!      with `ror.roc` mode d uses the submitted price directly, without a reference cache (XTEN, 2026-10-27).
 //!
 //! Main-dex marks are NOT step-limited. In binary 6911b792, 0x2965e0a tests clearinghouse.moh at +0x378:
 //! Main (0x8000000000000000) jumps straight to the selected-price write, bypassing the Hip3 1% limit.
@@ -36,7 +37,7 @@ use super::{
     actions::{MarkAction, SubmittedPrices},
     book::BestPrices,
     rules::{internal_round, inverse_basis, local_price, median_units, spot_reference_units, wire_units},
-    seed::{NativeAsset, NativeEmas, NativeSeed, ReferenceCache, StoredMark},
+    seed::{NativeAsset, NativeEmas, NativeSeed, ReferenceCache, ReferenceMode, ReferenceModes, StoredMark},
 };
 
 const BUCKET_NS: u64 = 3_000 * 1_000_000;
@@ -135,9 +136,10 @@ struct CoinPrices {
     mark: StoredMark,
     mark_update: MarkUpdate,
     emas: Option<NativeEmas>,
-    spot: MemberCache,
-    external_perp: MemberCache,
-    marks: MemberCache,
+    reference_modes: ReferenceModes,
+    spot: Option<MemberCache>,
+    external_perp: Option<MemberCache>,
+    marks: Option<MemberCache>,
     last_trade: u64,
     /// For a coin `psro` names: its spot book's price decimals (its Spot input is that book's midpoint).
     spot_reference_decimals: Option<u32>,
@@ -164,9 +166,10 @@ impl CoinPrices {
             mark: asset.mark,
             mark_update: MarkUpdate::Checkpoint,
             emas: asset.emas,
-            spot: MemberCache::seeded(asset.references.spot),
-            external_perp: MemberCache::seeded(asset.references.external_perp),
-            marks: MemberCache::seeded(asset.references.mark),
+            reference_modes: asset.reference_modes,
+            spot: asset.references.spot.map(MemberCache::seeded),
+            external_perp: asset.references.external_perp.map(MemberCache::seeded),
+            marks: asset.references.mark.map(MemberCache::seeded),
             last_trade: asset.last_trade_px,
             spot_reference_decimals,
             unsupported: asset.unsupported,
@@ -177,7 +180,7 @@ impl CoinPrices {
         if self.halted {
             return;
         }
-        for cache in [&mut self.spot, &mut self.external_perp, &mut self.marks] {
+        for cache in [&mut self.spot, &mut self.external_perp, &mut self.marks].into_iter().flatten() {
             cache.begin_block(block_ns);
         }
     }
@@ -199,11 +202,17 @@ impl CoinPrices {
             // a `psro` coin the validator does not price whose spot book has no midpoint: no input for it (0x2da772e)
             return Ok(());
         }
+        // XTEN has no reference inputs or cache keys. A later first reference needs its key-creation rule proved;
+        // retain that boundary explicitly instead of fabricating an empty, already-refreshed cache.
+        let (Some(spot_cache), Some(external_cache), Some(_)) = (&mut self.spot, &mut self.external_perp, &mut self.marks) else {
+            self.unsupported.get_or_insert("referenceCacheCreationUnsupported");
+            return Ok(());
+        };
         if let Some(spot) = spot {
-            self.spot.insert(user, spot, time_ns);
+            spot_cache.insert(user, spot, time_ns);
         }
         if let Some(external) = external {
-            self.external_perp.insert(user, external, time_ns);
+            external_cache.insert(user, external, time_ns);
         }
         let Some((bid, ask, local)) = self.local(cut) else { return Ok(()) };
         let Some(emas) = &self.emas else {
@@ -219,7 +228,7 @@ impl CoinPrices {
             candidates.push(filled);
         }
         let member = median_units(&candidates).ok_or("no Mark member candidates")?;
-        self.marks.insert(user, member, time_ns);
+        self.marks.as_mut().expect("reference caches checked above").insert(user, member, time_ns);
         Ok(())
     }
 
@@ -259,12 +268,16 @@ impl CoinPrices {
     /// A `SetGlobalAction`'s submitted (oracle, mark) for this coin.
     fn set_global(&mut self, submitted_oracle: u64, submitted_mark: u64, time_ns: u64, cut: CoinCut, update: MarkUpdate) -> Result<(), String> {
         let Some((bid, ask, local)) = self.local(cut) else { return Ok(()) };
-        let (Some(spot_median), Some(mark_median), Some(emas)) = (self.spot.median, self.marks.median, self.emas.as_ref()) else {
-            self.unsupported.get_or_insert("noCacheOrEma");
+        let Some(emas) = self.emas.as_ref() else {
+            self.unsupported.get_or_insert("noEma");
             return Ok(());
         };
-        let stored = median_units(&[submitted_oracle, spot_median, inverse_basis(local, emas.basis.basis_ratio())?]).ok_or("no oracle candidates")?;
-        let new_mark = median_units(&[submitted_mark, mark_median, local]).ok_or("no mark candidates")?;
+        let selected_oracle = select_price(self.reference_modes.spot, submitted_oracle, self.spot.as_ref(), || inverse_basis(local, emas.basis.basis_ratio()))?;
+        let selected_mark = select_price(self.reference_modes.mark, submitted_mark, self.marks.as_ref(), || Ok(local))?;
+        let (Some(stored), Some(new_mark)) = (selected_oracle, selected_mark) else {
+            self.unsupported.get_or_insert("noCacheOrMode");
+            return Ok(());
+        };
         let Some(local_price_ema) = emas.local_price.local_price_advanced(self.px(local), time_ns) else {
             self.unsupported.get_or_insert("localPriceGap");
             return Ok(());
@@ -276,6 +289,34 @@ impl CoinPrices {
         self.mark_update = update;
         Ok(())
     }
+}
+
+/// A disabled reference selector returns before reading any cache or inverse-basis candidate.
+fn select_price(mode: ReferenceMode, submitted: u64, cache: Option<&MemberCache>, local: impl FnOnce() -> Result<u64, String>) -> Result<Option<u64>, String> {
+    match mode {
+        ReferenceMode::Submitted => Ok(Some(submitted)),
+        ReferenceMode::Median => {
+            let Some(median) = cache.and_then(|cache| cache.median) else { return Ok(None) };
+            Ok(median_units(&[submitted, median, local()?]))
+        }
+        ReferenceMode::Unsupported => Ok(None),
+    }
+}
+
+fn cache_equals(replayed: &Option<MemberCache>, stored: &Option<ReferenceCache>) -> bool {
+    match (replayed, stored) {
+        (None, None) => true,
+        (Some(replayed), Some(stored)) => replayed.equals(stored),
+        _ => false,
+    }
+}
+
+fn cache_option_text(cache: &Option<MemberCache>) -> String {
+    cache.as_ref().map_or_else(|| "absent".to_string(), MemberCache::text)
+}
+
+fn stored_option_text(cache: &Option<ReferenceCache>) -> String {
+    cache.as_ref().map_or_else(|| "absent".to_string(), stored_cache_text)
 }
 
 /// Every main-dex coin's prices, by asset index.
@@ -314,8 +355,9 @@ pub(crate) struct CoinPriceState {
     /// refresh submits again; `None` before the coin has one.
     pub(crate) submitted: Option<(u64, u64)>,
     /// The oracle's and the mark's second candidates, members by validator.
-    pub(crate) spot_cache: ReferenceCache,
-    pub(crate) mark_cache: ReferenceCache,
+    pub(crate) reference_modes: ReferenceModes,
+    pub(crate) spot_cache: Option<ReferenceCache>,
+    pub(crate) mark_cache: Option<ReferenceCache>,
     pub(crate) last_trade: u64,
 }
 
@@ -392,8 +434,9 @@ impl NativePrices {
                 mark_update: coin.mark_update,
                 emas: coin.emas?,
                 submitted: *submitted,
-                spot_cache: coin.spot.snapshot(),
-                mark_cache: coin.marks.snapshot(),
+                reference_modes: coin.reference_modes,
+                spot_cache: coin.spot.as_ref().map(MemberCache::snapshot),
+                mark_cache: coin.marks.as_ref().map(MemberCache::snapshot),
                 last_trade: coin.last_trade,
             };
             Some((coin.name.as_str(), state))
@@ -413,7 +456,7 @@ impl NativePrices {
 
     #[cfg(test)]
     pub(crate) fn spot_member(&self, asset: usize, user: Address) -> Option<(u64, u64)> {
-        self.coins[asset].spot.members.get(&user).copied()
+        self.coins[asset].spot.as_ref()?.members.get(&user).copied()
     }
 
     /// One price action at its cut; `cut_of(asset)` reads the book and last trade there.
@@ -483,6 +526,10 @@ impl NativePrices {
                 unsupported.entry(reason).or_default().push(stored.name.clone());
                 continue;
             }
+            if coin.reference_modes != stored.reference_modes {
+                unsupported.entry("referenceConfigChanged").or_default().push(stored.name.clone());
+                continue;
+            }
             let (basis, local_price) = (coin.emas.as_ref().map(|emas| &emas.basis), coin.emas.as_ref().map(|emas| &emas.local_price));
             let (stored_basis, stored_local_price) =
                 (stored.emas.as_ref().map(|emas| &emas.basis), stored.emas.as_ref().map(|emas| &emas.local_price));
@@ -492,11 +539,11 @@ impl NativePrices {
                 ("mark", coin.mark == stored.mark, &|| debug_pair(&coin.mark, &stored.mark)),
                 ("msoe", basis == stored_basis, &|| debug_pair(&basis, &stored_basis)),
                 ("lmpe", local_price == stored_local_price, &|| debug_pair(&local_price, &stored_local_price)),
-                ("spotCache", coin.spot.equals(&caches.spot), &|| (coin.spot.text(), stored_cache_text(&caches.spot))),
-                ("externalPerpCache", coin.external_perp.equals(&caches.external_perp), &|| {
-                    (coin.external_perp.text(), stored_cache_text(&caches.external_perp))
+                ("spotCache", cache_equals(&coin.spot, &caches.spot), &|| (cache_option_text(&coin.spot), stored_option_text(&caches.spot))),
+                ("externalPerpCache", cache_equals(&coin.external_perp, &caches.external_perp), &|| {
+                    (cache_option_text(&coin.external_perp), stored_option_text(&caches.external_perp))
                 }),
-                ("markCache", coin.marks.equals(&caches.mark), &|| (coin.marks.text(), stored_cache_text(&caches.mark))),
+                ("markCache", cache_equals(&coin.marks, &caches.mark), &|| (cache_option_text(&coin.marks), stored_option_text(&caches.mark))),
             ];
             for (field, equal, values) in fields {
                 let entry = counts.entry(field).or_default();
@@ -550,6 +597,67 @@ mod tests {
         assert_eq!(prices.coins[1].mark.px, 4477, "PUMP is not priced: unchanged");
     }
 
+    #[test]
+    fn xten_submissions_match_three_real_checkpoints_without_fabricating_reference_caches() {
+        for case in super::super::seed::tests::xten_cases() {
+            let seed = super::super::seed::tests::xten_seed(&case);
+            let mut prices = NativePrices::seeded(&seed.native);
+            let action = &case["last_submission"];
+            let time_ns = crate::accounts::checkpoint::node_time_ns(action["time"].as_str().unwrap()).unwrap();
+            let pair = action["xten"].as_array().unwrap();
+            let set_global = MarkAction::SetGlobal(vec![SubmittedPrices::Priced {
+                oracle: pair[0].as_str().unwrap().to_string(), mark: pair[1].as_str().unwrap().to_string(),
+            }, SubmittedPrices::Unpriced]);
+            // Deliberately far from the submissions: a median or stale-price fallback would fail these assertions.
+            prices.coins[0].stored_oracle = 1;
+            prices.coins[0].mark.px = 2;
+            prices.begin_block(time_ns);
+            prices.apply(&set_global, None, time_ns, |_| cut(900_000, 950_000, 925_000)).unwrap();
+            assert_eq!(prices.stored_oracle(0), Some(seed.native.assets[0].stored_oracle));
+            assert_eq!(prices.mark_of(0), (seed.native.assets[0].mark, None));
+            let state = prices.price_states().find(|(name, _)| *name == "XTEN").unwrap().1;
+            assert_eq!((state.spot_cache, state.mark_cache), (None, None));
+            let check = prices.check_against(&seed.native);
+            for field in ["storedOracle", "mark", "spotCache", "externalPerpCache", "markCache"] {
+                assert!(check.fields.contains(&(field, 2, 0)), "{field}: {:?}", check.fields);
+            }
+            // These are real price goldens, not a claim that the deliberately artificial book reproduces the EMAs.
+        }
+    }
+
+    #[test]
+    fn submitted_mode_survives_automatic_refresh_and_restores_the_funding_price_dependency() {
+        let mut seed = native_seed();
+        let coin = &mut seed.assets[0];
+        coin.name = "XTEN".to_string(); coin.size_decimals = 0;
+        coin.reference_modes = ReferenceModes { spot: ReferenceMode::Submitted, external_perp: ReferenceMode::Submitted, mark: ReferenceMode::Submitted };
+        coin.references = super::super::seed::ReferenceCaches { spot: None, external_perp: None, mark: None };
+        seed.refresh = super::super::refresh::RefreshState::from_wire(super::super::refresh::tests::wire(), 2).unwrap().0;
+        let mut prices = NativePrices::seeded(&seed);
+        let action = MarkAction::SetGlobal(vec![SubmittedPrices::Priced { oracle: "0.26667".to_string(), mark: "0.27096".to_string() }, SubmittedPrices::Unpriced]);
+        prices.apply(&action, None, T1, |_| cut(900_000, 950_000, 925_000)).unwrap();
+        let later = T1 + 21_000_000_000;
+        prices.begin_block(later);
+        assert!(prices.refresh_stale(1, later, |_| cut(800_000, 850_000, 825_000)).unwrap());
+        assert_eq!((prices.stored_oracle(0), prices.mark(0)), (Some(266_670), Some(270_960)));
+        assert_eq!(prices.coins[0].mark_update, MarkUpdate::AutomaticRefresh);
+        let rows = [crate::accounts::misc::FundingDelta { user: VALIDATOR, coin: "XTEN".to_string(), size: "100".to_string(), amount_wei: 17 }];
+        let adjustment = crate::accounts::funding::balance(&rows, |name| {
+            let asset = prices.asset(name)?;
+            Some((prices.stored_oracle(asset)?, prices.size_decimals(asset)))
+        }).unwrap().unwrap();
+        assert_eq!(adjustment.amount_wei, -17);
+        prices.coins[0].unsupported = Some("partialEmas");
+        assert!(crate::accounts::funding::balance(&rows, |_| prices.stored_oracle(0).map(|px| (px, 0))).is_err());
+    }
+
+    #[test]
+    fn disabled_selector_never_reads_the_inverse_basis_or_a_stale_cache() {
+        assert_eq!(select_price(ReferenceMode::Submitted, 123, None, || panic!("disabled selector read local inputs")), Ok(Some(123)));
+        assert_eq!(select_price(ReferenceMode::Median, 123, None, || Ok(5)), Ok(None));
+        assert_eq!(select_price(ReferenceMode::Unsupported, 123, None, || Ok(5)), Ok(None));
+    }
+
     /// bm 10-27, XTEN's listing withheld every coin's marks. A `SetGlobalAction` pricing a coin with one of the two, a
     /// coin listed since the seed, and a coin whose submitted coverage changes leave that coin alone: the others take
     /// their prices.
@@ -582,7 +690,7 @@ mod tests {
         prices.apply(&set_global, None, T1, |_| cut(828_500, 828_700, 828_600)).unwrap();
         let state = btc(&prices);
         assert_eq!((state.mark_update, state.mark_time_ns, state.submitted), (MarkUpdate::SetGlobal, T1, Some((828_900, 828_600))));
-        assert_eq!((state.spot_cache.median, state.mark_cache.median, state.mark_cache.members.len()), (Some(828_720), Some(828_590), 1));
+        assert_eq!((state.spot_cache.as_ref().unwrap().median, state.mark_cache.as_ref().unwrap().median, state.mark_cache.as_ref().unwrap().members.len()), (Some(828_720), Some(828_590), 1));
         // the stale window is 20 s; lmpe's 30 s decay still spans the gap
         let later = T1 + 21_000_000_000;
         assert!(prices.refresh_stale(1, later, |_| cut(828_500, 828_700, 828_600)).unwrap(), "no SetGlobalAction for 21 s");
@@ -598,9 +706,9 @@ mod tests {
         };
         prices.apply(&reference, Some(VALIDATOR), T1, |_| cut(828_500, 828_700, 828_600)).unwrap();
         let btc = &prices.coins[0];
-        assert_eq!(btc.spot.members[&VALIDATOR], (828_750, T1));
-        assert_eq!(btc.external_perp.members[&VALIDATOR], (828_650, T1));
-        assert_eq!(btc.marks.members[&VALIDATOR], (828_650, T1), "median(A 828750, L 828600, C 828650)");
+        assert_eq!(btc.spot.as_ref().unwrap().members[&VALIDATOR], (828_750, T1));
+        assert_eq!(btc.external_perp.as_ref().unwrap().members[&VALIDATOR], (828_650, T1));
+        assert_eq!(btc.marks.as_ref().unwrap().members[&VALIDATOR], (828_650, T1), "median(A 828750, L 828600, C 828650)");
         assert_eq!(btc.unsupported, None);
     }
 
@@ -613,14 +721,14 @@ mod tests {
         let spot_only = MarkAction::Reference { oracle: vec![("BTC".to_string(), "82875.0".to_string())], external: Vec::new() };
         prices.apply(&spot_only, Some(VALIDATOR), T1, |_| cut(819_900, 820_100, 820_000)).unwrap();
         let btc = &prices.coins[0];
-        assert_eq!((btc.marks.members[&VALIDATOR], btc.unsupported), ((823_100, T1), None));
+        assert_eq!((btc.marks.as_ref().unwrap().members[&VALIDATOR], btc.unsupported), ((823_100, T1), None));
         assert_eq!(btc.emas.as_ref().unwrap().local_price.samples, 269_229, "a preview only");
         let mut cold = native_seed();
         // 29 samples with the preview's, below the decay parameter 30
         cold.assets[0].emas.as_mut().unwrap().local_price.samples = 28;
         let mut prices = NativePrices::seeded(&cold);
         prices.apply(&spot_only, Some(VALIDATOR), T1, |_| cut(819_900, 820_100, 820_000)).unwrap();
-        assert_eq!((prices.coins[0].marks.members.get(&VALIDATOR), prices.coins[0].unsupported), (None, Some("coldLocalPriceFill")));
+        assert_eq!((prices.coins[0].marks.as_ref().unwrap().members.get(&VALIDATOR), prices.coins[0].unsupported), (None, Some("coldLocalPriceFill")));
     }
 
     /// BTC given a spot book of 3 price decimals, as `psro` gives HYPE and PURR theirs.
@@ -648,35 +756,35 @@ mod tests {
         };
         prices.apply(&submitted, Some(VALIDATOR), T1, |_| spot_cut((Some(82_870_000), Some(82_870_101)))).unwrap();
         let btc = &prices.coins[0];
-        assert_eq!(btc.spot.members[&VALIDATOR], (828_700, T1));
-        assert_eq!(btc.marks.members[&VALIDATOR], (828_610, T1), "median(A 828610, L 828600, C 828650)");
+        assert_eq!(btc.spot.as_ref().unwrap().members[&VALIDATOR], (828_700, T1));
+        assert_eq!(btc.marks.as_ref().unwrap().members[&VALIDATOR], (828_610, T1), "median(A 828610, L 828600, C 828650)");
         let other = Address::repeat_byte(1);
         let unpriced = MarkAction::Reference { oracle: Vec::new(), external: Vec::new() };
         prices.apply(&unpriced, Some(other), T1, |_| spot_cut((Some(82_870_000), Some(82_870_301)))).unwrap();
         let btc = &prices.coins[0];
-        assert_eq!((btc.spot.members[&other], btc.marks.members[&other], btc.unsupported), ((828_702, T1), (828_600, T1), None));
-        assert!(!btc.external_perp.members.contains_key(&other));
+        assert_eq!((btc.spot.as_ref().unwrap().members[&other], btc.marks.as_ref().unwrap().members[&other], btc.unsupported), ((828_702, T1), (828_600, T1), None));
+        assert!(!btc.external_perp.as_ref().unwrap().members.contains_key(&other));
     }
 
     /// An action-free block still refreshes live empty/stale caches; a halted coin's three keys stay untouched.
     #[test]
     fn action_free_blocks_advance_live_caches_and_skip_halted_coins() {
         let mut seed = spot_referenced_seed();
-        seed.assets[0].references.external_perp.members.clear();
-        seed.assets[0].references.external_perp.median = None;
+        seed.assets[0].references.external_perp.as_mut().unwrap().members.clear();
+        seed.assets[0].references.external_perp.as_mut().unwrap().median = None;
         let mut prices = NativePrices::seeded(&seed);
         let halted = prices.coins[1].clone();
         prices.begin_block(T1);
         let btc = &prices.coins[0];
-        assert_eq!((btc.external_perp.last_bucket, btc.external_perp.median, btc.external_perp.members.len()), (T1 / BUCKET_NS, None, 0));
+        assert_eq!((btc.external_perp.as_ref().unwrap().last_bucket, btc.external_perp.as_ref().unwrap().median, btc.external_perp.as_ref().unwrap().members.len()), (T1 / BUCKET_NS, None, 0));
         let pump = &prices.coins[1];
         assert_eq!((&pump.spot, &pump.external_perp, &pump.marks), (&halted.spot, &halted.external_perp, &halted.marks));
         // Even stale members do not freeze a live key; do not confuse absent prices with an asset halt.
-        prices.coins[0].external_perp.insert(VALIDATOR, 7, T1 - 12_000_000_000);
-        prices.coins[0].external_perp.median = Some(5);
+        prices.coins[0].external_perp.as_mut().unwrap().insert(VALIDATOR, 7, T1 - 12_000_000_000);
+        prices.coins[0].external_perp.as_mut().unwrap().median = Some(5);
         prices.begin_block(T1 + BUCKET_NS);
         let btc = &prices.coins[0];
-        assert_eq!((btc.external_perp.last_bucket, btc.external_perp.median), (T1 / BUCKET_NS + 1, Some(5)));
+        assert_eq!((btc.external_perp.as_ref().unwrap().last_bucket, btc.external_perp.as_ref().unwrap().median), (T1 / BUCKET_NS + 1, Some(5)));
     }
 
     /// BM 1191810000 -> 1191820000: the endpoint crosses into a new bucket without any price action.
@@ -702,9 +810,9 @@ mod tests {
         for case in golden.cases {
             let mut coin = NativePrices::seeded(&native_seed()).coins.remove(0);
             coin.halted = case.halted;
-            coin.external_perp = case.before.state();
+            coin.external_perp = Some(case.before.state());
             coin.begin_block(golden.end_time_ns);
-            assert_eq!(coin.external_perp, case.after.state(), "{}", case.coin);
+            assert_eq!(coin.external_perp, Some(case.after.state()), "{}", case.coin);
         }
     }
 
@@ -716,11 +824,11 @@ mod tests {
         let unpriced = MarkAction::Reference { oracle: Vec::new(), external: Vec::new() };
         prices.apply(&unpriced, Some(VALIDATOR), T1, |_| spot_cut((Some(82_870_000), None))).unwrap();
         let btc = &prices.coins[0];
-        assert_eq!((btc.spot.members.get(&VALIDATOR), btc.marks.members.get(&VALIDATOR), btc.unsupported), (None, None, None));
+        assert_eq!((btc.spot.as_ref().unwrap().members.get(&VALIDATOR), btc.marks.as_ref().unwrap().members.get(&VALIDATOR), btc.unsupported), (None, None, None));
         let external = MarkAction::Reference { oracle: Vec::new(), external: vec![("BTC".to_string(), "82865.0".to_string())] };
         prices.apply(&external, Some(VALIDATOR), T1, |_| spot_cut((None, Some(82_870_000)))).unwrap();
         let btc = &prices.coins[0];
-        assert_eq!((btc.spot.members.get(&VALIDATOR), btc.marks.members[&VALIDATOR]), (None, (828_600, T1)));
+        assert_eq!((btc.spot.as_ref().unwrap().members.get(&VALIDATOR), btc.marks.as_ref().unwrap().members[&VALIDATOR]), (None, (828_600, T1)));
     }
 
     #[test]
@@ -791,8 +899,8 @@ mod tests {
             coin.mark.px = case.previous_mark_units;
             coin.stored_oracle = case.previous_oracle_units;
             coin.emas = Some(NativeEmas { basis: case.basis.state(), local_price: case.local_price_ema.state() });
-            coin.spot.median = Some(case.spot_cache_units);
-            coin.marks.median = Some(case.mark_cache_units);
+            coin.spot.as_mut().unwrap().median = Some(case.spot_cache_units);
+            coin.marks.as_mut().unwrap().median = Some(case.mark_cache_units);
             coin.set_global(wire_units(&case.submitted_oracle, coin.size_decimals).unwrap(), wire_units(&case.submitted_mark, coin.size_decimals).unwrap(), case.time_ns,
                 cut(case.bid_units, case.ask_units, case.last_trade_units), MarkUpdate::SetGlobal).unwrap();
             assert_eq!(coin.unsupported, None, "block {}", case.block);
@@ -828,9 +936,9 @@ mod tests {
         assert!(check.fields.contains(&("storedOracle", 1, 1)), "{:?}", check.fields);
         let sample = PriceMismatch { coin: "BTC".to_string(), field: "storedOracle", replayed: "828908".to_string(), checkpoint: "828909".to_string() };
         assert_eq!(check.samples, [sample]);
-        moved.assets[0].references.mark.median = Some(1);
+        moved.assets[0].references.mark.as_mut().unwrap().median = Some(1);
         let check = prices.check_against(&moved);
-        let validator = moved.assets[0].references.mark.members[0].0;
+        let validator = moved.assets[0].references.mark.as_ref().unwrap().members[0].0;
         assert_eq!((check.samples[1].field, check.samples[1].replayed.as_str(), check.samples[1].checkpoint.as_str()), (
             "markCache",
             format!("median Some(828590) bucket 597463947 members [({validator:?}, 828590, 1792391842000000000)]").as_str(),
