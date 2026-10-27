@@ -209,7 +209,7 @@ mod execution_tests {
         let book = |position, oid| RankedAction { rank: (0, 3, position), user: None,
             action: MarkAction::Book(BookAnchors { created: vec![oid], ..BookAnchors::default() }) };
         let actions = vec![book(0, 12), RankedAction { rank: (0, 3, 1), user: None,
-            action: MarkAction::SetGlobal(vec![Some(("82870.0".into(), "82870.0".into()))]) }, book(2, 14)];
+            action: MarkAction::SetGlobal(vec![crate::accounts::marks::actions::SubmittedPrices::Priced { oracle: "82870.0".into(), mark: "82870.0".into() }]) }, book(2, 14)];
         let report = marks.apply_block(1_002, MarkInputs {
             mark_actions: Ok(MarkActions { height: 1_002, time_ns: 1_792_391_844_000_000_000, actions }),
             fills: vec![fill("BTC", 11, true), fill("BTC", 12, false), fill("BTC", 13, false), fill("BTC", 14, false)],

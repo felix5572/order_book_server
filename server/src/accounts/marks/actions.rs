@@ -38,12 +38,34 @@ pub(crate) enum MarkAction {
     Book(BookAnchors),
     /// A successful vault withdrawal can create IOC `Vault Close` orders absent from its default receipt.
     VaultWithdraw { vault: Address },
-    /// Per main-dex asset, the submitted (oracle, mark); `None` for an asset the publisher does not price.
-    SetGlobal(Vec<Option<(String, String)>>),
+    /// Per main-dex asset, the submitted prices.
+    SetGlobal(Vec<SubmittedPrices>),
     /// Successful HIP-3 setOracle: execution identity only; written prices come from the oracle stream.
     Hip3Oracle { dex: String, execution_index: Option<usize> },
     /// A validator's submitted oracle and external perp prices, by coin.
     Reference { oracle: Vec<(String, String)>, external: Vec<(String, String)> },
+}
+
+/// One main-dex asset's prices in a `SetGlobalAction`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SubmittedPrices {
+    /// The publisher does not price the asset.
+    Unpriced,
+    Priced { oracle: String, mark: String },
+    /// One of the two: a coin the node has not fully built (bm 10-27, XTEN's first minute after its listing: the mark
+    /// alone). The coin alone is unsupported until a seed.
+    Partial,
+}
+
+impl SubmittedPrices {
+    /// Whether the asset is priced; `None` for one of the two, whose submitted coverage is unknown.
+    pub(crate) const fn priced(&self) -> Option<bool> {
+        match self {
+            Self::Unpriced => Some(false),
+            Self::Priced { .. } => Some(true),
+            Self::Partial => None,
+        }
+    }
 }
 
 impl MarkAction {
@@ -225,13 +247,12 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
             let pxs: Vec<(Option<String>, Option<String>)> = action.field(action.pxs.as_ref(), "pxs")?;
             let pxs = pxs
                 .into_iter()
-                .enumerate()
-                .map(|(asset, pair)| match pair {
-                    (Some(oracle), Some(mark)) => Ok(Some((oracle, mark))),
-                    (None, None) => Ok(None),
-                    _ => Err(format!("SetGlobalAction prices asset {asset} with one of oracle and mark")),
+                .map(|pair| match pair {
+                    (Some(oracle), Some(mark)) => SubmittedPrices::Priced { oracle, mark },
+                    (None, None) => SubmittedPrices::Unpriced,
+                    _ => SubmittedPrices::Partial,
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect();
             (3, MarkAction::SetGlobal(pxs))
         }
         _ => {
@@ -599,7 +620,8 @@ pub(crate) mod tests {
             takers: Vec::new(),
         };
         assert_eq!(book(3), modified, "the failed modify of 77 removed nothing");
-        assert_eq!(parsed.actions[4].action, MarkAction::SetGlobal(vec![Some(("81520".to_string(), "81503".to_string())), None]));
+        let priced = SubmittedPrices::Priced { oracle: "81520".to_string(), mark: "81503".to_string() };
+        assert_eq!(parsed.actions[4].action, MarkAction::SetGlobal(vec![priced, SubmittedPrices::Unpriced]));
         assert_eq!(parsed.actions[4].user, Some(USER.parse().unwrap()));
     }
 
@@ -642,7 +664,8 @@ pub(crate) mod tests {
         let broken = replica_line(9, &[&[(r#"{"type":"cancel","cancels":[{"a":1,"o":3}]}"#, &ok(r#"{"type":"cancel","data":{"statuses":[]}}"#))]]);
         let error = MarkActions::of(&ReplicaLine::parse(&broken).unwrap()).unwrap_err();
         assert!(error.contains("block 9: bundle 0x00: 1 cancels with 0 statuses"), "{error}");
-        let half = replica_line(9, &[&[(r#"{"type":"SetGlobalAction","pxs":[["1",null]]}"#, &ok(r#"{"type":"setGlobal","data":[]}"#))]]);
-        assert!(MarkActions::of(&ReplicaLine::parse(&half).unwrap()).unwrap_err().contains("one of oracle and mark"));
+        // bm 10-27: XTEN's first minute; the coin alone is unsupported (`native.rs`), the block parses
+        let half = replica_line(9, &[&[(r#"{"type":"SetGlobalAction","pxs":[[null,"1"]]}"#, &ok(r#"{"type":"setGlobal","data":[]}"#))]]);
+        assert_eq!(mark_actions(&half).actions[0].action, MarkAction::SetGlobal(vec![SubmittedPrices::Partial]));
     }
 }

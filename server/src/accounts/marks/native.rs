@@ -23,15 +23,17 @@
 //! ALT liquidation fills at blocks 1192112978 and 1192114308 confirm the uncapped middle-of-three price.
 //! A checkpoint checks only the end state; later updates can hide a wrong intermediate mark.
 //! A coin whose inputs take a path
-//! never observed (an empty book side, an lmpe gap, a cold lmpe for the third candidate), or whose seed state the
-//! node has not fully built (`NativeAsset::unsupported`), is `unsupported` until a seed replaces it: its values are not
-//! claimed.
+//! never observed (an empty book side, an lmpe gap, a cold lmpe for the third candidate), whose seed state the node
+//! has not fully built (`NativeAsset::unsupported`), which a `SetGlobalAction` prices with one of the oracle and the
+//! mark, or whose submitted coverage changes (`RefreshState::coverage_changes`), is `unsupported` until a seed replaces
+//! it: its values are not claimed. A coin listed since the seed is outside the replay until the next seed. None of
+//! them withholds the other coins (bm 10-27, XTEN's listing withheld every coin's marks for 36 minutes).
 
 use alloy::primitives::Address;
 use rustc_hash::FxHashMap;
 
 use super::{
-    actions::MarkAction,
+    actions::{MarkAction, SubmittedPrices},
     book::BestPrices,
     rules::{internal_round, inverse_basis, local_price, median_units, spot_reference_units, wire_units},
     seed::{NativeAsset, NativeEmas, NativeSeed, ReferenceCache, StoredMark},
@@ -391,11 +393,21 @@ impl NativePrices {
         match action {
             MarkAction::Book(_) | MarkAction::VaultWithdraw { .. } | MarkAction::Hip3Oracle { .. } => Ok(()),
             MarkAction::SetGlobal(pxs) => {
-                self.refresh.check_coverage(pxs.iter().map(Option::is_some))?;
+                for asset in self.refresh.coverage_changes(pxs.iter().map(SubmittedPrices::priced)) {
+                    self.coins[asset].unsupported.get_or_insert("submittedCoverageChanged");
+                }
                 self.refresh.explicit(time_ns);
-                for (asset, pair) in pxs.iter().enumerate() {
-                    let Some((oracle, mark)) = pair else { continue };
-                    let coin = self.coins.get_mut(asset).ok_or_else(|| format!("SetGlobalAction prices asset {asset} outside the universe"))?;
+                for (asset, prices) in pxs.iter().enumerate() {
+                    // a coin listed since the seed has no state until the next seed
+                    let Some(coin) = self.coins.get_mut(asset) else { continue };
+                    let (oracle, mark) = match prices {
+                        SubmittedPrices::Unpriced => continue,
+                        SubmittedPrices::Partial => {
+                            coin.unsupported.get_or_insert("partialSetGlobal");
+                            continue;
+                        }
+                        SubmittedPrices::Priced { oracle, mark } => (oracle, mark),
+                    };
                     let pair = (wire_units(oracle, coin.size_decimals)?, wire_units(mark, coin.size_decimals)?);
                     self.refresh.submitted[asset] = Some(pair);
                     coin.set_global(pair.0, pair.1, time_ns, cut_of(asset)).map_err(|err| format!("{}: {err}", coin.name))?;
@@ -493,7 +505,7 @@ mod tests {
     #[test]
     fn a_set_global_action_stores_the_medians_and_samples_both_emas() {
         let mut prices = NativePrices::seeded(&native_seed());
-        let set_global = MarkAction::SetGlobal(vec![Some(("82890.0".to_string(), "82860.0".to_string())), None]);
+        let set_global = MarkAction::SetGlobal(vec![SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: "82860.0".to_string() }, SubmittedPrices::Unpriced]);
         prices.apply(&set_global, None, T1, |_| cut(828_500, 828_700, 828_600)).unwrap();
         let btc = &prices.coins[0];
         assert_eq!(btc.stored_oracle, 828_720, "median(828900, Spot 828720, L 828600 with a zero basis)");
@@ -502,6 +514,24 @@ mod tests {
         assert_eq!((emas.basis.samples, emas.local_price.samples), (2_244_588, 269_230));
         assert_eq!(emas.local_price.last_sample_ns, Some(T1));
         assert_eq!(prices.coins[1].mark.px, 4477, "PUMP is not priced: unchanged");
+    }
+
+    /// bm 10-27, XTEN's listing withheld every coin's marks. A `SetGlobalAction` pricing a coin with one of the two, a
+    /// coin listed since the seed, and a coin whose submitted coverage changes leave that coin alone: the others take
+    /// their prices.
+    #[test]
+    fn a_coin_a_set_global_action_cannot_price_is_unsupported_alone() {
+        let mut seed = native_seed();
+        seed.refresh = super::super::refresh::RefreshState::from_wire(super::super::refresh::tests::wire(), 2).unwrap().0;
+        let mut prices = NativePrices::seeded(&seed);
+        let btc = SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: "82860.0".to_string() };
+        let listed_since = MarkAction::SetGlobal(vec![btc.clone(), SubmittedPrices::Partial, btc]);
+        prices.apply(&listed_since, None, T1, |_| cut(828_500, 828_700, 828_600)).unwrap();
+        assert_eq!(prices.mark_of(0), (StoredMark { px: 828_600, time_ns: T1 }, None));
+        assert_eq!(prices.mark_of(1).1, Some("partialSetGlobal"));
+        let dropped = MarkAction::SetGlobal(vec![SubmittedPrices::Unpriced, SubmittedPrices::Unpriced]);
+        prices.apply(&dropped, None, T1 + 3_000_000_000, |_| cut(828_500, 828_700, 828_600)).unwrap();
+        assert_eq!(prices.mark_of(0).1, Some("submittedCoverageChanged"), "BTC's input dropped");
     }
 
     #[test]
@@ -641,7 +671,7 @@ mod tests {
     #[test]
     fn unobserved_paths_make_a_coin_unsupported() {
         let mut prices = NativePrices::seeded(&native_seed());
-        let set_global = MarkAction::SetGlobal(vec![Some(("82890.0".to_string(), "90000.0".to_string()))]);
+        let set_global = MarkAction::SetGlobal(vec![SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: "90000.0".to_string() }]);
         prices.apply(&set_global, None, T1, |_| CoinCut { best: (Some(828_500), None), spot_reference: None, block_trade: None }).unwrap();
         assert_eq!(prices.coins[0].unsupported, Some("emptyBookSide"));
     }
@@ -651,7 +681,7 @@ mod tests {
     fn a_native_mark_takes_the_median_even_more_than_one_percent_away() {
         for (submitted, bid, ask, trade) in [("90000.0", 900_000, 900_100, 900_050), ("70000.0", 700_000, 700_100, 700_000)] {
             let mut prices = NativePrices::seeded(&native_seed());
-            let set_global = MarkAction::SetGlobal(vec![Some(("82890.0".to_string(), submitted.to_string()))]);
+            let set_global = MarkAction::SetGlobal(vec![SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: submitted.to_string() }]);
             prices.apply(&set_global, None, T1, |_| cut(bid, ask, trade)).unwrap();
             assert_eq!(prices.mark_of(0), (StoredMark { px: bid, time_ns: T1 }, None));
         }

@@ -1299,7 +1299,8 @@ pub(crate) mod tests {
         let set_global = RankedAction {
             rank: (1, 3, 0),
             user: None,
-            action: MarkAction::SetGlobal(vec![Some(("82890.0".to_string(), "82870.0".to_string())), None]),
+            action: MarkAction::SetGlobal(vec![actions::SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: "82870.0".to_string() },
+                actions::SubmittedPrices::Unpriced]),
         };
         let actions = MarkActions { height: 996, time_ns, actions: vec![placed((0, 1, 0), 11), set_global, placed((2, 1, 0), 12)] };
         let inputs = MarkInputs {

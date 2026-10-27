@@ -64,7 +64,9 @@ pub(crate) struct RefreshState {
 }
 
 impl RefreshState {
-    pub(crate) fn from_wire(wire: WireRefreshSeed, count: usize) -> Result<Self, String> {
+    /// The state, and the assets whose cached inputs hold one of the oracle and the mark (bm 10-27 XTEN at
+    /// 1198840000: the mark alone): unsupported coins, their submitted prices unknown.
+    pub(crate) fn from_wire(wire: WireRefreshSeed, count: usize) -> Result<(Self, Vec<usize>), String> {
         let config = wire.config.ok_or("missing exchange.msc automatic-price state")?;
         let outer = wire.outer.ok_or("missing begin_block_logic_guard")?;
         outer.validate()?;
@@ -79,19 +81,24 @@ impl RefreshState {
         let [oracle, mark, _external] = config.mou.u;
         let oracle = input_by_asset(oracle, count)?;
         let mark = input_by_asset(mark, count)?;
-        let submitted = oracle.into_iter().zip(mark).map(|(o, m)| match (o, m) {
-            (Some(o), Some(m)) => Ok(Some((o, m))),
-            (None, None) => Ok(None),
-            _ => Err("cached oracle/mark input coverage differs".to_string()),
-        }).collect::<Result<_, _>>()?;
-        Ok(Self {
+        let mut partial = Vec::new();
+        let submitted = oracle.into_iter().zip(mark).enumerate().map(|(asset, pair)| match pair {
+            (Some(o), Some(m)) => Some((o, m)),
+            (None, None) => None,
+            _ => {
+                partial.push(asset);
+                None
+            }
+        }).collect();
+        let state = Self {
             outer, inner: config.sog, stale_after_ns,
             last_explicit_ns: node_time_ns(&wire.last_explicit_time.ok_or("missing main lnsgt")?)?,
             post_only_until_ns: node_time_ns(&wire.post_only_until_time.ok_or("missing post_only_until_time")?)?,
             post_only_until_height: wire.post_only_until_height.ok_or("missing post_only_until_height")?,
             hardfork_height: wire.hardfork_height.ok_or("missing ctx.hardfork_height")?,
             submitted,
-        })
+        };
+        Ok((state, partial))
     }
 
     pub(crate) fn due(&mut self, height: u64, time_ns: u64) -> bool {
@@ -103,19 +110,19 @@ impl RefreshState {
         time_ns >= deadline && self.inner.advance(time_ns)
     }
 
-    /// The retained SAND evidence covers unchanged publisher coverage. Do not carry an
-    /// omitted active input forward as if the native cache's removal semantics were proven;
-    /// the next checkpoint can seed the new coverage without inference.
-    pub(crate) fn check_coverage(&self, coverage: impl Iterator<Item = bool>) -> Result<(), String> {
-        if self.stale_after_ns.is_none() { return Ok(()); }
+    /// The seed's assets an explicit SGA prices otherwise than their submitted prices (`coverage`: priced, `None` for
+    /// one of the two). The retained SAND evidence covers unchanged publisher coverage: the native cache of an input
+    /// added or dropped is not established, so such an asset's automatic refresh is unknown until the next checkpoint
+    /// seeds it; each asset refreshes from its own submitted prices alone, so the others are not affected. An asset
+    /// listed since the seed has no state to refresh.
+    pub(crate) fn coverage_changes(&self, coverage: impl Iterator<Item = Option<bool>>) -> Vec<usize> {
+        if self.stale_after_ns.is_none() { return Vec::new(); }
         let mut coverage = coverage;
-        for submitted in &self.submitted {
-            if coverage.next().unwrap_or(false) != submitted.is_some() {
-                return Err("automatic-price submitted coverage changed; requires checkpoint reseed".into());
-            }
-        }
-        if coverage.any(|priced| priced) { return Err("automatic-price asset outside seed universe".into()); }
-        Ok(())
+        let changed = self.submitted.iter().enumerate().filter_map(|(asset, submitted)| {
+            let priced = coverage.next().unwrap_or(Some(false))?;
+            (priced != submitted.is_some()).then_some(asset)
+        });
+        changed.collect()
     }
 
     pub(crate) fn explicit(&mut self, time_ns: u64) {
@@ -133,7 +140,7 @@ fn input_by_asset(values: Vec<(usize, u64)>, count: usize) -> Result<Vec<Option<
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod sand_tests;

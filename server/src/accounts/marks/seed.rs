@@ -420,7 +420,10 @@ impl NativeSeed {
                 unsupported: partial_emas.or(missing_cache),
             });
         }
-        let refresh = super::refresh::RefreshState::from_wire(refresh, count)?;
+        let (refresh, partial) = super::refresh::RefreshState::from_wire(refresh, count)?;
+        for asset in partial {
+            assets[asset].unsupported.get_or_insert("partialSubmittedPrices");
+        }
         Ok(Self { system_timing, assets, spot_references, refresh })
     }
 }
@@ -695,6 +698,9 @@ pub(crate) mod tests {
         let [btc, pump] = no_spot.native.assets.as_slice() else { panic!("two main assets") };
         assert_eq!((btc.unsupported, &btc.references.spot, pump.unsupported), (Some("noSpotReferenceCache"), &ReferenceCache::default(), None));
         assert_eq!(btc.references.mark.median, Some(828_590), "the caches it has are read");
+        let cached_mark_alone = seed_with(|checkpoint| checkpoint["exchange"]["msc"]["mou"]["u"][1] = json!([[0, 828_576]]));
+        let [btc, pump] = cached_mark_alone.native.assets.as_slice() else { panic!("two main assets") };
+        assert_eq!((btc.unsupported, pump.unsupported, &cached_mark_alone.native.refresh.submitted), (Some("partialSubmittedPrices"), None, &vec![None, None]));
         let replay = super::super::native::NativePrices::seeded(&no_spot.native);
         assert_eq!((replay.stored_oracle(0), replay.mark(0)), (None, None), "BTC is not claimed");
         let full = MarkSeed::from_checkpoint(parse_checkpoint_bytes(&fixture()).unwrap()).unwrap();
