@@ -523,6 +523,9 @@ impl OrderBookState {
         self.diffs.advance(height, time);
         self.latest.advance(height, time);
 
+        // Apply the node's stream order and New diffs' queue anchors; do not reconstruct activation order from
+        // trigger thresholds or account groups. One account's triggers can straddle another account's executions
+        // (README: "Observed trigger activation order"); a triggered status alone does not prove resting liquidity.
         for diff in batch.events() {
             let oid = diff.oid();
             let coin = diff.coin();

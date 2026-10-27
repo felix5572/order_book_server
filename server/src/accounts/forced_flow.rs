@@ -6,13 +6,17 @@
 //! Pure: the owner hands in the coin's trigger orders of the band, its liquidation candidates of both calibres and the
 //! positions at the marks' height. Sizes are raw, 10^-szDecimals of the coin; prices USD.
 //!
-//! A band's cumulative size (`Band::cumulative_raw`) is what of it walks the book whatever the order (user 2026-10-25):
-//! its market trigger orders and liquidations together. The node runs the trigger orders a mark move fires in one block
-//! in an order of its own, neither by trigger price nor by oid (bm 10-23 ZEC, 10-24 NEAR, 10-25 WLD, up to 1,282
-//! orders in a block), so the flow walks no entry after another: only the sum, which does not depend on the order. The
-//! limit trigger orders are left out, each stopping at its own limit in that unknown order. Likewise an entry's prefix
-//! (`prefix_sizes`): the market trigger orders and liquidations of its path at its level or nearer, what a mark move
-//! reaching its level fires with it.
+//! A band's cumulative size (`Band::cumulative_raw`) sums its market trigger orders and liquidations (user 2026-10-25).
+//! That fixed sum is independent of entry order; actual execution can change remaining positions and book liquidity.
+//! `prefix_sizes` likewise sums those entries of a path at its level or nearer, including every equal level; neither
+//! walk simulates successive executions or guarantees their aggregate filled size.
+//!
+//! BM 2026-10-26/27 evidence fits same-action, same-coin trigger activation by effective size, then address, then oid
+//! ascending (README: "Observed trigger activation order"). Accounts can interleave; the size is frozen before the
+//! batch, not the remaining position after earlier triggers. This is an observed rule, not a protocol guarantee or a
+//! liquidation-order rule. `path_order` remains presentation order, not an activation simulator. Limit triggers stay
+//! outside cumulative walks: modeling them would also require their ordered taking/resting effects and subsequent
+//! position changes, not merely sorting this list. Replay uses the node's actual stream order instead.
 
 use std::{
     cmp::Ordering,
@@ -376,6 +380,7 @@ fn listener_px(px: Px) -> f64 {
     px.value() as f64 / 10f64.powi(FIXED_POINT_DECIMALS.cast_signed())
 }
 
+/// Stable presentation by distance/level, not the node's trigger activation priority (see the module docs).
 fn path_order(left: &Entry, right: &Entry) -> Ordering {
     let by_level = nearest_first(left.direction, left.level_px, right.level_px);
     left.direction.cmp(&right.direction).then(by_level).then(left.source.kind().cmp(&right.source.kind())).then_with(|| {

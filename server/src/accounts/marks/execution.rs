@@ -8,7 +8,9 @@
 //! `SetGlobalAction`, the orders it triggered run inside it, after its selector. The anchors bound "lines before P" to an
 //! interval [lo, hi]; P reads the book at `lo` (the start, research method 3) and the last trade before its fills cut.
 //! An anchor of a later action before one of an earlier action contradicts the line order: the block breaks the
-//! contract.
+//! contract. Preserve observed diff/fill/status order within an action; do not regroup triggers by account, threshold
+//! or oid. The empirical activation key documented in README ("Observed trigger activation order") is not a substitute
+//! for execution evidence and does not place an otherwise unanchored trigger or liquidation.
 //!
 //! A trigger order's placement is not its activation. Only a main-dex trigger with no automatic block-start refresh and exactly one `SetGlobalAction`
 //! is placed by the rule above. HIP-3 triggers, and native triggers with zero/multiple `SetGlobalAction`s, stay
