@@ -451,6 +451,13 @@ lazy_static! {
         "1 while the account view is trusted"
     ).expect("metric can be created");
 
+    /// The block-actions height while the account view is trusted; it stays at the last one while not, so the gap to
+    /// the book's height says how long the view has been withheld (`ob_ops.py` health).
+    pub static ref ACCOUNTS_TRUSTED_HEIGHT: IntGauge = IntGauge::new(
+        "orderbook_accounts_trusted_height",
+        "Block-actions height of the trusted account view (the last one while it is not)"
+    ).expect("metric can be created");
+
     pub static ref ACCOUNTS_ANCHOR_HEIGHT: IntGauge = IntGauge::new(
         "orderbook_accounts_anchor_height",
         "Height of the installed account anchor checkpoint"
@@ -809,6 +816,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(ACCOUNTS_REPLAY_ROWS_CHECKED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_REPLAY_CHECKS_SKIPPED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_APPLIED_HEIGHT.clone())).ok();
+    REGISTRY.register(Box::new(ACCOUNTS_TRUSTED_HEIGHT.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_PENDING_BLOCKS.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(ACCOUNTS_EVIDENCE_TOTAL.clone())).ok();
