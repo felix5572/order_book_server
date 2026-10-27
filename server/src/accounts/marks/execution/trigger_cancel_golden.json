@@ -1,0 +1,198 @@
+{
+  "height": 1199055617,
+  "block_time": "2026-10-27T10:59:40.717986012",
+  "trigger_oid": 587179238618,
+  "later_order_oid": 587179303820,
+  "source_files_sha256": {
+    "replica_blocks.jsonl.gz": "afb8f6e037aea663ba310f204706eebb018eb49ec047aa9f2acc0576b46f72fb",
+    "misc_events_streaming.jsonl.gz": "c054ee2102db1389b1508ed1079a1e83c92b7321a3d0003876988ceb48a3b825",
+    "node_raw_book_diffs_streaming.jsonl.gz": "a08a49cd756281d12a0cb8182e93c8b7914b949c868826c397c8fa0b0621db91",
+    "node_fills_streaming.jsonl.gz": "d3a6bf66f00099efc8e6bee669f462bb5c5d9583711358616ab05c2fa01bf5f9",
+    "node_order_statuses_streaming.jsonl.gz": "8d8dc3ff3e15d952c2e65bfaa0aac328a559adc26ffe810d3996bc851084de9e"
+  },
+  "actions": [
+    {
+      "bundle": 2,
+      "position": 81,
+      "action": {
+        "type": "cancelByCloid",
+        "cancels": [
+          {
+            "asset": 0,
+            "cloid": "0x00000000000000000020261027f23004"
+          }
+        ]
+      },
+      "response": {
+        "user": "0xb24e468b4d79732f51b551b3177b973dde8ca82c",
+        "res": {
+          "status": "ok",
+          "response": {
+            "type": "cancel",
+            "data": {
+              "statuses": [
+                "success"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "bundle": 2,
+      "position": 231,
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 74,
+            "b": false,
+            "p": "4.4896",
+            "s": "289.5",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            },
+            "c": "0x7ccf0877e1ba8e6a0002073429dcd2bc"
+          }
+        ],
+        "grouping": {
+          "p": 5
+        }
+      },
+      "response": {
+        "user": "0x7ccf0877e1ba8e6a6ad26001ca1cdb5973d2d348",
+        "res": {
+          "status": "ok",
+          "response": {
+            "type": "order",
+            "data": {
+              "statuses": [
+                {
+                  "resting": {
+                    "oid": 587179303820,
+                    "cloid": "0x7ccf0877e1ba8e6a0002073429dcd2bc"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "statuses": [
+    {
+      "time": "2026-10-27T10:59:40.717986012",
+      "user": "0xb24e468b4d79732f51b551b3177b973dde8ca82c",
+      "hash": null,
+      "builder": null,
+      "status": "triggered",
+      "order": {
+        "coin": "BTC",
+        "side": "A",
+        "limitPx": "80000.0",
+        "sz": "0.00062",
+        "oid": 587179238618,
+        "timestamp": 1793098776577,
+        "triggerCondition": "Price above 79924",
+        "isTrigger": true,
+        "triggerPx": "79924.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Take Profit Limit",
+        "origSz": "0.00062",
+        "tif": null,
+        "cloid": "0x00000000000000000020261027f23004"
+      }
+    },
+    {
+      "time": "2026-10-27T10:59:40.717986012",
+      "user": "0x7ccf0877e1ba8e6a6ad26001ca1cdb5973d2d348",
+      "hash": "0x3f92dd8b06ad5d80410c044778230102030d0070a1a07c52e35b88ddc5a1376a",
+      "builder": null,
+      "status": "open",
+      "order": {
+        "coin": "NEAR",
+        "side": "A",
+        "limitPx": "4.4896",
+        "sz": "289.5",
+        "oid": 587179303820,
+        "timestamp": 1793098780717,
+        "triggerCondition": "N/A",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Limit",
+        "origSz": "289.5",
+        "tif": "Alo",
+        "cloid": "0x7ccf0877e1ba8e6a0002073429dcd2bc"
+      }
+    },
+    {
+      "time": "2026-10-27T10:59:40.717986012",
+      "user": "0xb24e468b4d79732f51b551b3177b973dde8ca82c",
+      "hash": null,
+      "builder": null,
+      "status": "canceled",
+      "order": {
+        "coin": "BTC",
+        "side": "A",
+        "limitPx": "80000.0",
+        "sz": "0.00062",
+        "oid": 587179238618,
+        "timestamp": 1793098780717,
+        "triggerCondition": "Triggered",
+        "isTrigger": false,
+        "triggerPx": "0.0",
+        "children": [],
+        "isPositionTpsl": false,
+        "reduceOnly": false,
+        "orderType": "Take Profit Limit",
+        "origSz": "0.00062",
+        "tif": "Gtc",
+        "cloid": "0x00000000000000000020261027f23004"
+      }
+    }
+  ],
+  "diffs": [
+    {
+      "user": "0xb24e468b4d79732f51b551b3177b973dde8ca82c",
+      "oid": 587179238618,
+      "coin": "BTC",
+      "side": "A",
+      "px": "80000.0",
+      "raw_book_diff": {
+        "new": {
+          "sz": "0.00062"
+        }
+      }
+    },
+    {
+      "user": "0x7ccf0877e1ba8e6a6ad26001ca1cdb5973d2d348",
+      "oid": 587179303820,
+      "coin": "NEAR",
+      "side": "A",
+      "px": "4.4896",
+      "raw_book_diff": {
+        "new": {
+          "sz": "289.5"
+        }
+      }
+    },
+    {
+      "user": "0xb24e468b4d79732f51b551b3177b973dde8ca82c",
+      "oid": 587179238618,
+      "coin": "BTC",
+      "side": "A",
+      "px": "80000.0",
+      "raw_book_diff": "remove"
+    }
+  ],
+  "scope": "Reduced factual wire witness. Original rank: SGA bundle0; reference(1,3,745); NEAR Alo(2,1,231); BTC cancelByCloid(2,2,81). Full raw block archived separately."
+}

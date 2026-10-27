@@ -444,6 +444,14 @@ impl<'s> Anchors<'s> {
             .map(|(line, diff)| {
                 let oid = diff.oid();
                 if let Some(side) = self.triggered_side(oid) {
+                    // Activation may leave a resting order that another action cancels later in this block.
+                    // Its successful cancel receipt places the remove; activation only places its earlier lifecycle.
+                    if matches!(diff.kind(), DiffKind::Remove) {
+                        let cancellations = Self::sides_of(&self.cancelled, oid);
+                        if !cancellations.is_empty() {
+                            return single(cancellations);
+                        }
+                    }
                     return Some(side);
                 }
                 if self.unplaced_triggered.contains(&oid) {

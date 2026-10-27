@@ -211,3 +211,74 @@ fn an_unpaired_request_must_not_make_another_action_appear_unique() {
     book.takers[0].asset += 1;
     assert_eq!(cut(&g, &a, g.statuses.clone()).lo, g.diffs.len(), "an unrelated unknown response does not block attribution");
 }
+
+/// BM 1199055617: BTC triggers in bundle 0 and is cancelled in bundle 2, after a reference
+/// action in bundle 1. The trigger's later cancellation must not move back to its activation.
+#[test]
+fn triggered_order_later_cancel_uses_its_successful_receipt() {
+    let g: serde_json::Value = serde_json::from_str(include_str!("trigger_cancel_golden.json")).unwrap();
+    let statuses: Vec<NodeDataOrderStatus> = serde_json::from_value(g["statuses"].clone()).unwrap();
+    let diffs: Vec<NodeDataOrderDiff> = serde_json::from_value(g["diffs"].clone()).unwrap();
+    let diffs: Vec<_> = diffs.iter().map(BookDiff::of).collect::<Result<_, _>>().unwrap();
+    let statuses = BlockStatuses::of(statuses).unwrap();
+    let sga = (r#"{"type":"SetGlobalAction","pxs":[]}"#, ok(r#"{"type":"setGlobal","data":[]}"#));
+    let reference = (r#"{"type":"validatorL1UpdateReferenceOracle","oraclePxs":[],"externalPerpPxs":[]}"#, ok(r#"{"type":"default"}"#));
+    let original_cancel = g["actions"][0]["action"].clone();
+    let order = g["actions"][1]["action"].to_string();
+    let order_response = g["actions"][1]["response"].to_string();
+    for by_cloid in [true, false] {
+        let cancel = if by_cloid { original_cancel.clone() } else {
+            serde_json::json!({"type":"cancel","cancels":[{"a":0,"o":g["trigger_oid"]}]})
+        }.to_string();
+        for successful in [true, false] {
+            let mut receipt = g["actions"][0]["response"].clone();
+            if !successful {
+                receipt["res"]["response"]["data"]["statuses"][0] = serde_json::json!({"error":"Order was never placed, already canceled, or filled. asset=0"});
+            }
+            let receipt = receipt.to_string();
+            let raw = replica_line(g["height"].as_u64().unwrap(), &[
+                &[(sga.0, &sga.1)], &[(reference.0, &reference.1)],
+                &[(&cancel, &receipt), (&order, &order_response)],
+            ]);
+            let actions = mark_actions(&raw);
+            let points = price_points(&actions, &statuses, &diffs, &[], |coin| match coin { "BTC" => Some(0), "NEAR" => Some(74), _ => None });
+            if !successful {
+                assert!(points.is_err(), "a rejected cancellation does not prove the later removal");
+                continue;
+            }
+            let points = points.unwrap();
+            assert_eq!(points.len(), 2);
+            assert_eq!(points[0].cut, Cut { lo: 0, hi: 0, fills_lo: 0 });
+            assert_eq!(points[1].cut, Cut { lo: 1, hi: 1, fills_lo: 0 });
+        }
+    }
+}
+
+/// Full archived input is kept outside Git; this validates price-point attribution, not checkpoint cash replay.
+#[test]
+#[ignore = "requires full_block.json via HL_MARK_BLOCK_1199055617"]
+fn archived_triggered_order_later_cancel_has_consistent_reference_cuts() {
+    use crate::accounts::replica::ReplicaLine;
+    let raw = std::fs::read_to_string(std::env::var("HL_MARK_BLOCK_1199055617").unwrap()).unwrap();
+    let g: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let replica = g["replica"].to_string();
+    let actions = MarkActions::of(&ReplicaLine::parse(&replica).unwrap()).unwrap();
+    let statuses: Vec<NodeDataOrderStatus> = serde_json::from_value(g["node_order_statuses_streaming"].clone()).unwrap();
+    let statuses = BlockStatuses::of(statuses).unwrap();
+    assert_eq!(statuses.self_trade_cancelled.len(), 1);
+    assert_eq!(statuses.self_trade_cancelled[0].coin.as_ref(), "xyz:SILVER");
+    assert_eq!(statuses.triggered_orders.len(), 2);
+    assert!(statuses.triggered_orders.iter().all(|s| matches!(s.coin.as_ref(), "BTC" | "XRP")));
+    let diffs: Vec<NodeDataOrderDiff> = serde_json::from_value(g["node_raw_book_diffs_streaming"].clone()).unwrap();
+    let diffs: Vec<_> = diffs.iter().map(BookDiff::of).collect::<Result<_, _>>().unwrap();
+    let fills: Vec<NodeDataFill> = serde_json::from_value(g["node_fills_streaming"].clone()).unwrap();
+    let fills: Vec<_> = fills.iter().map(BlockFill::of).collect();
+    assert_eq!(diffs.len(), 1389);
+    // Asset identities joined from original order requests, receipt oids and status coins in this same block.
+    let points = price_points(&actions, &statuses, &diffs, &fills, |coin| match coin {
+        "BTC" => Some(0), "XRP" => Some(25), "xyz:SILVER" => Some(110026), _ => None,
+    }).unwrap();
+    let reference = points.iter().find(|p| p.action.rank == (1, 3, 745)).unwrap();
+    assert_eq!(reference.cut.hi, 922);
+    println!("1199055617 price cuts: {:?}", points.iter().map(|p| (p.action.rank, p.cut)).collect::<Vec<_>>());
+}
