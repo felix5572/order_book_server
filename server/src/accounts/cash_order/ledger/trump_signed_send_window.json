@@ -1,0 +1,309 @@
+{
+  "schema": 1,
+  "case": {
+    "sender": "0xf9d33da08b05e3a78b878ebbedc50485d6e49374",
+    "receiver": "0xb6e14f4a2801c626cb04c0bc589f9cc91764a14a",
+    "blocks": [
+      {
+        "height": 1200570658,
+        "replica": {
+          "abci_block": {
+            "time": "2026-10-28T17:12:48.429665325",
+            "signed_action_bundles": [
+              [
+                "0xfd855a4755a298a544b7d093b8c0c6ef753cb92626279d4b851b3349009056b9",
+                {
+                  "signed_actions": [
+                    {
+                      "signature": {
+                        "r": "0x498e8d830fe29c7b750057062700bb14dcf569ecff9464f04c5876cdb97893f3",
+                        "s": "0x4682d794ad051a6fdc8a49d5a3ef7911fae152749f01aed7df014569e5cfa70a",
+                        "v": 28
+                      },
+                      "action": {
+                        "type": "sendAsset",
+                        "signatureChainId": "0xa4b1",
+                        "hyperliquidChain": "Mainnet",
+                        "destination": "0xb6e14f4a2801c626cb04c0bc589f9cc91764a14a",
+                        "sourceDex": "spot",
+                        "destinationDex": "",
+                        "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+                        "amount": "15.800311",
+                        "fromSubAccount": "",
+                        "nonce": 1793207566111
+                      },
+                      "nonce": 1793207566111
+                    }
+                  ],
+                  "broadcaster": "0xc9ba414780c1b75e9806e3469300993fd2bfa883",
+                  "broadcaster_nonce": 1793207476785
+                }
+              ],
+              [
+                "0xf4925e8ffba8c6c7d179ecf61524cfe16ecbd44e21556d09a16f6919a6a782a7",
+                {
+                  "signed_actions": [
+                    {
+                      "signature": {
+                        "r": "0x4d7e83347f44da215dc4f89835b8efa090997f2f1c56d30be47fb59194cd956e",
+                        "s": "0x5c98372c91b6e66e82c8eb67bcdfb485b97c4c2cb3a1a3b3dc7ce5d875c4e8f5",
+                        "v": 28
+                      },
+                      "action": {
+                        "type": "order",
+                        "orders": [
+                          {
+                            "a": 174,
+                            "b": true,
+                            "p": "1.7108",
+                            "s": "9.2",
+                            "r": false,
+                            "t": {
+                              "limit": {
+                                "tif": "Ioc"
+                              }
+                            },
+                            "c": "0x3491374e39ba43a4f6b48605e98b67e5"
+                          }
+                        ],
+                        "grouping": "na",
+                        "builder": {
+                          "b": "0x95985ed24b5d1047cd09c380c7d9cb7d6f2c22ae",
+                          "f": 0
+                        }
+                      },
+                      "nonce": 1793207566118,
+                      "expiresAfter": 1793207616118
+                    }
+                  ],
+                  "broadcaster": "0xc9ba414780c1b75e9806e3469300993fd2bfa883",
+                  "broadcaster_nonce": 1793207476786
+                }
+              ]
+            ],
+            "round": 1504957695,
+            "parent_round": 1504957694,
+            "hardfork": {
+              "version": 109,
+              "round": 1500712747
+            },
+            "proposer": "0xdf35aee8ef5658686142acd1e5ab5dbcdf8c51e8"
+          },
+          "resps": {
+            "Full": [
+              [
+                "0xfd855a4755a298a544b7d093b8c0c6ef753cb92626279d4b851b3349009056b9",
+                [
+                  {
+                    "user": "0xf9d33da08b05e3a78b878ebbedc50485d6e49374",
+                    "res": {
+                      "status": "ok",
+                      "response": {
+                        "type": "default"
+                      }
+                    }
+                  }
+                ]
+              ],
+              [
+                "0xf4925e8ffba8c6c7d179ecf61524cfe16ecbd44e21556d09a16f6919a6a782a7",
+                [
+                  {
+                    "user": "0xb6e14f4a2801c626cb04c0bc589f9cc91764a14a",
+                    "res": {
+                      "status": "ok",
+                      "response": {
+                        "type": "order",
+                        "data": {
+                          "statuses": [
+                            {
+                              "filled": {
+                                "totalSz": "9.2",
+                                "avgPx": "1.7023",
+                                "oid": 588414209490,
+                                "cloid": "0x3491374e39ba43a4f6b48605e98b67e5"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              ]
+            ]
+          },
+          "height": 1200570658
+        },
+        "fills": [
+          {
+            "local_time": "2026-10-28T17:12:48.661029593",
+            "block_time": "2026-10-28T17:12:48.429665325",
+            "block_number": 1200570658,
+            "events": [
+              [
+                "0xb6e14f4a2801c626cb04c0bc589f9cc91764a14a",
+                {
+                  "coin": "TRUMP",
+                  "px": "1.7023",
+                  "sz": "9.2",
+                  "side": "B",
+                  "time": 1793207568429,
+                  "startPosition": "0.0",
+                  "dir": "Open Long",
+                  "closedPnl": "0.0",
+                  "hash": "0xeb52f02da525acdaeccc04478f41220204d000134028cbac8f1b9b80642986c5",
+                  "oid": 588414209490,
+                  "crossed": true,
+                  "fee": "0.007047",
+                  "tid": 858453570265733,
+                  "cloid": "0x3491374e39ba43a4f6b48605e98b67e5",
+                  "feeToken": "USDC",
+                  "builder": "0x95985ed24b5d1047cd09c380c7d9cb7d6f2c22ae",
+                  "twapId": null
+                }
+              ]
+            ]
+          },
+          {
+            "local_time": "2026-10-28T17:12:48.661036125",
+            "block_time": "2026-10-28T17:12:48.429665325",
+            "block_number": 1200570658,
+            "events": [
+              [
+                "0x96b02a09fadb7af1dcaf0f59340f1766836cf0f6",
+                {
+                  "coin": "TRUMP",
+                  "px": "1.7023",
+                  "sz": "9.2",
+                  "side": "A",
+                  "time": 1793207568429,
+                  "startPosition": "576.0",
+                  "dir": "Close Long",
+                  "closedPnl": "-0.01196",
+                  "hash": "0xeb52f02da525acdaeccc04478f41220204d000134028cbac8f1b9b80642986c5",
+                  "oid": 588414116299,
+                  "crossed": false,
+                  "fee": "-0.000469",
+                  "tid": 858453570265733,
+                  "cloid": "0x0000000000000000000001a163298d65",
+                  "feeToken": "USDC",
+                  "twapId": null
+                }
+              ]
+            ]
+          }
+        ],
+        "statuses": [
+          {
+            "local_time": "2026-10-28T17:12:48.661043619",
+            "block_time": "2026-10-28T17:12:48.429665325",
+            "block_number": 1200570658,
+            "events": [
+              {
+                "time": "2026-10-28T17:12:48.429665325",
+                "user": "0xb6e14f4a2801c626cb04c0bc589f9cc91764a14a",
+                "hash": "0xeb52f02da525acdaeccc04478f41220204d000134028cbac8f1b9b80642986c5",
+                "builder": {
+                  "b": "0x95985ed24b5d1047cd09c380c7d9cb7d6f2c22ae",
+                  "f": 0
+                },
+                "status": "open",
+                "order": {
+                  "coin": "TRUMP",
+                  "side": "B",
+                  "limitPx": "1.7108",
+                  "sz": "9.2",
+                  "oid": 588414209490,
+                  "timestamp": 1793207568429,
+                  "triggerCondition": "N/A",
+                  "isTrigger": false,
+                  "triggerPx": "0.0",
+                  "children": [],
+                  "isPositionTpsl": false,
+                  "reduceOnly": false,
+                  "orderType": "Limit",
+                  "origSz": "9.2",
+                  "tif": "Ioc",
+                  "cloid": "0x3491374e39ba43a4f6b48605e98b67e5"
+                }
+              }
+            ]
+          },
+          {
+            "local_time": "2026-10-28T17:12:48.661046324",
+            "block_time": "2026-10-28T17:12:48.429665325",
+            "block_number": 1200570658,
+            "events": [
+              {
+                "time": "2026-10-28T17:12:48.429665325",
+                "user": "0xb6e14f4a2801c626cb04c0bc589f9cc91764a14a",
+                "hash": null,
+                "builder": {
+                  "b": "0x95985ed24b5d1047cd09c380c7d9cb7d6f2c22ae",
+                  "f": 0
+                },
+                "status": "filled",
+                "order": {
+                  "coin": "TRUMP",
+                  "side": "B",
+                  "limitPx": "1.7108",
+                  "sz": "0.0",
+                  "oid": 588414209490,
+                  "timestamp": 1793207568429,
+                  "triggerCondition": "N/A",
+                  "isTrigger": false,
+                  "triggerPx": "0.0",
+                  "children": [],
+                  "isPositionTpsl": false,
+                  "reduceOnly": false,
+                  "orderType": "Limit",
+                  "origSz": "9.2",
+                  "tif": "Ioc",
+                  "cloid": "0x3491374e39ba43a4f6b48605e98b67e5"
+                }
+              }
+            ]
+          }
+        ],
+        "system": [],
+        "misc": [
+          {
+            "local_time": "2026-10-28T17:12:48.647563425",
+            "block_time": "2026-10-28T17:12:48.429665325",
+            "block_number": 1200570658,
+            "events": [
+              {
+                "time": "2026-10-28T17:12:48.429665325",
+                "hash": "0xf0c39dae2ae890e6f23d04478f412202018c0093c5ebafb9948c4900e9ec6ad1",
+                "inner": {
+                  "LedgerUpdate": {
+                    "users": [
+                      "0xf9d33da08b05e3a78b878ebbedc50485d6e49374",
+                      "0xb6e14f4a2801c626cb04c0bc589f9cc91764a14a"
+                    ],
+                    "delta": {
+                      "type": "send",
+                      "user": "0xf9d33da08b05e3a78b878ebbedc50485d6e49374",
+                      "destination": "0xb6e14f4a2801c626cb04c0bc589f9cc91764a14a",
+                      "sourceDex": "spot",
+                      "destinationDex": "",
+                      "token": "USDC",
+                      "amount": "15.800311",
+                      "usdcValue": "15.800311",
+                      "fee": "0.0",
+                      "nativeTokenFee": "0.0",
+                      "nonce": 1793207566111,
+                      "feeToken": ""
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "provenance": "bm 2026-10-28 forced_flow_eval defect TRUMP 0xb6e14f4a 17:12:48 (block 1200570658). replica_cmds line reduced to the two participants' signed actions, bundles and in-bundle order kept; fills = the participants' and their counterparties', node fills; statuses = the participants', node_order_statuses_streaming; misc = their LedgerUpdate; system = none for them. HL clearinghouseState afterwards: TRUMP 9.2 long, isolated 1x, liquidationPx null."
+}

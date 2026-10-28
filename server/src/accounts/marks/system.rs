@@ -13,7 +13,7 @@ use rustc_hash::FxHashSet;
 use serde::Deserialize;
 
 use super::{actions::{BookAnchors, MarkAction, MarkActions, WireOrder}, orders::OrderKey, execution::BlockStatuses};
-use crate::types::node_data::NodeDataOrderStatus;
+use crate::{accounts::misc::SpotToMainSend, types::node_data::NodeDataOrderStatus};
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SystemAction {
@@ -47,22 +47,14 @@ fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(de: D) -> Res
     Option::<T>::deserialize(de)
 }
 
-/// Successful ledger matching supplies the outcome; this request only supplies pre-bundle timing.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DelayedSend {
-    pub(crate) user: Address,
-    pub(crate) destination: Address,
-    pub(crate) nonce: u64,
-    pub(crate) wei: u64,
-}
-
 impl SystemAction {
     pub(crate) const fn user(&self) -> Address { self.user }
 
-    pub(crate) fn spot_to_main_usdc(&self) -> Option<DelayedSend> {
+    /// Successful ledger matching supplies the outcome; this request only supplies pre-bundle timing.
+    pub(crate) fn spot_to_main_usdc(&self) -> Option<SpotToMainSend> {
         self.evm_tx_hash?;
         let Action::SendAsset { destination, from_sub_account: None, source: None, destination_dex: Some(0), token: 0, wei } = self.action else { return None; };
-        Some(DelayedSend { user: self.user, destination, nonce: self.nonce?, wei })
+        Some(SpotToMainSend { user: self.user, destination, nonce: self.nonce?, wei })
     }
 }
 

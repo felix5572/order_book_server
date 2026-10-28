@@ -1109,3 +1109,5 @@ intervening routing boundary, and the whole remaining maker side. It expires aft
 `cashEstimated`; missing prices, a changed tracker or admission requiring replenishment keep the prior estimate.
 
 现金回放补充（2026-10-24）：已确认的延迟 `SystemSendAssetAction`（USDC 从 spot 转主 dex）与成功账本流水按账户、nonce、金额和去向唯一匹配，且双方同块成交全部能归属普通下单时，先入账再回放成交。该顺序仍在 funding 之后，并写入同一重放日志；缺时序、重复证据、同块其他现金操作或无法归属成交时保持原估算。EUR 1194920000→1194930000 的四笔成交据此消除 849.373668 USDC 分配误差；统一账户物理划转边界仍保留 `cashEstimated`。NEAR 两个完整反手窗口也补为金样本，核验负现金与现货尾数合并后的微 USDC 取整（由 e8269ea 覆盖）。这些是离线验证，不替代部署后的 checkpoint 验收。
+
+现金回放补充（2026-10-28）：普通签名的 `sendAsset`（USDC 从发送方 spot 转到另一账户的主 dex）也按同一规则提前入账，证据换成 replica_cmds 里的执行排位。成功的 `sendAsset` 单独列在块动作的 `sends` 里，只作排序证据，不记现金；它须按发送方、nonce、金额和去向唯一对上成功账本流水，且双方本块全部成交都归属排在它之后的普通下单，才在成交前入账。成交排在它之前、排位缺失、同块其他现金操作或重复证据时保持原估算。TRUMP 1200570658（forced_flow_eval 10-28 17:12 报警）：收款方在下一个 bundle 用这笔钱开 1 倍逐仓多单，原先成交后才入账，逐仓划转被封顶在入账前的现金，回放行算成已穿仓，列为清算候选约 11 分钟直到下一个 checkpoint。金样本 `cash_order/ledger/trump_signed_send_window.json`；同样是离线验证。

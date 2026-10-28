@@ -1254,7 +1254,7 @@ impl TestOwner {
             self.inputs.send(fills_input(line.clone())).await.unwrap();
         }
         for block in [height, height + 1] {
-            let line = Ok((BlockActions { height: block, time_ms: block * 1_000, actions: Vec::new(), ranks: None }, Err("an account test line".to_string())));
+            let line = Ok((BlockActions { height: block, time_ms: block * 1_000, actions: Vec::new(), ranks: None, sends: Vec::new() }, Err("an account test line".to_string())));
             self.inputs.send(Input::BlockActions(line, Instant::now(), PairingDiagnostics::default())).await.unwrap();
         }
         let after = Instant::now() + Duration::from_micros(1);
@@ -1342,7 +1342,7 @@ mod tests {
         blocks: std::ops::RangeInclusive<u64>,
     ) {
         for height in blocks {
-            let parsed = (BlockActions { height, time_ms: height * 1_000, actions: Vec::new(), ranks: None }, Err("an account test line".to_string()));
+            let parsed = (BlockActions { height, time_ms: height * 1_000, actions: Vec::new(), ranks: None, sends: Vec::new() }, Err("an account test line".to_string()));
             let line = Input::BlockActions(Ok(parsed), Instant::now(), PairingDiagnostics::default());
             apply_input(&mut AccountDiagnostics::default(), book, marks, assembler, line);
         }
@@ -1480,7 +1480,7 @@ mod tests {
     fn a_block_actions_line_breaking_the_contract_keeps_its_height() {
         let empty = r#"{"abci_block":{"time":"2026-10-19T06:00:00.0","signed_action_bundles":[]},"resps":{"Full":[]},"height":8}"#;
         let Input::BlockActions(Ok((block, _)), _, _) = block_actions_input(empty.to_string()) else { panic!("an empty block reads") };
-        assert_eq!(block, BlockActions { height: 8, time_ms: 1_792_389_600_000, actions: Vec::new(), ranks: Some(Vec::new()) });
+        assert_eq!(block, BlockActions { height: 8, time_ms: 1_792_389_600_000, actions: Vec::new(), ranks: Some(Vec::new()), sends: Vec::new() });
         let unpaired = r#"{"abci_block":{"time":"2026-10-19T06:00:00.0","signed_action_bundles":[["0x01",{"signed_actions":[]}]]},"resps":{"Full":[]},"height":7}"#;
         let Input::BlockActions(Err(err), _, _) = block_actions_input(unpaired.to_string()) else { panic!("no responses") };
         assert_eq!(err.block, Some(7));

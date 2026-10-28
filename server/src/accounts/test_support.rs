@@ -162,7 +162,7 @@ pub(crate) fn funding_inner(deltas: &[(Address, &str, &str)]) -> String {
 /// A parsed `replica_cmds` block of these kept actions (the line format is tested in `actions`).
 /// Block `height` at block time `height` seconds, as the test anchors.
 pub(crate) fn block_actions(height: u64, actions: &[(BlockAction, Address)]) -> BlockActions {
-    BlockActions { height, time_ms: height * 1_000, actions: actions.to_vec(), ranks: None }
+    BlockActions { height, time_ms: height * 1_000, actions: actions.to_vec(), ranks: None, sends: Vec::new() }
 }
 
 pub(crate) fn batch_line(block: u64, events: &str) -> String {

@@ -36,6 +36,16 @@ pub(crate) enum MiscEvent {
     Unknown(String),
 }
 
+/// A USDC `send` from the sender's spot to another account's main dex, as its ledger event, a delayed system request
+/// (`marks::system`) and a signed `sendAsset` (`actions`) all name it. `wei` in 10^-8 USDC.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SpotToMainSend {
+    pub(crate) user: Address,
+    pub(crate) destination: Address,
+    pub(crate) nonce: u64,
+    pub(crate) wei: u64,
+}
+
 /// One position's funding settlement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FundingDelta {

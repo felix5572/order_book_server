@@ -86,6 +86,20 @@ pub(crate) struct Action<'a> {
     pub(crate) oracle_pxs: Option<LazyValue<'a>>,
     #[serde(borrow, rename = "externalPerpPxs")]
     pub(crate) external_perp_pxs: Option<LazyValue<'a>>,
+    /// `sendAsset`'s, read by `actions::signed_send` only.
+    #[serde(borrow)]
+    pub(crate) destination: Option<LazyValue<'a>>,
+    #[serde(borrow, rename = "sourceDex")]
+    pub(crate) source_dex: Option<LazyValue<'a>>,
+    #[serde(borrow, rename = "destinationDex")]
+    pub(crate) destination_dex: Option<LazyValue<'a>>,
+    #[serde(borrow)]
+    pub(crate) token: Option<LazyValue<'a>>,
+    #[serde(borrow, rename = "fromSubAccount")]
+    pub(crate) from_sub_account: Option<LazyValue<'a>>,
+    /// The signed payload's own nonce (its ledger event's), not the signed action's outer one.
+    #[serde(borrow)]
+    pub(crate) nonce: Option<LazyValue<'a>>,
 }
 
 #[derive(Deserialize)]

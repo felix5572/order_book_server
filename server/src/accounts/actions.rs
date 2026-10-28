@@ -2,14 +2,18 @@
 //! one; the line's format and the pairing of actions with responses are `replica`'s.
 //!
 //! Only the successful actions that move a pool's cash or rules without a fill or misc event are kept. Transfers such
-//! as `usdClassTransfer` and `send` are not: their ledger events already mark the account.
+//! as `usdClassTransfer` and `send` are not: their ledger events already mark the account. A successful signed
+//! `sendAsset` of USDC from spot to another account's main dex is listed apart (`sends`), with its execution rank, as
+//! evidence of when its ledger event's cash moved (`cash_order::ledger`); it moves no cash itself.
 
 use alloy::primitives::Address;
 
 use super::{
     checkpoint::node_time_ns,
+    marks::actions::Rank,
+    misc::{SpotToMainSend, USDC_NAME},
     replica::{Action, ReplicaLine, Response},
-    usdc::withdrawal_wei,
+    usdc::{usdc_wei, withdrawal_wei},
 };
 
 /// The block actions that may invalidate an anchor's liquidation price.
@@ -112,7 +116,16 @@ pub(crate) struct BlockActions {
     pub(crate) time_ms: u64,
     pub(crate) actions: Vec<KeptAction>,
     /// Execution ranks paired with actions; absent on unranked synthetic inputs, never inferred from arrival time.
-    pub(crate) ranks: Option<Vec<super::marks::actions::Rank>>,
+    pub(crate) ranks: Option<Vec<Rank>>,
+    /// The block's successful signed USDC sends from spot to another account's main dex, in block order.
+    pub(crate) sends: Vec<RankedSend>,
+}
+
+/// A signed send and its execution rank (category 3: neither an ALO order nor a cancel).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RankedSend {
+    pub(crate) rank: Rank,
+    pub(crate) send: SpotToMainSend,
 }
 
 /// Parses one line; an error names the height once the structure read (a response that does not pair with its action,
@@ -129,7 +142,12 @@ pub(crate) fn block_actions(replica: &ReplicaLine<'_>) -> Result<BlockActions, S
     let time_ms = node_time_ns(time).map_err(|err| format!("block {height}: {err}"))? / 1_000_000;
     let mut kept = Vec::new();
     let mut ranks = Vec::new();
+    let mut sends = Vec::new();
     for paired in replica.paired().map_err(|err| format!("block {height}: {err}"))? {
+        let rank = (paired.bundle, 3, paired.position);
+        if let Some(send) = signed_send(paired.action, paired.response).map_err(|err| format!("block {height}: bundle {}: {err}", paired.bundle_hash))? {
+            sends.push(RankedSend { rank, send });
+        }
         let read = || -> Result<Option<KeptAction>, String> {
             if paired.action.action_type != "multiSig" {
                 return kept_action(paired.action, paired.response);
@@ -146,10 +164,33 @@ pub(crate) fn block_actions(replica: &ReplicaLine<'_>) -> Result<BlockActions, S
         };
         if let Some(action) = read().map_err(|err| format!("block {height}: bundle {}: {err}", paired.bundle_hash))? {
             kept.push(action);
-            ranks.push((paired.bundle, 3, paired.position));
+            ranks.push(rank);
         }
     }
-    Ok(BlockActions { height, time_ms, actions: kept, ranks: Some(ranks) })
+    Ok(BlockActions { height, time_ms, actions: kept, ranks: Some(ranks), sends })
+}
+
+/// A successful signed `sendAsset` of USDC from the receipt account's spot to another account's main dex; `None` for
+/// a failed one or another shape (another token, dex or subaccount). Its fields are the wire's required ones: one that
+/// does not read breaks the contract.
+fn signed_send(action: &Action<'_>, response: &Response<'_>) -> Result<Option<SpotToMainSend>, String> {
+    if action.action_type != "sendAsset" {
+        return Ok(None);
+    }
+    let Some(user) = succeeded(action.action_type, response)? else { return Ok(None) };
+    let text = |raw, name| action.field::<String>(raw, name);
+    let token = text(action.token.as_ref(), "token")?;
+    if text(action.source_dex.as_ref(), "sourceDex")? != "spot"
+        || !text(action.destination_dex.as_ref(), "destinationDex")?.is_empty()
+        || !text(action.from_sub_account.as_ref(), "fromSubAccount")?.is_empty()
+        || token.split(':').next() != Some(USDC_NAME)
+    {
+        return Ok(None);
+    }
+    let destination: Address = action.field(action.destination.as_ref(), "destination")?;
+    let amount = usdc_wei(&text(action.amount.as_ref(), "amount")?).map_err(|err| format!("sendAsset amount: {err}"))?;
+    let wei = u64::try_from(amount).map_err(|err| format!("sendAsset amount {amount}: {err}"))?;
+    Ok(Some(SpotToMainSend { user, destination, nonce: action.field(action.nonce.as_ref(), "nonce")?, wei }))
 }
 
 fn kept_action(action: &Action<'_>, response: &Response<'_>) -> Result<Option<KeptAction>, String> {
@@ -204,7 +245,7 @@ pub(crate) mod tests {
     fn keeps_the_successful_actions_with_the_responses_user() {
         let parsed = parse_block_actions(REAL_LINE).unwrap();
         let leverage = (BlockAction::Leverage { asset: 99, is_cross: true, leverage: 3 }, address(LEVERAGE_VAULT));
-        assert_eq!(parsed, BlockActions { height: 1_189_931_524, time_ms: 1_792_442_115_736, actions: vec![leverage], ranks: Some(vec![(0, 3, 2)]) });
+        assert_eq!(parsed, BlockActions { height: 1_189_931_524, time_ms: 1_792_442_115_736, actions: vec![leverage], ranks: Some(vec![(0, 3, 2)]), sends: Vec::new() });
     }
 
     /// Payloads of real successful actions (bm `replica_cmds`, 2026-10-19), put in the place of the kept one.
@@ -315,7 +356,7 @@ pub(crate) mod tests {
     #[test]
     fn a_block_without_kept_actions_still_reads_its_height() {
         let line = REAL_LINE.replace(r#""type":"updateLeverage""#, r#""type":"order""#);
-        let empty = BlockActions { height: 1_189_931_524, time_ms: 1_792_442_115_736, actions: Vec::new(), ranks: Some(Vec::new()) };
+        let empty = BlockActions { height: 1_189_931_524, time_ms: 1_792_442_115_736, actions: Vec::new(), ranks: Some(Vec::new()), sends: Vec::new() };
         assert_eq!(parse_block_actions(&line).unwrap(), empty);
     }
 
