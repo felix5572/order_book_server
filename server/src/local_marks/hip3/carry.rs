@@ -4,16 +4,20 @@
 //! last write's offset, rho the through-zero least-squares slope of each offset on the one before over the session's
 //! consecutive writes, each pair weighted by its age in block time: the coefficient of least squared error.
 //!
-//! - A write's offset is its oracle minus the SIP midpoint `RELAYER_READ_LEAD_MS` before its block, the relayer's read
-//!   (at the open, against the midpoint when the write reached us the carry did worse: P90 4.44 vs 3.74 bp, 20 stocks).
+//! - A write's offset is its oracle minus the midpoint of its session's quote feed (the SIP's, BOATS's overnight)
+//!   `RELAYER_READ_LEAD_MS` before its block, the relayer's read (at the open, against the midpoint when the write
+//!   reached us the carry did worse: P90 4.44 vs 3.74 bp, 20 stocks; BOATS's lead is the SIP's, bm 10-28).
 //! - A pair is two writes at most `MAX_UPDATE_GAP_NS` apart: the relayer writes every ~3 s and the share is per write.
 //! - Each session of each New York day starts over (pre-market's estimate carried into the open: P90 4.14 vs 3.74 bp),
-//!   and a reading applies the carry only within the session its pairs belong to.
+//!   overnight one too (design 000543), and a reading applies the carry only within the session its pairs belong to.
 //! - With weights below `MIN_PAIRS`, or every previous offset zero, there is no carry and (1) is v1's midpoint.
 
 use std::collections::VecDeque;
 
-use super::session::{SipSessionId, sip_session};
+use super::{
+    protocol::EquityFeed,
+    session::{EquitySessionId, equity_session},
+};
 use crate::local_marks::{price::VenuePrice, snapshot::MAX_PROGRESS_LAG_MS};
 
 /// The relayer reads the NBBO about this long before the block (bm 10-27: its external price is closest to the SIP
@@ -30,34 +34,37 @@ const MIN_PAIRS: f64 = 30.0;
 /// `RELAYER_READ_LEAD_MS` before its block.
 const HISTORY_SPAN_MS: u64 = RELAYER_READ_LEAD_MS + MAX_PROGRESS_LAG_MS;
 
-/// A valid SIP quote's midpoint at its SIP time, on its connection.
+/// A valid quote's midpoint at its feed's time, on its feed's connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SipMid {
+pub(crate) struct QuoteMid {
+    pub(crate) feed: EquityFeed,
     pub(crate) epoch: u64,
-    pub(crate) sip_ms: u64,
+    pub(crate) quote_ms: u64,
     pub(crate) mid: VenuePrice,
 }
 
-/// A coin's recent SIP midpoints by SIP time, one per tick it changed (the ticks' 50 ms sampling, not every quote).
+/// A coin's recent midpoints of the session's feed by the feed's time, one per tick it changed (the ticks' 50 ms
+/// sampling, not every quote).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SipMidHistory {
-    epoch: Option<u64>,
+pub(crate) struct QuoteMidHistory {
+    /// The feed and connection of the midpoints.
+    source: Option<(EquityFeed, u64)>,
     mids: VecDeque<(u64, VenuePrice)>,
 }
 
-impl SipMidHistory {
-    /// This tick's quote; `None` (no valid quote) or another connection's starts over: what came before cannot stand
-    /// for a gap. Keeps `HISTORY_SPAN_MS` before `now_ms` and the one standing at its start.
-    pub(crate) fn observe(&mut self, quote: Option<SipMid>, now_ms: u64) {
-        let Some(SipMid { epoch, sip_ms, mid }) = quote else {
+impl QuoteMidHistory {
+    /// This tick's quote; `None` (no valid quote), another feed's or another connection's starts over: what came
+    /// before cannot stand for a gap. Keeps `HISTORY_SPAN_MS` before `now_ms` and the one standing at its start.
+    pub(crate) fn observe(&mut self, quote: Option<QuoteMid>, now_ms: u64) {
+        let Some(QuoteMid { feed, epoch, quote_ms, mid }) = quote else {
             *self = Self::default();
             return;
         };
-        if self.epoch != Some(epoch) {
-            *self = Self { epoch: Some(epoch), mids: VecDeque::new() };
+        if self.source != Some((feed, epoch)) {
+            *self = Self { source: Some((feed, epoch)), mids: VecDeque::new() };
         }
-        if self.mids.back().is_none_or(|&(last_ms, _)| sip_ms > last_ms) {
-            self.mids.push_back((sip_ms, mid));
+        if self.mids.back().is_none_or(|&(last_ms, _)| quote_ms > last_ms) {
+            self.mids.push_back((quote_ms, mid));
         }
         let start_ms = now_ms.saturating_sub(HISTORY_SPAN_MS);
         while self.mids.get(1).is_some_and(|&(second_ms, _)| second_ms <= start_ms) {
@@ -65,9 +72,13 @@ impl SipMidHistory {
         }
     }
 
-    /// The midpoint standing at SIP time `sip_ms`; `None` before the history.
-    pub(crate) fn at(&self, sip_ms: u64) -> Option<VenuePrice> {
-        let after = self.mids.partition_point(|&(time_ms, _)| time_ms <= sip_ms);
+    /// `feed`'s midpoint standing at its time `quote_ms`; `None` before the history or for another feed's (a write
+    /// of the session before, reaching us after the switch, review 000543 r1).
+    pub(crate) fn at(&self, feed: EquityFeed, quote_ms: u64) -> Option<VenuePrice> {
+        if self.source.is_none_or(|(source, _)| source != feed) {
+            return None;
+        }
+        let after = self.mids.partition_point(|&(time_ms, _)| time_ms <= quote_ms);
         after.checked_sub(1).map(|index| self.mids[index].1)
     }
 }
@@ -120,7 +131,7 @@ pub(crate) struct Hip3Carry {
     /// The last write taken in, by its time: a tick showing it again is not a write.
     seen_ns: Option<u64>,
     /// The session the pairs and `last` belong to.
-    session: Option<SipSessionId>,
+    session: Option<EquitySessionId>,
     pairs: Option<Pairs>,
     last: Option<LastWrite>,
 }
@@ -149,20 +160,21 @@ pub(crate) struct Hip3CarryReading {
 impl Hip3Carry {
     /// Takes in the node state's write, if it is a new one: its offset against `mids`, and the pair with the write
     /// before. The caller passes only writes of a trusted node state.
-    pub(crate) fn write(&mut self, write: OracleWrite, mids: &SipMidHistory) {
+    pub(crate) fn write(&mut self, write: OracleWrite, mids: &QuoteMidHistory) {
         if self.seen_ns == Some(write.time_ns) {
             return;
         }
         self.seen_ns = Some(write.time_ns);
         let block_ms = write.time_ns / 1_000_000;
-        let Some(session) = sip_session(block_ms) else {
+        let Some(session) = equity_session(block_ms) else {
             self.last = Some(LastWrite { time_ns: write.time_ns, offset: None });
             return;
         };
         if self.session != Some(session) {
             *self = Self { seen_ns: self.seen_ns, session: Some(session), pairs: None, last: None };
         }
-        let offset = write.on_external.then(|| mids.at(block_ms.saturating_sub(RELAYER_READ_LEAD_MS))).flatten().map(|mid| {
+        let feed = EquityFeed::of(session.session);
+        let offset = write.on_external.then(|| mids.at(feed, block_ms.saturating_sub(RELAYER_READ_LEAD_MS))).flatten().map(|mid| {
             #[expect(clippy::cast_precision_loss, reason = "prices are below 2^53")]
             let oracle = write.oracle as f64;
             oracle - mid.units_f64(write.size_decimals)
@@ -178,7 +190,7 @@ impl Hip3Carry {
     /// The carry at a tick of unix ms `now_ms`: none outside the session the pairs belong to.
     pub(crate) fn reading(&self, now_ms: u64) -> Hip3CarryReading {
         let warmup = Hip3CarryReading { status: CarryStatus::Warmup, rho: None, pairs: 0.0, offset: None, carry: None };
-        if self.session.is_none() || self.session != sip_session(now_ms) {
+        if self.session.is_none() || self.session != equity_session(now_ms) {
             return warmup;
         }
         let offset = self.last.and_then(|last| last.offset);
@@ -206,13 +218,13 @@ mod tests {
         VenuePrice::parse(text).unwrap()
     }
 
-    fn mid(epoch: u64, sip_ms: u64, text: &str) -> SipMid {
-        SipMid { epoch, sip_ms, mid: price(text) }
+    fn mid(epoch: u64, quote_ms: u64, text: &str) -> QuoteMid {
+        QuoteMid { feed: EquityFeed::Sip, epoch, quote_ms, mid: price(text) }
     }
 
     /// A coin of szDecimals 4 (units 0.01) whose SIP midpoint stands at 100.00 since `from_ms`.
-    fn standing(from_ms: u64, now_ms: u64) -> SipMidHistory {
-        let mut mids = SipMidHistory::default();
+    fn standing(from_ms: u64, now_ms: u64) -> QuoteMidHistory {
+        let mut mids = QuoteMidHistory::default();
         mids.observe(Some(mid(1, from_ms, "100")), now_ms);
         mids
     }
@@ -233,29 +245,40 @@ mod tests {
 
     #[test]
     fn the_history_answers_the_midpoint_standing_then() {
-        let mut mids = SipMidHistory::default();
+        let mut mids = QuoteMidHistory::default();
         mids.observe(Some(mid(1, 1_000, "100")), 1_050);
         mids.observe(Some(mid(1, 1_000, "100")), 1_100);
         mids.observe(Some(mid(1, 1_400, "100.5")), 1_450);
         assert_eq!(mids.mids.len(), 2, "the same SIP time once");
-        assert_eq!((mids.at(999), mids.at(1_000), mids.at(1_399), mids.at(5_000)), (None, Some(price("100")), Some(price("100")), Some(price("100.5"))));
+        assert_eq!((mids.at(EquityFeed::Sip, 999), mids.at(EquityFeed::Sip, 1_000), mids.at(EquityFeed::Sip, 1_399), mids.at(EquityFeed::Sip, 5_000)), (None, Some(price("100")), Some(price("100")), Some(price("100.5"))));
         // HISTORY_SPAN_MS later the first is dropped once the second stands at the span's start
         mids.observe(Some(mid(1, 1_400, "100.5")), 1_400 + HISTORY_SPAN_MS);
-        assert_eq!((mids.at(1_000), mids.at(1_400)), (None, Some(price("100.5"))));
+        assert_eq!((mids.at(EquityFeed::Sip, 1_000), mids.at(EquityFeed::Sip, 1_400)), (None, Some(price("100.5"))));
         // a quiet quote stays: the one standing at the span's start
         mids.observe(Some(mid(1, 1_400, "100.5")), 60_000);
-        assert_eq!(mids.at(59_000), Some(price("100.5")));
+        assert_eq!(mids.at(EquityFeed::Sip, 59_000), Some(price("100.5")));
     }
 
     /// Review 000537 r1 P3: another connection (even valid at both ticks) or no valid quote starts the history over.
+    /// Review 000543 r1: another feed's midpoints start the history over, and a query for one feed never reads the
+    /// other's (a session's write reaching us after the switch).
+    #[test]
+    fn the_history_belongs_to_one_feed() {
+        let mut mids = QuoteMidHistory::default();
+        mids.observe(Some(mid(1, 1_000, "100")), 1_000);
+        assert_eq!(mids.at(EquityFeed::Boats, 1_000), None);
+        mids.observe(Some(QuoteMid { feed: EquityFeed::Boats, epoch: 1, quote_ms: 2_000, mid: price("101") }), 2_000);
+        assert_eq!((mids.at(EquityFeed::Sip, 1_500), mids.at(EquityFeed::Boats, 1_500), mids.at(EquityFeed::Boats, 2_000)), (None, None, Some(price("101"))));
+    }
+
     #[test]
     fn the_history_starts_over_on_another_connection_or_no_quote() {
-        let mut mids = SipMidHistory::default();
+        let mut mids = QuoteMidHistory::default();
         mids.observe(Some(mid(1, 1_000, "100")), 1_000);
         mids.observe(Some(mid(2, 3_000, "101")), 3_000);
-        assert_eq!((mids.at(2_000), mids.at(3_000)), (None, Some(price("101"))), "nothing known for the outage");
+        assert_eq!((mids.at(EquityFeed::Sip, 2_000), mids.at(EquityFeed::Sip, 3_000)), (None, Some(price("101"))), "nothing known for the outage");
         mids.observe(None, 3_050);
-        assert_eq!(mids.at(3_000), None);
+        assert_eq!(mids.at(EquityFeed::Sip, 3_000), None);
     }
 
     /// Offsets alternating 8 and 4: pairs (8, 4) and (4, 8), slope (32 + 32) / (64 + 16) = 0.8 unweighted; with each
@@ -336,6 +359,31 @@ mod tests {
         assert_eq!((fresh.status, fresh.pairs, fresh.offset), (CarryStatus::Warmup, 0.0, Some(15.0)), "the open's first write starts over");
         let next_day = PRE_MS + 86_400_000 - 120_000;
         assert_eq!(carry.reading(next_day).status, CarryStatus::Warmup, "the next day's pre-market");
+    }
+
+    /// Review 000543 r1: at 04:00 the overnight carry stops at once, and an overnight write reaching us after the
+    /// switch finds no BOATS midpoint in the SIP's history.
+    #[test]
+    fn the_overnight_carry_ends_at_the_pre_market() {
+        const NIGHT_MS: u64 = 1_793_087_880_000; // 2026-10-27T07:58:00Z, 03:58 in New York: Monday's night
+        let boats = |now_ms| {
+            let mut mids = QuoteMidHistory::default();
+            mids.observe(Some(QuoteMid { feed: EquityFeed::Boats, epoch: 1, quote_ms: NIGHT_MS - 200_000, mid: price("100") }), now_ms);
+            mids
+        };
+        let mut carry = Hip3Carry::default();
+        for index in 0..40 {
+            let time_ms = NIGHT_MS - 120_000 + 3_000 * index;
+            carry.write(write(time_ms, 10_015), &boats(time_ms));
+        }
+        let night = carry.reading(NIGHT_MS);
+        assert_eq!((night.status, night.carry), (CarryStatus::Ready, Some(15.0)));
+        let pre_ms = NIGHT_MS + 120_000; // 04:00:00
+        assert_eq!(carry.reading(pre_ms).status, CarryStatus::Warmup, "no pre-market write yet");
+        let mut late = carry;
+        late.write(write(pre_ms - 500, 10_015), &standing(pre_ms - 10_000, pre_ms + 200));
+        assert_eq!(late.last.unwrap().offset, None, "the night's write against the SIP's history");
+        assert_eq!(late.reading(pre_ms + 200).status, CarryStatus::Warmup);
     }
 
     #[test]

@@ -1,15 +1,16 @@
 //! `GET /extMarkInputs` (design 000454 batch 1): every feed's connection, and per coin each listing's latest quote as
 //! the venue wrote it with its multiplier, whether it holds now, and which venues price the oracle and the external
-//! price. For checking the feeds; the marks themselves come in batch 2. With the HIP-3 SIP feed (design 000535 r2
-//! revision 1), a `sip` section: its connection and each HIP-3 coin's latest quote; the main-dex part is unchanged and,
-//! without the feed, so is the whole answer.
+//! price. For checking the feeds; the marks themselves come in batch 2. With the HIP-3 equity feeds (design 000535 r2
+//! revision 1, 000543 §5), a `sip` and a `boats` section: each feed's connection and each HIP-3 coin's latest quote;
+//! the main-dex part is unchanged and, without the feeds, so is the whole answer.
 
 use std::collections::BTreeMap;
 
 use serde::Serialize;
 
 use super::{
-    feeds::LocalMarkFeeds,
+    feeds::{EquityReadings, LocalMarkFeeds},
+    hip3::{protocol::EquityFeed, sources::Hip3SipSources},
     slot::{Connection, Entry, Validity},
     subscriptions::{ConnectionProjection, FeedProjection},
     snapshot::Coverage,
@@ -24,24 +25,26 @@ pub(crate) struct InputsView {
     stopped: Option<String>,
     feeds: Vec<FeedView>,
     coins: Vec<CoinInputs>,
-    /// Absent without the SIP feed.
+    /// The two HIP-3 equity feeds; absent without them.
     #[serde(skip_serializing_if = "Option::is_none")]
-    sip: Option<SipInputs>,
+    sip: Option<EquityInputs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    boats: Option<EquityInputs>,
 }
 
-/// The SIP feed and its coins' quotes (all, or the queried HIP-3 coin's).
+/// A HIP-3 equity feed and its coins' quotes (all, or the queried HIP-3 coin's).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SipInputs {
+struct EquityInputs {
     feed: FeedView,
-    coins: Vec<SipCoinInputs>,
+    coins: Vec<EquityCoinInputs>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SipCoinInputs {
+struct EquityCoinInputs {
     coin: String,
-    sip: ListingView,
+    quote: ListingView,
 }
 
 #[derive(Serialize)]
@@ -148,14 +151,14 @@ fn feed_view(feed: Feed, markets: &FeedMarkets, reading: &FeedProjection) -> Fee
     }
 }
 
-/// The view now; `coin` narrows the coins (the feeds are always all): a main-dex coin's listings, or a HIP-3 coin's SIP
-/// quote. `Err` for a coin in neither source.
+/// The view now; `coin` narrows the coins (the feeds are always all): a main-dex coin's listings, or a HIP-3 coin's
+/// quotes. `Err` for a coin in neither source.
 pub(crate) fn inputs_view(feeds: &LocalMarkFeeds, coin: Option<&str>, now_ms: u64) -> Result<InputsView, String> {
     let readings = feeds.readings(now_ms);
     let by_feed: BTreeMap<Feed, (&FeedMarkets, &FeedProjection)> = readings.iter().map(|(feed, markets, reading)| (*feed, (*markets, reading))).collect();
     let hip3 = feeds.hip3.as_deref();
     let is_hip3 = |coin: &str| hip3.is_some_and(|sources| sources.markets.coins.iter().any(|(listed, _)| listed == coin));
-    let (coins, sip_coins): (Vec<&str>, Option<Vec<&str>>) = match coin {
+    let (coins, equity_coins): (Vec<&str>, Option<Vec<&str>>) = match coin {
         Some(coin) if feeds.sources.listings(coin).is_some() => (vec![coin], None),
         Some(coin) if is_hip3(coin) => (Vec::new(), Some(vec![coin])),
         Some(coin) => return Err(format!("{coin} is not in the local marks' sources")),
@@ -163,17 +166,23 @@ pub(crate) fn inputs_view(feeds: &LocalMarkFeeds, coin: Option<&str>, now_ms: u6
     };
     let feed_views = readings.iter().map(|(feed, markets, reading)| feed_view(*feed, markets, reading)).collect();
     let coins = coins.into_iter().map(|coin| coin_inputs(feeds, &by_feed, coin)).collect();
-    let sip = sip_coins.map(|sip_coins| {
-        let markets = &hip3.unwrap_or_else(|| unreachable!("SIP coins come from the HIP-3 sources")).markets;
-        let reading = feeds.sip_reading(now_ms).unwrap_or_else(|| unreachable!("the HIP-3 sources run the SIP feed"));
-        let coins = sip_coins.into_iter().map(|coin| {
-            let index = markets.coins.iter().position(|(listed, _)| listed == coin).unwrap_or_else(|| unreachable!("a HIP-3 coin"));
-            let (entry, validity) = reading.entries[index];
-            SipCoinInputs { coin: coin.to_string(), sip: listing_view(&markets.symbols[index], "1".to_string(), entry, validity) }
-        }).collect();
-        SipInputs { feed: feed_view(Feed::SIP, markets, &reading), coins }
+    let equity = equity_coins.map(|equity_coins| {
+        let sources = hip3.unwrap_or_else(|| unreachable!("equity coins come from the HIP-3 sources"));
+        let readings = feeds.equity_readings(now_ms).unwrap_or_else(|| unreachable!("the HIP-3 sources run the equity feeds"));
+        (equity_inputs(EquityFeed::Sip, sources, &readings, &equity_coins), equity_inputs(EquityFeed::Boats, sources, &readings, &equity_coins))
     });
-    Ok(InputsView { time_ms: now_ms, stopped: feeds.stopped(), feeds: feed_views, coins, sip })
+    let (sip, boats) = equity.unzip();
+    Ok(InputsView { time_ms: now_ms, stopped: feeds.stopped(), feeds: feed_views, coins, sip, boats })
+}
+
+fn equity_inputs(feed: EquityFeed, sources: &Hip3SipSources, readings: &EquityReadings, coins: &[&str]) -> EquityInputs {
+    let (markets, reading) = (&sources.markets, readings.of(feed));
+    let coins = coins.iter().map(|coin| {
+        let index = markets.coins.iter().position(|(listed, _)| listed == coin).unwrap_or_else(|| unreachable!("a HIP-3 coin"));
+        let (entry, validity) = reading.entries[index];
+        EquityCoinInputs { coin: (*coin).to_string(), quote: listing_view(&markets.symbols[index], "1".to_string(), entry, validity) }
+    }).collect();
+    EquityInputs { feed: feed_view(feed.feed(), markets, reading), coins }
 }
 
 fn listing_view(symbol: &str, px_multiplier: String, entry: Option<Entry>, validity: Validity) -> ListingView {

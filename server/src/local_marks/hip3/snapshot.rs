@@ -1,19 +1,21 @@
 //! The HIP-3 coins' legs at one tick (design 000535 r1 §3, r2 revisions 2–4): the node leg is the stream's stored
-//! prices, the local leg `compute::hip3_local_mark` on them, the HL book and the SIP quote now. The same progress clocks
-//! as the main dex's gate both legs; then, for the local leg, the observation gates in order: the SIP's candidate
-//! hours, the relayer on its external price (external == oracle), a known last trade, a valid and recent SIP quote, a
-//! warm EMA. v2 (design 000537): each coin's SIP midpoints and offset carry move at every tick before its legs, the
-//! carry taking in the node state's oracle writes only while that state is trusted.
+//! prices, the local leg `compute::hip3_local_mark` on them, the HL book and the session's quote now (the SIP's, BOATS's
+//! overnight: design 000543). The same progress clocks as the main dex's gate both legs; then, for the local leg, the
+//! observation gates in order: a quote session, the relayer on its external price (external == oracle), a known last
+//! trade, a valid and recent quote of the session's feed, a warm EMA. v2 (design 000537): each coin's quote midpoints
+//! and offset carry move at every tick before its legs, the carry taking in the node state's oracle writes only while
+//! that state is trusted.
 
 use std::time::Duration;
 
 use rustc_hash::FxHashMap;
 
 use super::{
-    carry::{Hip3Carry, Hip3CarryReading, OracleWrite, SipMid, SipMidHistory},
+    carry::{Hip3Carry, Hip3CarryReading, OracleWrite, QuoteMid, QuoteMidHistory},
     compute::{Hip3Inputs, Hip3LocalMark, hip3_local_mark},
     ema::{Hip3Ema, WARMUP},
-    session::sip_candidate_hours,
+    protocol::EquityFeed,
+    session::equity_session,
     sources::Hip3SipSources,
 };
 use crate::{
@@ -21,13 +23,15 @@ use crate::{
     local_marks::{
         slot::{Entry, Quote, Validity},
         snapshot::{Tick, Withheld, book_units},
-        subscriptions::FeedProjection,
     },
 };
 
-/// A SIP quote whose SIP time is older than this no longer counts (design 000535 r1 §3, starting value): after the
-/// close the last NBBO stands still.
-const MAX_SIP_QUIET_MS: u64 = 60_000;
+/// A quote whose feed's time is older than this no longer counts (design 000535 r1 §3, starting value): after a
+/// session the feed's last quote stands still.
+const MAX_QUOTE_QUIET_MS: u64 = 60_000;
+
+/// A coin's quote of the session's feed at a tick, and its validity.
+type SessionQuote = (EquityFeed, (Option<Entry>, Validity));
 
 /// The node leg: the coin's stored prices, in its price units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,9 +60,10 @@ pub(crate) struct Hip3LocalLeg {
     pub(crate) size_decimals: u32,
     pub(crate) bid: u64,
     pub(crate) ask: u64,
-    pub(crate) sip: Quote,
-    pub(crate) sip_event_ms: Option<u64>,
-    pub(crate) sip_received_ms: u64,
+    pub(crate) quote_feed: EquityFeed,
+    pub(crate) quote: Quote,
+    pub(crate) quote_event_ms: Option<u64>,
+    pub(crate) quote_received_ms: u64,
     /// (2) - (1) of the EMA, price units.
     pub(crate) gap: f64,
     pub(crate) ema_sampled: Duration,
@@ -71,7 +76,7 @@ pub(crate) struct Hip3LocalLeg {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Hip3CoinState {
     pub(crate) ema: Hip3Ema,
-    pub(crate) sip_mids: SipMidHistory,
+    pub(crate) quote_mids: QuoteMidHistory,
     pub(crate) carry: Hip3Carry,
 }
 
@@ -79,8 +84,8 @@ pub(crate) struct Hip3CoinState {
 pub(crate) struct Hip3CoinMarks {
     pub(crate) node: Result<Hip3NodeMark, Withheld>,
     pub(crate) local: Result<Hip3LocalLeg, Withheld>,
-    /// The SIP quote's validity, whatever the legs.
-    pub(crate) sip: Validity,
+    /// The session's feed and its quote's validity, whatever the legs; `None` outside every session.
+    pub(crate) quote: Option<(EquityFeed, Validity)>,
 }
 
 /// The HIP-3 coins of the SIP sources, in their order (each coin's market index is its own).
@@ -115,22 +120,22 @@ pub(crate) struct Hip3Gates<'a> {
     pub(crate) stopped: Option<&'a Withheld>,
 }
 
-/// Every coin's legs. First its state moves: the SIP midpoints with this tick's quote; with trusted node prices, the
-/// carry with the oracle's write, and, the book trusted too, the EMA with this tick's sample.
+/// Every coin's legs. First its state moves: the quote midpoints with this tick's quote of the session's feed; with
+/// trusted node prices, the carry with the oracle's write, and, the book trusted too, the EMA with this tick's sample.
 pub(crate) fn hip3_marks(table: &Hip3Table, tick: &Tick<'_>, book_offset: usize, gates: Hip3Gates<'_>, states: &mut [Hip3CoinState]) -> Vec<Hip3CoinMarks> {
     assert_eq!(states.len(), table.names.len(), "one state per HIP-3 coin");
-    let sip = tick.sip;
+    let feed = equity_session(tick.now_ms).map(|id| EquityFeed::of(id.session));
     table
         .names
         .iter()
         .enumerate()
         .map(|(index, coin)| {
             let state = &mut states[index];
-            let validity = sip.map_or(Validity::NotConnected, |reading| reading.entries[index].1);
-            state.sip_mids.observe(sip.and_then(|reading| sip_mid(reading.entries[index])), tick.now_ms);
+            let quote: Option<SessionQuote> = feed.map(|feed| (feed, tick.equity.map_or((None, Validity::NotConnected), |readings| readings.of(feed).entries[index])));
+            state.quote_mids.observe(quote.and_then(quote_mid), tick.now_ms);
             let node = node_leg(coin, tick, gates.node);
             if let Some(write) = node.as_ref().ok().and_then(Hip3NodeMark::oracle_write) {
-                state.carry.write(write, &state.sip_mids);
+                state.carry.write(write, &state.quote_mids);
             }
             let book = node.as_ref().ok().and_then(|node| book_prices(coin, tick, book_offset + index, node.size_decimals).transpose()).transpose();
             if let (Ok(node), Ok(Some((bid, ask))), None) = (&node, &book, gates.book) {
@@ -142,9 +147,9 @@ pub(crate) fn hip3_marks(table: &Hip3Table, tick: &Tick<'_>, book_offset: usize,
                 (Some(withheld), _, _) | (None, Err(withheld), _) => Err(withheld.clone()),
                 (None, Ok(_), Err(withheld)) => Err(withheld),
                 (None, Ok(_), Ok(None)) => Err(Withheld::unavailable("hlBook", format!("the HL book of {coin} has an empty side"))),
-                (None, Ok(node), Ok(Some((bid, ask)))) => local_leg(coin, tick, sip, index, node, (bid, ask), state),
+                (None, Ok(node), Ok(Some((bid, ask)))) => local_leg(coin, tick, quote, node, (bid, ask), state),
             };
-            Hip3CoinMarks { node, local, sip: validity }
+            Hip3CoinMarks { node, local, quote: quote.map(|(feed, (_, validity))| (feed, validity)) }
         })
         .collect()
 }
@@ -163,11 +168,11 @@ fn node_leg(coin: &str, tick: &Tick<'_>, withheld: Option<&Withheld>) -> Result<
     })
 }
 
-/// A valid quote's midpoint at its SIP time, for the coin's history; `None` otherwise.
-fn sip_mid((entry, validity): (Option<Entry>, Validity)) -> Option<SipMid> {
+/// A valid quote's midpoint at its feed's time, for the coin's history; `None` otherwise.
+fn quote_mid((feed, (entry, validity)): SessionQuote) -> Option<QuoteMid> {
     let entry = entry.filter(|_| validity == Validity::Valid)?;
     let quote = entry.quote?;
-    Some(SipMid { epoch: entry.epoch(), sip_ms: entry.event_ms?, mid: quote.bid.midpoint(quote.ask)? })
+    Some(QuoteMid { feed, epoch: entry.epoch(), quote_ms: entry.event_ms?, mid: quote.bid.midpoint(quote.ask)? })
 }
 
 /// The coin's best bid and ask in its price units; `None` with an empty side.
@@ -178,36 +183,39 @@ fn book_prices(coin: &str, tick: &Tick<'_>, book_index: usize, size_decimals: u3
     Ok(Some((units(bid)?, units(ask)?)))
 }
 
-fn local_leg(coin: &str, tick: &Tick<'_>, sip: Option<&FeedProjection>, index: usize, node: &Hip3NodeMark, (bid, ask): (u64, u64), state: &Hip3CoinState) -> Result<Hip3LocalLeg, Withheld> {
-    if !sip_candidate_hours(tick.now_ms) {
-        return Err(Withheld::unavailable("sipSession", "outside the SIP's candidate hours (Monday to Friday, 04:00–20:00 New York)"));
-    }
+fn local_leg(coin: &str, tick: &Tick<'_>, quote: Option<SessionQuote>, node: &Hip3NodeMark, (bid, ask): (u64, u64), state: &Hip3CoinState) -> Result<Hip3LocalLeg, Withheld> {
+    let Some((feed, (entry, validity))) = quote else {
+        let detail = "outside the US stocks' quote sessions (New York: 04:00–20:00 Monday to Friday on the SIP, 20:05–04:00 begun Sunday to Thursday on BOATS)";
+        return Err(Withheld::unavailable("quoteSession", detail));
+    };
     let external = node.external.ok_or_else(|| Withheld::unavailable("externalUnknown", format!("{coin} has no stored external price yet")))?;
     if external != node.stored_oracle {
         let detail = format!("{coin}'s stored external {external} differs from its oracle {}: the relayer prices internally", node.stored_oracle);
         return Err(Withheld::unavailable("externalClosed", detail));
     }
     let last_trade = node.last_trade.ok_or_else(|| Withheld::unavailable("lastTradeUnknown", format!("{coin} has no last trade since the state's checkpoint")))?;
-    let reading = sip.ok_or_else(|| Withheld::unavailable("sipQuote", "the server runs without the SIP feed"))?;
-    let (entry, validity) = reading.entries[index];
-    let entry = entry.filter(|_| validity == Validity::Valid).ok_or_else(|| Withheld::unavailable("sipQuote", format!("the SIP quote of {coin} is {validity:?}")))?;
+    let name = feed.name();
+    let entry = entry.filter(|_| validity == Validity::Valid).ok_or_else(|| Withheld::unavailable("quoteUnavailable", format!("the {name} quote of {coin} is {validity:?}")))?;
     let quote = entry.quote.unwrap_or_else(|| unreachable!("a valid entry holds a quote"));
-    // the SIP parser requires the quote's time; never the receive time in its place (review 000536 P2-2)
-    let quoted_ms = entry.event_ms.ok_or_else(|| Withheld::unavailable("sipQuote", format!("the SIP quote of {coin} carries no SIP time")))?;
+    // the Alpaca parser requires the quote's time; never the receive time in its place (review 000536 P2-2)
+    let quoted_ms = entry.event_ms.ok_or_else(|| Withheld::unavailable("quoteUnavailable", format!("the {name} quote of {coin} carries no time")))?;
     let age_ms = tick.now_ms.saturating_sub(quoted_ms);
-    if age_ms > MAX_SIP_QUIET_MS {
-        return Err(Withheld::stale("sipQuiet", format!("the SIP quote of {coin} is {age_ms} ms old")));
+    if age_ms > MAX_QUOTE_QUIET_MS {
+        return Err(Withheld::stale("quoteQuiet", format!("the {name} quote of {coin} is {age_ms} ms old")));
     }
     let (gap, ema_sampled) = state.ema.gap().map_err(|sampled| {
         Withheld::unavailable("emaWarmup", format!("the EMA of {coin} has sampled {} s of {} s", sampled.as_secs(), WARMUP.as_secs()))
     })?;
     let carry = state.carry.reading(tick.now_ms);
     let inputs = Hip3Inputs {
-        size_decimals: node.size_decimals, stored_oracle: node.stored_oracle, sip_bid: quote.bid, sip_ask: quote.ask, gap, carry: carry.carry, bid, ask,
-        last_trade,
+        size_decimals: node.size_decimals, stored_oracle: node.stored_oracle, quote_bid: quote.bid, quote_ask: quote.ask, gap, carry: carry.carry, bid,
+        ask, last_trade,
     };
     let mark = hip3_local_mark(inputs).map_err(|err| Withheld::unavailable("calculation", format!("{coin}: {err}")))?;
-    Ok(Hip3LocalLeg { size_decimals: node.size_decimals, bid, ask, sip: quote, sip_event_ms: entry.event_ms, sip_received_ms: entry.received_ms, gap, ema_sampled, carry, mark })
+    Ok(Hip3LocalLeg {
+        size_decimals: node.size_decimals, bid, ask, quote_feed: feed, quote, quote_event_ms: entry.event_ms, quote_received_ms: entry.received_ms, gap,
+        ema_sampled, carry, mark,
+    })
 }
 
 #[cfg(test)]
@@ -216,7 +224,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        local_marks::hip3::carry::CarryStatus,
+        local_marks::{
+            feeds::EquityReadings,
+            hip3::carry::CarryStatus,
+            subscriptions::FeedProjection,
+        },
         accounts::{
             marks::{NativePriceSnapshot, seed::StoredMark},
             publish::NodePrices,
@@ -241,13 +253,13 @@ mod tests {
     }
 
     /// TSLA at 17:51:02 (szDecimals 3): stored oracle and external 405.770, mark 405.760, last trade 405.760; the HL book
-    /// 405.750 / 405.770; the SIP 405.765 x 405.775 quoted 1 s ago; the EMA warm at a gap of -0.020.
+    /// 405.750 / 405.770; the SIP 405.765 x 405.775 quoted 1 s ago, BOATS not connected; the EMA warm at a gap of -0.020.
     struct World {
         sources: MarkSources,
         table: Arc<CoinTable>,
         node: NodePrices,
         book: Option<BestPricesAt>,
-        sip: FeedProjection,
+        equity: EquityReadings,
         states: Vec<Hip3CoinState>,
         instant: tokio::time::Instant,
     }
@@ -267,9 +279,10 @@ mod tests {
             let prices = vec![(None, None), (Some(Px::new(40_575_000_000)), Some(Px::new(40_577_000_000)))];
             let book = Some(BestPricesAt { time: NOW_MS - 400, height: 1_001, trusted: true, prices });
             let sip = FeedProjection { connections: Vec::new(), messages: 1, entries: vec![quote("405.765", "405.775", NOW_MS - 1_000)] };
+            let boats = FeedProjection { connections: Vec::new(), messages: 0, entries: vec![(None, Validity::NotConnected)] };
             let instant = tokio::time::Instant::now();
             let states = vec![Hip3CoinState { ema: Hip3Ema::warm_for_test(-20.0, instant), ..Hip3CoinState::default() }];
-            Self { sources, table, node, book, sip, states, instant }
+            Self { sources, table, node, book, equity: EquityReadings { sip, boats }, states, instant }
         }
 
         fn marks(&mut self, now_ms: u64) -> Hip3CoinMarks {
@@ -278,7 +291,7 @@ mod tests {
                 (feed, markets, FeedProjection { connections: Vec::new(), messages: 0, entries })
             }).collect();
             self.instant += Duration::from_millis(50);
-            let tick = Tick { now_ms, instant: self.instant, stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, sip: Some(&self.sip) };
+            let tick = Tick { now_ms, instant: self.instant, stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, equity: Some(&self.equity) };
             let snapshot = assemble(&self.table, &tick, &mut self.states);
             snapshot.hip3_coin("xyz:TSLA").unwrap().clone()
         }
@@ -288,7 +301,7 @@ mod tests {
             let Ok(node) = &mut self.node else { unreachable!() };
             Arc::make_mut(node).block_time_ms += shift_ms;
             self.book.as_mut().unwrap().time += shift_ms;
-            self.sip.entries[0] = quote("405.765", "405.775", NOW_MS - 1_000 + shift_ms);
+            self.equity.sip.entries[0] = quote("405.765", "405.775", NOW_MS - 1_000 + shift_ms);
             self
         }
 
@@ -298,9 +311,9 @@ mod tests {
         }
     }
 
-    /// A quote of SIP time `sip_ms`, received 80 ms later (the trade machine's transport lag, 10-27).
-    fn quote(bid: &str, ask: &str, sip_ms: u64) -> (Option<Entry>, Validity) {
-        (Some(Entry::for_test_at(Some(Quote { bid: price(bid), ask: price(ask) }), sip_ms + 80, Some(sip_ms), 1)), Validity::Valid)
+    /// A quote of its feed's time `quote_ms`, received 80 ms later (the trade machine's transport lag, 10-27).
+    fn quote(bid: &str, ask: &str, quote_ms: u64) -> (Option<Entry>, Validity) {
+        (Some(Entry::for_test_at(Some(Quote { bid: price(bid), ask: price(ask) }), quote_ms + 80, Some(quote_ms), 1)), Validity::Valid)
     }
 
     fn code(marks: &Hip3CoinMarks) -> Option<&'static str> {
@@ -316,14 +329,14 @@ mod tests {
         assert_eq!((node.mark, node.stored_oracle, node.external, node.last_trade), (405_760, 405_770, Some(405_770), Some(405_760)));
         let local = marks.local.unwrap();
         assert_eq!((local.mark.oracle, local.mark.ema, local.mark.book, local.mark.predicted), (405_770, 405_750, 405_760, 405_760));
-        assert_eq!((local.bid, local.ask, marks.sip), (405_750, 405_770, Validity::Valid));
+        assert_eq!((local.bid, local.ask, local.quote_feed, marks.quote), (405_750, 405_770, EquityFeed::Sip, Some((EquityFeed::Sip, Validity::Valid))));
         assert!((local.gap + 20.0).abs() < 0.01, "the tick sampled x = -10 for 50 ms: {}", local.gap);
     }
 
     #[test]
     fn each_gate_withholds_the_local_leg_with_its_code() {
         let sunday = 1_793_545_200_000; // 2026-11-01T15:00:00Z
-        assert_eq!(code(&World::new().shifted(sunday - NOW_MS).marks(sunday)), Some("sipSession"));
+        assert_eq!(code(&World::new().shifted(sunday - NOW_MS).marks(sunday)), Some("quoteSession"));
         let mut world = World::new();
         world.tsla().external = Some(405_000);
         assert_eq!(code(&world.marks(NOW_MS)), Some("externalClosed"));
@@ -333,16 +346,16 @@ mod tests {
         world.tsla().last_trade = None;
         assert_eq!(code(&world.marks(NOW_MS)), Some("lastTradeUnknown"));
         let mut world = World::new();
-        world.sip.entries[0].1 = Validity::NotConnected;
+        world.equity.sip.entries[0].1 = Validity::NotConnected;
         let marks = world.marks(NOW_MS);
-        assert_eq!((code(&marks), marks.sip), (Some("sipQuote"), Validity::NotConnected));
+        assert_eq!((code(&marks), marks.quote), (Some("quoteUnavailable"), Some((EquityFeed::Sip, Validity::NotConnected))));
         let mut world = World::new();
-        world.sip.entries[0] = quote("405.765", "405.775", NOW_MS - 60_001);
+        world.equity.sip.entries[0] = quote("405.765", "405.775", NOW_MS - 60_001);
         let quiet = world.marks(NOW_MS);
-        assert_eq!((code(&quiet), quiet.local.unwrap_err().status), (Some("sipQuiet"), Status::Stale), "by the SIP time, though received later");
+        assert_eq!((code(&quiet), quiet.local.unwrap_err().status), (Some("quoteQuiet"), Status::Stale), "by the SIP time, though received later");
         let mut world = World::new();
-        world.sip.entries[0].0 = Some(Entry::for_test_at(Some(Quote { bid: price("405.765"), ask: price("405.775") }), NOW_MS, None, 1));
-        assert_eq!(code(&world.marks(NOW_MS)), Some("sipQuote"), "no SIP time: no age, no prediction");
+        world.equity.sip.entries[0].0 = Some(Entry::for_test_at(Some(Quote { bid: price("405.765"), ask: price("405.775") }), NOW_MS, None, 1));
+        assert_eq!(code(&world.marks(NOW_MS)), Some("quoteUnavailable"), "no SIP time: no age, no prediction");
         let mut world = World::new();
         world.states = vec![Hip3CoinState::default()];
         assert_eq!(code(&world.marks(NOW_MS)), Some("emaWarmup"));
@@ -363,7 +376,7 @@ mod tests {
             (feed, markets, FeedProjection { connections: Vec::new(), messages: 0, entries: vec![(None, Validity::NotConnected); markets.symbols.len()] })
         }).collect();
         world.instant += Duration::from_millis(50);
-        let tick = Tick { now_ms: NOW_MS, instant: world.instant, stopped: None, node: &world.node, book: world.book.as_ref(), readings: &readings, sip: Some(&world.sip) };
+        let tick = Tick { now_ms: NOW_MS, instant: world.instant, stopped: None, node: &world.node, book: world.book.as_ref(), readings: &readings, equity: Some(&world.equity) };
         let snapshot = assemble(&world.table, &tick, &mut world.states);
         assert_eq!(snapshot.local_predicted("xyz:TSLA").map(|local| local.map_err(|withheld| withheld.code)), Some(Ok(405_760)));
         assert_eq!(snapshot.local_predicted("BTC").map(|local| local.map_err(|withheld| withheld.code)), Some(Err("nodeCoin")), "the main dex's through the same entry");
@@ -374,13 +387,13 @@ mod tests {
         let gap = frame["data"]["local"]["emaGapPx"].take().as_f64().unwrap();
         assert!((gap + 0.02).abs() < 1e-5, "{gap}");
         assert_eq!(frame, serde_json::json!({"channel": "extHip3MarkPrices", "data": {
-            "schemaVersion": 2, "coin": "xyz:TSLA", "intervalMs": 50, "publishedTsMs": NOW_MS, "sipStatus": "valid",
+            "schemaVersion": 3, "coin": "xyz:TSLA", "intervalMs": 50, "publishedTsMs": NOW_MS, "quoteFeed": "sip", "quoteStatus": "valid",
             "node": {"status": "ready", "markPx": "405.76", "markTimeNs": (NOW_MS - 500) * 1_000_000, "storedOraclePx": "405.77",
                      "storedOracleTimeNs": (NOW_MS - 500) * 1_000_000, "externalPx": "405.77", "lastTradePx": "405.76", "seedHeight": 900, "height": 1_000, "blockTimeMs": NOW_MS - 500},
-            "local": {"status": "ready", "predictedMarkPx": "405.76", "oraclePx": "405.77", "sipMidPx": "405.77", "carriedPx": null,
+            "local": {"status": "ready", "predictedMarkPx": "405.76", "oraclePx": "405.77", "quoteFeed": "sip", "quoteMidPx": "405.77", "carriedPx": null,
                       "carryStatus": "warmup", "carryPx": null, "carryRho": null, "carryPairs": 0.0, "carryOffsetPx": null, "emaPx": "405.75",
                       "emaGapPx": null, "emaSampledS": 750.05, "bookPx": "405.76", "bidPx": "405.75", "askPx": "405.77",
-                      "sipBidPx": "405.765", "sipAskPx": "405.775", "sipQuoteTimeMs": NOW_MS - 1_000, "sipReceivedMs": NOW_MS - 920,
+                      "quoteBidPx": "405.765", "quoteAskPx": "405.775", "quoteTimeMs": NOW_MS - 1_000, "quoteReceivedMs": NOW_MS - 920,
                       "nodeHeight": 1_000, "nodeBlockTimeMs": NOW_MS - 500, "bookTimeMs": NOW_MS - 400, "bookHeight": 1_001}}}));
     }
 
@@ -390,11 +403,11 @@ mod tests {
     #[test]
     fn a_ready_carry_moves_the_oracle_term() {
         let mut world = World::new();
-        world.sip.entries[0] = quote("405.765", "405.775", NOW_MS - 3_000);
+        world.equity.sip.entries[0] = quote("405.765", "405.775", NOW_MS - 3_000);
         world.tsla().oracle = Some(406_070);
         world.tsla().external = Some(406_070);
-        let mut mids = SipMidHistory::default();
-        mids.observe(Some(SipMid { epoch: 1, sip_ms: NOW_MS - 200_000, mid: price("405.77") }), NOW_MS - 200_000);
+        let mut mids = QuoteMidHistory::default();
+        mids.observe(Some(QuoteMid { feed: EquityFeed::Sip, epoch: 1, quote_ms: NOW_MS - 200_000, mid: price("405.77") }), NOW_MS - 200_000);
         for step in (1..=40).rev() {
             let time_ms = NOW_MS - 500 - 3_000 * step;
             let write = OracleWrite { time_ns: time_ms * 1_000_000, oracle: 406_070, size_decimals: 3, on_external: true };
@@ -403,12 +416,29 @@ mod tests {
         let marks = world.marks(NOW_MS);
         let local = marks.local.unwrap();
         assert_eq!((local.carry.status, local.carry.rho, local.carry.offset, local.carry.carry), (CarryStatus::Ready, Some(1.0), Some(300.0), Some(300.0)));
-        assert_eq!((local.mark.sip_mid, local.mark.carried, local.mark.oracle, local.mark.ema, local.mark.predicted), (405_770, Some(406_070), 406_070, 406_050, 406_050));
+        assert_eq!((local.mark.quote_mid, local.mark.carried, local.mark.oracle, local.mark.ema, local.mark.predicted), (405_770, Some(406_070), 406_070, 406_050, 406_050));
         // the relayer pricing internally at its next write: the offset unknown, (1) the midpoint again
         world.tsla().external = Some(405_000);
         world.tsla().oracle_time_ns = Some((NOW_MS + 2_500) * 1_000_000);
         let marks = world.shifted(0).marks(NOW_MS + 3_000);
         assert_eq!(code(&marks), Some("externalClosed"));
+    }
+
+    /// Design 000543: overnight the local leg reads BOATS's quote, not the SIP's, and only BOATS's outage withholds it.
+    #[test]
+    fn overnight_the_quote_is_boats() {
+        // 2026-10-28T02:00:00Z, Tuesday 22:00 in New York: Tuesday's night
+        let night = 1_793_152_800_000;
+        let mut world = World::new().shifted(night - NOW_MS);
+        world.equity.boats.entries[0] = quote("405.70", "405.90", night - 1_000);
+        let marks = world.marks(night);
+        let local = marks.local.unwrap();
+        assert_eq!((local.quote_feed, marks.quote, local.mark.quote_mid), (EquityFeed::Boats, Some((EquityFeed::Boats, Validity::Valid)), 405_800));
+        world.equity.boats.entries[0].1 = Validity::NotConnected;
+        let marks = world.marks(night);
+        assert_eq!((code(&marks), marks.quote), (Some("quoteUnavailable"), Some((EquityFeed::Boats, Validity::NotConnected))), "the SIP's valid quote does not stand in");
+        let gap = 1_793_145_780_000; // 2026-10-28T00:03:00Z, Tuesday 20:03 in New York: between the post-market and the night
+        assert_eq!(code(&World::new().shifted(gap - NOW_MS).marks(gap)), Some("quoteSession"));
     }
 
     /// Review 000535 r2: the EMA samples only with a trusted book and node state; a long untrusted span starts it over.

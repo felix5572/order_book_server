@@ -23,7 +23,7 @@ use tokio::{
 use super::{
     connection::{ConnectionEnd, FeedError, Timeouts, run_connection},
     hip3::{
-        protocol::{AlpacaCredentials, alpaca_session},
+        protocol::{AlpacaCredentials, EquityFeed, alpaca_session},
         sources::Hip3SipSources,
     },
     protocol::{Protocol, kucoin_session, mexc_spot_book_tickers},
@@ -44,22 +44,58 @@ const HEALTHY_FOR: Duration = Duration::from_secs(30);
 /// MEXC spot is polled at this cadence; its slot owns quote expiry.
 const MEXC_SPOT_POLL: Duration = Duration::from_millis(250);
 /// Alpaca 406 (the account's sessions in use) is retried this long from the first refusal of a failure that no
-/// subscribed session ended (design 000535 r2 revision 5): an old session not yet released, then the SIP feed stops.
-const SIP_CONNECTION_LIMIT_BUDGET: Duration = Duration::from_secs(60);
+/// subscribed session ended (design 000535 r2 revision 5): an old session not yet released, then that feed stops. Each
+/// Alpaca feed has its own.
+const ALPACA_CONNECTION_LIMIT_BUDGET: Duration = Duration::from_secs(60);
 
-/// The HIP-3 SIP feed's configuration (design 000535): its markets and the Alpaca account.
-pub(crate) struct SipFeedConfig {
+/// The HIP-3 US stocks' feeds' configuration (design 000535, 000543): their markets and the Alpaca account.
+pub(crate) struct EquityFeedsConfig {
     pub(crate) sources: Arc<Hip3SipSources>,
     pub(crate) credentials: AlpacaCredentials,
+}
+
+/// The HIP-3 US stocks' two feeds, the SIP's and BOATS's, of the same markets; each always connected (design 000543
+/// §3), the session choosing whose quote counts.
+struct EquitySubscriptions {
+    sip: FeedSubscriptions,
+    boats: FeedSubscriptions,
+}
+
+impl EquitySubscriptions {
+    fn new(markets: &FeedMarkets) -> Self {
+        Self { sip: FeedSubscriptions::new(Feed::SIP, markets), boats: FeedSubscriptions::new(Feed::BOATS, markets) }
+    }
+
+    const fn of(&self, feed: EquityFeed) -> &FeedSubscriptions {
+        match feed {
+            EquityFeed::Sip => &self.sip,
+            EquityFeed::Boats => &self.boats,
+        }
+    }
+}
+
+/// Both HIP-3 equity feeds' readings at one moment, in the HIP-3 coins' order.
+pub(crate) struct EquityReadings {
+    pub(crate) sip: FeedProjection,
+    pub(crate) boats: FeedProjection,
+}
+
+impl EquityReadings {
+    pub(crate) const fn of(&self, feed: EquityFeed) -> &FeedProjection {
+        match feed {
+            EquityFeed::Sip => &self.sip,
+            EquityFeed::Boats => &self.boats,
+        }
+    }
 }
 
 /// The feeds of the sources, their slots, and the supervisor of their tasks.
 pub(crate) struct LocalMarkFeeds {
     pub(crate) sources: Arc<MarkSources>,
     subscriptions: Vec<FeedSubscriptions>,
-    /// The HIP-3 SIP coins and their feed's one connection; `None` without `--hip3-sip-marks`.
+    /// The HIP-3 SIP coins and their feeds' connections, one each; `None` without `--hip3-sip-marks`.
     pub(crate) hip3: Option<Arc<Hip3SipSources>>,
-    sip: Option<FeedSubscriptions>,
+    equity: Option<EquitySubscriptions>,
     /// Why every feed stopped (a task's internal failure), until restart.
     stopped: Arc<Mutex<Option<String>>>,
     supervisor: AbortHandle,
@@ -73,9 +109,9 @@ impl Drop for LocalMarkFeeds {
 }
 
 impl LocalMarkFeeds {
-    /// Spawns one supervised task per connection partition, with independent retry/quote epochs, and the SIP feed's
-    /// when configured.
-    pub(crate) fn start(sources: Arc<MarkSources>, sip: Option<SipFeedConfig>) -> Self {
+    /// Spawns one supervised task per connection partition, with independent retry/quote epochs, and the HIP-3 equity
+    /// feeds' when configured.
+    pub(crate) fn start(sources: Arc<MarkSources>, equity: Option<EquityFeedsConfig>) -> Self {
         let subscriptions: Vec<_> = sources.feeds().map(|(feed, markets)| FeedSubscriptions::new(feed, markets)).collect();
         let mut tasks = JoinSet::new();
         let mut by_task = HashMap::new();
@@ -87,15 +123,17 @@ impl LocalMarkFeeds {
                 by_task.insert(task.id(), identity);
             }
         }
-        let hip3 = sip.map(|SipFeedConfig { sources, credentials }| {
-            let group = FeedSubscriptions::new(Feed::SIP, &sources.markets);
-            for part in &group.subscriptions {
-                let shard = part.shard;
-                let (part, credentials) = (Arc::clone(part), credentials.clone());
-                let task = tasks.spawn(async move { run_sip_feed(&part, &credentials).await });
-                by_task.insert(task.id(), (Feed::SIP, shard));
+        let hip3 = equity.map(|EquityFeedsConfig { sources, credentials }| {
+            let groups = EquitySubscriptions::new(&sources.markets);
+            for feed in EquityFeed::ALL {
+                for part in &groups.of(feed).subscriptions {
+                    let shard = part.shard;
+                    let (part, credentials) = (Arc::clone(part), credentials.clone());
+                    let task = tasks.spawn(async move { run_equity_feed(feed, &part, &credentials).await });
+                    by_task.insert(task.id(), (feed.feed(), shard));
+                }
             }
-            (sources, group)
+            (sources, groups)
         });
         Self::supervised(sources, subscriptions, hip3, tasks, by_task)
     }
@@ -103,15 +141,16 @@ impl LocalMarkFeeds {
     fn supervised(
         sources: Arc<MarkSources>,
         subscriptions: Vec<FeedSubscriptions>,
-        hip3: Option<(Arc<Hip3SipSources>, FeedSubscriptions)>,
+        hip3: Option<(Arc<Hip3SipSources>, EquitySubscriptions)>,
         tasks: JoinSet<()>,
         by_task: HashMap<Id, (Feed, usize)>,
     ) -> Self {
         let stopped = Arc::new(Mutex::new(None));
-        let (hip3, sip) = hip3.unzip();
-        let slots = subscriptions.iter().chain(&sip).flat_map(|group| group.subscriptions.iter().map(|part| Arc::clone(&part.slot))).collect();
+        let (hip3, equity) = hip3.unzip();
+        let equity_groups = equity.iter().flat_map(|groups| EquityFeed::ALL.map(|feed| groups.of(feed)));
+        let slots = subscriptions.iter().chain(equity_groups).flat_map(|group| group.subscriptions.iter().map(|part| Arc::clone(&part.slot))).collect();
         let supervisor = tokio::spawn(supervise(tasks, by_task, slots, Arc::clone(&stopped))).abort_handle();
-        Self { sources, subscriptions, hip3, sip, stopped, supervisor }
+        Self { sources, subscriptions, hip3, equity, stopped, supervisor }
     }
 
     /// The feeds' slots without a task: nothing connects or quotes.
@@ -119,8 +158,8 @@ impl LocalMarkFeeds {
     pub(crate) fn idle_for_test(sources: Arc<MarkSources>, hip3: Option<Arc<Hip3SipSources>>) -> Self {
         let subscriptions = sources.feeds().map(|(feed, markets)| FeedSubscriptions::new(feed, markets)).collect();
         let hip3 = hip3.map(|sources| {
-            let group = FeedSubscriptions::new(Feed::SIP, &sources.markets);
-            (sources, group)
+            let groups = EquitySubscriptions::new(&sources.markets);
+            (sources, groups)
         });
         Self::supervised(sources, subscriptions, hip3, JoinSet::new(), HashMap::new())
     }
@@ -131,9 +170,9 @@ impl LocalMarkFeeds {
         self.stopped.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
-    /// The SIP feed's reading now, in its markets' (the HIP-3 coins') order; `None` without it.
-    pub(crate) fn sip_reading(&self, now_ms: u64) -> Option<FeedProjection> {
-        self.sip.as_ref().map(|group| group.read(now_ms))
+    /// The HIP-3 equity feeds' readings now, in their markets' (the HIP-3 coins') order; `None` without them.
+    pub(crate) fn equity_readings(&self, now_ms: u64) -> Option<EquityReadings> {
+        self.equity.as_ref().map(|groups| EquityReadings { sip: groups.sip.read(now_ms), boats: groups.boats.read(now_ms) })
     }
 
     /// Every feed's reading now, with its markets.
@@ -194,7 +233,7 @@ async fn run_feed(part: &Subscription) {
         };
         let (reason, requested) = match error {
             FeedError::Contract(reason) => return stop(slot, shard, &reason),
-            // only the SIP feed's venue answers so (`run_sip_feed` budgets it)
+            // only Alpaca answers so (`run_equity_feed` budgets it)
             FeedError::Transient(reason) | FeedError::ConnectionLimit(reason) => (reason, false),
             FeedError::ReconnectRequested(reason) => (reason, true),
         };
@@ -228,18 +267,18 @@ async fn pause(slot: &FeedSlot, shard: usize, shard_label: &str, started: Instan
     *backoff = (*backoff * 2).min(BACKOFF_MAX);
 }
 
-/// The SIP feed (design 000535 r2 revision 5): as `run_feed`, and Alpaca 406 within `SIP_CONNECTION_LIMIT_BUDGET` of
-/// the first refusal since the last session that subscribed. Backoff and reconnects do not renew the budget; only a
-/// session answered `authenticated` and `subscription` does.
-async fn run_sip_feed(part: &Subscription, credentials: &AlpacaCredentials) {
+/// An Alpaca feed (design 000535 r2 revision 5, 000543 §3): as `run_feed`, and Alpaca 406 within
+/// `ALPACA_CONNECTION_LIMIT_BUDGET` of the first refusal since the last session that subscribed. Backoff and reconnects
+/// do not renew the budget; only a session answered `authenticated` and `subscription` does.
+async fn run_equity_feed(feed: EquityFeed, part: &Subscription, credentials: &AlpacaCredentials) {
     let (slot, markets, shard) = (&*part.slot, &part.markets, part.shard);
     let shard_label = shard.to_string();
-    let protocol = Protocol { kind: Kind::Equity, venue: Venue::Alpaca };
+    let protocol = Protocol { kind: feed.feed().kind, venue: Venue::Alpaca };
     let mut backoff = BACKOFF_MIN;
-    let mut budget = ConnectionLimitBudget::new(SIP_CONNECTION_LIMIT_BUDGET);
+    let mut budget = ConnectionLimitBudget::new(ALPACA_CONNECTION_LIMIT_BUDGET);
     loop {
         let started = Instant::now();
-        let end = run_connection(protocol, alpaca_session(&markets.symbols, credentials), markets, slot, Timeouts::FEEDS).await;
+        let end = run_connection(protocol, alpaca_session(feed, &markets.symbols, credentials), markets, slot, Timeouts::FEEDS).await;
         match budget.on_end(end, started, Instant::now()) {
             Ok(reason) => pause(slot, shard, &shard_label, started, &mut backoff, reason, false).await,
             Err(reason) => return stop(slot, shard, &reason),
@@ -425,14 +464,15 @@ mod tests {
         assert!(ConnectionLimitBudget::new(Duration::from_secs(60)).on_end(ConnectionEnd { error: FeedError::Contract("401".into()), subscribed: false }, at(0), at(0)).is_err());
     }
 
-    /// Review 000536 P2-1: `GET /extMarkInputs` shows the SIP feed and each HIP-3 coin's quote, also once the feed is lost
-    /// or stopped (its reason, the last quote, no longer valid); a main-dex coin's answer has no `sip` section.
+    /// Review 000536 P2-1, design 000543 §5: `GET /extMarkInputs` shows the SIP and BOATS feeds and each HIP-3 coin's
+    /// quotes, also once a feed is lost or stopped (its reason, the last quote, no longer valid); a main-dex coin's answer
+    /// has neither section.
     #[tokio::test]
-    async fn the_inputs_view_shows_the_sip_feed_and_its_quotes() {
+    async fn the_inputs_view_shows_the_equity_feeds_and_their_quotes() {
         let main = Arc::new(MarkSources::embedded().unwrap());
         let hip3 = Arc::new(Hip3SipSources::parse(r#"{"feed": "sip", "coins": {"xyz:TSLA": {"symbol": "TSLA"}, "xyz:AAPL": {"symbol": "AAPL"}}}"#).unwrap());
         let feeds = LocalMarkFeeds::idle_for_test(Arc::clone(&main), Some(hip3));
-        let slot = Arc::clone(&feeds.sip.as_ref().unwrap().subscriptions[0].slot);
+        let slot = Arc::clone(&feeds.equity.as_ref().unwrap().sip.subscriptions[0].slot);
         let epoch = slot.connected(1);
         slot.record(epoch, 2_080, [(1, Some(quote()), Some(2_000))]);
         let view = |coin: Option<&str>| serde_json::to_value(super::super::view::inputs_view(&feeds, coin, 3_000).unwrap()).unwrap();
@@ -440,17 +480,22 @@ mod tests {
         assert_eq!(all["sip"]["feed"]["feed"], "equity_alpaca");
         assert_eq!(all["sip"]["feed"]["connection"], serde_json::json!({"state": "connected", "sinceMs": 1}));
         assert_eq!(all["sip"]["coins"].as_array().unwrap().len(), 2);
+        assert_eq!((all["boats"]["feed"]["feed"].as_str(), all["boats"]["feed"]["connection"]["state"].as_str()), (Some("equity_alpaca_boats"), Some("connecting")));
+        assert_eq!(all["boats"]["coins"][0]["quote"]["status"], "notConnected", "BOATS quotes nothing yet");
         let tsla = view(Some("xyz:TSLA"));
         assert_eq!(tsla["coins"], serde_json::json!([]));
-        assert_eq!(tsla["sip"]["coins"], serde_json::json!([{"coin": "xyz:TSLA", "sip": {"symbol": "TSLA", "pxMultiplier": "1", "bid": "100", "ask": "101",
+        assert_eq!(tsla["sip"]["coins"], serde_json::json!([{"coin": "xyz:TSLA", "quote": {"symbol": "TSLA", "pxMultiplier": "1", "bid": "100", "ask": "101",
             "receivedTsMs": 2_080, "eventTsMs": 2_000, "status": "valid"}}]));
-        assert!(view(Some("BTC")).get("sip").is_none(), "a main-dex coin's answer is unchanged");
+        assert_eq!(tsla["boats"]["coins"].as_array().unwrap().len(), 1);
+        let btc = view(Some("BTC"));
+        assert!(btc.get("sip").is_none() && btc.get("boats").is_none(), "a main-dex coin's answer is unchanged");
         slot.stopped("Alpaca error 402 auth failed".to_string(), 2_500);
         let stopped = view(Some("xyz:TSLA"));
         assert_eq!(stopped["sip"]["feed"]["connection"], serde_json::json!({"state": "stopped", "reason": "Alpaca error 402 auth failed", "atMs": 2_500}));
-        assert_eq!((stopped["sip"]["coins"][0]["sip"]["bid"].as_str(), stopped["sip"]["coins"][0]["sip"]["status"].as_str()), (Some("100"), Some("notConnected")));
+        assert_eq!((stopped["sip"]["coins"][0]["quote"]["bid"].as_str(), stopped["sip"]["coins"][0]["quote"]["status"].as_str()), (Some("100"), Some("notConnected")));
         let without = LocalMarkFeeds::idle_for_test(main, None);
-        assert!(serde_json::to_value(super::super::view::inputs_view(&without, None, 3_000).unwrap()).unwrap().get("sip").is_none());
+        let answer = serde_json::to_value(super::super::view::inputs_view(&without, None, 3_000).unwrap()).unwrap();
+        assert!(answer.get("sip").is_none() && answer.get("boats").is_none());
         assert!(super::super::view::inputs_view(&without, Some("xyz:TSLA"), 3_000).is_err());
     }
 

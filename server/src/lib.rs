@@ -77,8 +77,8 @@ pub struct ServerConfig {
     pub accounts: bool,
     /// Run the local marks' venue feeds (design 000454; needs `accounts`) and serve `GET /extMarkInputs`.
     pub local_marks: bool,
-    /// Run the HIP-3 US stocks' local marks (design 000535; needs `local_marks`): the Alpaca SIP feed, its key from the
-    /// environment.
+    /// Run the HIP-3 US stocks' local marks (design 000535, 000543; needs `local_marks`): the Alpaca SIP and BOATS
+    /// feeds, their key from the environment.
     pub hip3_sip_marks: bool,
 }
 

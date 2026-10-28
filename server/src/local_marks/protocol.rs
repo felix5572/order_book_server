@@ -155,7 +155,9 @@ impl Protocol {
                 heartbeat: ping(r#"{"method":"ping"}"#),
             },
             (Kind::Spot, Venue::Mexc) | (Kind::Perp, Venue::Kraken | Venue::Kucoin) => unreachable!("not a WS feed: {self:?}"),
-            (Kind::Equity, _) | (_, Venue::Alpaca) => unreachable!("the SIP session carries the credentials: `hip3::protocol::alpaca_session`"),
+            (Kind::Equity | Kind::EquityOvernight, _) | (_, Venue::Alpaca) => {
+                unreachable!("an Alpaca session carries the credentials: `hip3::protocol::alpaca_session`")
+            }
         }
     }
 

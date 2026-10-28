@@ -120,10 +120,10 @@ struct Args {
     #[arg(long, default_value = "false")]
     local_marks: bool,
 
-    /// HIP-3 US stocks' local marks (design 000535; needs --local-marks): Alpaca's SIP stream of the stocks in
-    /// server/data/hip3_sip_sources.json, one connection, its key from APCA_API_KEY_ID / APCA_API_SECRET_KEY in the
-    /// environment; served at GET /extHip3MarkPrices, the extHip3MarkPrices subscription and extForcedFlow's local
-    /// distances.
+    /// HIP-3 US stocks' local marks (design 000535, 000543; needs --local-marks): Alpaca's SIP and, overnight, BOATS
+    /// streams of the stocks in server/data/hip3_sip_sources.json, one connection each, the key from APCA_API_KEY_ID /
+    /// APCA_API_SECRET_KEY in the environment; served at GET /extHip3MarkPrices, the extHip3MarkPrices subscription and
+    /// extForcedFlow's local distances.
     #[arg(long, default_value = "false")]
     hip3_sip_marks: bool,
 }
@@ -221,7 +221,7 @@ async fn main() -> Result<()> {
         println!("  Local marks: ON (venue feeds, GET /extMarkInputs)");
     }
     if config.hip3_sip_marks {
-        println!("  HIP-3 SIP marks: ON (Alpaca SIP feed, GET /extHip3MarkPrices)");
+        println!("  HIP-3 US stock marks: ON (Alpaca SIP and BOATS feeds, GET /extHip3MarkPrices)");
     }
     if config.no_resync {
         println!("  Re-sync: DISABLED (--no-resync) — drift tolerated, book will NOT self-heal");

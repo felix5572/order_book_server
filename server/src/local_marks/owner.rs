@@ -53,8 +53,8 @@ impl LocalMarks {
         let table = Arc::new(CoinTable::new(&feeds.sources, feeds.hip3.as_deref()));
         let now_ms = now_ms();
         let readings = feeds.readings(now_ms);
-        let sip = feeds.sip_reading(now_ms);
-        let tick = Tick { now_ms, instant: Instant::now(), stopped: None, node: &Err(NOT_TICKED.to_string()), book: None, readings: &readings, sip: sip.as_ref() };
+        let equity = feeds.equity_readings(now_ms);
+        let tick = Tick { now_ms, instant: Instant::now(), stopped: None, node: &Err(NOT_TICKED.to_string()), book: None, readings: &readings, equity: equity.as_ref() };
         let initial = assemble(&table, &tick, &mut table.hip3_states());
         let (snapshots, receiver) = watch::channel(Arc::new(initial));
         let owner = tokio::spawn(run_owner(table, Arc::clone(&feeds), node_prices, book, snapshots));
@@ -111,9 +111,9 @@ async fn run_owner(
         let best = book.best_prices(table.book_coins()).await;
         let now_ms = now_ms();
         let readings = feeds.readings(now_ms);
-        let sip = feeds.sip_reading(now_ms);
+        let equity = feeds.equity_readings(now_ms);
         let stopped = if owner_gone { Some(OWNER_GONE.to_string()) } else { feeds.stopped() };
-        let tick = Tick { now_ms, instant: Instant::now(), stopped, node: &node, book: best.as_ref(), readings: &readings, sip: sip.as_ref() };
+        let tick = Tick { now_ms, instant: Instant::now(), stopped, node: &node, book: best.as_ref(), readings: &readings, equity: equity.as_ref() };
         let snapshot = assemble(&table, &tick, &mut hip3_states);
         drop(snapshots.send_replace(Arc::new(snapshot)));
     }

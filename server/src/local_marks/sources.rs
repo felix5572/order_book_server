@@ -22,7 +22,7 @@ pub(crate) enum Venue {
     Kucoin,
     Gate,
     Mexc,
-    /// Alpaca's SIP stream (design 000535): only `Feed::SIP`, never a main-dex listing.
+    /// Alpaca's stock streams (design 000535, 000543): only `Feed::SIP` and `Feed::BOATS`, never a main-dex listing.
     Alpaca,
 }
 
@@ -55,6 +55,8 @@ pub(crate) enum Kind {
     Perp,
     /// A US stock's NBBO, which predicts a HIP-3 relayer's oracle (design 000535).
     Equity,
+    /// A US stock's overnight quote, Blue Ocean ATS's, which predicts it overnight (design 000543).
+    EquityOvernight,
 }
 
 /// One venue's markets of one kind: one WS connection or one poll.
@@ -83,6 +85,8 @@ impl Feed {
 
     /// Alpaca's SIP NBBO of the HIP-3 US stocks; not in `ALL` (the main-dex sources cannot list it).
     pub(crate) const SIP: Self = Self { kind: Kind::Equity, venue: Venue::Alpaca };
+    /// Alpaca's BOATS quotes of the HIP-3 US stocks, overnight; not in `ALL` either.
+    pub(crate) const BOATS: Self = Self { kind: Kind::EquityOvernight, venue: Venue::Alpaca };
 
     const fn spot(venue: Venue) -> Self {
         Self { kind: Kind::Spot, venue }
@@ -99,7 +103,7 @@ impl Feed {
             Venue::Binance => 3,
             Venue::Okx | Venue::Bybit => 2,
             Venue::Kraken | Venue::Kucoin | Venue::Gate | Venue::Mexc => 1,
-            Venue::Alpaca => panic!("the SIP feed is in no weighted median"),
+            Venue::Alpaca => panic!("the Alpaca feeds are in no weighted median"),
         }
     }
 
@@ -119,8 +123,11 @@ impl Feed {
             (Kind::Perp, Venue::Gate) => "perp_gate",
             (Kind::Perp, Venue::Mexc) => "perp_mexc",
             (Kind::Equity, Venue::Alpaca) => "equity_alpaca",
+            (Kind::EquityOvernight, Venue::Alpaca) => "equity_alpaca_boats",
             (Kind::Perp, Venue::Kraken | Venue::Kucoin) => unreachable!("Kraken and Kucoin are no perp feed (`Feed::ALL`)"),
-            (Kind::Spot | Kind::Perp, Venue::Alpaca) | (Kind::Equity, _) => unreachable!("Alpaca is only the SIP feed: {self:?}"),
+            (Kind::Spot | Kind::Perp, Venue::Alpaca) | (Kind::Equity | Kind::EquityOvernight, _) => {
+                unreachable!("Alpaca is only the SIP and BOATS feeds: {self:?}")
+            }
         }
     }
 

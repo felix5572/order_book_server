@@ -13,6 +13,7 @@ use serde::Serialize;
 use tokio::time::Instant;
 
 use super::{
+    feeds::EquityReadings,
     compute::{LocalMark, MarkInputs, local_mark, weighted_median},
     hip3::{
         snapshot::{Hip3CoinMarks, Hip3CoinState, Hip3Gates, Hip3Table, hip3_marks},
@@ -266,8 +267,8 @@ pub(crate) struct Tick<'a> {
     pub(crate) book: Option<&'a BestPricesAt>,
     /// Every feed's reading (`LocalMarkFeeds::readings`).
     pub(crate) readings: &'a [(Feed, &'a FeedMarkets, FeedProjection)],
-    /// The SIP feed's reading; `None` without it.
-    pub(crate) sip: Option<&'a FeedProjection>,
+    /// The HIP-3 equity feeds' readings; `None` without them.
+    pub(crate) equity: Option<&'a EquityReadings>,
 }
 
 /// `hip3_states`: the owner's, one per HIP-3 coin; this tick moves them.
@@ -330,7 +331,7 @@ fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, node_withheld: O
         match listed.feed.kind {
             Kind::Spot => oracle_coverage.add(listed.feed, validity),
             Kind::Perp => external_coverage.add(listed.feed, validity),
-            Kind::Equity => unreachable!("a main-dex coin lists no SIP market (`Feed::ALL`)"),
+            Kind::Equity | Kind::EquityOvernight => unreachable!("a main-dex coin lists no Alpaca market (`Feed::ALL`)"),
         }
     }
     let state = match (node_withheld, tick.node) {
@@ -482,7 +483,7 @@ pub(crate) mod tests {
 
         pub(crate) fn snapshot(&self, now_ms: u64) -> LocalMarksSnapshot {
             let readings: Vec<_> = self.sources.feeds().zip(&self.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
-            let tick = Tick { now_ms, instant: Instant::now(), stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, sip: None };
+            let tick = Tick { now_ms, instant: Instant::now(), stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, equity: None };
             assemble(&self.table, &tick, &mut [])
         }
 
@@ -505,7 +506,7 @@ pub(crate) mod tests {
         let mut book = world.book.clone().unwrap();
         book.prices.push((None, None));
         let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
-        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: None, node: &world.node, book: Some(&book), readings: &readings, sip: None };
+        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: None, node: &world.node, book: Some(&book), readings: &readings, equity: None };
         let shared = assemble(&table, &tick, &mut table.hip3_states());
         let frames = |snapshot: &LocalMarksSnapshot| {
             snapshot.coins().map(|(coin, marks)| super::super::prices_view::CoinMarksView::of(snapshot, coin, marks).to_wire()).collect::<Vec<_>>()
@@ -570,7 +571,7 @@ pub(crate) mod tests {
         assert_eq!(snapshot.coin("BTC").unwrap().node.as_ref().unwrap_err().detail, "the account view is unavailable: initializing");
         let world = World::new();
         let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
-        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: Some("gone".to_string()), node: &world.node, book: world.book.as_ref(), readings: &readings, sip: None };
+        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: Some("gone".to_string()), node: &world.node, book: world.book.as_ref(), readings: &readings, equity: None };
         let stopped = assemble(&world.table, &tick, &mut []);
         assert_eq!(statuses(&stopped, "BTC"), (None, Some("stopped")), "the node leg does not read the feeds");
     }

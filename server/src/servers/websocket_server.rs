@@ -16,7 +16,7 @@ use crate::{
         L2ParamGuard, L2SnapshotParams, OrderBookListener, bbo::{BboKey, key as bbo_key}, hl_listen_hft, triggers::TriggerAvailability,
     },
     local_marks::{
-        feeds::{LocalMarkFeeds, SipFeedConfig},
+        feeds::{EquityFeedsConfig, LocalMarkFeeds},
         hip3::{protocol::AlpacaCredentials, sources::Hip3SipSources},
         owner::LocalMarks,
         sources::MarkSources,
@@ -348,14 +348,14 @@ fn start_local_marks(
     let accounts = accounts.ok_or("--local-marks needs --accounts: the local marks read the node replica of the account view")?;
     let sources = MarkSources::embedded()?;
     info!("Local marks: {} coins, venue feeds starting", sources.coins().count());
-    let sip = if config.hip3_sip_marks {
+    let equity = if config.hip3_sip_marks {
         let sources = Hip3SipSources::embedded()?;
-        info!("HIP-3 SIP marks: {} coins, the Alpaca SIP feed starting", sources.coins().count());
-        Some(SipFeedConfig { sources: Arc::new(sources), credentials: AlpacaCredentials::from_env()? })
+        info!("HIP-3 US stock marks: {} coins, the Alpaca SIP and BOATS feeds starting", sources.coins().count());
+        Some(EquityFeedsConfig { sources: Arc::new(sources), credentials: AlpacaCredentials::from_env()? })
     } else {
         None
     };
-    let feeds = Arc::new(LocalMarkFeeds::start(Arc::new(sources), sip));
+    let feeds = Arc::new(LocalMarkFeeds::start(Arc::new(sources), equity));
     Ok(Some(LocalMarks::start(feeds, accounts.node_prices(), Arc::clone(listener))))
 }
 

@@ -1,7 +1,8 @@
 //! `extHip3MarkPrices` (design 000535 r2 revision 1): one HIP-3 coin's node and local legs at a tick, the frame `data`
 //! of the WS subscription and the rows of `GET /extHip3MarkPrices`. Prices are decimal text in HL's units of the coin.
 //! Its own channel, so `extMarkPrices` (schema 2) keeps its frames byte for byte. Schema 2 (design 000537): (1) carries
-//! the oracle's offset from the SIP midpoint, shown in the `carry*` fields.
+//! the oracle's offset from the quote's midpoint, shown in the `carry*` fields. Schema 3 (design 000543): the quote is
+//! the session's feed's, the SIP's or BOATS's overnight (`quoteFeed`), and its fields are named `quote*`.
 
 use serde::Serialize;
 
@@ -16,7 +17,7 @@ use crate::local_marks::{
     snapshot::LocalMarksSnapshot,
 };
 
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,8 +28,11 @@ pub(crate) struct Hip3MarksView<'a> {
     published_ts_ms: u64,
     node: LegView<NodeView>,
     local: LegView<LocalView>,
-    /// The SIP quote's validity: `valid`, `notQuoted`, `noQuote` (no two-sided or a crossed NBBO), `notConnected`.
-    sip_status: &'static str,
+    /// The session's feed, `sip` or `boats`; `null` outside every session.
+    quote_feed: Option<&'static str>,
+    /// Its quote's validity: `valid`, `notQuoted`, `noQuote` (no two-sided or a crossed quote), `notConnected`; `null`
+    /// outside every session.
+    quote_status: Option<&'static str>,
 }
 
 /// The coin's stored prices at the node state's height (the node's HIP-3 oracle stream; the last trade from its fills).
@@ -54,10 +58,12 @@ struct NodeView {
 #[serde(rename_all = "camelCase")]
 struct LocalView {
     predicted_mark_px: String,
-    /// (1): the SIP midpoint plus the offset carry when `carryStatus` is `ready` (`carriedPx`, else `sipMidPx`), as
-    /// published, clamped to the stored oracle +-50 bp.
+    /// (1): the quote's midpoint plus the offset carry when `carryStatus` is `ready` (`carriedPx`, else `quoteMidPx`),
+    /// as published, clamped to the stored oracle +-50 bp.
     oracle_px: String,
-    sip_mid_px: String,
+    /// The feed of the quote, `sip` or `boats`.
+    quote_feed: &'static str,
+    quote_mid_px: String,
     /// The midpoint plus the carry, rounded as published, before the clamp; `null` unless `carryStatus` is `ready`.
     carried_px: Option<String>,
     /// `ready`; `warmup`: this session's writes cannot estimate the persistence yet (too few, or every offset zero);
@@ -79,11 +85,11 @@ struct LocalView {
     book_px: String,
     bid_px: String,
     ask_px: String,
-    sip_bid_px: String,
-    sip_ask_px: String,
-    /// The quote's SIP time (`null` if the quote carried none) and when it arrived, unix ms.
-    sip_quote_time_ms: Option<u64>,
-    sip_received_ms: u64,
+    quote_bid_px: String,
+    quote_ask_px: String,
+    /// The quote's time at its feed (`null` if the quote carried none) and when it arrived, unix ms.
+    quote_time_ms: Option<u64>,
+    quote_received_ms: u64,
     node_height: u64,
     node_block_time_ms: u64,
     book_time_ms: u64,
@@ -122,7 +128,8 @@ impl<'a> Hip3MarksView<'a> {
             published_ts_ms: snapshot.computed_ms,
             node: marks.node.as_ref().map_or_else(withheld, |node| node_view(snapshot, node)),
             local: marks.local.as_ref().map_or_else(withheld, |local| local_view(snapshot, local)),
-            sip_status: validity_label(marks.sip),
+            quote_feed: marks.quote.map(|(feed, _)| feed.name()),
+            quote_status: marks.quote.map(|(_, validity)| validity_label(validity)),
         }
     }
 
@@ -164,7 +171,8 @@ fn local_view(snapshot: &LocalMarksSnapshot, local: &Hip3LocalLeg) -> LegView<Lo
     LegView::Ready(LocalView {
         predicted_mark_px: px(mark.predicted),
         oracle_px: px(mark.oracle),
-        sip_mid_px: px(mark.sip_mid),
+        quote_feed: local.quote_feed.name(),
+        quote_mid_px: px(mark.quote_mid),
         carried_px: mark.carried.map(px),
         carry_status: carry_label(carry.status),
         carry_px: carry.carry.map(|units| usd(units, local.size_decimals)),
@@ -177,10 +185,10 @@ fn local_view(snapshot: &LocalMarksSnapshot, local: &Hip3LocalLeg) -> LegView<Lo
         book_px: px(mark.book),
         bid_px: px(local.bid),
         ask_px: px(local.ask),
-        sip_bid_px: local.sip.bid.to_string(),
-        sip_ask_px: local.sip.ask.to_string(),
-        sip_quote_time_ms: local.sip_event_ms,
-        sip_received_ms: local.sip_received_ms,
+        quote_bid_px: local.quote.bid.to_string(),
+        quote_ask_px: local.quote.ask.to_string(),
+        quote_time_ms: local.quote_event_ms,
+        quote_received_ms: local.quote_received_ms,
         node_height: progress.height,
         node_block_time_ms: progress.block_time_ms,
         book_time_ms: book.time_ms,

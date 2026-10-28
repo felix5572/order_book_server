@@ -710,3 +710,20 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
 - **离线证据**(hyperliquid-trade `analyze/research/xyz_oracle_sources_20261027/`, d7c76a42): 只看 (1), 提前 1 秒,
   P90 中位: 盘后 31 只 5.37 → 2.39bp, 盘前 2.25 → 1.65bp, 正常盘 1.52 → 1.53bp(自动学到 0–0.2), 都和本段事后最优斜率相当;
   换时段不清零开盘变差, 偏离按节点到达时刻算开盘也变差, 所以清零、留中间价历史。
+
+## 2026-10-28 HIP-3 美股本地 mark 加夜盘: Alpaca BOATS(设计 000543 r1)
+
+- **起因**: 用户问 Alpaca 是否有夜盘行情。trade.xyz 文档写明: 外部价覆盖周日 20:05 ET 到周五 20:00 ET;
+  夜盘 20:05–04:00 ET 由 Blue Ocean ATS(BOATS)提供。v2 夜里一律撤回(`sipSession`)。
+- **时段**(`hip3/session.rs`): `EquitySession { Pre, Regular, Post, Overnight }`, 身份带美东日期; 夜盘以开始那晚的
+  日期为身份, 周日到周四晚开始; 20:00–20:05、周五晚到周日 20:05 不属于任何时段。
+- **数据源**: 第二条 Alpaca 连接 `Feed::BOATS`(`wss://stream.data.alpaca.markets/v1beta1/boats`, 标签 `equity_alpaca_boats`),
+  协议、确认、心跳、错误分类和 406 预算与 SIP 共用(各一份预算); 两条全天连着, 按 tick 的时段取报价。
+  开关仍是 `--hip3-sip-marks`(改名会牵动 `ob_ops.py` 按版本给可选参数)。
+- **偏离修正**: 夜盘自成时段; 中间价历史按(数据源, 连接代次)记, 换数据源清空, 查询指定数据源, 04:00 迟到的夜盘写入
+  查不到 SIP 历史里的 BOATS 中间价。
+- **输出**: `extHip3MarkPrices` 升 schema 3, 报价字段改成与数据源无关的 `quote*`, 加 `quoteFeed`; 撤回码 `quoteSession`、
+  `quoteUnavailable`、`quoteQuiet`; `/extMarkInputs` 加 `boats` 段, 两段的币条目字段改名 `quote`。
+- **离线证据**(hyperliquid-trade `analyze/research/xyz_oracle_sources_20261027/`, d5782161, 10-28 00:05–02:00Z):
+  85 只都有 BOATS 双边报价; 读价提前 1–1.5 秒最准(同 SIP); oracle 项提前 1 秒 P90 中位: 只用中间价 6.27bp, 按币在线修正 2.68bp;
+  8 只冷门股超过 10bp(最大 SHAZ 229bp), 本批不加门控, 上线后按币量化, 开 HIP-3 交易时按币核对。

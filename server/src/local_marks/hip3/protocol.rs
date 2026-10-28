@@ -1,5 +1,6 @@
-//! Alpaca's SIP stream (design 000535 r1 §2.1, r2 revisions 5–6; docs.alpaca.markets/docs/streaming-market-data): one
-//! connection subscribes the quotes of every SIP source. After connecting the server answers `connected`; the auth and
+//! Alpaca's stock streams (design 000535 r1 §2.1, r2 revisions 5–6; docs.alpaca.markets/docs/streaming-market-data):
+//! the SIP's and, overnight, BOATS's (design 000543; the trading system's `cross_venue/alpaca` runs both with this
+//! protocol), one connection each subscribing the quotes of every source. After connecting the server answers `connected`; the auth and
 //! the subscription are sent at once and answered `authenticated` and `subscription` in order (bm 10-27: the 85 sources'
 //! quotes followed within a second). A message is `{"T": ...}` in a JSON array frame; a quote is
 //! `{"T":"q","S":"GOOGL","bx":"Q","bp":322.9,"bs":80,"ax":"Q","ap":322.93,"as":40,"c":["R"],"z":"C","t":"2026-10-27T19:51:07.196393577Z"}`.
@@ -13,13 +14,13 @@ use std::time::Duration;
 use serde::Deserialize;
 use sonic_rs::LazyValue;
 
+use super::session::EquitySession;
 use crate::local_marks::{
     protocol::{Heartbeat, Observation, Parsed, Session, index, price, strict},
     slot::Quote,
-    sources::FeedMarkets,
+    sources::{Feed, FeedMarkets},
 };
 
-const SIP_URL: &str = "wss://stream.data.alpaca.markets/v2/sip";
 /// Alpaca defines no text ping and a quiet market sends nothing; a WebSocket ping every 15 s keeps the read deadline
 /// (the 10-14 research recorder pinged every 20 s for hours, never timing out).
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
@@ -53,12 +54,54 @@ impl AlpacaCredentials {
     }
 }
 
+/// The HIP-3 US stocks' two Alpaca feeds: the SIP's consolidated NBBO in the day sessions, BOATS's quotes overnight
+/// (docs.trade.xyz: "The overnight trading session is provided by Blue Ocean ATS (BOATS)").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EquityFeed {
+    Sip,
+    Boats,
+}
+
+impl EquityFeed {
+    pub(crate) const ALL: [Self; 2] = [Self::Sip, Self::Boats];
+
+    /// The feed of a session's quotes.
+    pub(crate) const fn of(session: EquitySession) -> Self {
+        match session {
+            EquitySession::Pre | EquitySession::Regular | EquitySession::Post => Self::Sip,
+            EquitySession::Overnight => Self::Boats,
+        }
+    }
+
+    pub(crate) const fn feed(self) -> Feed {
+        match self {
+            Self::Sip => Feed::SIP,
+            Self::Boats => Feed::BOATS,
+        }
+    }
+
+    /// `sip`, `boats`: the frames' `quoteFeed`.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Sip => "sip",
+            Self::Boats => "boats",
+        }
+    }
+
+    const fn url(self) -> &'static str {
+        match self {
+            Self::Sip => "wss://stream.data.alpaca.markets/v2/sip",
+            Self::Boats => "wss://stream.data.alpaca.markets/v1beta1/boats",
+        }
+    }
+}
+
 /// Auth, then every symbol's quotes; both acknowledged.
-pub(crate) fn alpaca_session(symbols: &[String], credentials: &AlpacaCredentials) -> Session {
+pub(crate) fn alpaca_session(feed: EquityFeed, symbols: &[String], credentials: &AlpacaCredentials) -> Session {
     let auth = sonic_rs::json!({"action": "auth", "key": credentials.key_id, "secret": credentials.secret});
     let subscribe = sonic_rs::json!({"action": "subscribe", "quotes": symbols});
     Session {
-        url: SIP_URL.to_string(),
+        url: feed.url().to_string(),
         requests: vec![auth.to_string(), subscribe.to_string()],
         acks: 2,
         heartbeat: Some((Heartbeat::WsPing, HEARTBEAT_INTERVAL)),
@@ -193,9 +236,25 @@ mod tests {
         }
     }
 
+    /// bm 10-28 02:42Z, a second BOATS connection beside the trading system's: its subscription answer as sent, then a
+    /// quote in the REST history's fields (Blue Ocean `B` both sides, tape `N`).
+    #[test]
+    fn boats_answers_as_the_sip() {
+        let coins = r#"{"feed": "sip", "coins": {"xyz:AAPL": {"symbol": "AAPL"}, "xyz:NVDA": {"symbol": "NVDA"}, "xyz:QNT": {"symbol": "QNT"}, "xyz:TSLA": {"symbol": "TSLA"}}}"#;
+        let markets = Hip3SipSources::parse(coins).unwrap().markets;
+        let ack = r#"[{"T":"subscription","trades":[],"quotes":["AAPL","NVDA","QNT","TSLA"],"bars":[],"updatedBars":[],"dailyBars":[],"statuses":[],"corrections":[],"cancelErrors":[]}]"#;
+        assert_eq!(alpaca(ack, &markets), Ok(Parsed::Acked(1)));
+        let frame = r#"[{"T":"q","S":"NVDA","bx":"B","bp":217.61,"bs":100,"ax":"B","ap":219.3,"as":130,"c":[],"z":"N","t":"2026-10-28T00:00:00.034772514Z"}]"#;
+        let quote = Quote { bid: VenuePrice::parse("217.61").unwrap(), ask: VenuePrice::parse("219.3").unwrap() };
+        assert_eq!(alpaca(frame, &markets), Ok(Parsed::Quotes(vec![(1, Some(quote), Some(1_793_145_600_034))])));
+        let session = alpaca_session(EquityFeed::Boats, &["NVDA".to_string()], &AlpacaCredentials::for_test());
+        assert_eq!(session.url, "wss://stream.data.alpaca.markets/v1beta1/boats");
+        assert_eq!(alpaca_session(EquityFeed::Sip, &["NVDA".to_string()], &AlpacaCredentials::for_test()).url, "wss://stream.data.alpaca.markets/v2/sip");
+    }
+
     #[test]
     fn the_session_authenticates_then_subscribes_and_hides_the_secret() {
-        let session = alpaca_session(&["GOOGL".to_string(), "TSLA".to_string()], &AlpacaCredentials::for_test());
+        let session = alpaca_session(EquityFeed::Sip, &["GOOGL".to_string(), "TSLA".to_string()], &AlpacaCredentials::for_test());
         assert_eq!(session.requests[0], r#"{"action":"auth","key":"key","secret":"secret"}"#);
         assert_eq!(session.requests[1], r#"{"action":"subscribe","quotes":["GOOGL","TSLA"]}"#);
         assert_eq!((session.acks, &session.heartbeat), (2, &Some((Heartbeat::WsPing, HEARTBEAT_INTERVAL))));
