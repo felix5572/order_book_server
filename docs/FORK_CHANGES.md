@@ -724,6 +724,6 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   查不到 SIP 历史里的 BOATS 中间价。
 - **输出**: `extHip3MarkPrices` 升 schema 3, 报价字段改成与数据源无关的 `quote*`, 加 `quoteFeed`; 撤回码 `quoteSession`、
   `quoteUnavailable`、`quoteQuiet`; `/extMarkInputs` 加 `boats` 段, 两段的币条目字段改名 `quote`。
-- **离线证据**(hyperliquid-trade `analyze/research/xyz_oracle_sources_20261027/`, d5782161, 10-28 00:05–02:00Z):
+- **离线证据**(hyperliquid-trade `analyze/research/xyz_oracle_sources_20261027/`, b20ac07d, 10-28 00:05–02:00Z):
   85 只都有 BOATS 双边报价; 读价提前 1–1.5 秒最准(同 SIP); oracle 项提前 1 秒 P90 中位: 只用中间价 6.27bp, 按币在线修正 2.68bp;
   8 只冷门股超过 10bp(最大 SHAZ 229bp), 本批不加门控, 上线后按币量化, 开 HIP-3 交易时按币核对。
