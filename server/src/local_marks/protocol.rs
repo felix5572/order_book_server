@@ -101,7 +101,7 @@ impl Protocol {
             (Kind::Spot | Kind::Perp, Venue::Okx) => {
                 let args: Vec<sonic_rs::Value> = symbols.iter().map(|symbol| sonic_rs::json!({"channel": "bbo-tbt", "instId": symbol})).collect();
                 Session {
-                    url: "wss://ws.okx.com:8443/ws/v5/public".to_string(),
+                    url: "wss://ws.okx.com/ws/v5/public".to_string(),
                     requests: vec![json(sonic_rs::json!({"op": "subscribe", "args": args}))],
                     // one `subscribe` event per instrument (bm 10-21)
                     acks: symbols.len(),
