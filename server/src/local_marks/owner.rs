@@ -55,7 +55,7 @@ impl LocalMarks {
         let readings = feeds.readings(now_ms);
         let sip = feeds.sip_reading(now_ms);
         let tick = Tick { now_ms, instant: Instant::now(), stopped: None, node: &Err(NOT_TICKED.to_string()), book: None, readings: &readings, sip: sip.as_ref() };
-        let initial = assemble(&table, &tick, &mut table.hip3_emas());
+        let initial = assemble(&table, &tick, &mut table.hip3_states());
         let (snapshots, receiver) = watch::channel(Arc::new(initial));
         let owner = tokio::spawn(run_owner(table, Arc::clone(&feeds), node_prices, book, snapshots));
         tokio::spawn(async move {
@@ -99,8 +99,8 @@ async fn run_owner(
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut owner_gone = false;
-    // the HIP-3 EMAs' state lives across ticks (design 000535 r2 revision 4)
-    let mut hip3_emas = table.hip3_emas();
+    // the HIP-3 coins' state lives across ticks (design 000535 r2 revision 4, 000537)
+    let mut hip3_states = table.hip3_states();
     loop {
         ticker.tick().await;
         if !owner_gone && node_prices.has_changed().is_err() {
@@ -114,7 +114,7 @@ async fn run_owner(
         let sip = feeds.sip_reading(now_ms);
         let stopped = if owner_gone { Some(OWNER_GONE.to_string()) } else { feeds.stopped() };
         let tick = Tick { now_ms, instant: Instant::now(), stopped, node: &node, book: best.as_ref(), readings: &readings, sip: sip.as_ref() };
-        let snapshot = assemble(&table, &tick, &mut hip3_emas);
+        let snapshot = assemble(&table, &tick, &mut hip3_states);
         drop(snapshots.send_replace(Arc::new(snapshot)));
     }
 }

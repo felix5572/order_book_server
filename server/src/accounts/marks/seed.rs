@@ -440,6 +440,10 @@ pub(crate) struct Hip3Coin {
     /// Exchange-action asset id projected from the checkpoint universe, not inferred from order requests.
     pub(crate) order_asset: u32,
     pub(crate) oracle: Option<u64>,
+    /// When the relayer last wrote `oracle`: the stream entry's `last_update_time` (unix ns); `None` from the checkpoint,
+    /// before the stream writes one. A deployer's update lists coins it did not write with their old time (bm 10-27: xyz
+    /// ACN at 10-25 09:35 in every event while its mark took each block's), so this, not the mark's, dates a write.
+    pub(crate) oracle_time_ns: Option<u64>,
     pub(crate) size_decimals: u32,
     /// `None` when the asset stores no price.
     pub(crate) mark: Option<StoredMark>,
@@ -472,7 +476,7 @@ impl MarkSeed {
                 let oracle = asset.oracle_raw.map(price_units).transpose().map_err(|err| format!("{}: stored oracle {err}", asset.name))?;
                 let external = asset.external_raw.map(price_units).transpose().map_err(|err| format!("{}: stored external {err}", asset.name))?;
                 let last_trade = hip3_last_trades.get(&book_asset).copied();
-                hip3.insert(asset.name.clone(), Hip3Coin { order_asset, size_decimals: asset.size_decimals, mark, oracle, external, last_trade });
+                hip3.insert(asset.name.clone(), Hip3Coin { order_asset, size_decimals: asset.size_decimals, mark, oracle, oracle_time_ns: None, external, last_trade });
             }
         }
         Ok(Self { height, time_ms, native, hip3 })
@@ -743,6 +747,7 @@ pub(crate) mod tests {
         assert_eq!(seed.hip3["xyz:TSLA"], Hip3Coin {
             order_asset: 110_000,
             oracle: Some(357_970),
+            oracle_time_ns: None,
             size_decimals: 3,
             mark: Some(StoredMark { px: 358_320, time_ns: 1_792_391_842_000_000_000 }),
             external: Some(357_970),

@@ -250,7 +250,10 @@ impl MarkState {
                 continue;
             };
             match (exact_price_units(&update.px, coin.size_decimals), update.kind) {
-                (Ok(px), Hip3PriceKind::Oracle) => coin.oracle = Some(px),
+                (Ok(px), Hip3PriceKind::Oracle) => {
+                    coin.oracle = Some(px);
+                    coin.oracle_time_ns = Some(update.time_ns);
+                }
                 (Ok(px), Hip3PriceKind::Mark) => coin.mark = Some(StoredMark { px, time_ns: update.time_ns }),
                 (Ok(px), Hip3PriceKind::External) => coin.external = Some(px),
                 (Err(err), _) => report.errors.push((Stream::Hip3OracleUpdates, format!("block {height} {}: {err}", update.coin))),
@@ -999,6 +1002,7 @@ pub(crate) mod tests {
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         let tsla = marks.state.as_ref().unwrap().hip3["xyz:TSLA"];
         assert_eq!((tsla.mark.map(|mark| mark.px), tsla.oracle, tsla.external, tsla.last_trade), (Some(361_000), Some(361_500), Some(361_500), Some(361_400)), "the last taker fill's price");
+        assert_eq!(tsla.oracle_time_ns, Some(node_time_ns(time).unwrap()), "the oracle entry's own write time (design 000537 r1 §2.1)");
         assert_eq!(marks.price_snapshot().unwrap().hip3["xyz:TSLA"], tsla);
     }
 
@@ -1136,14 +1140,14 @@ pub(crate) mod tests {
         assert_eq!(marks.apply_block(1_001, hip3_only(vec![line(1_001, &[("xyz:NEW", "2.5")])])).unknown_coin_updates, 1);
         assert_eq!(marks.apply_block(1_002, hip3_only(vec![line(1_002, &[("xyz:NEW", "2.75")])])).unknown_coin_updates, 1);
         let mut listing = seed(1_000);
-        listing.hip3.insert("xyz:NEW".to_string(), Hip3Coin { external: None, last_trade: None, order_asset: 110_001, size_decimals: 4, mark: None, oracle: None });
+        listing.hip3.insert("xyz:NEW".to_string(), Hip3Coin { external: None, last_trade: None, order_asset: 110_001, size_decimals: 4, mark: None, oracle: None, oracle_time_ns: None });
         let report = marks.install(listing);
         assert_eq!((report.rebuild, report.errors.as_slice()), (Rebuild::Replayed { blocks: 2 }, [].as_slice()));
         assert_eq!(marks.state.as_ref().unwrap().hip3["xyz:NEW"].mark, Some(written(275)), "block 1002, at 2 decimals");
         run(&mut marks, 1_003..=1_100, &[]);
         marks.apply_block(1_101, hip3_only(vec![line(1_101, &[("xyz:NEW", "2.75")])]));
         let mut coarser = seed(1_100);
-        coarser.hip3.insert("xyz:NEW".to_string(), Hip3Coin { external: None, last_trade: None, order_asset: 110_001, size_decimals: 5, mark: None, oracle: None });
+        coarser.hip3.insert("xyz:NEW".to_string(), Hip3Coin { external: None, last_trade: None, order_asset: 110_001, size_decimals: 5, mark: None, oracle: None, oracle_time_ns: None });
         let report = marks.install(coarser);
         assert_eq!(report.errors.len(), 1, "2.75 has more than one decimal at szDecimals 5");
         let lost = Unavailable::DataLoss { stream: Stream::Hip3OracleUpdates, bound: LossBound::Block(1_101) };

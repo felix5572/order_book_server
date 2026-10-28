@@ -15,8 +15,7 @@ use tokio::time::Instant;
 use super::{
     compute::{LocalMark, MarkInputs, local_mark, weighted_median},
     hip3::{
-        ema::Hip3Ema,
-        snapshot::{Hip3CoinMarks, Hip3Gates, Hip3Table, hip3_marks},
+        snapshot::{Hip3CoinMarks, Hip3CoinState, Hip3Gates, Hip3Table, hip3_marks},
         sources::Hip3SipSources,
     },
     price::VenuePrice,
@@ -244,9 +243,9 @@ impl CoinTable {
         Self { names, book_coins, listings, by_name, feeds, hip3 }
     }
 
-    /// One EMA per HIP-3 coin, none sampled: the owner's state across ticks.
-    pub(crate) fn hip3_emas(&self) -> Vec<Hip3Ema> {
-        vec![Hip3Ema::default(); self.hip3.names().len()]
+    /// One state per HIP-3 coin (its EMA, SIP midpoints and offset carry), none sampled: the owner's across ticks.
+    pub(crate) fn hip3_states(&self) -> Vec<Hip3CoinState> {
+        vec![Hip3CoinState::default(); self.hip3.names().len()]
     }
 
     /// The coins to read from the HL book, in the table's order.
@@ -271,8 +270,8 @@ pub(crate) struct Tick<'a> {
     pub(crate) sip: Option<&'a FeedProjection>,
 }
 
-/// `hip3_emas`: the owner's, one per HIP-3 coin; this tick samples them.
-pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, hip3_emas: &mut [Hip3Ema]) -> LocalMarksSnapshot {
+/// `hip3_states`: the owner's, one per HIP-3 coin; this tick moves them.
+pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, hip3_states: &mut [Hip3CoinState]) -> LocalMarksSnapshot {
     assert!(
         tick.readings.iter().map(|(feed, _, _)| *feed).eq(table.feeds.iter().copied()),
         "the readings follow the sources' feeds"
@@ -285,7 +284,7 @@ pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, hip3_emas: &mut 
         .map(|index| coin_marks(table, index, tick, node_withheld.as_ref(), local_withheld.as_ref()))
         .collect();
     let gates = Hip3Gates { node: node_withheld.as_ref(), book: book_withheld.as_ref(), stopped: stopped.as_ref() };
-    let hip3 = hip3_marks(&table.hip3, tick, table.names.len(), gates, hip3_emas);
+    let hip3 = hip3_marks(&table.hip3, tick, table.names.len(), gates, hip3_states);
     LocalMarksSnapshot {
         computed_ms: tick.now_ms,
         node: tick.node.as_ref().map(|prices| NodeProgress { seed_height: prices.seed_height, height: prices.height, block_time_ms: prices.block_time_ms }).map_err(Clone::clone),
@@ -507,7 +506,7 @@ pub(crate) mod tests {
         book.prices.push((None, None));
         let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
         let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: None, node: &world.node, book: Some(&book), readings: &readings, sip: None };
-        let shared = assemble(&table, &tick, &mut table.hip3_emas());
+        let shared = assemble(&table, &tick, &mut table.hip3_states());
         let frames = |snapshot: &LocalMarksSnapshot| {
             snapshot.coins().map(|(coin, marks)| super::super::prices_view::CoinMarksView::of(snapshot, coin, marks).to_wire()).collect::<Vec<_>>()
         };

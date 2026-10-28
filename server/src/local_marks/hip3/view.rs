@@ -1,17 +1,22 @@
 //! `extHip3MarkPrices` (design 000535 r2 revision 1): one HIP-3 coin's node and local legs at a tick, the frame `data`
 //! of the WS subscription and the rows of `GET /extHip3MarkPrices`. Prices are decimal text in HL's units of the coin.
-//! Its own channel, so `extMarkPrices` (schema 2) keeps its frames byte for byte.
+//! Its own channel, so `extMarkPrices` (schema 2) keeps its frames byte for byte. Schema 2 (design 000537): (1) carries
+//! the oracle's offset from the SIP midpoint, shown in the `carry*` fields.
 
 use serde::Serialize;
 
-use super::snapshot::{Hip3CoinMarks, Hip3LocalLeg, Hip3NodeMark};
+use super::{
+    carry::CarryStatus,
+    snapshot::{Hip3CoinMarks, Hip3LocalLeg, Hip3NodeMark},
+};
 use crate::local_marks::{
+    price::MAX_PERP_DECIMALS,
     prices_view::{INTERVAL_MS, LegView, node_progress, price, withheld},
     slot::Validity,
     snapshot::LocalMarksSnapshot,
 };
 
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +39,8 @@ struct NodeView {
     /// When the node set `markPx` (block time, unix ns).
     mark_time_ns: u64,
     stored_oracle_px: String,
+    /// When the relayer last wrote `storedOraclePx` (block time, unix ns); `null` since the checkpoint until a write.
+    stored_oracle_time_ns: Option<u64>,
     /// `null` until known.
     external_px: Option<String>,
     last_trade_px: Option<String>,
@@ -47,9 +54,23 @@ struct NodeView {
 #[serde(rename_all = "camelCase")]
 struct LocalView {
     predicted_mark_px: String,
-    /// (1): the SIP midpoint as published (`sipMidPx`), clamped to the stored oracle +-50 bp.
+    /// (1): the SIP midpoint plus the offset carry when `carryStatus` is `ready` (`carriedPx`, else `sipMidPx`), as
+    /// published, clamped to the stored oracle +-50 bp.
     oracle_px: String,
     sip_mid_px: String,
+    /// The midpoint plus the carry, rounded as published, before the clamp; `null` unless `carryStatus` is `ready`.
+    carried_px: Option<String>,
+    /// `ready`; `warmup`: this session's writes cannot estimate the persistence yet (too few, or every offset zero);
+    /// `offsetUnknown`: estimated, the last write's offset unknown.
+    carry_status: &'static str,
+    /// `carryRho` times `carryOffsetPx`, USD; `null` unless `ready`.
+    carry_px: Option<f64>,
+    /// The persistence estimated this session; `null` before.
+    carry_rho: Option<f64>,
+    /// This session's pairs, weighted by age.
+    carry_pairs: f64,
+    /// The last write's oracle minus the SIP midpoint at its read, USD; `null` unknown.
+    carry_offset_px: Option<f64>,
     /// (2): the oracle plus the EMA gap; `emaGapPx` is the gap in USD, `emaSampledS` how long the EMA has sampled.
     ema_px: String,
     ema_gap_px: f64,
@@ -67,6 +88,19 @@ struct LocalView {
     node_block_time_ms: u64,
     book_time_ms: u64,
     book_height: u64,
+}
+
+const fn carry_label(status: CarryStatus) -> &'static str {
+    match status {
+        CarryStatus::Ready => "ready",
+        CarryStatus::Warmup => "warmup",
+        CarryStatus::OffsetUnknown => "offsetUnknown",
+    }
+}
+
+/// Price units of a coin in USD.
+fn usd(units: f64, size_decimals: u32) -> f64 {
+    units / 10_f64.powi(MAX_PERP_DECIMALS.cast_signed() - size_decimals.cast_signed())
 }
 
 const fn validity_label(validity: Validity) -> &'static str {
@@ -112,6 +146,7 @@ fn node_view(snapshot: &LocalMarksSnapshot, node: &Hip3NodeMark) -> LegView<Node
         mark_px: px(node.mark),
         mark_time_ns: node.mark_time_ns,
         stored_oracle_px: px(node.stored_oracle),
+        stored_oracle_time_ns: node.oracle_time_ns,
         external_px: node.external.map(px),
         last_trade_px: node.last_trade.map(px),
         seed_height: progress.seed_height,
@@ -125,12 +160,19 @@ fn local_view(snapshot: &LocalMarksSnapshot, local: &Hip3LocalLeg) -> LegView<Lo
     let book = snapshot.book.unwrap_or_else(|| unreachable!("a ready local leg read the book"));
     let px = |units| price(units, local.size_decimals);
     let mark = &local.mark;
+    let carry = &local.carry;
     LegView::Ready(LocalView {
         predicted_mark_px: px(mark.predicted),
         oracle_px: px(mark.oracle),
         sip_mid_px: px(mark.sip_mid),
+        carried_px: mark.carried.map(px),
+        carry_status: carry_label(carry.status),
+        carry_px: carry.carry.map(|units| usd(units, local.size_decimals)),
+        carry_rho: carry.rho,
+        carry_pairs: carry.pairs,
+        carry_offset_px: carry.offset.map(|units| usd(units, local.size_decimals)),
         ema_px: px(mark.ema),
-        ema_gap_px: local.gap / 10_f64.powi(crate::local_marks::price::MAX_PERP_DECIMALS.cast_signed() - local.size_decimals.cast_signed()),
+        ema_gap_px: usd(local.gap, local.size_decimals),
         ema_sampled_s: local.ema_sampled.as_secs_f64(),
         book_px: px(mark.book),
         bid_px: px(local.bid),

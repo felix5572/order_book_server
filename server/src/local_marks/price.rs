@@ -73,6 +73,15 @@ impl VenuePrice {
         wire_units(&self.to_string(), size_decimals)
     }
 
+    /// In the node's price units, unrounded (design 000537: an offset from the SIP midpoint).
+    pub(crate) fn units_f64(self, size_decimals: u32) -> f64 {
+        let exponent = i64::from(MAX_PERP_DECIMALS) - i64::from(size_decimals) - i64::from(self.scale);
+        let power = 10_f64.powi(i32::try_from(exponent.unsigned_abs()).unwrap_or(i32::MAX));
+        #[expect(clippy::cast_precision_loss, reason = "a price's digits; f64 is the offset's precision")]
+        let mantissa = self.mantissa as f64;
+        if exponent >= 0 { mantissa * power } else { mantissa / power }
+    }
+
     /// The value in 10^-decimals; `None` when it has more decimals or is out of range.
     #[cfg(test)]
     pub(crate) fn exact_units(self, decimals: u32) -> Option<u128> {

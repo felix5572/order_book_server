@@ -691,3 +691,22 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - 交叉的 NBBO 记为当前无报价, 不停 feed。
   - 对照表 `server/data/hip3_sip_sources.json` 由 `scripts/discover_hip3_sip_sources.py` 生成, 85 个币。
 - **凭证**: 从环境变量读; `ob_ops.py` 经 `bash -ic` 加载 unit 用户的 bashrc(用户定)。可选参数按各版本 `--help` 给, 回滚安全。
+
+## 2026-10-28 HIP-3 美股本地 mark v2: oracle 项加按币在线估计的偏离延续(设计 000537 r1–r2)
+
+- **起因**: v1 上线后盘后实测(10-27 20:52–24:00Z, 85 只), 提前 1 秒的预测 P90 2.79bp, 比节点已知 mark 的 1.89bp 还差,
+  误差几乎都来自 (1): 盘后点差宽, 中继的聚合价长时间停在点差里同一处(NET 常驻 +15bp, BX/UMC/KSTR 超过 50bp 撞限幅)。
+  用户定"按币在线估计"。
+- **机制**(`local_marks/hip3/carry.rs`):
+  - 偏离 = 写入的 oracle − 区块前 `RELAYER_READ_LEAD_MS` 的 SIP 中间价(按币留几秒中间价历史, 换连接代次或无有效报价就清空)。
+  - ρ̂ = 本美东时段(每天的盘前/正常盘/盘后各算)相邻写入的偏离对上一次偏离的加权回归斜率, 不带截距, 按区块时间衰减, 限 [0, 1]。
+  - (1) = 中间价 + ρ̂ × 上次偏离, 再照 v1 舍入、限幅; (2) 跟着 (1) 走。
+  - 预热(权重不够或偏离全为 0)、读数时已换时段: 不修正, 照出 v1; 帧里 `carryStatus` 标明。
+- **节点状态**: `Hip3Coin` 加 `oracle_time_ns`(oracle 条目自己的 `last_update_time`): 一次更新会列出这次没写的币、带旧时间,
+  只有它能识别中继这次写没写。checkpoint 种子为 `None`。
+- **owner 状态**: 每个 HIP-3 币一份 `Hip3CoinState { ema, sip_mids, carry }`, 代替原来的 `Vec<Hip3Ema>`。
+- **输出**: `extHip3MarkPrices` 升 `schemaVersion: 2`(oraclePx 含义变了), 加 `carry*`、`carriedPx`、节点腿 `storedOracleTimeNs`。
+  主站帧不变; `local_predicted()` 接口不变但 HIP-3 的值变, `extForcedFlow` 的本地距离随之变。
+- **离线证据**(hyperliquid-trade `analyze/research/xyz_oracle_sources_20261027/`, d7c76a42): 只看 (1), 提前 1 秒,
+  P90 中位: 盘后 31 只 5.37 → 2.39bp, 盘前 2.25 → 1.65bp, 正常盘 1.52 → 1.53bp(自动学到 0–0.2), 都和本段事后最优斜率相当;
+  换时段不清零开盘变差, 偏离按节点到达时刻算开盘也变差, 所以清零、留中间价历史。

@@ -40,6 +40,13 @@ pub(crate) struct Entry {
     epoch: u64,
 }
 
+impl Entry {
+    /// The connection it was observed on: another one after an outage (the HIP-3 SIP midpoints' continuity).
+    pub(crate) const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
 #[cfg(test)]
 impl Entry {
     /// An observation on the connection `epoch`.

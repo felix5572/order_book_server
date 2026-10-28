@@ -35,7 +35,7 @@ impl Fixture {
         Self {
             height,
             coins: FxHashMap::from_iter([(coin.into(), Hip3Coin { external: None, last_trade: None,
-                order_asset: u32::try_from(event["order_asset"].as_u64().unwrap()).unwrap(), size_decimals: decimals, oracle: None,
+                order_asset: u32::try_from(event["order_asset"].as_u64().unwrap()).unwrap(), size_decimals: decimals, oracle: None, oracle_time_ns: None,
                 mark: Some(StoredMark { px: exact_price_units(event["before_mark"].as_str().unwrap(), decimals).unwrap(), time_ns: time_ns - 1 }),
             })]),
             inputs: BlockInputs {
