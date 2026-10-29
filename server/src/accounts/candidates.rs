@@ -377,10 +377,11 @@ impl Candidates {
         let (trust, mailbox) = (link.trust.clone(), Arc::clone(&link.mailbox));
         let state = (trust.is_trusted(), trust.withheld_periods());
         let moved = self.book_state.replace(state) != Some(state);
+        let mut noted = ChangeIndex::default();
         if moved {
             self.requested.clear();
             let walk = if state.0 { BookWalk::Pending } else { BookWalk::Untrusted };
-            self.set_walks(&walk, changes);
+            self.set_walks(&walk, changes, &mut noted);
         }
         if !state.0 || !(moved || reevaluated) {
             return;
@@ -393,7 +394,7 @@ impl Candidates {
                 continue;
             }
             let unchanged = previous.map_or(0, |previous| previous.iter().zip(&sequence).take_while(|(old, new)| old == new).count());
-            self.set_suffix_pending(&key.0, &sequence[unchanged..], changes);
+            self.set_suffix_pending(&key.0, &sequence[unchanged..], changes, &mut noted);
             self.walk_version += 1;
             let request = WalkRequest { version: self.walk_version, sequence };
             mailbox.post(key.clone(), request.clone());
@@ -402,21 +403,21 @@ impl Candidates {
     }
 
     /// The listed candidates' estimates back to pending, as updates.
-    fn set_suffix_pending(&mut self, coin: &str, suffix: &[(Address, u64, bool)], changes: &mut CandidateChanges) {
+    fn set_suffix_pending(&mut self, coin: &str, suffix: &[(Address, u64, bool)], changes: &mut CandidateChanges, noted: &mut ChangeIndex) {
         let Some(published) = self.published.get_mut(coin) else { return };
         for (user, _, _) in suffix {
             let Some(candidate) = published.get_mut(user).filter(|candidate| candidate.walk != BookWalk::Pending) else { continue };
             candidate.walk = BookWalk::Pending;
-            note_update(changes, coin, *user, candidate);
+            noted.note(changes, coin, *user, candidate);
         }
     }
 
     /// Every published candidate's walk set to `walk`, as updates.
-    fn set_walks(&mut self, walk: &BookWalk, changes: &mut CandidateChanges) {
+    fn set_walks(&mut self, walk: &BookWalk, changes: &mut CandidateChanges, noted: &mut ChangeIndex) {
         for (coin, published) in &mut self.published {
             for (user, candidate) in published.iter_mut().filter(|(_, candidate)| candidate.walk != *walk) {
                 candidate.walk = walk.clone();
-                note_update(changes, coin, *user, candidate);
+                noted.note(changes, coin, *user, candidate);
             }
         }
     }
@@ -637,14 +638,44 @@ impl Candidates {
     }
 }
 
-/// `candidate` into this refresh's changes: in place of its own entry or update, else as an update.
-fn note_update(changes: &mut CandidateChanges, coin: &str, user: Address, candidate: &Candidate) {
-    let same = |(entry_coin, entry_user, _): &&mut (String, Address, Candidate)| entry_coin == coin && *entry_user == user;
-    if let Some(entry) = changes.enter.iter_mut().chain(changes.update.iter_mut()).find(same) {
-        entry.2 = candidate.clone();
-        return;
+/// This refresh's entries and updates by (coin, user), so that a note finds its own without scanning the lists: after a
+/// mark update `evaluate` lists thousands of candidates and the walk orders send thousands of them back to pending, and
+/// a scan per note made the refresh quadratic (bm perf 2026-10-29: the scan alone 24% of the account owner thread, which
+/// the refreshes kept ~85% busy in runs of up to ~1.3 s, the forced flow frames on it waiting). Built from the lists at
+/// the first note; every change after that goes through `note`.
+#[derive(Default)]
+struct ChangeIndex(Option<FxHashMap<String, FxHashMap<Address, ChangeSlot>>>);
+
+#[derive(Clone, Copy)]
+enum ChangeSlot {
+    Enter(usize),
+    Update(usize),
+}
+
+impl ChangeIndex {
+    /// `candidate` into this refresh's changes: in place of its own entry or update, else as an update.
+    fn note(&mut self, changes: &mut CandidateChanges, coin: &str, user: Address, candidate: &Candidate) {
+        let slots = self.0.get_or_insert_with(|| Self::slots(changes));
+        match slots.get(coin).and_then(|users| users.get(&user)).copied() {
+            Some(ChangeSlot::Enter(at)) => changes.enter[at].2 = candidate.clone(),
+            Some(ChangeSlot::Update(at)) => changes.update[at].2 = candidate.clone(),
+            None => {
+                slots.entry(coin.to_string()).or_default().insert(user, ChangeSlot::Update(changes.update.len()));
+                changes.update.push((coin.to_string(), user, candidate.clone()));
+            }
+        }
     }
-    changes.update.push((coin.to_string(), user, candidate.clone()));
+
+    /// The first entry or update of each (coin, user), entries first: the one a scan of the lists finds.
+    fn slots(changes: &CandidateChanges) -> FxHashMap<String, FxHashMap<Address, ChangeSlot>> {
+        let entries = changes.enter.iter().enumerate().map(|(at, (coin, user, _))| (coin, *user, ChangeSlot::Enter(at)));
+        let updates = changes.update.iter().enumerate().map(|(at, (coin, user, _))| (coin, *user, ChangeSlot::Update(at)));
+        let mut slots: FxHashMap<String, FxHashMap<Address, ChangeSlot>> = FxHashMap::default();
+        for (coin, user, slot) in entries.chain(updates) {
+            slots.entry(coin.clone()).or_default().entry(user).or_insert(slot);
+        }
+        slots
+    }
 }
 
 /// The row's index entry: a computed price only.
@@ -1009,5 +1040,106 @@ mod walk_tests {
         assert_eq!(walk_as_of(walk, Some((true, 1))), BookWalk::Pending, "a frame sent before, going out now");
         assert_eq!(walk_as_of(walk, Some((true, 0))), walk.clone());
         assert_eq!(walk_as_of(walk, None), walk.clone(), "no book: as recorded");
+    }
+
+    /// The scan `ChangeIndex` stands in for: in place of the first entry or update of the (coin, user), else appended as
+    /// an update.
+    fn note_by_scan(changes: &mut CandidateChanges, coin: &str, user: Address, candidate: &Candidate) {
+        let same = |(entry_coin, entry_user, _): &&mut (String, Address, Candidate)| entry_coin == coin && *entry_user == user;
+        if let Some(entry) = changes.enter.iter_mut().chain(changes.update.iter_mut()).find(same) {
+            entry.2 = candidate.clone();
+            return;
+        }
+        changes.update.push((coin.to_string(), user, candidate.clone()));
+    }
+
+    /// A candidate told apart by its size.
+    fn sized(size_raw: i64) -> Candidate {
+        Candidate {
+            size_raw,
+            size_decimals: 0,
+            height: 3,
+            mark_raw: 1_000,
+            liquidation_px: 0.5,
+            distance_bps: 10.0,
+            isolated: false,
+            pool_positions: 1,
+            cash_estimated: false,
+            cross_pool_coins: Vec::new(),
+            order: ExpectedOrder::of(size_raw, 1_000, Cooldown::None),
+            walk: BookWalk::Pending,
+        }
+    }
+
+    type Note = (&'static str, Address, Candidate);
+
+    /// `evaluate`'s lists at a mark update - users `0..listed` entered, `listed..2 × listed` updated, user `n` on coin
+    /// `n mod 3`, and a last update repeating user 0's entry - then the notes, each told apart by its size: `random` from
+    /// a fixed pseudo-random walk over three times as many users (listed as entries, as updates, or not at all, many
+    /// noted more than once), then user 0 (listed twice), the first update and an unlisted user twice (sizes −100,001 to
+    /// −100,004).
+    fn listed_then_noted(listed: u64, random: usize) -> (CandidateChanges, Vec<Note>) {
+        const COINS: [&str; 3] = ["PUMP", "ENA", "xyz:TSLA"];
+        let coin = |n: u64| COINS[usize::try_from(n % 3).unwrap()];
+        let user = |n: u64| Address::left_padding_from(&n.to_be_bytes());
+        let row = |n: u64| (coin(n).to_string(), user(n), sized(n.cast_signed()));
+        let mut update: Vec<_> = (listed..2 * listed).map(row).collect();
+        update.push((coin(0).to_string(), user(0), sized(-1)));
+        let changes = CandidateChanges { version: 1, height: 3, time_ms: 4, enter: (0..listed).map(row).collect(), update, exit: Vec::new() };
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let walk = (0..random).map(|_| {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % (3 * listed)
+        });
+        let random_notes = walk.zip(2_i64..).map(|(n, size)| (coin(n), user(n), sized(-size)));
+        let last = [0, listed, 3 * listed, 3 * listed].into_iter().zip(100_001_i64..).map(|(n, size)| (coin(n), user(n), sized(-size)));
+        (changes, random_notes.chain(last).collect())
+    }
+
+    fn noted(changes: &CandidateChanges, notes: &[Note]) -> (CandidateChanges, CandidateChanges) {
+        let (mut by_scan, mut by_index, mut index) = (changes.clone(), changes.clone(), ChangeIndex::default());
+        for (coin, user, candidate) in notes {
+            note_by_scan(&mut by_scan, coin, *user, candidate);
+            index.note(&mut by_index, coin, *user, candidate);
+        }
+        (by_scan, by_index)
+    }
+
+    /// Bm perf 2026-10-29: each note scanned this refresh's lists for its own entry or update, quadratic at a mark update's
+    /// size. The index leaves every note where the scan put it - the same lists, in the same order.
+    #[test]
+    fn indexed_notes_leave_the_changes_a_scan_leaves() {
+        let (listed, notes) = listed_then_noted(30, 300);
+        let (by_scan, by_index) = noted(&listed, &notes);
+        assert_eq!(by_index, by_scan);
+        assert_eq!(by_index.enter.len(), listed.enter.len());
+        assert!(by_index.update.len() > listed.update.len() + 1, "unlisted users of the walk appended");
+        assert_eq!(by_index.enter[0].2.size_raw, -100_001, "user 0's first match is its entry");
+        assert_eq!(by_index.update[30].2.size_raw, -1, "user 0's repeated update untouched");
+        assert_eq!(by_index.update[0].2.size_raw, -100_002, "the first update, in place");
+        let unlisted = Address::left_padding_from(&90_u64.to_be_bytes());
+        let appended: Vec<i64> = by_index.update.iter().filter(|(_, user, _)| *user == unlisted).map(|(_, _, candidate)| candidate.size_raw).collect();
+        assert_eq!(appended, [-100_004], "the unlisted user appended once, then noted in place");
+    }
+
+    /// The scan against the index at a mark update's size: 20,000 listed, 20,000 notes.
+    #[test]
+    #[ignore = "timing; run with --release when investigating the account owner thread"]
+    fn indexed_notes_against_a_scan_at_a_mark_updates_size() {
+        let (listed, notes) = listed_then_noted(10_000, 20_000);
+        let timed = |note: &mut dyn FnMut(&mut CandidateChanges, &Note)| {
+            let mut changes = listed.clone();
+            let started = std::time::Instant::now();
+            for each in &notes {
+                note(&mut changes, each);
+            }
+            (started.elapsed(), changes)
+        };
+        let (scan, by_scan) = timed(&mut |changes, (coin, user, candidate)| note_by_scan(changes, coin, *user, candidate));
+        let mut index = ChangeIndex::default();
+        let (indexed, by_index) = timed(&mut |changes, (coin, user, candidate)| index.note(changes, coin, *user, candidate));
+        assert_eq!(by_index, by_scan);
+        eprintln!("{} listed, {} notes: scan {scan:?}, index {indexed:?}", listed.enter.len() + listed.update.len(), notes.len());
+        assert!(indexed < scan);
     }
 }

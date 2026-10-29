@@ -738,3 +738,18 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   超过 60 秒才从头来。漏掉的中继采样占 EMA 权重 1 − exp(−空档/150 秒): 15 秒 9.5%, 60 秒 33%, 误差是这部分权重乘 x 在空档里的变化。
 - **有预测时的精度**(同一天, 提前 1 秒, 预测 / 节点已知 mark 的 P90/P99 bp): 正常盘 2.01/6.4 对 3.35/9.9, 盘前 2.28/10.9 对 2.53/10.6,
   夜盘 1.73/11.4 对 1.70/6.8。
+
+## 2026-10-29 清算候选刷新: 一次刷新里的变化登记按(币, 用户)索引, 不再逐条扫描(用户 10-29 定)
+
+- **起因**: hyperliquid-trade forced_flow 首晚实盘复盘(`analyze/research/forced_flow_live_20261028/`)里, 发晚的 IOC 用的都是止损成交前的帧;
+  止损成交那一块之后, OB 0.8–1.4 秒不出任何币的被迫成交帧。账户线程 `accounts-owner` CPU 99%; 每 100ms 读一次 `/metrics` 共 16 秒,
+  清算候选刷新占 85%, 每 1–3 秒一次独占 0.6–1.3 秒, 期间账户视图落后盘口 0→15–22 块。`perf`(15 秒, 99Hz): `note_update` 自身 23.9%,
+  另有 13.9% 在 libc 的 ≤32 字节比较。
+- **原因**: `note_update` 每记一条候选变化, 都线性扫一遍本次的 `enter`/`update` 找同一(币, 用户)。mark 更新时 `evaluate` 先列出上万条,
+  `walk_book` 再把上万条的盘口估计改回 pending、逐条记, 是 n×m。
+- **改动**(`accounts/candidates.rs`): `ChangeIndex` 在 `walk_book` 第一次记录时由两个列表建出(每个(币, 用户)取第一条, entries 在前,
+  即扫描找到的那条), 之后的记录都经过它。输出的列表内容和顺序不变, `CandidateChanges` 结构不变。
+- **验证**: 新测试 `indexed_notes_leave_the_changes_a_scan_leaves` 与原扫描逐条对照(含同一用户既在 entries 又在 updates、未列出的用户
+  追加后再记); 计时测试(`#[ignore]`, release): 20,001 条、20,004 次记录, 扫描 316ms、索引 4.3ms(开发机)。
+- **未改**: 多币持仓账户在每次 mark 更新时全部重算(`reindex` / `replayed_row` / 按币名查 `CoinBook`, perf 约 37%), 以及刷新与被迫成交帧
+  共用一个线程; 部署后再量。
