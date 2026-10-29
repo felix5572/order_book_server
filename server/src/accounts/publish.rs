@@ -14,7 +14,8 @@ use tokio::sync::{broadcast, watch};
 
 use super::{
     book::{AccountBook, QueryError, Touched, Unavailable},
-    candidates::{CandidateChanges, Refresh},
+    candidates::{CandidateChanges, Candidates, Refresh},
+    flow_accounts::FlowAccountsFeed,
     forced_flow_owner::{FlowFrame, FlowOutput},
     marks::{MarksAt, NativePriceSnapshot, NodeMarks},
     view::CoinPositionsFrame,
@@ -33,8 +34,9 @@ pub(crate) enum AccountsFrame {
     WithdrawAll { reason: String },
     /// The coin left the anchor universe: its subscriptions end.
     WithdrawCoin { coin: String, reason: String },
-    /// One refresh of the liquidation candidates (design 000443): each candidate subscription projects it.
-    Candidates(CandidateChanges),
+    /// One change of the liquidation candidates (design 000443): each candidate subscription projects it; the forced
+    /// flow's copy of the view takes the same `Arc` (review 000563 r2).
+    Candidates(Arc<CandidateChanges>),
     /// The liquidation candidates stopped being available: every candidate subscription ends.
     CandidatesWithdrawn { reason: String },
     /// A coin's new forced-flow content of one tier (design 000451): each subscription admitting it sends its view.
@@ -96,12 +98,39 @@ pub(crate) struct Publisher {
     available: bool,
     /// Whether the node marks were.
     marks_available: bool,
+    /// The forced flow's copy of the view (review 000563): `None` without a forced flow thread.
+    flow: Option<FlowAccountsFeed>,
 }
 
 impl Publisher {
     pub(crate) fn new(subscriptions: CoinSubscriptions, frames: broadcast::Sender<Arc<AccountsFrame>>) -> Self {
         let (prices, _) = watch::channel(Err(marks_unavailable(&Unavailable::Initializing)));
-        Self { subscriptions, frames, prices, available: false, marks_available: false }
+        Self { subscriptions, frames, prices, available: false, marks_available: false, flow: None }
+    }
+
+    /// The forced flow thread's copy of the view, fed from now on.
+    pub(crate) fn attach_flow(&mut self, feed: FlowAccountsFeed) {
+        self.flow = Some(feed);
+    }
+
+    /// After an input or an anchor, before the candidates' refresh: the forced flow's copy brought to the view as it
+    /// stands (`FlowAccountsFeed::on_applied`).
+    pub(crate) fn flow_applied(&mut self, book: &AccountBook, marks: Option<&dyn MarksAt>, touched: &Touched, candidates: &Candidates) {
+        self.with_flow(|feed| feed.on_applied(book, marks, touched, candidates));
+    }
+
+    /// After a refresh: the height the candidates are confirmed at, for the forced flow's copy.
+    pub(crate) fn flow_candidates_confirmed(&mut self, candidates: &Candidates) {
+        self.with_flow(|feed| feed.on_candidates_confirmed(candidates));
+    }
+
+    /// A step of the feed; the forced flow thread found gone withdraws the forced flow, once.
+    fn with_flow(&mut self, step: impl FnOnce(&mut FlowAccountsFeed)) {
+        let Some(feed) = &mut self.flow else { return };
+        step(feed);
+        if let Some(reason) = feed.take_ended() {
+            send_frame(&self.frames, AccountsFrame::ForcedFlowWithdrawn { reason }, "forcedFlowWithdrawn");
+        }
     }
 
     /// The node prices from now on; closed once the owner (holding this publisher) is gone.
@@ -200,31 +229,55 @@ impl Publisher {
     }
 
     /// A candidates refresh as one frame.
-    pub(crate) fn publish_candidates(&self, refresh: Refresh) {
+    /// The candidates' one exit (review 000563 r2 revision 3: refresh, book walk and stop alike): the broadcast and the
+    /// forced flow's copy.
+    pub(crate) fn publish_candidates(&mut self, refresh: Refresh) {
         match refresh {
             Refresh::Unchanged => {}
-            Refresh::Changes(changes) => self.send(AccountsFrame::Candidates(changes), "candidates"),
-            Refresh::Withdrawn(reason) => self.send(AccountsFrame::CandidatesWithdrawn { reason }, "candidatesWithdrawn"),
+            Refresh::Changes(changes) => {
+                let changes = Arc::new(changes);
+                self.with_flow(|feed| feed.on_candidates(&changes));
+                self.send(AccountsFrame::Candidates(changes), "candidates");
+            }
+            Refresh::Withdrawn(reason) => {
+                self.with_flow(|feed| feed.on_candidates_withdrawn(&reason));
+                self.send(AccountsFrame::CandidatesWithdrawn { reason }, "candidatesWithdrawn");
+            }
         }
     }
 
+    fn send(&self, frame: AccountsFrame, kind: &str) {
+        send_frame(&self.frames, frame, kind);
+    }
+}
+
+/// The forced flow thread's side of the push (review 000563): its frames on the same broadcast.
+pub(crate) struct FlowPublisher {
+    frames: broadcast::Sender<Arc<AccountsFrame>>,
+}
+
+impl FlowPublisher {
+    pub(crate) const fn new(frames: broadcast::Sender<Arc<AccountsFrame>>) -> Self {
+        Self { frames }
+    }
+
     /// The forced-flow frames of one step.
-    pub(crate) fn publish_forced_flow(&self, output: FlowOutput) {
+    pub(crate) fn publish(&self, output: FlowOutput) {
         for frame in output.frames {
-            self.send(AccountsFrame::ForcedFlow(frame), "forcedFlow");
+            send_frame(&self.frames, AccountsFrame::ForcedFlow(frame), "forcedFlow");
         }
     }
 
     /// The forced flow ended until restart.
-    pub(crate) fn withdraw_forced_flow(&self, reason: String) {
-        self.send(AccountsFrame::ForcedFlowWithdrawn { reason }, "forcedFlowWithdrawn");
+    pub(crate) fn withdraw(&self, reason: String) {
+        send_frame(&self.frames, AccountsFrame::ForcedFlowWithdrawn { reason }, "forcedFlowWithdrawn");
     }
+}
 
-    fn send(&self, frame: AccountsFrame, kind: &str) {
-        ACCOUNTS_FRAMES_TOTAL.with_label_values(&[kind]).inc();
-        // an error only means no connection is listening right now
-        drop(self.frames.send(Arc::new(frame)));
-    }
+fn send_frame(frames: &broadcast::Sender<Arc<AccountsFrame>>, frame: AccountsFrame, kind: &str) {
+    ACCOUNTS_FRAMES_TOTAL.with_label_values(&[kind]).inc();
+    // an error only means no connection is listening right now
+    drop(frames.send(Arc::new(frame)));
 }
 
 fn marks_unavailable(reason: &Unavailable) -> String {

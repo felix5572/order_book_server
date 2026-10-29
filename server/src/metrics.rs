@@ -680,11 +680,31 @@ lazy_static! {
         &["read"]
     ).expect("metric can be created");
 
-    /// The forced flow's work on the account owner task per step (`query`, `read`, `tick`, `local`).
+    /// The forced flow's work per step (`query`, `read`, `tick`, `local`, `accounts`) on its own thread, apart from the
+    /// account owner since hyperliquid-trade review 000563 (the name kept).
     pub static ref FORCED_FLOW_OWNER_SECONDS: HistogramVec = HistogramVec::new(
-        HistogramOpts::new("orderbook_forced_flow_owner_seconds", "Forced flow step time on the account owner task")
+        HistogramOpts::new("orderbook_forced_flow_owner_seconds", "Forced flow step time on the forced flow thread")
             .buckets(vec![0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5]),
         &["step"]
+    ).expect("metric can be created");
+
+    /// The forced flow's copy of the account view sent again whole (review 000563 r2): the queue was `full`, the copy
+    /// `requested` it (an event out of order), or the forced flow thread is gone (`closed`).
+    pub static ref FORCED_FLOW_ACCOUNTS_RESYNC_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_forced_flow_accounts_resync_total", "Forced flow account copy resynchronizations"),
+        &["cause"]
+    ).expect("metric can be created");
+
+    /// The account events waiting for the forced flow thread after the owner's last send.
+    pub static ref FORCED_FLOW_ACCOUNTS_QUEUE_DEPTH: IntGauge = IntGauge::new(
+        "orderbook_forced_flow_accounts_queue_depth",
+        "Account events queued for the forced flow thread"
+    ).expect("metric can be created");
+
+    /// The owner's time to build the forced flow's whole copy of the account view.
+    pub static ref FORCED_FLOW_ACCOUNTS_SNAPSHOT_SECONDS: Histogram = Histogram::with_opts(
+        HistogramOpts::new("orderbook_forced_flow_accounts_snapshot_seconds", "Forced flow account snapshot build time")
+            .buckets(vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
     ).expect("metric can be created");
 
     /// Entries the forced flow walked (each alone over its side's levels).
@@ -839,6 +859,9 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(FORCED_FLOW_LOCK_WAIT_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(FORCED_FLOW_LOCK_HOLD_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(FORCED_FLOW_OWNER_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(FORCED_FLOW_ACCOUNTS_RESYNC_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(FORCED_FLOW_ACCOUNTS_QUEUE_DEPTH.clone())).ok();
+    REGISTRY.register(Box::new(FORCED_FLOW_ACCOUNTS_SNAPSHOT_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(FORCED_FLOW_WALKED_ENTRIES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.clone())).ok();

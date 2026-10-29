@@ -15,7 +15,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
     book::{AccountBook, Replayed},
-    forced_flow::LiquidationInput,
     cooldown::Cooldown,
     liquidation::{LiquidationPx, RowMark},
     marks::MarksAt,
@@ -200,14 +199,12 @@ impl CoinIndex {
         }
     }
 
-    /// The rows whose price is within `max_bps` of either mark (USD), and some just outside it: a long's sale below the
-    /// higher mark, a short's buy above the lower one, both past it included.
+    /// The rows whose price is within `max_bps` of either mark (USD), and some just outside it (`liquidation_band`).
     fn within(&self, marks: (f64, f64), max_bps: u32) -> impl Iterator<Item = (Address, IndexedRow)> + '_ {
-        let cap = f64::from(max_bps) / 1e4;
-        let low = (marks.0.min(marks.1) * (1.0 - cap - RANGE_MARGIN)).max(0.0).to_bits();
-        let high = (marks.0.max(marks.1) * (1.0 + cap + RANGE_MARGIN)).to_bits();
-        let longs = self.longs.range((low, Address::ZERO)..);
-        let shorts = self.shorts.range(..=(high, Address::repeat_byte(0xff)));
+        let (low, high) = liquidation_band(marks, max_bps);
+        // positive prices order as their bits
+        let longs = self.longs.range((low.to_bits(), Address::ZERO)..);
+        let shorts = self.shorts.range(..=(high.to_bits(), Address::repeat_byte(0xff)));
         longs.chain(shorts).map(|(_, user)| (*user, self.rows[user]))
     }
 
@@ -215,6 +212,19 @@ impl CoinIndex {
     fn near(&self, mark: f64) -> impl Iterator<Item = (Address, IndexedRow)> + '_ {
         self.within((mark, mark), MAX_CANDIDATE_DISTANCE_BPS)
     }
+}
+
+/// The liquidation prices (USD) within `max_bps` of either mark, and some just outside it: a long's at or above the
+/// low end (its sale below the higher mark), a short's at or below the high end (its buy above the lower one), both
+/// past the mark included. The index and the forced flow's copy of the candidates read through it alike.
+pub(crate) fn liquidation_band(marks: (f64, f64), max_bps: u32) -> (f64, f64) {
+    let cap = f64::from(max_bps) / 1e4;
+    ((marks.0.min(marks.1) * (1.0 - cap - RANGE_MARGIN)).max(0.0), marks.0.max(marks.1) * (1.0 + cap + RANGE_MARGIN))
+}
+
+/// Whether a row of `size_raw` with its liquidation price at `liquidation_px` is in `liquidation_band`'s `band`.
+pub(crate) fn in_liquidation_band(size_raw: i64, liquidation_px: f64, band: (f64, f64)) -> bool {
+    if size_raw > 0 { liquidation_px >= band.0 } else { liquidation_px <= band.1 }
 }
 
 /// The trusted rows' height and block time, and the anchor they replay from.
@@ -465,38 +475,17 @@ impl Candidates {
         Refresh::Changes(changes)
     }
 
-    /// The coin's indexed rows within `max_bps` of the node mark or of the local mark (both 10^-(6 - szDecimals) USD),
-    /// each with its next market liquidation order (design 000451 r5 revision 15: the index, not the published list cut
-    /// at the node distance); `Err` while the candidates are not trusted.
-    pub(crate) fn liquidation_inputs(
-        &self,
-        book: &AccountBook,
-        coin: &str,
-        node_mark_raw: u64,
-        local_mark_raw: Option<u64>,
-        max_bps: u32,
-    ) -> Result<Vec<LiquidationInput>, String> {
-        if let Some(reason) = &self.stopped {
-            return Err(reason.clone());
-        }
-        self.trusted.ok_or("the liquidation candidates are not available")?;
-        let Some(index) = self.index.get(coin) else { return Ok(Vec::new()) };
-        let mark = |raw: u64| super::checkpoint::mark_px(raw, index.size_decimals);
-        let marks = (mark(node_mark_raw), mark(local_mark_raw.unwrap_or(node_mark_raw)));
-        Ok(index
-            .within(marks, max_bps)
-            .map(|(user, row)| LiquidationInput {
-                user,
-                size_raw: row.size_raw,
-                liquidation_px: row.liquidation_px,
-                cash_estimated: row.cash_estimated,
-                order: ExpectedOrder::of(row.size_raw, node_mark_raw, book.cooldown(&user)),
-            })
-            .collect())
-    }
-
     pub(crate) fn count(&self) -> usize {
         self.published.values().map(FxHashMap::len).sum()
+    }
+
+    /// The (height, block time) the candidates are confirmed at while trusted: every refresh moves it, whether or not a
+    /// candidate changed (review 000563 r1 P2-2: progress apart from the content's `version`).
+    pub(crate) fn confirmed(&self) -> Option<(u64, u64)> {
+        if self.stopped.is_some() {
+            return None;
+        }
+        self.trusted.map(|trusted| (trusted.height, trusted.time_ms))
     }
 
     /// Every published candidate; `Err` while untrusted.

@@ -1495,6 +1495,11 @@ impl AccountBook {
         self.coins.keys().map(String::as_str)
     }
 
+    /// The coin's open positions: each holder's signed size, raw (10^-szDecimals); nothing outside the universe.
+    pub(crate) fn open_positions_raw(&self, coin: &str) -> impl Iterator<Item = (Address, i64)> + '_ {
+        self.coins.get(coin).into_iter().flat_map(|book| book.records.iter()).filter(|(_, record)| record.size_raw != 0).map(|(user, record)| (*user, record.size_raw))
+    }
+
     /// `user`'s signed position in `coin`, raw (10^-szDecimals); 0 without one.
     pub(crate) fn position_raw(&self, user: Address, coin: &str) -> i64 {
         self.coins.get(coin).and_then(|book| book.records.get(&user)).map_or(0, |record| record.size_raw)

@@ -11,9 +11,10 @@ use tokio::{runtime::Builder, sync::oneshot, task::JoinHandle};
 /// keep normal Tokio semantics. The OS thread owns its executor until that task
 /// is dropped, including an abort before its first poll. The thread then exits; dropping a handle alone still detaches, like `tokio::spawn`.
 /// Cancellation is cooperative: a synchronous step finishes before it takes effect.
-pub(super) fn spawn_owner(future: impl Future<Output = ()> + Send + 'static) -> io::Result<JoinHandle<()>> {
+/// `name`: the thread's (`accounts-owner`, `forced-flow`: each owner on its own, review 000563).
+pub(super) fn spawn_owner(name: &'static str, future: impl Future<Output = ()> + Send + 'static) -> io::Result<JoinHandle<()>> {
     let (ready, started) = mpsc::sync_channel(1);
-    thread::Builder::new().name("accounts-owner".into()).spawn(move || {
+    thread::Builder::new().name(name.into()).spawn(move || {
         let runtime = match Builder::new_current_thread().enable_time().build() {
             Ok(runtime) => runtime,
             Err(error) => { drop(ready.send(Err(error))); return; }
@@ -28,7 +29,7 @@ pub(super) fn spawn_owner(future: impl Future<Output = ()> + Send + 'static) -> 
         // Only lifetime notification: task errors are delivered by its JoinHandle.
         runtime.block_on(async { drop(stopped.await); });
     })?;
-    started.recv().map_err(|error| io::Error::other(format!("account owner thread failed to start: {error}")))?
+    started.recv().map_err(|error| io::Error::other(format!("{name} thread failed to start: {error}")))?
 }
 
 #[cfg(test)]
@@ -45,7 +46,7 @@ mod tests {
     async fn owner_timer_queries_and_completion_run_on_its_own_thread() {
         let caller = thread::current().id();
         let (reply, answer) = oneshot::channel();
-        let owner = spawn_owner(async move {
+        let owner = spawn_owner("accounts-owner", async move {
             let before = thread::current().id();
             tokio::time::sleep(Duration::from_millis(5)).await;
             assert_eq!(before, thread::current().id());
@@ -60,7 +61,7 @@ mod tests {
     async fn abort_closes_owner_state_and_join_reports_cancellation() {
         let (started, ready) = oneshot::channel();
         let (state, mut view) = tokio::sync::watch::channel(0);
-        let owner = spawn_owner(async move {
+        let owner = spawn_owner("accounts-owner", async move {
             let _state = state;
             started.send(()).unwrap();
             std::future::pending::<()>().await;
@@ -74,7 +75,7 @@ mod tests {
     #[tokio::test]
     async fn panic_is_reported_and_closes_owner_state() {
         let (state, mut view) = tokio::sync::watch::channel(0);
-        let owner = spawn_owner(async move {
+        let owner = spawn_owner("accounts-owner", async move {
             let _state = state;
             panic!("simulated account invariant failure");
         }).unwrap();
@@ -123,7 +124,7 @@ mod tests {
             go.send(()).unwrap();
             thread::sleep(Duration::from_millis(1_600));
         };
-        let owner = if isolated { spawn_owner(work).unwrap() } else { tokio::spawn(work) };
+        let owner = if isolated { spawn_owner("accounts-owner", work).unwrap() } else { tokio::spawn(work) };
         owner.await.unwrap();
         // The producer normally finished before the owner; never join on a network worker.
         tokio::task::spawn_blocking(move || producer.join().unwrap()).await.unwrap();

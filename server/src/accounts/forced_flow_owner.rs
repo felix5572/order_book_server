@@ -1,6 +1,7 @@
-//! The forced flow's owner side (design 000451 r4 revisions 9–11, r5 revisions 13–14). Lives in the account view's
-//! owner task: which (coin, tier) is demanded - by a WS subscription's guard or an HTTP query -, each one's pipeline of
-//! two reads (the band's trigger orders, then the entries' walks, both in the flow reader task), and its latest frame.
+//! The forced flow's owner side (design 000451 r4 revisions 9–11, r5 revisions 13–14). Lives on the forced flow's own
+//! thread (hyperliquid-trade review 000563), reading the account view through its copy (`flow_accounts`): which (coin,
+//! tier) is demanded - by a WS subscription's guard or an HTTP query -, each one's pipeline of two reads (the band's
+//! trigger orders, then the entries' walks, both in the flow reader task), and its latest frame.
 //!
 //! A demanded (coin, tier) runs its pipeline once per tier period (100 ms for 10 and 50 bp, 1 s, 5 s); a local leg that turns withheld
 //! or ended starts it at once. The frame is published when its content differs from the last published one (r5:
@@ -17,11 +18,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{oneshot, watch};
 
 use super::{
-    book::AccountBook,
-    candidates::Candidates,
+    flow_accounts::{AccountsCopy, FlowAccounts},
     forced_flow::{CoinFlow, CoinInputs, Entry, Tier, TriggerInput, Unplaced, coin_flow, cumulative_sizes, prefix_sizes},
     forced_flow_reader::{FlowJob, FlowJobKind, FlowMailbox, FlowRead, SideJob, SideWalks, WalkItem},
-    marks::MarksAt,
     walk::{Limit, WalkPart, walk_units},
 };
 use crate::{
@@ -118,7 +117,7 @@ pub(crate) struct FlowEntry {
 /// What a frame says of a coin; compared to decide whether a frame goes out.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FlowContent {
-    /// The flow of the coin is not available: the account view, the node marks or the book, with the reason.
+    /// The flow of the coin is not available: the account accounts, the node marks or the book, with the reason.
     Unavailable(String),
     Ready(Box<ReadyFlow>),
 }
@@ -180,6 +179,8 @@ enum LocalLink {
 /// What a band read left for the walks to complete.
 struct Walking {
     version: u64,
+    /// The account copy's generation the content stands on (review 000566 r1 P2-1).
+    generation: u64,
     heights: FlowHeights,
     ready: ReadyFlow,
     trust: (bool, u64),
@@ -191,8 +192,8 @@ struct Walking {
 
 enum Stage {
     Idle,
-    /// `local_ready`: whether the local leg was ready when the read was posted.
-    Reading { version: u64, lo: Px, hi: Px, local_ready: bool },
+    /// `local_ready`: whether the local leg was ready when the read was posted; `generation`: the account copy's.
+    Reading { version: u64, lo: Px, hi: Px, local_ready: bool, generation: u64 },
     Walking(Box<Walking>),
 }
 
@@ -225,13 +226,6 @@ struct Waiter {
     remaining: FxHashSet<String>,
     frames: Vec<Arc<FlowFrame>>,
     reply: oneshot::Sender<Result<Vec<Arc<FlowFrame>>, String>>,
-}
-
-/// What a step reads of the account view.
-pub(crate) struct OwnerView<'a> {
-    pub(crate) book: &'a AccountBook,
-    pub(crate) marks: Option<&'a dyn MarksAt>,
-    pub(crate) candidates: &'a Candidates,
 }
 
 pub(crate) struct ForcedFlow {
@@ -279,31 +273,61 @@ impl ForcedFlow {
         }
     }
 
-    /// Every demanded (coin, tier) whose period has run starts its pipeline.
-    pub(crate) fn tick(&mut self, now: Instant, view: &OwnerView<'_>) -> FlowOutput {
+    /// The copy of the account view stopped serving, or serves another generation (review 000563 r2 revision 2,
+    /// 000566 r1 P2-1): every frame goes `Unavailable` at once, not at each key's next period, and the reads under way
+    /// are voided - their answers find no stage to fit. The frames a waiting query has collected stood on the same
+    /// facts: their coins are computed again for it (review 000566 r2). A copy serving a new generation is computed at
+    /// once; the queries waiting are answered by the computations started again.
+    pub(crate) fn withdraw_accounts(&mut self, reason: &str, now: Instant, accounts: &FlowAccounts) -> FlowOutput {
         let mut output = FlowOutput::default();
-        for (coin, tier) in self.demanded(view) {
+        let mut keys: Vec<(String, Tier)> = self.pipelines.keys().cloned().collect();
+        keys.sort_unstable();
+        for key in keys {
+            if let Some(pipeline) = self.pipelines.get_mut(&key) {
+                pipeline.stage = Stage::Idle;
+            }
+            self.publish(&key, FlowHeights::default(), FlowContent::Unavailable(reason.to_string()), false, &mut output);
+        }
+        for waiter in &mut self.waiters {
+            waiter.remaining.extend(waiter.frames.drain(..).map(|frame| frame.coin.clone()));
+        }
+        if accounts.serving().is_ok() {
+            let mut wanted: Vec<(String, Tier)> = self.wanted(accounts).into_iter().collect();
+            wanted.sort_unstable();
+            for (coin, tier) in wanted {
+                self.start(&coin, tier, now, accounts, &mut output);
+            }
+        }
+        self.follow_ups(now, accounts, &mut output);
+        self.answer_waiters();
+        output
+    }
+
+    /// Every demanded (coin, tier) whose period has run starts its pipeline.
+    pub(crate) fn tick(&mut self, now: Instant, accounts: &FlowAccounts) -> FlowOutput {
+        let mut output = FlowOutput::default();
+        for (coin, tier) in self.demanded(accounts) {
             let due = self.pipelines.get(&(coin.clone(), tier)).is_none_or(|pipeline| {
                 matches!(pipeline.stage, Stage::Idle) && pipeline.started.is_none_or(|started| now.duration_since(started) >= tier.period())
             });
             if due {
-                self.start(&coin, tier, now, view, &mut output);
+                self.start(&coin, tier, now, accounts, &mut output);
             }
         }
         output
     }
 
     /// A new local snapshot, or its channel closed: every wanted (coin, tier) checked against the local leg now.
-    pub(crate) fn on_local(&mut self, closed: bool, now: Instant, view: &OwnerView<'_>) -> FlowOutput {
+    pub(crate) fn on_local(&mut self, closed: bool, now: Instant, accounts: &FlowAccounts) -> FlowOutput {
         if closed {
             self.local = LocalLink::Ended;
         }
-        let wanted = self.wanted(view);
+        let wanted = self.wanted(accounts);
         let mut output = FlowOutput::default();
         let mut keys: Vec<(String, Tier)> = self.pipelines.keys().filter(|key| wanted.contains(*key)).cloned().collect();
         keys.sort_unstable();
         for key in keys {
-            self.revalidate_local(&key, now, view, &mut output);
+            self.revalidate_local(&key, now, accounts, &mut output);
         }
         self.answer_waiters();
         output
@@ -312,14 +336,14 @@ impl ForcedFlow {
     /// The key against the local leg now (review 000460 r2 P2-1): a published frame claiming a local mark that no
     /// longer holds is withdrawn at once, before any read; a content under way or last computed with the other validity
     /// starts again, whatever stage it is in (r1 P2-1: the newer read voids the older ones).
-    fn revalidate_local(&mut self, key: &(String, Tier), now: Instant, view: &OwnerView<'_>, output: &mut FlowOutput) {
+    fn revalidate_local(&mut self, key: &(String, Tier), now: Instant, accounts: &FlowAccounts, output: &mut FlowOutput) {
         let now_ready = self.local_ready(&key.0);
         let was_ready = self.pipelines.get(key).and_then(Pipeline::local_ready);
         if !now_ready {
             self.withdraw_local(key, output);
         }
         if was_ready.is_some_and(|was| was != now_ready) {
-            self.start(&key.0, key.1, now, view, output);
+            self.start(&key.0, key.1, now, accounts, output);
         }
     }
 
@@ -346,8 +370,8 @@ impl ForcedFlow {
     }
 
     /// The (coin, tier) pairs a subscription or a waiting query wants.
-    fn wanted(&self, view: &OwnerView<'_>) -> FxHashSet<(String, Tier)> {
-        let mut wanted: FxHashSet<(String, Tier)> = self.demanded(view).into_iter().collect();
+    fn wanted(&self, accounts: &FlowAccounts) -> FxHashSet<(String, Tier)> {
+        let mut wanted: FxHashSet<(String, Tier)> = self.demanded(accounts).into_iter().collect();
         for waiter in &self.waiters {
             wanted.extend(waiter.remaining.iter().map(|coin| (coin.clone(), waiter.tier)));
         }
@@ -367,24 +391,24 @@ impl ForcedFlow {
         tier: Tier,
         reply: oneshot::Sender<Result<Vec<Arc<FlowFrame>>, String>>,
         now: Instant,
-        view: &OwnerView<'_>,
+        accounts: &FlowAccounts,
     ) -> FlowOutput {
         if let Some(reason) = &self.stopped {
             drop(reply.send(Err(reason.clone())));
             return FlowOutput::default();
         }
-        let coins = coin.map_or_else(|| marked_coins(view), |coin| vec![coin]);
+        let coins = coin.map_or_else(|| marked_coins(accounts), |coin| vec![coin]);
         // waiting first: a pipeline may finish as it starts (no book, no mark)
         self.waiters.push(Waiter { tier, since: now, remaining: coins.into_iter().collect(), frames: Vec::new(), reply });
         let mut output = FlowOutput::default();
-        self.follow_ups(now, view, &mut output);
+        self.follow_ups(now, accounts, &mut output);
         self.answer_waiters();
         output
     }
 
     /// A computation for every idle key a query still waits for (review 000460 r2 P2-2): a computation under way is
     /// not voided by a new caller - it serves the callers that came before it started, and the next one the others.
-    fn follow_ups(&mut self, now: Instant, view: &OwnerView<'_>, output: &mut FlowOutput) {
+    fn follow_ups(&mut self, now: Instant, accounts: &FlowAccounts, output: &mut FlowOutput) {
         let mut keys: Vec<(String, Tier)> = self
             .waiters
             .iter()
@@ -394,29 +418,29 @@ impl ForcedFlow {
         keys.sort_unstable();
         keys.dedup();
         for (coin, tier) in keys {
-            self.start(&coin, tier, now, view, output);
+            self.start(&coin, tier, now, accounts, output);
         }
     }
 
     /// A read back from the reader task.
-    pub(crate) fn on_read(&mut self, read: FlowRead, now: Instant, view: &OwnerView<'_>) -> FlowOutput {
+    pub(crate) fn on_read(&mut self, read: FlowRead, now: Instant, accounts: &FlowAccounts) -> FlowOutput {
         let mut output = FlowOutput::default();
         match read {
-            FlowRead::Band { coin, tier, version, read } => self.on_band(&coin, tier, version, read, now, view, &mut output),
-            FlowRead::Walk { coin, tier, version, sides } => self.on_walks(&coin, tier, version, sides, now, view, &mut output),
+            FlowRead::Band { coin, tier, version, read } => self.on_band(&coin, tier, version, read, now, accounts, &mut output),
+            FlowRead::Walk { coin, tier, version, sides } => self.on_walks(&coin, tier, version, sides, now, accounts, &mut output),
         }
-        self.follow_ups(now, view, &mut output);
+        self.follow_ups(now, accounts, &mut output);
         self.answer_waiters();
         output
     }
 
     /// The demanded (coin, tier) pairs, `None` coins expanded to every coin with a node mark.
-    fn demanded(&self, view: &OwnerView<'_>) -> Vec<(String, Tier)> {
+    fn demanded(&self, accounts: &FlowAccounts) -> Vec<(String, Tier)> {
         let mut pairs: Vec<(String, Tier)> = Vec::new();
         for (coin, tier) in self.demand.demanded() {
             match coin {
                 Some(coin) => pairs.push((coin, tier)),
-                None => pairs.extend(marked_coins(view).into_iter().map(|coin| (coin, tier))),
+                None => pairs.extend(marked_coins(accounts).into_iter().map(|coin| (coin, tier))),
             }
         }
         pairs.sort_unstable();
@@ -448,7 +472,7 @@ impl ForcedFlow {
     }
 
     /// Reads the coin's band for the tier around both marks, or finishes it unavailable.
-    fn start(&mut self, coin: &str, tier: Tier, now: Instant, view: &OwnerView<'_>, output: &mut FlowOutput) {
+    fn start(&mut self, coin: &str, tier: Tier, now: Instant, accounts: &FlowAccounts, output: &mut FlowOutput) {
         let key = (coin.to_string(), tier);
         self.pipelines.entry(key.clone()).or_insert(Pipeline { started: None, stage: Stage::Idle, frame: None }).started = Some(now);
         let unavailable = |reason: String| FlowContent::Unavailable(reason);
@@ -458,10 +482,14 @@ impl ForcedFlow {
         if self.link.is_none() {
             return self.finish(&key, FlowHeights::default(), unavailable("the server runs without an order book".to_string()), output);
         }
-        let (Some(marks), Some(size_decimals)) = (view.marks, view.book.size_decimals(coin)) else {
+        let copy = match accounts.serving() {
+            Ok(copy) => copy,
+            Err(reason) => return self.finish(&key, FlowHeights::default(), unavailable(reason), output),
+        };
+        let Some(size_decimals) = copy.size_decimals(coin) else {
             return self.finish(&key, FlowHeights::default(), unavailable(format!("no node marks of {coin}")), output);
         };
-        let Some(node_mark_raw) = marks.mark(coin) else {
+        let Some(node_mark_raw) = copy.mark(coin) else {
             return self.finish(&key, FlowHeights::default(), unavailable(format!("the node replay claims no mark of {coin}")), output);
         };
         let (local, _) = self.local_calibre(coin);
@@ -469,29 +497,38 @@ impl ForcedFlow {
         let (lo, hi) = band(node_mark_raw, local_mark_raw(&local), size_decimals, tier);
         self.version += 1;
         let version = self.version;
+        let generation = copy.generation();
         self.post((coin.to_string(), tier, FlowJobKind::Band), FlowJob::Band { version, lo, hi });
         if let Some(pipeline) = self.pipelines.get_mut(&key) {
-            pipeline.stage = Stage::Reading { version, lo, hi, local_ready };
+            pipeline.stage = Stage::Reading { version, lo, hi, local_ready, generation };
         }
     }
 
     /// The band came back: the entries at the current marks, then their walks (r2 revision 2: the band read must cover
     /// the range the current marks need, else it is read again).
     #[expect(clippy::too_many_arguments, reason = "one read's parts, handed in by the dispatch")]
-    fn on_band(&mut self, coin: &str, tier: Tier, version: u64, read: Option<TriggerBandAt>, now: Instant, view: &OwnerView<'_>, output: &mut FlowOutput) {
+    fn on_band(&mut self, coin: &str, tier: Tier, version: u64, read: Option<TriggerBandAt>, now: Instant, accounts: &FlowAccounts, output: &mut FlowOutput) {
         let key = (coin.to_string(), tier);
-        let Some(Stage::Reading { version: expected, lo, hi, .. }) = self.pipelines.get(&key).map(|pipeline| &pipeline.stage) else { return };
+        let Some(Stage::Reading { version: expected, lo, hi, generation, .. }) = self.pipelines.get(&key).map(|pipeline| &pipeline.stage) else { return };
         if *expected != version {
             return;
         }
-        let (lo, hi) = (*lo, *hi);
+        let (lo, hi, read_generation) = (*lo, *hi, *generation);
         let Some(read) = read else {
             return self.finish(&key, FlowHeights::default(), FlowContent::Unavailable("the order book has no snapshot yet".to_string()), output);
         };
-        let (Some(marks), Some(size_decimals)) = (view.marks, view.book.size_decimals(coin)) else {
+        let copy = match accounts.serving() {
+            Ok(copy) => copy,
+            Err(reason) => return self.finish(&key, FlowHeights::default(), FlowContent::Unavailable(reason), output),
+        };
+        if copy.generation() != read_generation {
+            // the read was posted for facts the copy has replaced since (review 000566 r1 P2-1)
+            return self.start(coin, tier, now, accounts, output);
+        }
+        let Some(size_decimals) = copy.size_decimals(coin) else {
             return self.finish(&key, FlowHeights::default(), FlowContent::Unavailable(format!("no node marks of {coin}")), output);
         };
-        let Some(node_mark_raw) = marks.mark(coin) else {
+        let Some(node_mark_raw) = copy.mark(coin) else {
             return self.finish(&key, FlowHeights::default(), FlowContent::Unavailable(format!("the node replay claims no mark of {coin}")), output);
         };
         let (local, local_published_ms) = self.local_calibre(coin);
@@ -499,9 +536,10 @@ impl ForcedFlow {
         let (need_lo, need_hi) = band(node_mark_raw, local_raw, size_decimals, tier);
         if need_lo < lo || need_hi > hi {
             // the marks moved past the band read: read the new one
-            return self.start(coin, tier, now, view, output);
+            return self.start(coin, tier, now, accounts, output);
         }
-        let (accounts_height, accounts_time_ms) = view.book.replay_at().map_or((0, 0), |(_, height, time_ms)| (height, time_ms));
+        // the account part's common lower bound: the candidates may be older than the positions (r2 revision 1)
+        let (accounts_height, accounts_time_ms) = copy.accounts_at();
         let heights = FlowHeights {
             accounts_height,
             accounts_time_ms,
@@ -514,7 +552,7 @@ impl ForcedFlow {
             sell_walk_book: None,
             buy_walk_book: None,
         };
-        let liquidations = match view.candidates.liquidation_inputs(view.book, coin, node_mark_raw, local_raw, tier.bps()) {
+        let liquidations = match copy.liquidation_inputs(coin, node_mark_raw, local_raw, tier.bps()) {
             Ok(liquidations) => liquidations,
             Err(reason) => return self.finish(&key, heights, FlowContent::Unavailable(reason), output),
         };
@@ -524,7 +562,7 @@ impl ForcedFlow {
         let triggers: Vec<TriggerInput> =
             read.band.orders.iter().map(|(trigger_px, order)| TriggerInput { trigger_px: *trigger_px, order: Arc::clone(order) }).chain(unpriced).collect();
         let inputs = CoinInputs { size_decimals, node_mark_raw, local_mark_raw: local_raw, triggers: &triggers, liquidations: &liquidations };
-        let flow = match coin_flow(&inputs, |user| view.book.position_raw(user, coin)) {
+        let flow = match coin_flow(&inputs, |user| copy.position_raw(user, coin)) {
             Ok(flow) => flow,
             Err(err) => {
                 error!("forced flow {coin}: {err}");
@@ -533,11 +571,11 @@ impl ForcedFlow {
         };
         let triggers_status = trigger_status(&read);
         let ready = ready_flow(flow, tier, size_decimals, node_mark_raw, local, triggers_status);
-        self.walk(&key, heights, ready, (read.trusted, read.withheld_periods), output);
+        self.walk(&key, heights, ready, (read.trusted, read.withheld_periods), read_generation, output);
     }
 
     /// Posts the entries' walks, or finishes at once without entries or while the book is withheld.
-    fn walk(&mut self, key: &(String, Tier), heights: FlowHeights, mut ready: ReadyFlow, trust: (bool, u64), output: &mut FlowOutput) {
+    fn walk(&mut self, key: &(String, Tier), heights: FlowHeights, mut ready: ReadyFlow, trust: (bool, u64), generation: u64, output: &mut FlowOutput) {
         if !trust.0 {
             ready.walks = WalkStatus::Untrusted;
             return self.finish(key, heights, FlowContent::Ready(Box::new(ready)), output);
@@ -571,7 +609,7 @@ impl ForcedFlow {
         let version = self.version;
         self.post((key.0.clone(), key.1, FlowJobKind::Walk), FlowJob::Walk { version, sides });
         if let Some(pipeline) = self.pipelines.get_mut(key) {
-            pipeline.stage = Stage::Walking(Box::new(Walking { version, heights, ready, trust, cumulative, prefixes }));
+            pipeline.stage = Stage::Walking(Box::new(Walking { version, generation, heights, ready, trust, cumulative, prefixes }));
         }
     }
 
@@ -584,7 +622,7 @@ impl ForcedFlow {
     /// review 000460 r1 P2-1), and only while the book stayed trusted in the period the band was read in - a book
     /// withheld since may also have missed trigger statuses, so the trigger part is incomplete too.
     #[expect(clippy::too_many_arguments, reason = "one read's parts, handed in by the dispatch")]
-    fn on_walks(&mut self, coin: &str, tier: Tier, version: u64, sides: Vec<SideWalks>, now: Instant, view: &OwnerView<'_>, output: &mut FlowOutput) {
+    fn on_walks(&mut self, coin: &str, tier: Tier, version: u64, sides: Vec<SideWalks>, now: Instant, accounts: &FlowAccounts, output: &mut FlowOutput) {
         let key = (coin.to_string(), tier);
         let Some(pipeline) = self.pipelines.get(&key) else { return };
         let Stage::Walking(walking) = &pipeline.stage else { return };
@@ -592,11 +630,18 @@ impl ForcedFlow {
             return;
         }
         if matches!(walking.ready.local, LocalCalibre::Ready { .. }) != self.local_ready(coin) {
-            return self.revalidate_local(&key, now, view, output);
+            return self.revalidate_local(&key, now, accounts, output);
         }
         let Some(pipeline) = self.pipelines.get_mut(&key) else { unreachable!("found above") };
         let Stage::Walking(walking) = std::mem::replace(&mut pipeline.stage, Stage::Idle) else { unreachable!("matched above") };
-        let Walking { mut heights, mut ready, trust, cumulative, prefixes, .. } = *walking;
+        let Walking { mut heights, mut ready, trust, cumulative, prefixes, generation, .. } = *walking;
+        // the copy stopped serving, or serves another generation, while the walks were out: what the content stands on
+        // is no longer claimed (review 000563 r2 revision 2, 000566 r1)
+        match accounts.serving() {
+            Err(reason) => return self.finish(&key, FlowHeights::default(), FlowContent::Unavailable(reason), output),
+            Ok(copy) if copy.generation() != generation => return self.start(coin, tier, now, accounts, output),
+            Ok(_) => {}
+        }
         let link_trust = self.link.as_ref().map(|link| (link.trust.is_trusted(), link.trust.withheld_periods()));
         let read_trusted = sides.iter().filter_map(|side| side.book).all(|book| (book.trusted, book.withheld_periods) == trust);
         if link_trust != Some(trust) || !read_trusted {
@@ -658,12 +703,10 @@ impl ForcedFlow {
     }
 }
 
-/// The coins of the account view with a node mark.
-fn marked_coins(view: &OwnerView<'_>) -> Vec<String> {
-    let Some(marks) = view.marks else { return Vec::new() };
-    let mut coins: Vec<String> = view.book.coins().filter(|coin| marks.mark(coin).is_some()).map(str::to_string).collect();
-    coins.sort_unstable();
-    coins
+/// The coins of the account view with a node mark; none while the copy holds no valid view (with the candidates
+/// withdrawn alone, each coin still gets its frame, unavailable).
+fn marked_coins(accounts: &FlowAccounts) -> Vec<String> {
+    accounts.copy().map(AccountsCopy::marked_coins).unwrap_or_default()
 }
 
 const fn local_mark_raw(local: &LocalCalibre) -> Option<u64> {
@@ -762,8 +805,11 @@ mod tests {
     use super::*;
     use crate::{
         accounts::{
+            book::AccountBook,
+            candidates::Candidates,
             checkpoint::tests::{HOLDER, user as checkpoint_user},
-            forced_flow::{Source, SourceKind},
+            flow_accounts::{AccountsSnapshot, FlowAccountsEvent, FlowAccountsValidity, tests::serving},
+            forced_flow::{SizeReason, Source, SourceKind},
             forced_flow_reader::{BookAt, FlowJobKey},
             test_support::{ListedMarks, PUMP, replay_book},
             walk::WalkEnd,
@@ -841,26 +887,32 @@ mod tests {
             Self { book, marks, candidates, mailbox, trust, demand, flow }
         }
 
+        /// The copy of the view as it stands (the account owner's snapshot of it), with the watch keeping it valid: every
+        /// step reads the view through the copy, as on the forced flow thread.
+        fn accounts(&self) -> (FlowAccounts, watch::Sender<FlowAccountsValidity>) {
+            serving(&self.book, &self.marks, &self.candidates)
+        }
+
         fn query(&mut self, coin: &str, tier: Tier, now: Instant) -> oneshot::Receiver<Result<Vec<Arc<FlowFrame>>, String>> {
             let (reply, answer) = oneshot::channel();
-            let view = OwnerView { book: &self.book, marks: Some(&self.marks), candidates: &self.candidates };
-            drop(self.flow.query(Some(coin.to_string()), tier, reply, now, &view));
+            let (accounts, _validity) = self.accounts();
+            drop(self.flow.query(Some(coin.to_string()), tier, reply, now, &accounts));
             answer
         }
 
         fn local(&mut self, closed: bool, now: Instant) -> FlowOutput {
-            let view = OwnerView { book: &self.book, marks: Some(&self.marks), candidates: &self.candidates };
-            self.flow.on_local(closed, now, &view)
+            let (accounts, _validity) = self.accounts();
+            self.flow.on_local(closed, now, &accounts)
         }
 
         fn tick(&mut self, now: Instant) -> FlowOutput {
-            let view = OwnerView { book: &self.book, marks: Some(&self.marks), candidates: &self.candidates };
-            self.flow.tick(now, &view)
+            let (accounts, _validity) = self.accounts();
+            self.flow.tick(now, &accounts)
         }
 
         fn read(&mut self, read: FlowRead, now: Instant) -> FlowOutput {
-            let view = OwnerView { book: &self.book, marks: Some(&self.marks), candidates: &self.candidates };
-            self.flow.on_read(read, now, &view)
+            let (accounts, _validity) = self.accounts();
+            self.flow.on_read(read, now, &accounts)
         }
 
         /// The one pending job.
@@ -1260,13 +1312,191 @@ mod tests {
         let demand = FlowDemand::default();
         let mut flow = ForcedFlow::new(demand.clone(), None);
         let _guard = demand.acquire((None, Tier::Near));
-        let view = OwnerView { book: &book, marks: Some(&marks), candidates: &candidates };
-        let output = flow.tick(Instant::now(), &view);
+        let (accounts, _validity) = serving(&book, &marks, &candidates);
+        let output = flow.tick(Instant::now(), &accounts);
         assert_eq!(output.frames.len(), 1, "every coin with a node mark");
         assert_eq!(output.frames[0].content, FlowContent::Unavailable("the server runs without an order book".to_string()));
         flow.stop("the forced flow read task ended".to_string());
         let (reply, mut answer) = oneshot::channel();
-        drop(flow.query(None, Tier::Near, reply, Instant::now(), &view));
+        drop(flow.query(None, Tier::Near, reply, Instant::now(), &accounts));
         assert_eq!(answer.try_recv().unwrap(), Err("the forced flow read task ended".to_string()));
+    }
+
+    /// Review 000563 r2 revision 1: the positions at block 1,005, the candidates confirmed at 1,000: the frame's account
+    /// part is of 1,000 - every account input's common lower bound, the one the trader's age gate reads.
+    #[test]
+    fn the_account_part_is_of_its_oldest_input() {
+        let mut owner = Owner::new();
+        let _guard = owner.demand.acquire((Some(PUMP.to_string()), Tier::Mid));
+        let (mut accounts, _validity) = owner.accounts();
+        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_005, time_ms: 1_005_000, marks: Vec::new(), positions: Vec::new() });
+        let now = Instant::now();
+        drop(owner.flow.tick(now, &accounts));
+        let ((_, _, _), FlowJob::Band { version, .. }) = owner.job() else { panic!("a band job") };
+        let read = band_at(Vec::new(), TriggerAvailability::Complete, true);
+        let frame = owner.flow.on_read(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Mid, version, read: Some(read) }, now, &accounts).frames.remove(0);
+        assert_eq!((frame.heights.accounts_height, frame.heights.accounts_time_ms), (1_000, 1_000_000));
+    }
+
+    /// Review 000563 r2 revision 2: the copy stopping serving withdraws the published frame at once, voids the read
+    /// under way, and a query meanwhile is answered unavailable at once.
+    #[test]
+    fn a_copy_stopping_serving_withdraws_every_frame_at_once() {
+        let mut owner = Owner::new();
+        let _guard = owner.demand.acquire((Some(PUMP.to_string()), Tier::Mid));
+        let now = Instant::now();
+        owner.tick(now);
+        let read = band_at(vec![stop(1, 1_245_000)], TriggerAvailability::Complete, true);
+        let published = owner.answer(PUMP, Tier::Mid, read.clone(), now).frames.remove(0);
+        let later = now + Duration::from_secs(1);
+        owner.tick(later);
+        let ((_, _, _), FlowJob::Band { version, .. }) = owner.job() else { panic!("a band job") };
+        let (accounts, validity) = owner.accounts();
+        validity.send_replace(FlowAccountsValidity { generation: 1, state: Err("behind".to_string()) });
+        let withdrawn = owner.flow.withdraw_accounts("behind", later, &accounts).frames;
+        assert_eq!(withdrawn.len(), 1);
+        assert_eq!((withdrawn[0].seq, withdrawn[0].content.clone()), (published.seq + 1, FlowContent::Unavailable("behind".to_string())));
+        let late = owner.flow.on_read(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Mid, version, read: Some(read) }, later, &accounts);
+        assert!(late.frames.is_empty() && owner.mailbox.drain().is_empty(), "the voided read is not taken");
+        let (reply, mut answer) = oneshot::channel();
+        drop(owner.flow.query(Some(PUMP.to_string()), Tier::Mid, reply, later, &accounts));
+        assert_eq!(answer.try_recv().unwrap().unwrap()[0].content, FlowContent::Unavailable("behind".to_string()));
+    }
+
+    /// Review 000563 r2 revision 2: walks back after the copy stopped serving, before the thread took the notice, give
+    /// no ready frame.
+    #[test]
+    fn walks_back_after_the_copy_stopped_give_no_ready_frame() {
+        let mut owner = Owner::new();
+        let _guard = owner.demand.acquire((Some(PUMP.to_string()), Tier::Mid));
+        let now = Instant::now();
+        owner.tick(now);
+        drop(owner.answer_band(PUMP, Tier::Mid, band_at(vec![stop(1, 1_245_000)], TriggerAvailability::Complete, true), now));
+        let ((_, _, _), FlowJob::Walk { version, sides }) = owner.job() else { panic!("a walk job") };
+        let (accounts, validity) = owner.accounts();
+        validity.send_replace(FlowAccountsValidity { generation: 1, state: Err("behind".to_string()) });
+        let book = BookAt { height: 7, time: 5, trusted: true, withheld_periods: 0, mid_px: None };
+        let sides = sides.into_iter().map(|side| SideWalks { taker: side.taker, book: Some(book), walks: Vec::new(), cumulative: Vec::new() }).collect();
+        let output = owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Mid, version, sides }, now, &accounts);
+        assert_eq!(output.frames[0].content, FlowContent::Unavailable("behind".to_string()));
+    }
+
+    /// Generation 2 of the view, HOLDER's PUMP position closed in it, served at once (its snapshot handled before the
+    /// watch's notice, no unavailable step seen between).
+    fn second_generation(owner: &Owner, accounts: &mut FlowAccounts, validity: &watch::Sender<FlowAccountsValidity>) {
+        let closed = replay_book(1_000, 1_000, &[]);
+        let mut candidates = Candidates::new(None);
+        drop(candidates.refresh(&closed, Some(&owner.marks), &[]));
+        accounts.apply(FlowAccountsEvent::Snapshot(Box::new(AccountsSnapshot::of(2, &closed, &owner.marks, &candidates).unwrap())));
+        validity.send_replace(FlowAccountsValidity { generation: 2, state: Ok(()) });
+    }
+
+    fn walked(sides: Vec<SideJob>) -> Vec<SideWalks> {
+        let book = BookAt { height: 7, time: 5, trusted: true, withheld_periods: 0, mid_px: Some(0.0125) };
+        let fill = |size: u64| WalkPart { filled: size, vwap_px: Some(0.0124), first_px: None, deepest_px: None, levels: 1, end: WalkEnd::Filled, steps: Vec::new() };
+        sides
+            .into_iter()
+            .map(|side| SideWalks {
+                taker: side.taker,
+                book: Some(book),
+                walks: side.items.iter().map(|(size, _)| fill(*size)).collect(),
+                cumulative: side.cumulative.iter().map(|size| fill(*size)).collect(),
+            })
+            .collect()
+    }
+
+    /// Review 000566 r1 P2-1: the walks of a read posted under generation 1 - HOLDER's reduce-only stop sized on its
+    /// 1,000,000 PUMP - come back once generation 2, where the position is closed, serves: no frame stands on the old
+    /// facts; the content is read again on the new ones.
+    #[test]
+    fn a_new_generation_voids_the_reads_of_the_old_one() {
+        let mut owner = Owner::new();
+        let _guard = owner.demand.acquire((Some(PUMP.to_string()), Tier::Mid));
+        let now = Instant::now();
+        owner.tick(now);
+        drop(owner.answer_band(PUMP, Tier::Mid, band_at(vec![stop(1, 1_245_000)], TriggerAvailability::Complete, true), now));
+        let ((_, _, _), FlowJob::Walk { version, sides }) = owner.job() else { panic!("a walk job") };
+        let (mut accounts, validity) = owner.accounts();
+        second_generation(&owner, &mut accounts, &validity);
+        let output = owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Mid, version, sides: walked(sides) }, now, &accounts);
+        assert!(output.frames.is_empty(), "{output:?}");
+        assert!(matches!(owner.job(), ((_, _, FlowJobKind::Band), FlowJob::Band { .. })), "read again on the new facts");
+    }
+
+    /// Review 000566 r1 P2-1: a new generation serving withdraws the frames of the old one and computes at once, not at
+    /// each key's next period; the walks of the old read then find no stage to fit.
+    #[test]
+    fn a_new_generation_is_withdrawn_and_computed_at_once() {
+        let mut owner = Owner::new();
+        let _guard = owner.demand.acquire((Some(PUMP.to_string()), Tier::Mid));
+        let now = Instant::now();
+        owner.tick(now);
+        let read = band_at(vec![stop(1, 1_245_000)], TriggerAvailability::Complete, true);
+        let published = owner.answer(PUMP, Tier::Mid, read.clone(), now).frames.remove(0);
+        assert_eq!(ready(&published).entries[0].entry.size_raw, 100);
+        let (mut accounts, validity) = owner.accounts();
+        second_generation(&owner, &mut accounts, &validity);
+        let renewed = "the account view was sent anew (generation 2)";
+        let withdrawn = owner.flow.withdraw_accounts(renewed, now + Duration::from_millis(10), &accounts).frames;
+        assert_eq!((withdrawn.len(), withdrawn[0].seq, withdrawn[0].content.clone()), (1, published.seq + 1, FlowContent::Unavailable(renewed.to_string())));
+        let ((_, _, kind), FlowJob::Band { version, .. }) = owner.job() else { panic!("computed at once") };
+        assert_eq!(kind, FlowJobKind::Band);
+        let output = owner.flow.on_read(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Mid, version, read: Some(read) }, now, &accounts);
+        assert!(output.frames.is_empty(), "the stop's walk is out");
+        let ((_, _, _), FlowJob::Walk { version, sides }) = owner.job() else { panic!("a walk job") };
+        let frame = owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Mid, version, sides: walked(sides) }, now, &accounts).frames.remove(0);
+        let entry = &ready(&frame).entries[0].entry;
+        assert_eq!((entry.size_raw, entry.size_reason), (0, SizeReason::NoPositionToReduce), "sized on the new generation's closed position");
+    }
+
+    /// Review 000566 r1 P2-2: the view and the marks fine, the candidates alone withdrawn: the walks back give no ready
+    /// frame.
+    #[test]
+    fn a_withdrawal_of_the_candidates_alone_voids_the_walks() {
+        let mut owner = Owner::new();
+        let _guard = owner.demand.acquire((Some(PUMP.to_string()), Tier::Mid));
+        let now = Instant::now();
+        owner.tick(now);
+        drop(owner.answer_band(PUMP, Tier::Mid, band_at(vec![stop(1, 1_245_000)], TriggerAvailability::Complete, true), now));
+        let ((_, _, _), FlowJob::Walk { version, sides }) = owner.job() else { panic!("a walk job") };
+        let (mut accounts, _validity) = owner.accounts();
+        accounts.apply(FlowAccountsEvent::CandidatesWithdrawn { generation: 1, reason: "the book walk task ended".to_string() });
+        let output = owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Mid, version, sides: walked(sides) }, now, &accounts);
+        assert_eq!(output.frames[0].content, FlowContent::Unavailable("the book walk task ended".to_string()));
+    }
+
+    /// Review 000566 r2: an every-coin query holds PUMP's frame of generation 1 - HOLDER's stop sized on 1,000,000
+    /// PUMP - while BTC's is still computed; the view is sent anew with the position closed: PUMP is computed again for
+    /// the query, whose answer holds no frame of the facts replaced.
+    #[test]
+    fn a_waiting_query_drops_the_frames_of_a_replaced_generation() {
+        let mut owner = Owner::new();
+        let now = Instant::now();
+        let (mut accounts, validity) = owner.accounts();
+        let (reply, mut answer) = oneshot::channel();
+        drop(owner.flow.query(None, Tier::Mid, reply, now, &accounts));
+        let stop_read = band_at(vec![stop(1, 1_245_000)], TriggerAvailability::Complete, true);
+        let pump_band = (PUMP.to_string(), Tier::Mid, FlowJobKind::Band);
+        let mut jobs = owner.mailbox.drain();
+        assert_eq!(jobs.len(), 2, "BTC and PUMP: {jobs:?}");
+        let Some(FlowJob::Band { version, .. }) = jobs.remove(&pump_band) else { panic!("PUMP's band") };
+        drop(owner.flow.on_read(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Mid, version, read: Some(stop_read.clone()) }, now, &accounts));
+        let ((_, _, _), FlowJob::Walk { version, sides }) = owner.job() else { panic!("PUMP's walk") };
+        drop(owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Mid, version, sides: walked(sides) }, now, &accounts));
+        assert!(answer.try_recv().is_err(), "BTC is still out");
+        second_generation(&owner, &mut accounts, &validity);
+        drop(owner.flow.withdraw_accounts("the account view was sent anew (generation 2)", now, &accounts));
+        let mut jobs = owner.mailbox.drain();
+        assert_eq!(jobs.len(), 2, "both computed again for the query: {jobs:?}");
+        let Some(FlowJob::Band { version, .. }) = jobs.remove(&("BTC".to_string(), Tier::Mid, FlowJobKind::Band)) else { panic!("BTC's band") };
+        drop(owner.flow.on_read(FlowRead::Band { coin: "BTC".to_string(), tier: Tier::Mid, version, read: Some(band_at(Vec::new(), TriggerAvailability::Complete, true)) }, now, &accounts));
+        let Some(FlowJob::Band { version, .. }) = jobs.remove(&pump_band) else { panic!("PUMP's band") };
+        drop(owner.flow.on_read(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Mid, version, read: Some(stop_read) }, now, &accounts));
+        let ((_, _, _), FlowJob::Walk { version, sides }) = owner.job() else { panic!("PUMP's walk") };
+        drop(owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Mid, version, sides: walked(sides) }, now, &accounts));
+        let frames = answer.try_recv().unwrap().unwrap();
+        assert_eq!(frames.iter().map(|frame| frame.coin.as_str()).collect::<Vec<_>>(), ["BTC", PUMP]);
+        let entry = &ready(&frames[1]).entries[0].entry;
+        assert_eq!((entry.size_raw, entry.size_reason), (0, SizeReason::NoPositionToReduce), "the new generation's closed position");
     }
 }
