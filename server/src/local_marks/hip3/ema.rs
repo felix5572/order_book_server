@@ -3,19 +3,20 @@
 //! 1 - exp(-dt / 150 s). bm 10-27 17:47–18:38 (`ema_check.py`): against the published (2) - (1), median 0.05–0.24 bp
 //! and P90 0.11–0.41 bp over five stocks, about the cent's rounding; a 150 s half-life fit worse.
 //!
-//! Only a tick with a trusted HL book and node state samples. Two samples further apart than `MAX_GAP` start it over:
-//! an unobserved long gap is not sampling. It is ready after `WARMUP` of continuous sampling (5 tau). The SIP takes no
-//! part: its outage only withholds the prediction.
+//! Only a tick with a trusted HL book and node state samples. A gap up to `MAX_GAP` between two samples folds the last
+//! sample in over it, as any tick does; a longer one starts it over: an unobserved long gap is not sampling. It is ready
+//! after `WARMUP` of sampling (5 tau). The SIP takes no part: its outage only withholds the prediction.
 
 use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::local_marks::snapshot::MAX_PROGRESS_LAG_MS;
-
 const TAU_S: f64 = 150.0;
 pub(crate) const WARMUP: Duration = Duration::from_secs(750);
-const MAX_GAP: Duration = Duration::from_millis(MAX_PROGRESS_LAG_MS);
+/// bm's node stalls about every 5 minutes in busy hours (bm 10-28: 37 of NVDA's 53 stalls over 5 s lasted 5–30 s, 2
+/// 30–60 s); starting over at the node state's 5 s limit kept the EMA from warming, 442 of NVDA's 1,439 minutes withheld. Over a gap the
+/// relayer's samples we missed weigh 1 - exp(-gap / tau): 9.5% at 15 s, 33% at this limit, of x's move in the gap.
+const MAX_GAP: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct State {
@@ -106,6 +107,17 @@ mod tests {
         }
         let (gap, _) = ema.gap().unwrap();
         assert!((gap - (1.0 - (-1.0_f64).exp())).abs() < 1e-9, "{gap}");
+    }
+
+    /// A node stall shorter than `MAX_GAP` holds the last sample over it and keeps the EMA warm.
+    #[test]
+    fn a_stall_holds_the_last_sample() {
+        let start = Instant::now();
+        let mut ema = Hip3Ema { state: Some(State { value: 0.0, held: 1.0, last: start, sampled: WARMUP }) };
+        ema.sample(start + Duration::from_secs(15), 3.0);
+        let (gap, sampled) = ema.gap().unwrap();
+        assert!((gap - (1.0 - (-0.1_f64).exp())).abs() < 1e-12, "15 s of the held 1.0, not of 3.0: {gap}");
+        assert_eq!(sampled, WARMUP + Duration::from_secs(15));
     }
 
     #[test]

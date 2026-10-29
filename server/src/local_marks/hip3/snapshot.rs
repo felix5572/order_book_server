@@ -441,14 +441,20 @@ mod tests {
         assert_eq!(code(&World::new().shifted(gap - NOW_MS).marks(gap)), Some("quoteSession"));
     }
 
-    /// Review 000535 r2: the EMA samples only with a trusted book and node state; a long untrusted span starts it over.
+    /// Review 000535 r2: the EMA samples only with a trusted book and node state; a long untrusted span starts it over,
+    /// a stall of the node's usual length does not.
     #[test]
     fn the_ema_samples_only_trusted_ticks() {
         let mut world = World::new();
         world.book.as_mut().unwrap().trusted = false;
-        world.instant += Duration::from_secs(10);
+        world.instant += Duration::from_secs(15);
         assert_eq!(code(&world.marks(NOW_MS)), Some("hlBook"));
         world.book.as_mut().unwrap().trusted = true;
-        assert_eq!(code(&world.marks(NOW_MS)), Some("emaWarmup"), "10 s unsampled: over the gap limit, it started over");
+        assert_eq!(code(&world.marks(NOW_MS)), None, "15 s unsampled: within the gap limit, still warm");
+        world.book.as_mut().unwrap().trusted = false;
+        world.instant += Duration::from_secs(61);
+        assert_eq!(code(&world.marks(NOW_MS)), Some("hlBook"));
+        world.book.as_mut().unwrap().trusted = true;
+        assert_eq!(code(&world.marks(NOW_MS)), Some("emaWarmup"), "61 s unsampled: over the gap limit, it started over");
     }
 }
