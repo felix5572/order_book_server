@@ -222,6 +222,7 @@ pub(crate) struct AccountsCopy {
     marks: FxHashMap<String, u64>,
     positions: FxHashMap<String, FxHashMap<Address, i64>>,
     candidates: Result<CandidatesCopy, String>,
+    changed: ChangedSinceConfirmed,
 }
 
 #[derive(Debug)]
@@ -230,6 +231,48 @@ struct CandidatesCopy {
     /// The (height, block time) a refresh confirmed last.
     confirmed: (u64, u64),
     by_coin: FxHashMap<String, FxHashMap<Address, Candidate>>,
+}
+
+/// The positions the copy saw change after the candidates' confirmed height (hyperliquid-trade review 000569): a
+/// candidate's liquidation price is its refresh's, of the account as it stood then, so a candidate whose account moved
+/// since is withheld until a refresh confirms past the change - a liquidation that happened, a partial one's remainder,
+/// the holder's own trade alike.
+#[derive(Debug)]
+struct ChangedSinceConfirmed {
+    /// Each user's coins whose size changed, at the latest height it did.
+    by_user: FxHashMap<Address, FxHashMap<String, u64>>,
+    /// A snapshot's height while its positions were newer than its candidates: which changed in between is unknown.
+    unknown_through: Option<u64>,
+}
+
+impl ChangedSinceConfirmed {
+    fn of(positions_height: u64, candidates_height: Option<u64>) -> Self {
+        let unknown_through = candidates_height.filter(|height| *height < positions_height).map(|_| positions_height);
+        Self { by_user: FxHashMap::default(), unknown_through }
+    }
+
+    fn note(&mut self, user: Address, coin: &str, height: u64) {
+        self.by_user.entry(user).or_default().insert(coin.to_string(), height);
+    }
+
+    /// A refresh at `height` re-evaluated every account touched through it: what changed then is in its candidates.
+    fn confirm(&mut self, height: u64) {
+        self.by_user.retain(|_, coins| {
+            coins.retain(|_, changed| *changed > height);
+            !coins.is_empty()
+        });
+        self.unknown_through = self.unknown_through.filter(|through| *through > height);
+    }
+
+    /// An isolated position's price is its own coin's alone; a cross one's moves with any position of its pool, which
+    /// a refresh lists (`cross_pool_coins`) but a position opened since is not in: any coin of the user's counts.
+    fn withholds(&self, user: Address, coin: &str, candidate: &Candidate) -> bool {
+        if self.unknown_through.is_some() {
+            return true;
+        }
+        let Some(coins) = self.by_user.get(&user) else { return false };
+        if candidate.isolated { coins.contains_key(coin) } else { !coins.is_empty() }
+    }
 }
 
 impl AccountsCopy {
@@ -241,6 +284,8 @@ impl AccountsCopy {
             }
             CandidatesCopy { version: candidates.version, confirmed: (candidates.height, candidates.time_ms), by_coin }
         });
+        // the owner sends a snapshot after an input and before its refresh: its positions may be a block ahead
+        let changed = ChangedSinceConfirmed::of(snapshot.height, candidates.as_ref().ok().map(|candidates| candidates.confirmed.0));
         Self {
             generation: snapshot.generation,
             height: snapshot.height,
@@ -249,6 +294,7 @@ impl AccountsCopy {
             marks: snapshot.marks,
             positions: snapshot.positions,
             candidates,
+            changed,
         }
     }
 
@@ -264,11 +310,11 @@ impl AccountsCopy {
             };
         }
         for (coin, user, size_raw) in positions {
-            let held = self.positions.entry(coin).or_default();
-            if size_raw == 0 {
-                held.remove(&user);
-            } else {
-                held.insert(user, size_raw);
+            let held = self.positions.entry(coin.clone()).or_default();
+            let before = if size_raw == 0 { held.remove(&user) } else { held.insert(user, size_raw) };
+            // touched at the same size changes no price
+            if before.unwrap_or(0) != size_raw {
+                self.changed.note(user, &coin, height);
             }
         }
         Ok(())
@@ -298,6 +344,7 @@ impl AccountsCopy {
             return Err(format!("candidates confirmed at {height} after {}", candidates.confirmed.0));
         }
         candidates.confirmed = (height, time_ms);
+        self.changed.confirm(height);
         Ok(())
     }
 
@@ -342,15 +389,18 @@ impl AccountsCopy {
     /// The coin's candidates within `max_bps` of the node mark or the local one (the band `Candidates`'s index reads),
     /// each with its next market liquidation order at the node mark. Only the published candidates are here - within
     /// 1000 bp of the node mark at their refresh - whatever the tier, and the order's cooldown is the refresh's (r2
-    /// revision 4, the scope accepted). `Err` while withdrawn.
+    /// revision 4, the scope accepted); one whose account moved since its refresh is withheld until a refresh confirms
+    /// past the change (review 000569). In user order, so two calls over the same facts compare equal. `Err` while
+    /// withdrawn.
     pub(crate) fn liquidation_inputs(&self, coin: &str, node_mark_raw: u64, local_mark_raw: Option<u64>, max_bps: u32) -> Result<Vec<LiquidationInput>, String> {
         let candidates = self.candidates.as_ref().map_err(Clone::clone)?;
         let (Some(published), Some(size_decimals)) = (candidates.by_coin.get(coin), self.size_decimals(coin)) else { return Ok(Vec::new()) };
         let mark = |raw: u64| mark_px(raw, size_decimals);
         let band = liquidation_band((mark(node_mark_raw), mark(local_mark_raw.unwrap_or(node_mark_raw))), max_bps);
-        Ok(published
+        let mut inputs: Vec<LiquidationInput> = published
             .iter()
             .filter(|(_, candidate)| in_liquidation_band(candidate.size_raw, candidate.liquidation_px, band))
+            .filter(|(user, candidate)| !self.changed.withholds(**user, coin, candidate))
             .map(|(user, candidate)| LiquidationInput {
                 user: *user,
                 size_raw: candidate.size_raw,
@@ -358,7 +408,9 @@ impl AccountsCopy {
                 cash_estimated: candidate.cash_estimated,
                 order: ExpectedOrder::of(candidate.size_raw, node_mark_raw, candidate.order.cooldown),
             })
-            .collect())
+            .collect();
+        inputs.sort_unstable_by_key(|input| input.user);
+        Ok(inputs)
     }
 }
 
@@ -696,6 +748,90 @@ pub(crate) mod tests {
         assert_eq!(accounts.serving().unwrap_err(), "gone", "review 000566 r1 P2-2: no frame stands without them");
         let copy = accounts.copy().unwrap();
         assert_eq!((copy.liquidation_inputs(PUMP, 12_500, None, 50).unwrap_err(), copy.marked_coins().len()), ("gone".to_string(), 2));
+    }
+
+    /// The users listed within 50 bp of the node mark 0.0125, shorts only (HOLDER's long is no candidate there).
+    fn listed_shorts(accounts: &FlowAccounts) -> Vec<(Address, i64)> {
+        let inputs = accounts.serving().unwrap().liquidation_inputs(PUMP, 12_500, None, 50).unwrap();
+        inputs.iter().filter(|input| input.size_raw < 0).map(|input| (input.user, input.size_raw)).collect()
+    }
+
+    fn block(height: u64, positions: Vec<(&str, Address, i64)>) -> FlowAccountsEvent {
+        let positions = positions.into_iter().map(|(coin, user, size_raw)| (coin.to_string(), user, size_raw)).collect();
+        FlowAccountsEvent::Block { generation: 1, height, time_ms: height * 1_000, marks: Vec::new(), positions }
+    }
+
+    fn confirmed(height: u64) -> FlowAccountsEvent {
+        FlowAccountsEvent::CandidatesConfirmed { generation: 1, height, time_ms: height * 1_000 }
+    }
+
+    /// Review 000569: a cross candidate is withheld from the block its account's size changed in - its own coin or
+    /// another, a partial liquidation's remainder, a full one - until a refresh confirms past that block; a position
+    /// touched at the same size withholds nothing; a confirmation clears the changes through its height only.
+    #[test]
+    fn a_candidate_whose_account_moved_waits_for_a_refresh_past_it() {
+        let (book, marks, candidates) = view();
+        let (mut accounts, _validity) = serving(&book, &marks, &candidates);
+        let base = candidates.snapshot().unwrap().version;
+        // a short liquidated above 0.01249, past the node mark
+        accounts.apply(FlowAccountsEvent::Candidates { generation: 1, changes: changes(base + 1, vec![(PUMP, other(), candidate(-5, 0.012_49))], Vec::new()) });
+        assert_eq!(listed_shorts(&accounts), [(other(), -5)]);
+        accounts.apply(block(1_001, vec![(PUMP, other(), -5)]));
+        assert!(listed_shorts(&accounts).is_empty(), "opened in the copy's sight: a change");
+        accounts.apply(confirmed(1_001));
+        assert_eq!(listed_shorts(&accounts), [(other(), -5)]);
+        accounts.apply(block(1_002, vec![(PUMP, other(), -5)]));
+        assert_eq!(listed_shorts(&accounts), [(other(), -5)], "touched at the same size");
+        accounts.apply(block(1_003, vec![(PUMP, other(), -3)]));
+        assert!(listed_shorts(&accounts).is_empty(), "a partial liquidation's remainder");
+        accounts.apply(block(1_004, vec![("BTC", other(), 2)]));
+        accounts.apply(FlowAccountsEvent::Candidates { generation: 1, changes: changes(base + 2, vec![(PUMP, other(), candidate(-3, 0.012_49))], Vec::new()) });
+        accounts.apply(confirmed(1_003));
+        assert!(listed_shorts(&accounts).is_empty(), "its BTC changed at 1,004, after the refresh");
+        accounts.apply(confirmed(1_004));
+        assert_eq!(listed_shorts(&accounts), [(other(), -3)], "the refresh's new size");
+        accounts.apply(block(1_005, vec![(PUMP, other(), 0)]));
+        assert!(listed_shorts(&accounts).is_empty(), "liquidated whole, before the refresh");
+        accounts.apply(FlowAccountsEvent::Candidates { generation: 1, changes: changes(base + 3, Vec::new(), vec![(PUMP, other())]) });
+        accounts.apply(confirmed(1_005));
+        assert!(listed_shorts(&accounts).is_empty(), "gone from the candidates");
+    }
+
+    /// Review 000569: an isolated candidate's price is its own coin's alone - another coin of the user changing withholds
+    /// only its cross candidates -, its own coin changing withholds it.
+    #[test]
+    fn an_isolated_candidate_waits_for_its_own_coin_alone() {
+        let (book, marks, candidates) = view();
+        let (mut accounts, _validity) = serving(&book, &marks, &candidates);
+        let base = candidates.snapshot().unwrap().version;
+        let (isolated_user, cross_user) = (other(), Address::repeat_byte(0x43));
+        let isolated = Candidate { isolated: true, ..candidate(-5, 0.012_49) };
+        let enter = vec![(PUMP, isolated_user, isolated), (PUMP, cross_user, candidate(-7, 0.012_49))];
+        accounts.apply(FlowAccountsEvent::Candidates { generation: 1, changes: changes(base + 1, enter, Vec::new()) });
+        assert_eq!(listed_shorts(&accounts), [(isolated_user, -5), (cross_user, -7)], "in user order");
+        accounts.apply(block(1_001, vec![("BTC", isolated_user, 2), ("BTC", cross_user, 1)]));
+        assert_eq!(listed_shorts(&accounts), [(isolated_user, -5)]);
+        accounts.apply(block(1_002, vec![(PUMP, isolated_user, -4)]));
+        assert_eq!(listed_shorts(&accounts), Vec::new(), "its own coin moved");
+    }
+
+    /// Review 000569: a snapshot whose positions are a block ahead of its candidates (sent after an input, before its
+    /// refresh) cannot say which changed in between: no liquidation is listed until a refresh confirms its height.
+    #[test]
+    fn a_snapshot_ahead_of_its_candidates_lists_no_liquidation_until_confirmed() {
+        let (book, marks, candidates) = view();
+        let (validity, watched) = watch::channel(FlowAccountsValidity { generation: 1, state: Ok(()) });
+        let mut accounts = FlowAccounts { validity: watched, generation: 0, copy: None, broken: None, resync: Arc::new(AtomicBool::new(false)) };
+        let mut snapshot = AccountsSnapshot::of(1, &book, &marks, &candidates).unwrap();
+        (snapshot.height, snapshot.time_ms) = (1_005, 1_005_000);
+        accounts.apply(FlowAccountsEvent::Snapshot(Box::new(snapshot)));
+        let listed = |accounts: &FlowAccounts| accounts.serving().unwrap().liquidation_inputs(PUMP, 12_500, None, 1_000).unwrap().len();
+        assert_eq!(listed(&accounts), 0, "HOLDER's within 1000 bp, withheld");
+        accounts.apply(confirmed(1_004));
+        assert_eq!(listed(&accounts), 0);
+        accounts.apply(confirmed(1_005));
+        assert_eq!(listed(&accounts), 1);
+        drop(validity);
     }
 
     /// The watch decides (review 000563 r2 revision 2): withheld, another generation, or the owner gone.

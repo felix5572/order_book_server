@@ -109,7 +109,7 @@ pub(crate) struct TriggerInput {
 }
 
 /// A liquidation candidate: its position, static liquidation price and next market liquidation order.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct LiquidationInput {
     pub(crate) user: Address,
     pub(crate) size_raw: i64,

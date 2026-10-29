@@ -19,7 +19,7 @@ use tokio::sync::{oneshot, watch};
 
 use super::{
     flow_accounts::{AccountsCopy, FlowAccounts},
-    forced_flow::{CoinFlow, CoinInputs, Entry, Tier, TriggerInput, Unplaced, coin_flow, cumulative_sizes, prefix_sizes},
+    forced_flow::{CoinFlow, CoinInputs, Entry, LiquidationInput, Tier, TriggerInput, Unplaced, coin_flow, cumulative_sizes, prefix_sizes},
     forced_flow_reader::{FlowJob, FlowJobKind, FlowMailbox, FlowRead, SideJob, SideWalks, WalkItem},
     walk::{Limit, WalkPart, walk_units},
 };
@@ -176,11 +176,27 @@ enum LocalLink {
     Ended,
 }
 
+/// The account copy's facts a computation stands on: the generation it read (review 000566 r1 P2-1), and the
+/// liquidation inputs it took at its marks (review 000569 r2) - the walks' result stands only while the copy still
+/// gives the same, a candidate withheld or changed since its walks went out computing the content anew.
+struct AccountsRead {
+    generation: u64,
+    liquidations: Vec<LiquidationInput>,
+    node_mark_raw: u64,
+    local_mark_raw: Option<u64>,
+}
+
+impl AccountsRead {
+    fn still_holds(&self, copy: &AccountsCopy, coin: &str, tier: Tier) -> bool {
+        copy.generation() == self.generation
+            && copy.liquidation_inputs(coin, self.node_mark_raw, self.local_mark_raw, tier.bps()).is_ok_and(|inputs| inputs == self.liquidations)
+    }
+}
+
 /// What a band read left for the walks to complete.
 struct Walking {
     version: u64,
-    /// The account copy's generation the content stands on (review 000566 r1 P2-1).
-    generation: u64,
+    accounts: AccountsRead,
     heights: FlowHeights,
     ready: ReadyFlow,
     trust: (bool, u64),
@@ -571,11 +587,12 @@ impl ForcedFlow {
         };
         let triggers_status = trigger_status(&read);
         let ready = ready_flow(flow, tier, size_decimals, node_mark_raw, local, triggers_status);
-        self.walk(&key, heights, ready, (read.trusted, read.withheld_periods), read_generation, output);
+        let accounts_read = AccountsRead { generation: read_generation, liquidations, node_mark_raw, local_mark_raw: local_raw };
+        self.walk(&key, heights, ready, (read.trusted, read.withheld_periods), accounts_read, output);
     }
 
     /// Posts the entries' walks, or finishes at once without entries or while the book is withheld.
-    fn walk(&mut self, key: &(String, Tier), heights: FlowHeights, mut ready: ReadyFlow, trust: (bool, u64), generation: u64, output: &mut FlowOutput) {
+    fn walk(&mut self, key: &(String, Tier), heights: FlowHeights, mut ready: ReadyFlow, trust: (bool, u64), accounts: AccountsRead, output: &mut FlowOutput) {
         if !trust.0 {
             ready.walks = WalkStatus::Untrusted;
             return self.finish(key, heights, FlowContent::Ready(Box::new(ready)), output);
@@ -609,7 +626,7 @@ impl ForcedFlow {
         let version = self.version;
         self.post((key.0.clone(), key.1, FlowJobKind::Walk), FlowJob::Walk { version, sides });
         if let Some(pipeline) = self.pipelines.get_mut(key) {
-            pipeline.stage = Stage::Walking(Box::new(Walking { version, generation, heights, ready, trust, cumulative, prefixes }));
+            pipeline.stage = Stage::Walking(Box::new(Walking { version, accounts, heights, ready, trust, cumulative, prefixes }));
         }
     }
 
@@ -634,12 +651,13 @@ impl ForcedFlow {
         }
         let Some(pipeline) = self.pipelines.get_mut(&key) else { unreachable!("found above") };
         let Stage::Walking(walking) = std::mem::replace(&mut pipeline.stage, Stage::Idle) else { unreachable!("matched above") };
-        let Walking { mut heights, mut ready, trust, cumulative, prefixes, generation, .. } = *walking;
-        // the copy stopped serving, or serves another generation, while the walks were out: what the content stands on
-        // is no longer claimed (review 000563 r2 revision 2, 000566 r1)
+        let Walking { mut heights, mut ready, trust, cumulative, prefixes, accounts: read, .. } = *walking;
+        // the copy stopped serving, serves another generation, or gives other liquidations while the walks were out:
+        // what the content stands on is no longer claimed (review 000563 r2 revision 2, 000566 r1, 000569 r2) - its
+        // entries and the cumulative walks of them dropped whole
         match accounts.serving() {
             Err(reason) => return self.finish(&key, FlowHeights::default(), FlowContent::Unavailable(reason), output),
-            Ok(copy) if copy.generation() != generation => return self.start(coin, tier, now, accounts, output),
+            Ok(copy) if !read.still_holds(copy, coin, tier) => return self.start(coin, tier, now, accounts, output),
             Ok(_) => {}
         }
         let link_trust = self.link.as_ref().map(|link| (link.trust.is_trusted(), link.trust.withheld_periods()));
@@ -802,11 +820,13 @@ fn attach_walks(entries: &mut [FlowEntry], sides: &[SideWalks]) {
 mod tests {
     use std::time::Duration;
 
+    use alloy::primitives::Address;
+
     use super::*;
     use crate::{
         accounts::{
             book::AccountBook,
-            candidates::Candidates,
+            candidates::{Candidate, CandidateChanges, Candidates},
             checkpoint::tests::{HOLDER, user as checkpoint_user},
             flow_accounts::{AccountsSnapshot, FlowAccountsEvent, FlowAccountsValidity, tests::serving},
             forced_flow::{SizeReason, Source, SourceKind},
@@ -1463,6 +1483,93 @@ mod tests {
         accounts.apply(FlowAccountsEvent::CandidatesWithdrawn { generation: 1, reason: "the book walk task ended".to_string() });
         let output = owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Mid, version, sides: walked(sides) }, now, &accounts);
         assert_eq!(output.frames[0].content, FlowContent::Unavailable("the book walk task ended".to_string()));
+    }
+
+    /// The far tier's walks out for HOLDER's stop and HOLDER's liquidation, with the copy that took them.
+    fn far_walks_out(owner: &mut Owner, now: Instant) -> (FlowAccounts, watch::Sender<FlowAccountsValidity>, u64, Vec<SideJob>) {
+        owner.tick(now);
+        drop(owner.answer_band(PUMP, Tier::Far, band_at(vec![stop(1, 1_245_000)], TriggerAvailability::Complete, true), now));
+        let ((_, _, _), FlowJob::Walk { version, sides }) = owner.job() else { panic!("a walk job") };
+        let (accounts, validity) = owner.accounts();
+        assert_eq!(accounts.serving().unwrap().liquidation_inputs(PUMP, 12_500, None, Tier::Far.bps()).unwrap().len(), 1, "HOLDER's");
+        (accounts, validity, version, sides)
+    }
+
+    /// The content computed anew on `accounts`: the far tier's pending band read answered, then its walks.
+    fn computed_anew(owner: &mut Owner, accounts: &FlowAccounts, now: Instant) -> Arc<FlowFrame> {
+        let ((_, _, kind), FlowJob::Band { version, .. }) = owner.job() else { panic!("computed anew") };
+        assert_eq!(kind, FlowJobKind::Band);
+        let read = band_at(vec![stop(1, 1_245_000)], TriggerAvailability::Complete, true);
+        let output = owner.flow.on_read(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Far, version, read: Some(read) }, now, accounts);
+        assert!(output.frames.is_empty(), "the stop's walk is out");
+        let ((_, _, _), FlowJob::Walk { version, sides }) = owner.job() else { panic!("a walk job") };
+        owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Far, version, sides: walked(sides) }, now, accounts).frames.remove(0)
+    }
+
+    fn liquidations(frame: &FlowFrame) -> Vec<(Address, i64)> {
+        ready(frame)
+            .entries
+            .iter()
+            .filter_map(|flow_entry| match &flow_entry.entry.source {
+                Source::Liquidation { user, .. } => Some((*user, flow_entry.entry.position_raw)),
+                Source::Trigger { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Review 000569 r2 P2-1: HOLDER's liquidation taken, its walks out; HOLDER liquidated whole meanwhile (the copy's
+    /// block, before any refresh): the walks back publish nothing, the content is computed anew, without it.
+    #[test]
+    fn a_liquidation_gone_while_its_walks_are_out_is_computed_anew() {
+        let mut owner = Owner::new();
+        let _guard = owner.demand.acquire((Some(PUMP.to_string()), Tier::Far));
+        let now = Instant::now();
+        let (mut accounts, _validity, version, sides) = far_walks_out(&mut owner, now);
+        let positions = vec![(PUMP.to_string(), checkpoint_user(HOLDER), 0)];
+        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_001, time_ms: 1_001_000, marks: Vec::new(), positions });
+        let output = owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Far, version, sides: walked(sides) }, now, &accounts);
+        assert!(output.frames.is_empty(), "{output:?}");
+        let frame = computed_anew(&mut owner, &accounts, now);
+        assert!(liquidations(&frame).is_empty(), "{frame:?}");
+        assert_eq!((trigger_oids(&frame), frame.heights.accounts_height), (vec![1], 1_000), "the stop kept; the candidates' height still");
+    }
+
+    /// Review 000569 r2 P2-1: while the walks are out, HOLDER's position is cut, the refresh updates the candidate and
+    /// confirms past the block: the walks back publish nothing, the new content lists the new size.
+    #[test]
+    fn a_refresh_confirmed_while_the_walks_are_out_lists_the_new_size() {
+        let mut owner = Owner::new();
+        let _guard = owner.demand.acquire((Some(PUMP.to_string()), Tier::Far));
+        let now = Instant::now();
+        let (mut accounts, _validity, version, sides) = far_walks_out(&mut owner, now);
+        let holder = checkpoint_user(HOLDER);
+        let snapshot = owner.candidates.snapshot().unwrap();
+        let (_, _, held) = snapshot.candidates.iter().find(|(coin, user, _)| coin == PUMP && *user == holder).unwrap();
+        let cut = Candidate { size_raw: 600_000, ..held.clone() };
+        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_001, time_ms: 1_001_000, marks: Vec::new(), positions: vec![(PUMP.to_string(), holder, 600_000)] });
+        let changes = CandidateChanges { version: snapshot.version + 1, height: 1_001, time_ms: 1_001_000, enter: Vec::new(), update: vec![(PUMP.to_string(), holder, cut)], exit: Vec::new() };
+        accounts.apply(FlowAccountsEvent::Candidates { generation: 1, changes: Arc::new(changes) });
+        accounts.apply(FlowAccountsEvent::CandidatesConfirmed { generation: 1, height: 1_001, time_ms: 1_001_000 });
+        let output = owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Far, version, sides: walked(sides) }, now, &accounts);
+        assert!(output.frames.is_empty(), "{output:?}");
+        let frame = computed_anew(&mut owner, &accounts, now);
+        assert_eq!(liquidations(&frame), [(holder, 600_000)]);
+    }
+
+    /// Review 000569 r2: while the walks are out, only another user's other coin moves: the liquidations the copy gives
+    /// are the same, the walks back publish.
+    #[test]
+    fn walks_back_with_the_same_liquidations_publish() {
+        let mut owner = Owner::new();
+        let _guard = owner.demand.acquire((Some(PUMP.to_string()), Tier::Far));
+        let now = Instant::now();
+        let (mut accounts, _validity, version, sides) = far_walks_out(&mut owner, now);
+        let positions = vec![("BTC".to_string(), Address::repeat_byte(0x42), 5)];
+        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_001, time_ms: 1_001_000, marks: Vec::new(), positions });
+        let mut output = owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Far, version, sides: walked(sides) }, now, &accounts);
+        assert_eq!(output.frames.len(), 1, "{output:?}");
+        assert_eq!(liquidations(&output.frames.remove(0)), [(checkpoint_user(HOLDER), 1_000_000)]);
+        assert!(owner.mailbox.drain().is_empty(), "not computed again");
     }
 
     /// Review 000566 r2: an every-coin query holds PUMP's frame of generation 1 - HOLDER's stop sized on 1,000,000
