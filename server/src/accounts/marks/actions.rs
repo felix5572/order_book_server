@@ -40,8 +40,9 @@ pub(crate) enum MarkAction {
     VaultWithdraw { vault: Address },
     /// Per main-dex asset, the submitted prices.
     SetGlobal(Vec<SubmittedPrices>),
-    /// Successful HIP-3 setOracle: execution identity only; written prices come from the oracle stream.
-    Hip3Oracle { dex: String, execution_index: Option<usize> },
+    /// Successful HIP-3 setOracle: execution identity; written prices come from the oracle stream. `submitted` is its
+    /// `markPxs` read as the xyz local model's two terms (design 000582), an `Err` only for that model.
+    Hip3Oracle { dex: String, execution_index: Option<usize>, submitted: Result<Vec<SubmittedMark>, String> },
     /// A validator's submitted oracle and external perp prices, by coin.
     Reference { oracle: Vec<(String, String)>, external: Vec<(String, String)> },
 }
@@ -288,7 +289,43 @@ fn hip3_oracle(action: &crate::accounts::replica::Action<'_>) -> Result<MarkActi
     struct SetOracle { dex: String }
     let SetOracle { dex } = action.field(action.set_oracle.as_ref(), "setOracle")?;
     if dex.is_empty() || dex.contains(':') { return Err("setOracle with invalid dex".into()); }
-    Ok(MarkAction::Hip3Oracle { dex, execution_index: None })
+    Ok(MarkAction::Hip3Oracle { dex, execution_index: None, submitted: submitted_marks(action) })
+}
+
+/// One coin's two `markPxs` terms as submitted: xyz's (1) oracle and (2) oracle plus its EMA (docs.trade.xyz mark
+/// price; bm 10-30: every xyz write lists its 127 coins in both, the first equal to `oraclePxs`), wire decimals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SubmittedMark {
+    pub(crate) coin: String,
+    pub(crate) oracle: String,
+    pub(crate) ema: String,
+}
+
+/// The setOracle's `markPxs` as the xyz local model reads it: two lists of `[coin, px]` of the same coins. The
+/// protocol allows 0, 1 or 2 lists of any deployer's meaning, so another form is no anchor for that model, never an
+/// error of the action.
+fn submitted_marks(action: &crate::accounts::replica::Action<'_>) -> Result<Vec<SubmittedMark>, String> {
+    #[derive(Deserialize)]
+    struct MarkPxs {
+        #[serde(rename = "markPxs")]
+        mark_pxs: Vec<Vec<(String, String)>>,
+    }
+    // the read setOracle object itself: not repeated in the reason (127 coins in 4 lists)
+    let raw = action.set_oracle.as_ref().ok_or("no setOracle")?.as_raw_str();
+    let MarkPxs { mark_pxs } = sonic_rs::from_str(raw).map_err(|err| format!("markPxs: {err}"))?;
+    let [oracle, ema] = <[Vec<(String, String)>; 2]>::try_from(mark_pxs).map_err(|lists| format!("markPxs of {} lists, not 2", lists.len()))?;
+    let mut emas: rustc_hash::FxHashMap<String, String> = ema.into_iter().collect();
+    let submitted: Vec<SubmittedMark> = oracle
+        .into_iter()
+        .map(|(coin, oracle)| {
+            let ema = emas.remove(&coin).ok_or_else(|| format!("markPxs: {coin} once in the first list, not in the second"))?;
+            Ok(SubmittedMark { coin, oracle, ema })
+        })
+        .collect::<Result<_, String>>()?;
+    if let Some(coin) = emas.keys().next() {
+        return Err(format!("markPxs: {coin} in the second list only"));
+    }
+    Ok(submitted)
 }
 
 /// Preserve this narrow receipt proof separately from the broader list of placed oids.
@@ -545,9 +582,34 @@ pub(crate) mod tests {
         assert_eq!(parsed.actions[0].rank, (1, 3, 0));
         assert_eq!(parsed.actions[1].rank, (1, 3, 1));
         for (index, a) in parsed.actions.into_iter().enumerate() {
-            assert_eq!(a.action, MarkAction::Hip3Oracle { dex: "xyz".into(), execution_index: Some(index + 2) });
+            assert_eq!(a.action, MarkAction::Hip3Oracle { dex: "xyz".into(), execution_index: Some(index + 2), submitted: Err("markPxs of 0 lists, not 2".into()) });
             assert!(!a.action.is_price(), "HIP-3 timing evidence cannot alter native price evaluation");
         }
+    }
+
+    /// Design 000582: xyz's markPxs read as its two terms by coin; another form is no anchor and keeps the action.
+    #[test]
+    fn a_set_oracle_reads_its_two_mark_terms_or_says_why_not() {
+        let accepted = ok(r#"{"type":"default"}"#);
+        let submitted = |set_oracle: &str| {
+            let action = format!(r#"{{"type":"perpDeploy","setOracle":{set_oracle}}}"#);
+            let parsed = mark_actions(&replica_line(1, &[&[(&action, &accepted)]]));
+            let [RankedAction { action: MarkAction::Hip3Oracle { submitted, .. }, .. }] = parsed.actions.as_slice() else { panic!("{parsed:?}") };
+            submitted.clone()
+        };
+        let two = r#"{"dex":"xyz","oraclePxs":[["xyz:NVDA","201.5"]],"markPxs":[[["xyz:NVDA","201.5"],["xyz:TSLA","440.1"]],[["xyz:TSLA","440.31"],["xyz:NVDA","201.48"]]]}"#;
+        assert_eq!(submitted(two), Ok(vec![
+            SubmittedMark { coin: "xyz:NVDA".into(), oracle: "201.5".into(), ema: "201.48".into() },
+            SubmittedMark { coin: "xyz:TSLA".into(), oracle: "440.1".into(), ema: "440.31".into() },
+        ]));
+        for (set_oracle, why) in [
+            (r#"{"dex":"km","markPxs":[[["km:A","1"]]]}"#, "markPxs of 1 lists, not 2"),
+            (r#"{"dex":"xyz","markPxs":[[["xyz:NVDA","1"]],[["xyz:TSLA","1"]]]}"#, "markPxs: xyz:NVDA once in the first list, not in the second"),
+            (r#"{"dex":"xyz","markPxs":[[],[["xyz:TSLA","1"]]]}"#, "markPxs: xyz:TSLA in the second list only"),
+        ] {
+            assert_eq!(submitted(set_oracle), Err(why.to_string()), "{set_oracle}");
+        }
+        assert!(submitted(r#"{"dex":"xyz","markPxs":[[["xyz:NVDA",1]],[]]}"#).unwrap_err().starts_with("markPxs: "), "a number, not a wire decimal");
     }
 
     #[test]
@@ -568,10 +630,11 @@ pub(crate) mod tests {
                 (cancel, rejected), (noop, &accepted), (&wrapped, rejected)],
             &[(cancel, rejected)],
         ]));
-        assert_eq!(parsed.actions[0].action, MarkAction::Hip3Oracle { dex: "io".into(), execution_index: Some(6) });
+        assert!(matches!(&parsed.actions[0].action, MarkAction::Hip3Oracle { dex, execution_index: Some(6), submitted: Err(_) } if dex == "io"),
+            "a setOracle without markPxs keeps its identity: {:?}", parsed.actions[0].action);
         let unknown = r#"{"type":"order","orders":"unknown-wire-form"}"#;
         let parsed = mark_actions(&replica_line(1, &[&[(oracle, &accepted), (unknown, rejected)]]));
-        assert_eq!(parsed.actions[0].action, MarkAction::Hip3Oracle { dex: "io".into(), execution_index: None },
+        assert!(matches!(&parsed.actions[0].action, MarkAction::Hip3Oracle { dex, execution_index: None, .. } if dex == "io"),
             "unknown optional priority evidence retains the oracle without inventing a locator or stopping marks");
     }
 

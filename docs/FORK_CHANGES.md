@@ -859,3 +859,19 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   cargo test -p server --lib -- accounts::
   cargo check --workspace --bins
   ```
+
+## 2026-10-30 HIP-3 美股本地 mark：(2) 锚定中继自己公布的 EMA，去掉 750 秒预热（设计 000582 r2，用户 10-30 定）
+
+- **起因**：(2) 的 EMA 原来完全自己攒。OB 每次启动要采满 750 秒，节点卡住超过 60 秒也要从头来。10-29 正常盘能出预测的只有 75%，其中 15% 是预热，来自两次 OB 重启。开盘 13:30–13:45 只有 0.9%：节点卡了 128 秒和 135 秒，又赶上一次重启。10-30 01:18、07:00 两次重启，各 12.5 分钟。
+- **依据**：中继的 setOracle 里，`markPxs` = [[(1)], [(2)]]，(2)−(1) 就是它此刻的 EMA（10-27 逐块核对）。bm 10-30 08:36–08:39 共 73 次 xyz 写入，平均约 2.96 秒一次，每次带全部 127 个币；两组的币相同，第一组等于 `oraclePxs`。
+- **改动**：
+  - **`accounts/marks/actions.rs`**：`MarkAction::Hip3Oracle` 加 `submitted: Result<Vec<SubmittedMark>, String>`，按 xyz 模型读两组。其他形状只算这个模型的 `Err`，整条 action 照常成功，因为协议允许 0、1、2 组。
+  - **`accounts/marks/mod.rs`、`seed.rs`**：每块按 action 顺序把 (2)−(1) 换算成币的价格单位，写到 `Hip3Coin.relayer_gap`。检查点恢复时是 `Err(SinceCheckpoint)`，读不出时是 `Err(Unreadable)`。读不出的原因在币转为 `Unreadable` 的那一刻记进 `MarksBlockReport.relayer_marks`，由 runtime 以 `Cause::Hip3RelayerMarks` 报诊断；不进 `errors`，不算流丢失，检查点重放归类相同。
+  - **`local_marks/hip3/ema.rs`**：中继每次写入就锚定，值从写入那块用当前 x 外推到当前 tick；两次写入之间照旧用自己的采样往前推。采样空档超过 5 秒就清值，但保留已用过的写入时间，只认更新的写入。删掉 `WARMUP` 和 ef7a90c 的 60 秒规则。撤回原因 `emaWarmup` 改为 `relayerGapUnknown`。
+  - **`extHip3MarkPrices` schema 4**：`emaSampledS` 换成 `emaAnchorTimeMs`。
+- **测试**：
+  - `actions` 解析：正常两组，以及 1 组、只在一组里、数字不是字符串；
+  - `marks::a_set_oracle_sets_the_relayer_gap_and_an_unreadable_one_is_no_loss`：依次是有效 → 1 组 → 再 1 组（不重复报告）→ 有效 → 精度超出 → 有效，然后用检查点 1000 重放 7 块，`errors` 为空，节点价格一直可用；
+  - `ema` 的 5 个测试；
+  - snapshot 集成：4 秒空档继续可用，6 秒空档后等新写入，新写入后立即可用；`Unreadable` 撤回，同一次写入不能再用。
+  - 变异检查：同一次写入也能重新锚定 → 7 个测试失败；空档上限改成 60 秒 → 集成测试失败；把读不出当成流丢失 → 验收测试失败。

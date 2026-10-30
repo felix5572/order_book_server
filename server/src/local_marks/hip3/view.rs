@@ -2,7 +2,8 @@
 //! of the WS subscription and the rows of `GET /extHip3MarkPrices`. Prices are decimal text in HL's units of the coin.
 //! Its own channel, so `extMarkPrices` (schema 2) keeps its frames byte for byte. Schema 2 (design 000537): (1) carries
 //! the oracle's offset from the quote's midpoint, shown in the `carry*` fields. Schema 3 (design 000543): the quote is
-//! the session's feed's, the SIP's or BOATS's overnight (`quoteFeed`), and its fields are named `quote*`.
+//! the session's feed's, the SIP's or BOATS's overnight (`quoteFeed`), and its fields are named `quote*`. Schema 4 (design
+//! 000582): the EMA is anchored at the relayer's submitted (2) - (1), `emaAnchorTimeMs` in place of `emaSampledS`.
 
 use serde::Serialize;
 
@@ -17,7 +18,7 @@ use crate::local_marks::{
     snapshot::LocalMarksSnapshot,
 };
 
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,10 +78,11 @@ struct LocalView {
     carry_pairs: f64,
     /// The last write's oracle minus the SIP midpoint at its read, USD; `null` unknown.
     carry_offset_px: Option<f64>,
-    /// (2): the oracle plus the EMA gap; `emaGapPx` is the gap in USD, `emaSampledS` how long the EMA has sampled.
+    /// (2): the oracle plus the EMA gap; `emaGapPx` is the gap in USD, `emaAnchorTimeMs` the block time of the relayer
+    /// write it is anchored at.
     ema_px: String,
     ema_gap_px: f64,
-    ema_sampled_s: f64,
+    ema_anchor_time_ms: u64,
     /// (3): median(bid, ask, last trade).
     book_px: String,
     bid_px: String,
@@ -181,7 +183,7 @@ fn local_view(snapshot: &LocalMarksSnapshot, local: &Hip3LocalLeg) -> LegView<Lo
         carry_offset_px: carry.offset.map(|units| usd(units, local.size_decimals)),
         ema_px: px(mark.ema),
         ema_gap_px: usd(local.gap, local.size_decimals),
-        ema_sampled_s: local.ema_sampled.as_secs_f64(),
+        ema_anchor_time_ms: local.ema_anchored_ns / 1_000_000,
         book_px: px(mark.book),
         bid_px: px(local.bid),
         ask_px: px(local.ask),

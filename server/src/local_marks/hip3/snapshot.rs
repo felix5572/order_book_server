@@ -6,20 +6,18 @@
 //! and offset carry move at every tick before its legs, the carry taking in the node state's oracle writes only while
 //! that state is trusted.
 
-use std::time::Duration;
-
 use rustc_hash::FxHashMap;
 
 use super::{
     carry::{Hip3Carry, Hip3CarryReading, OracleWrite, QuoteMid, QuoteMidHistory},
     compute::{Hip3Inputs, Hip3LocalMark, hip3_local_mark},
-    ema::{Hip3Ema, WARMUP},
+    ema::Hip3Ema,
     protocol::EquityFeed,
     session::equity_session,
     sources::Hip3SipSources,
 };
 use crate::{
-    accounts::marks::seed::Hip3Coin,
+    accounts::marks::seed::{Hip3Coin, NoRelayerGap, RelayerGap},
     local_marks::{
         slot::{Entry, Quote, Validity},
         snapshot::{Tick, Withheld, book_units},
@@ -44,6 +42,8 @@ pub(crate) struct Hip3NodeMark {
     pub(crate) oracle_time_ns: Option<u64>,
     pub(crate) external: Option<u64>,
     pub(crate) last_trade: Option<u64>,
+    /// The (2) - (1) of the relayer's last setOracle (design 000582).
+    pub(crate) relayer_gap: Result<RelayerGap, NoRelayerGap>,
 }
 
 impl Hip3NodeMark {
@@ -66,7 +66,8 @@ pub(crate) struct Hip3LocalLeg {
     pub(crate) quote_received_ms: u64,
     /// (2) - (1) of the EMA, price units.
     pub(crate) gap: f64,
-    pub(crate) ema_sampled: Duration,
+    /// The block time (unix ns) of the relayer write the EMA is anchored at.
+    pub(crate) ema_anchored_ns: u64,
     /// The offset carry this tick (`mark.carried` its result).
     pub(crate) carry: Hip3CarryReading,
     pub(crate) mark: Hip3LocalMark,
@@ -141,7 +142,10 @@ pub(crate) fn hip3_marks(table: &Hip3Table, tick: &Tick<'_>, book_offset: usize,
             if let (Ok(node), Ok(Some((bid, ask))), None) = (&node, &book, gates.book) {
                 #[expect(clippy::cast_precision_loss, reason = "prices are below 2^53")]
                 let x = (bid + ask) as f64 / 2.0 - node.stored_oracle as f64;
-                state.ema.sample(tick.instant, x);
+                match node.relayer_gap {
+                    Ok(relayer) => state.ema.observe(tick.instant, tick.now_ms, x, relayer),
+                    Err(_) => state.ema.withdraw(),
+                }
             }
             let local = match (gates.stopped.or(gates.node).or(gates.book), &node, book) {
                 (Some(withheld), _, _) | (None, Err(withheld), _) => Err(withheld.clone()),
@@ -164,7 +168,7 @@ fn node_leg(coin: &str, tick: &Tick<'_>, withheld: Option<&Withheld>) -> Result<
     let stored_oracle = state.oracle.ok_or_else(|| Withheld::unavailable("nodeOracle", format!("{coin} has no stored oracle yet")))?;
     Ok(Hip3NodeMark {
         size_decimals: state.size_decimals, mark: mark.px, mark_time_ns: mark.time_ns, stored_oracle, oracle_time_ns: state.oracle_time_ns,
-        external: state.external, last_trade: state.last_trade,
+        external: state.external, last_trade: state.last_trade, relayer_gap: state.relayer_gap,
     })
 }
 
@@ -203,8 +207,15 @@ fn local_leg(coin: &str, tick: &Tick<'_>, quote: Option<SessionQuote>, node: &Hi
     if age_ms > MAX_QUOTE_QUIET_MS {
         return Err(Withheld::stale("quoteQuiet", format!("the {name} quote of {coin} is {age_ms} ms old")));
     }
-    let (gap, ema_sampled) = state.ema.gap().map_err(|sampled| {
-        Withheld::unavailable("emaWarmup", format!("the EMA of {coin} has sampled {} s of {} s", sampled.as_secs(), WARMUP.as_secs()))
+    if let Err(missing) = node.relayer_gap {
+        let detail = match missing {
+            NoRelayerGap::SinceCheckpoint => format!("no setOracle of {coin}'s dex read since the checkpoint"),
+            NoRelayerGap::Unreadable => format!("the last setOracle of {coin}'s dex did not read as its (1) and (2): the accounts diagnostics say why"),
+        };
+        return Err(Withheld::unavailable("relayerGapUnknown", detail));
+    }
+    let (gap, ema_anchored_ns) = state.ema.gap().ok_or_else(|| {
+        Withheld::unavailable("relayerGapUnknown", format!("the EMA of {coin} waits for a relayer write newer than the one it took, after a sampling gap"))
     })?;
     let carry = state.carry.reading(tick.now_ms);
     let inputs = Hip3Inputs {
@@ -214,13 +225,13 @@ fn local_leg(coin: &str, tick: &Tick<'_>, quote: Option<SessionQuote>, node: &Hi
     let mark = hip3_local_mark(inputs).map_err(|err| Withheld::unavailable("calculation", format!("{coin}: {err}")))?;
     Ok(Hip3LocalLeg {
         size_decimals: node.size_decimals, bid, ask, quote_feed: feed, quote, quote_event_ms: entry.event_ms, quote_received_ms: entry.received_ms, gap,
-        ema_sampled, carry, mark,
+        ema_anchored_ns, carry, mark,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use super::*;
     use crate::{
@@ -245,6 +256,8 @@ mod tests {
 
     /// 2026-10-27T17:51:02Z, a Tuesday 13:51 in New York.
     const NOW_MS: u64 = 1_793_123_462_000;
+    /// The relayer's last write, 500 ms before.
+    const WRITE_NS: u64 = (NOW_MS - 500) * 1_000_000;
     const MAIN: &str = r#"{"coins": {"BTC": {"spot": {"okx": {"symbol": "BTC-USDT", "pxMultiplier": "1"}}, "perp": {"okx": {"symbol": "BTC-USDT-SWAP", "pxMultiplier": "1"}}}}}"#;
     const HIP3: &str = r#"{"feed": "sip", "coins": {"xyz:TSLA": {"symbol": "TSLA"}}}"#;
 
@@ -253,7 +266,8 @@ mod tests {
     }
 
     /// TSLA at 17:51:02 (szDecimals 3): stored oracle and external 405.770, mark 405.760, last trade 405.760; the HL book
-    /// 405.750 / 405.770; the SIP 405.765 x 405.775 quoted 1 s ago, BOATS not connected; the EMA warm at a gap of -0.020.
+    /// 405.750 / 405.770; the SIP 405.765 x 405.775 quoted 1 s ago, BOATS not connected; the relayer's last write 500 ms
+    /// ago at a gap of -0.020, the EMA anchored at it.
     struct World {
         sources: MarkSources,
         table: Arc<CoinTable>,
@@ -272,6 +286,7 @@ mod tests {
                 order_asset: 110_000, size_decimals: 3, oracle: Some(405_770), oracle_time_ns: Some((NOW_MS - 500) * 1_000_000), external: Some(405_770),
                 last_trade: Some(405_760),
                 mark: Some(StoredMark { px: 405_760, time_ns: (NOW_MS - 500) * 1_000_000 }),
+                relayer_gap: Ok(RelayerGap { gap_raw: -20, time_ns: WRITE_NS }),
             };
             let hip3 = FxHashMap::from_iter([("xyz:TSLA".to_string(), tsla)]);
             let node = Ok(Arc::new(NativePriceSnapshot { seed_height: 900, height: 1_000, block_time_ms: NOW_MS - 500, coins: FxHashMap::default(), hip3 }));
@@ -281,7 +296,7 @@ mod tests {
             let sip = FeedProjection { connections: Vec::new(), messages: 1, entries: vec![quote("405.765", "405.775", NOW_MS - 1_000)] };
             let boats = FeedProjection { connections: Vec::new(), messages: 0, entries: vec![(None, Validity::NotConnected)] };
             let instant = tokio::time::Instant::now();
-            let states = vec![Hip3CoinState { ema: Hip3Ema::warm_for_test(-20.0, instant), ..Hip3CoinState::default() }];
+            let states = vec![Hip3CoinState { ema: Hip3Ema::anchored_for_test(-20.0, WRITE_NS, instant), ..Hip3CoinState::default() }];
             Self { sources, table, node, book, equity: EquityReadings { sip, boats }, states, instant }
         }
 
@@ -358,7 +373,12 @@ mod tests {
         assert_eq!(code(&world.marks(NOW_MS)), Some("quoteUnavailable"), "no SIP time: no age, no prediction");
         let mut world = World::new();
         world.states = vec![Hip3CoinState::default()];
-        assert_eq!(code(&world.marks(NOW_MS)), Some("emaWarmup"));
+        assert_eq!(code(&world.marks(NOW_MS)), None, "a fresh EMA anchors at the relayer's write at once: no warmup");
+        for missing in [NoRelayerGap::SinceCheckpoint, NoRelayerGap::Unreadable] {
+            let mut world = World::new();
+            world.tsla().relayer_gap = Err(missing);
+            assert_eq!(code(&world.marks(NOW_MS)), Some("relayerGapUnknown"), "{missing:?}");
+        }
         let mut world = World::new();
         world.book.as_mut().unwrap().prices[1].1 = None;
         assert_eq!(code(&world.marks(NOW_MS)), Some("hlBook"));
@@ -387,12 +407,12 @@ mod tests {
         let gap = frame["data"]["local"]["emaGapPx"].take().as_f64().unwrap();
         assert!((gap + 0.02).abs() < 1e-5, "{gap}");
         assert_eq!(frame, serde_json::json!({"channel": "extHip3MarkPrices", "data": {
-            "schemaVersion": 3, "coin": "xyz:TSLA", "intervalMs": 50, "publishedTsMs": NOW_MS, "quoteFeed": "sip", "quoteStatus": "valid",
+            "schemaVersion": 4, "coin": "xyz:TSLA", "intervalMs": 50, "publishedTsMs": NOW_MS, "quoteFeed": "sip", "quoteStatus": "valid",
             "node": {"status": "ready", "markPx": "405.76", "markTimeNs": (NOW_MS - 500) * 1_000_000, "storedOraclePx": "405.77",
                      "storedOracleTimeNs": (NOW_MS - 500) * 1_000_000, "externalPx": "405.77", "lastTradePx": "405.76", "seedHeight": 900, "height": 1_000, "blockTimeMs": NOW_MS - 500},
             "local": {"status": "ready", "predictedMarkPx": "405.76", "oraclePx": "405.77", "quoteFeed": "sip", "quoteMidPx": "405.77", "carriedPx": null,
                       "carryStatus": "warmup", "carryPx": null, "carryRho": null, "carryPairs": 0.0, "carryOffsetPx": null, "emaPx": "405.75",
-                      "emaGapPx": null, "emaSampledS": 750.05, "bookPx": "405.76", "bidPx": "405.75", "askPx": "405.77",
+                      "emaGapPx": null, "emaAnchorTimeMs": NOW_MS - 500, "bookPx": "405.76", "bidPx": "405.75", "askPx": "405.77",
                       "quoteBidPx": "405.765", "quoteAskPx": "405.775", "quoteTimeMs": NOW_MS - 1_000, "quoteReceivedMs": NOW_MS - 920,
                       "nodeHeight": 1_000, "nodeBlockTimeMs": NOW_MS - 500, "bookTimeMs": NOW_MS - 400, "bookHeight": 1_001}}}));
     }
@@ -441,20 +461,28 @@ mod tests {
         assert_eq!(code(&World::new().shifted(gap - NOW_MS).marks(gap)), Some("quoteSession"));
     }
 
-    /// Review 000535 r2: the EMA samples only with a trusted book and node state; a long untrusted span starts it over,
-    /// a stall of the node's usual length does not.
+    /// Design 000582: the EMA samples only with a trusted book and node state; past the node's freshness limit unsampled
+    /// it waits for a relayer write newer than the one it took, then anchors at once; a gap within the limit carries on;
+    /// the node listing no usable gap withdraws it.
     #[test]
     fn the_ema_samples_only_trusted_ticks() {
         let mut world = World::new();
         world.book.as_mut().unwrap().trusted = false;
-        world.instant += Duration::from_secs(15);
+        world.instant += Duration::from_secs(4);
         assert_eq!(code(&world.marks(NOW_MS)), Some("hlBook"));
         world.book.as_mut().unwrap().trusted = true;
-        assert_eq!(code(&world.marks(NOW_MS)), None, "15 s unsampled: within the gap limit, still warm");
+        assert_eq!(code(&world.marks(NOW_MS)), None, "4 s unsampled: within the limit");
         world.book.as_mut().unwrap().trusted = false;
-        world.instant += Duration::from_secs(61);
+        world.instant += Duration::from_secs(6);
         assert_eq!(code(&world.marks(NOW_MS)), Some("hlBook"));
         world.book.as_mut().unwrap().trusted = true;
-        assert_eq!(code(&world.marks(NOW_MS)), Some("emaWarmup"), "61 s unsampled: over the gap limit, it started over");
+        assert_eq!(code(&world.marks(NOW_MS)), Some("relayerGapUnknown"), "6 s unsampled: the write taken does not serve again");
+        world.tsla().relayer_gap = Ok(RelayerGap { gap_raw: -30, time_ns: WRITE_NS + 3_000_000_000 });
+        let local = world.marks(NOW_MS).local.unwrap();
+        assert_eq!(local.ema_anchored_ns, WRITE_NS + 3_000_000_000, "a newer write anchors at once");
+        world.tsla().relayer_gap = Err(NoRelayerGap::Unreadable);
+        assert_eq!(code(&world.marks(NOW_MS)), Some("relayerGapUnknown"));
+        world.tsla().relayer_gap = Ok(RelayerGap { gap_raw: -30, time_ns: WRITE_NS + 3_000_000_000 });
+        assert_eq!(code(&world.marks(NOW_MS)), Some("relayerGapUnknown"), "withdrawn: the same write does not come back");
     }
 }

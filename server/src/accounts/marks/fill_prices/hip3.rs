@@ -26,7 +26,7 @@ struct CoinPrices<'a> {
 fn oracle_ranks(actions: &MarkActions) -> FxHashMap<&str, Option<(Rank, Option<usize>)>> {
     let mut out = FxHashMap::default();
     for action in &actions.actions {
-        if let MarkAction::Hip3Oracle { dex, execution_index } = &action.action {
+        if let MarkAction::Hip3Oracle { dex, execution_index, .. } = &action.action {
             out.entry(dex.as_str()).and_modify(|old| *old = None).or_insert(Some((action.rank, *execution_index)));
         }
     }
@@ -186,7 +186,7 @@ pub(crate) fn golden_prices(case: &serde_json::Value, event: &serde_json::Value)
     let decimals = u32::try_from(case["size_decimals"].as_u64().unwrap()).unwrap();
     let height = event["height"].as_u64().unwrap();
     let px = exact_price_units(event["before_mark"].as_str().unwrap(), decimals).unwrap();
-    let coins = FxHashMap::from_iter([(coin.into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, oracle_time_ns: None, size_decimals: decimals, mark: Some(StoredMark { px, time_ns: 0 }) })]);
+    let coins = FxHashMap::from_iter([(coin.into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, oracle_time_ns: None, relayer_gap: Err(crate::accounts::marks::seed::NoRelayerGap::SinceCheckpoint), size_decimals: decimals, mark: Some(StoredMark { px, time_ns: 0 }) })]);
     let fills: Vec<_> = event["legs"].as_array().unwrap().iter().map(|leg| BlockFill::of(&serde_json::from_value::<NodeDataFill>(leg.clone()).unwrap())).collect();
     let updates: Vec<_> = event["updates"].as_array().unwrap().iter().map(|u| Hip3PriceUpdate {
         normal: u[1] == "Normal", kind: Hip3PriceKind::Mark, coin: coin.into(), px: u[0].as_str().unwrap().into(), time_ns: 1,
@@ -195,7 +195,7 @@ pub(crate) fn golden_prices(case: &serde_json::Value, event: &serde_json::Value)
     if let Some(ranks) = event["rank"].as_array() {
         for rank in ranks[0].as_array().unwrap() {
             actions.actions.push(RankedAction { rank: serde_json::from_value(rank.clone()).unwrap(), user: None,
-                action: MarkAction::Hip3Oracle { dex: coin.split_once(':').unwrap().0.into(), execution_index: None } });
+                action: MarkAction::Hip3Oracle { dex: coin.split_once(':').unwrap().0.into(), execution_index: None, submitted: Ok(Vec::new()) } });
         }
         let taker = fills.iter().find(|f| f.crossed).unwrap();
         for rank in ranks[1].as_array().unwrap() {
@@ -238,13 +238,13 @@ impl TriggerFixture {
         Self {
             height,
             fills: case["legs"].as_array().unwrap().iter().map(|leg| BlockFill::of(&serde_json::from_value::<NodeDataFill>(leg.clone()).unwrap())).collect(),
-            coins: FxHashMap::from_iter([(coin.into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, oracle_time_ns: None, size_decimals: decimals,
+            coins: FxHashMap::from_iter([(coin.into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, oracle_time_ns: None, relayer_gap: Err(crate::accounts::marks::seed::NoRelayerGap::SinceCheckpoint), size_decimals: decimals,
                 mark: Some(StoredMark { px: exact_price_units(case["before_mark"].as_str().unwrap(), decimals).unwrap(), time_ns: time_ns - 1 }) })]),
             updates: vec![Hip3PriceUpdate { normal: case["normal"].as_bool().unwrap(), kind: Hip3PriceKind::Mark, coin: coin.into(),
                 px: case["after_mark"].as_str().unwrap().into(), time_ns }],
             actions: MarkActions { height, time_ns, actions: vec![RankedAction {
                 rank: serde_json::from_value(case["oracle_rank"].clone()).unwrap(), user: None,
-                action: MarkAction::Hip3Oracle { dex: coin.split_once(':').unwrap().0.into(), execution_index: None },
+                action: MarkAction::Hip3Oracle { dex: coin.split_once(':').unwrap().0.into(), execution_index: None, submitted: Ok(Vec::new()) },
             }] },
             statuses: BlockStatuses::of([serde_json::from_value(case["triggered_status"].clone()).unwrap()]).unwrap(),
         }
@@ -272,7 +272,7 @@ mod tests {
         RankedAction { rank, user: None, action: MarkAction::Book(BookAnchors { created: vec![oid], ..BookAnchors::default() }) }
     }
     fn oracle(rank: Rank, dex: &str) -> RankedAction {
-        RankedAction { rank, user: None, action: MarkAction::Hip3Oracle { dex: dex.into(), execution_index: None } }
+        RankedAction { rank, user: None, action: MarkAction::Hip3Oracle { dex: dex.into(), execution_index: None, submitted: Ok(Vec::new()) } }
     }
     fn fill(oid: u64, tid: u64, crossed: bool, twap: bool) -> BlockFill {
         BlockFill { coin: "xyz:X".into(), px: "1".into(), sz: "1".into(), oid, tid, action_position: None, crossed, twap, liquidation_mark_px: None }
@@ -281,7 +281,7 @@ mod tests {
         Hip3PriceUpdate { normal, kind: Hip3PriceKind::Mark, coin: "xyz:X".into(), px: price.into(), time_ns: 1 }
     }
     fn ranges(fills: &[BlockFill], actions: &[RankedAction], updates: &[Hip3PriceUpdate], triggered: &[u64]) -> Vec<FillMarkRange> {
-        let coins = FxHashMap::from_iter([("xyz:X".into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, oracle_time_ns: None, size_decimals: 6, mark: Some(StoredMark { px: 100, time_ns: 0 }) })]);
+        let coins = FxHashMap::from_iter([("xyz:X".into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, oracle_time_ns: None, relayer_gap: Err(crate::accounts::marks::seed::NoRelayerGap::SinceCheckpoint), size_decimals: 6, mark: Some(StoredMark { px: 100, time_ns: 0 }) })]);
         let actions = MarkActions { height: 1, time_ns: 1, actions: actions.to_vec() };
         let mut statuses = BlockStatuses::default();
         statuses.triggered.extend(triggered);
@@ -336,7 +336,7 @@ mod tests {
     fn collateral_uses_the_takers_oracle_phase_and_retains_ambiguous_bounds() {
         let mut coins = FxHashMap::default();
         for (name, px) in [("xyz:X", 100), ("xyz:A", 200)] {
-            coins.insert(name.into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, oracle_time_ns: None, size_decimals: 6,
+            coins.insert(name.into(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, oracle_time_ns: None, relayer_gap: Err(crate::accounts::marks::seed::NoRelayerGap::SinceCheckpoint), size_decimals: 6,
                 mark: Some(StoredMark { px, time_ns: 0 }) });
         }
         let fills = vec![fill(10, 1, true, false), fill(99, 1, false, false),
@@ -373,7 +373,7 @@ mod tests {
             let mut updates = Vec::new();
             for (name, before) in golden["before"].as_object().unwrap() {
                 let decimals = u32::try_from(case["markets"][name]["size_decimals"].as_u64().unwrap()).unwrap();
-                coins.insert(name.clone(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, oracle_time_ns: None, size_decimals: decimals,
+                coins.insert(name.clone(), Hip3Coin { external: None, last_trade: None, order_asset: 110_000, oracle: None, oracle_time_ns: None, relayer_gap: Err(crate::accounts::marks::seed::NoRelayerGap::SinceCheckpoint), size_decimals: decimals,
                     mark: Some(StoredMark { px: before.as_u64().unwrap(), time_ns: time_ns - 1 }) });
                 updates.push(Hip3PriceUpdate { normal: true, kind: Hip3PriceKind::Mark, coin: name.clone(), time_ns,
                     px: crate::accounts::size::format_size_raw(golden["after"][name].as_i64().unwrap(), 6 - decimals) });

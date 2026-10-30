@@ -33,13 +33,13 @@ pub(crate) mod system;
 use rustc_hash::FxHashMap;
 
 use self::{
-    actions::{MarkActions, Rank},
+    actions::{MarkAction, MarkActions, Rank, SubmittedMark},
     book::{Applied, BookDiff, BooksCheck, NativeBooks},
     execution::{BlockFill, BlockStatuses, BookCuts},
     fill_prices::{FillMarkPrices, FillPriceBuilder},
     native::{CoinCut, CoinPriceState, NativePrices, PriceMismatch, PricesCheck},
     rules::wire_units,
-    seed::{Hip3Coin, MarkSeed, StoredMark, exact_price_units},
+    seed::{Hip3Coin, MarkSeed, NoRelayerGap, RelayerGap, StoredMark, exact_price_units},
 };
 use super::{
     book::{AnchorInfo, Stream, StreamProgress, Unavailable},
@@ -207,6 +207,9 @@ impl MarkState {
         fill_prices.collateral(&self.hip3, &self.prices, inputs);
         fill_prices.hip3(&self.hip3, inputs);
         self.apply_hip3(height, &inputs.hip3, report);
+        if let Some(actions) = &inputs.actions {
+            self.apply_relayer_marks(actions, report);
+        }
         self.apply_hip3_trades(height, &inputs.fills, report);
         let cuts = self.apply_diffs(height, &inputs.diffs, report);
         let trades = self.block_trades(height, &inputs.fills, report);
@@ -257,6 +260,32 @@ impl MarkState {
                 (Ok(px), Hip3PriceKind::Mark) => coin.mark = Some(StoredMark { px, time_ns: update.time_ns }),
                 (Ok(px), Hip3PriceKind::External) => coin.external = Some(px),
                 (Err(err), _) => report.errors.push((Stream::Hip3OracleUpdates, format!("block {height} {}: {err}", update.coin))),
+            }
+        }
+    }
+
+    /// Each successful setOracle's submitted terms in block order (design 000582): the local HIP-3 model's EMA anchor,
+    /// never the marks' contract. A write that does not read as the two terms leaves its coins without a gap, the reason
+    /// reported once a coin turns so (`relayer_marks`, no stream loss).
+    fn apply_relayer_marks(&mut self, actions: &MarkActions, report: &mut MarksBlockReport) {
+        for action in &actions.actions {
+            let MarkAction::Hip3Oracle { dex, submitted, .. } = &action.action else { continue };
+            match submitted {
+                Ok(marks) => {
+                    for mark in marks {
+                        let Some(coin) = self.hip3.get_mut(&mark.coin) else { continue };
+                        match relayer_gap(mark, coin.size_decimals, actions.time_ns) {
+                            Ok(gap) => coin.relayer_gap = Ok(gap),
+                            Err(err) => unreadable_relayer_gap(&mark.coin, coin, &err, report),
+                        }
+                    }
+                }
+                Err(why) => {
+                    let prefix = format!("{dex}:");
+                    for (name, coin) in self.hip3.iter_mut().filter(|(name, _)| name.starts_with(&prefix)) {
+                        unreadable_relayer_gap(name, coin, why, report);
+                    }
+                }
             }
         }
     }
@@ -469,6 +498,19 @@ impl MarkStreams {
     }
 }
 
+/// A submitted (2) - (1) in the coin's price units.
+fn relayer_gap(mark: &SubmittedMark, size_decimals: u32, time_ns: u64) -> Result<RelayerGap, String> {
+    let units = |px: &str| exact_price_units(px, size_decimals).and_then(|units| i64::try_from(units).map_err(|err| format!("price {px}: {err}")));
+    Ok(RelayerGap { gap_raw: units(&mark.ema)? - units(&mark.oracle)?, time_ns })
+}
+
+fn unreadable_relayer_gap(name: &str, coin: &mut Hip3Coin, why: &str, report: &mut MarksBlockReport) {
+    if coin.relayer_gap != Err(NoRelayerGap::Unreadable) {
+        report.relayer_marks.push(format!("{name}: {why}"));
+    }
+    coin.relayer_gap = Err(NoRelayerGap::Unreadable);
+}
+
 /// What one completed block did to the marks.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct MarksBlockReport {
@@ -480,6 +522,9 @@ pub(crate) struct MarksBlockReport {
     pub(crate) unknown_coin_diffs: usize,
     /// Contract violations by stream; each is a loss of that stream up to the block.
     pub(crate) errors: Vec<(Stream, String)>,
+    /// HIP-3 coins whose relayer gap turned unreadable at the block, with why (design 000582): the local model's input
+    /// gone, never a stream loss.
+    pub(crate) relayer_marks: Vec<String>,
     /// Already-applied replay history exceeded its bound; live input continuity is unchanged.
     pub(crate) log_overflowed: bool,
     /// Price actions whose lines before them are not pinned to one count: each reads the book at `lo`, the first line
@@ -1006,6 +1051,44 @@ pub(crate) mod tests {
         assert_eq!(marks.price_snapshot().unwrap().hip3["xyz:TSLA"], tsla);
     }
 
+    /// Design 000582 (review 000582 r1 P2): a setOracle's submitted terms set its coins' relayer gap; a write that does
+    /// not read as them leaves its dex's coins without one, reported once as they turn so, never a stream loss: the node
+    /// prices stay available, live and through a rebuild of the logged blocks; a valid write after it sets the gap again.
+    #[test]
+    fn a_set_oracle_sets_the_relayer_gap_and_an_unreadable_one_is_no_loss() {
+        let mut marks = trusted_marks();
+        let time_ns = |height: u64| HIP3_LINE_TIME_NS + (height - 1_001) * 1_000_000_000;
+        let block = |height: u64, dex: &str, submitted: Result<Vec<(&str, &str, &str)>, &str>| {
+            let submitted = submitted
+                .map(|marks| marks.into_iter().map(|(coin, oracle, ema)| SubmittedMark { coin: coin.into(), oracle: oracle.into(), ema: ema.into() }).collect())
+                .map_err(str::to_string);
+            let action = actions::RankedAction { rank: (0, 3, 0), user: None, action: MarkAction::Hip3Oracle { dex: dex.into(), execution_index: None, submitted } };
+            MarkInputs { mark_actions: Ok(MarkActions { height, time_ns: time_ns(height), actions: vec![action] }), ..MarkInputs::default() }
+        };
+        let gap = |marks: &NodeMarks| marks.state.as_ref().unwrap().hip3["xyz:TSLA"].relayer_gap;
+        let gold = |marks: &NodeMarks| marks.state.as_ref().unwrap().hip3["flx:GOLD"].relayer_gap;
+        let report = marks.apply_block(1_002, block(1_002, "xyz", Ok(vec![("xyz:TSLA", "361.5", "361.48"), ("xyz:NEW", "1", "1")])));
+        assert_eq!((report.errors.len(), report.relayer_marks.len()), (0, 0), "{report:?}");
+        assert_eq!(gap(&marks), Ok(RelayerGap { gap_raw: -20, time_ns: time_ns(1_002) }), "(2) - (1) in TSLA's price units, a coin unknown skipped");
+        let report = marks.apply_block(1_003, block(1_003, "xyz", Err("markPxs of 1 lists, not 2")));
+        assert_eq!((report.errors, report.relayer_marks), (Vec::new(), vec!["xyz:TSLA: markPxs of 1 lists, not 2".to_string()]));
+        assert_eq!((gap(&marks), gold(&marks)), (Err(NoRelayerGap::Unreadable), Err(NoRelayerGap::SinceCheckpoint)), "its dex's coins only");
+        assert_eq!(marks.availability(), Ok(1_003), "no stream loss");
+        assert_eq!(marks.apply_block(1_004, block(1_004, "xyz", Err("markPxs of 1 lists, not 2"))).relayer_marks, Vec::<String>::new(), "reported as it turns");
+        let report = marks.apply_block(1_005, block(1_005, "xyz", Ok(vec![("xyz:TSLA", "361.5", "361.53")])));
+        assert_eq!((report.relayer_marks.len(), gap(&marks)), (0, Ok(RelayerGap { gap_raw: 30, time_ns: time_ns(1_005) })));
+        let report = marks.apply_block(1_006, block(1_006, "xyz", Ok(vec![("xyz:TSLA", "361.5", "361.5305")])));
+        assert_eq!(report.relayer_marks.len(), 1, "a price finer than TSLA's units: {:?}", report.relayer_marks);
+        assert!(report.relayer_marks[0].starts_with("xyz:TSLA: "), "{:?}", report.relayer_marks);
+        assert_eq!((report.errors.len(), gap(&marks), marks.availability()), (0, Err(NoRelayerGap::Unreadable), Ok(1_006)));
+        marks.apply_block(1_007, block(1_007, "xyz", Ok(vec![("xyz:TSLA", "361.5", "361.52")])));
+        let mut checkpoint = seed(1_000);
+        checkpoint.hip3.get_mut("xyz:TSLA").unwrap().mark = Some(written(360_000));
+        let report = marks.install(checkpoint);
+        assert_eq!((report.errors, report.rebuild), (Vec::new(), Rebuild::Replayed { blocks: 7 }), "the unreadable writes replayed, no loss");
+        assert_eq!((marks.availability(), gap(&marks)), (Ok(1_007), Ok(RelayerGap { gap_raw: 20, time_ns: time_ns(1_007) })));
+    }
+
     #[test]
     fn the_grid_holds_its_anchor_and_every_interval_both_ways() {
         assert!([800, 1_000, 1_100, 2_000].into_iter().all(|height| GRID.contains(height)));
@@ -1140,14 +1223,14 @@ pub(crate) mod tests {
         assert_eq!(marks.apply_block(1_001, hip3_only(vec![line(1_001, &[("xyz:NEW", "2.5")])])).unknown_coin_updates, 1);
         assert_eq!(marks.apply_block(1_002, hip3_only(vec![line(1_002, &[("xyz:NEW", "2.75")])])).unknown_coin_updates, 1);
         let mut listing = seed(1_000);
-        listing.hip3.insert("xyz:NEW".to_string(), Hip3Coin { external: None, last_trade: None, order_asset: 110_001, size_decimals: 4, mark: None, oracle: None, oracle_time_ns: None });
+        listing.hip3.insert("xyz:NEW".to_string(), Hip3Coin { external: None, last_trade: None, order_asset: 110_001, size_decimals: 4, mark: None, oracle: None, oracle_time_ns: None, relayer_gap: Err(NoRelayerGap::SinceCheckpoint) });
         let report = marks.install(listing);
         assert_eq!((report.rebuild, report.errors.as_slice()), (Rebuild::Replayed { blocks: 2 }, [].as_slice()));
         assert_eq!(marks.state.as_ref().unwrap().hip3["xyz:NEW"].mark, Some(written(275)), "block 1002, at 2 decimals");
         run(&mut marks, 1_003..=1_100, &[]);
         marks.apply_block(1_101, hip3_only(vec![line(1_101, &[("xyz:NEW", "2.75")])]));
         let mut coarser = seed(1_100);
-        coarser.hip3.insert("xyz:NEW".to_string(), Hip3Coin { external: None, last_trade: None, order_asset: 110_001, size_decimals: 5, mark: None, oracle: None, oracle_time_ns: None });
+        coarser.hip3.insert("xyz:NEW".to_string(), Hip3Coin { external: None, last_trade: None, order_asset: 110_001, size_decimals: 5, mark: None, oracle: None, oracle_time_ns: None, relayer_gap: Err(NoRelayerGap::SinceCheckpoint) });
         let report = marks.install(coarser);
         assert_eq!(report.errors.len(), 1, "2.75 has more than one decimal at szDecimals 5");
         let lost = Unavailable::DataLoss { stream: Stream::Hip3OracleUpdates, bound: LossBound::Block(1_101) };

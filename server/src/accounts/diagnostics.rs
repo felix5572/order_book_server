@@ -14,6 +14,8 @@ const RESEARCH_SAMPLES: u64 = 20;
 pub(super) enum Cause {
     Positioning, WatcherDiscard, LateOrDropped, Parse, HeightGap, PendingOverflow,
     Reconstruction, SizeReconstruction, Merge, HeldOverflow, LogOverflow, MarkLogOverflow, FundingDependency,
+    /// A setOracle's `markPxs` not read as the local HIP-3 model's two terms (design 000582).
+    Hip3RelayerMarks,
 }
 impl Cause {
     pub(super) const fn label(self) -> &'static str {
@@ -25,13 +27,14 @@ impl Cause {
             Self::HeldOverflow => "hold_overflow", Self::LogOverflow => "replay_log_overflow",
             Self::FundingDependency => "funding_dependency",
             Self::MarkLogOverflow => "mark_replay_retention_overflow",
+            Self::Hip3RelayerMarks => "hip3_relayer_marks",
         }
     }
     pub(super) const fn category(self) -> &'static str {
         match self {
             Self::Positioning => "initialization",
             Self::WatcherDiscard | Self::LateOrDropped | Self::HeightGap => "inputContinuity",
-            Self::Parse => "inputFormat",
+            Self::Parse | Self::Hip3RelayerMarks => "inputFormat",
             Self::PendingOverflow | Self::HeldOverflow | Self::LogOverflow | Self::MarkLogOverflow => "capacity",
             Self::Reconstruction | Self::SizeReconstruction | Self::Merge => "reconstruction",
             Self::FundingDependency => "missingDependency",

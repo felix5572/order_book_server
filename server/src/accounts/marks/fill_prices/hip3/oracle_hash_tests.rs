@@ -35,7 +35,7 @@ impl Fixture {
         Self {
             height,
             coins: FxHashMap::from_iter([(coin.into(), Hip3Coin { external: None, last_trade: None,
-                order_asset: u32::try_from(event["order_asset"].as_u64().unwrap()).unwrap(), size_decimals: decimals, oracle: None, oracle_time_ns: None,
+                order_asset: u32::try_from(event["order_asset"].as_u64().unwrap()).unwrap(), size_decimals: decimals, oracle: None, oracle_time_ns: None, relayer_gap: Err(crate::accounts::marks::seed::NoRelayerGap::SinceCheckpoint),
                 mark: Some(StoredMark { px: exact_price_units(event["before_mark"].as_str().unwrap(), decimals).unwrap(), time_ns: time_ns - 1 }),
             })]),
             inputs: BlockInputs {
@@ -110,7 +110,8 @@ fn full_archived_blocks_derive_oracle_execution_positions_without_projection() {
         let parsed = mark_actions(&line);
         let oracle = parsed.actions.iter().find(|a| matches!(&a.action, MarkAction::Hip3Oracle { dex, .. } if dex == "io")).unwrap();
         assert_eq!(oracle.rank, serde_json::from_value(event["rank"].clone()).unwrap());
-        assert_eq!(oracle.action, MarkAction::Hip3Oracle { dex: "io".into(), execution_index: Some(usize::try_from(event["execution_index"].as_u64().unwrap()).unwrap()) });
+        let expected = usize::try_from(event["execution_index"].as_u64().unwrap()).unwrap();
+        assert!(matches!(&oracle.action, MarkAction::Hip3Oracle { dex, execution_index: Some(index), .. } if dex == "io" && *index == expected), "{:?}", oracle.action);
         fixture.inputs.actions = Some(parsed);
         fixture.assert_range(event, true);
     }
@@ -152,7 +153,7 @@ fn oracle_bracket_full_archived_block_confirms_both_price_evidence_sources() {
     let parsed = mark_actions(&line);
     let oracle = parsed.actions.iter().find(|a| matches!(&a.action, MarkAction::Hip3Oracle { dex, .. } if dex == "xyz")).unwrap();
     assert_eq!(oracle.rank, (0, 3, 362));
-    assert_eq!(oracle.action, MarkAction::Hip3Oracle { dex: "xyz".into(), execution_index: Some(371) });
+    assert!(matches!(&oracle.action, MarkAction::Hip3Oracle { dex, execution_index: Some(371), .. } if dex == "xyz"), "{:?}", oracle.action);
     assert_eq!(fixture.inputs.statuses.interleaved_trigger_ranks(&parsed).get(&583_470_232_916), Some(&(2, 1, 5)));
     fixture.inputs.actions = Some(parsed);
     fixture.assert_range(event, true);
@@ -177,7 +178,8 @@ fn oracle_bracket_followup_full_blocks_verify_projected_ranks_and_execution_indi
         let dex = event["coin"].as_str().unwrap().split_once(':').unwrap().0;
         let oracle = parsed.actions.iter().find(|a| matches!(&a.action, MarkAction::Hip3Oracle { dex: actual, .. } if actual == dex)).unwrap();
         assert_eq!(oracle.rank, serde_json::from_value(event["rank"].clone()).unwrap());
-        assert_eq!(oracle.action, MarkAction::Hip3Oracle { dex: dex.into(), execution_index: Some(usize::try_from(event["execution_index"].as_u64().unwrap()).unwrap()) });
+        let expected = usize::try_from(event["execution_index"].as_u64().unwrap()).unwrap();
+        assert!(matches!(&oracle.action, MarkAction::Hip3Oracle { dex: written, execution_index: Some(index), .. } if written == dex && *index == expected), "{:?}", oracle.action);
         let projected = fixture.inputs.statuses.interleaved_trigger_ranks(fixture.inputs.actions.as_ref().unwrap());
         let actual = fixture.inputs.statuses.interleaved_trigger_ranks(&parsed);
         assert!(!projected.is_empty());

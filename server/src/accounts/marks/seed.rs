@@ -452,6 +452,24 @@ pub(crate) struct Hip3Coin {
     /// The book's last trade price (the checkpoint book's `last_trade_px`, then each block's last taker fill); `None`
     /// before one.
     pub(crate) last_trade: Option<u64>,
+    /// The (2) - (1) its dex's last setOracle submitted (design 000582): the local HIP-3 model's EMA anchor.
+    pub(crate) relayer_gap: Result<RelayerGap, NoRelayerGap>,
+}
+
+/// A setOracle's `markPxs` (2) - (1) for a coin, price units, and its block's time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RelayerGap {
+    pub(crate) gap_raw: i64,
+    pub(crate) time_ns: u64,
+}
+
+/// Why a coin holds no relayer gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoRelayerGap {
+    /// No setOracle of its dex read since the checkpoint (the checkpoint stores no `markPxs`).
+    SinceCheckpoint,
+    /// Its dex's last setOracle did not read as the model's two terms for it: the accounts diagnostics say why.
+    Unreadable,
 }
 
 impl MarkSeed {
@@ -476,7 +494,10 @@ impl MarkSeed {
                 let oracle = asset.oracle_raw.map(price_units).transpose().map_err(|err| format!("{}: stored oracle {err}", asset.name))?;
                 let external = asset.external_raw.map(price_units).transpose().map_err(|err| format!("{}: stored external {err}", asset.name))?;
                 let last_trade = hip3_last_trades.get(&book_asset).copied();
-                hip3.insert(asset.name.clone(), Hip3Coin { order_asset, size_decimals: asset.size_decimals, mark, oracle, oracle_time_ns: None, external, last_trade });
+                hip3.insert(asset.name.clone(), Hip3Coin {
+                    order_asset, size_decimals: asset.size_decimals, mark, oracle, oracle_time_ns: None, external, last_trade,
+                    relayer_gap: Err(NoRelayerGap::SinceCheckpoint),
+                });
             }
         }
         Ok(Self { height, time_ms, native, hip3 })
@@ -752,6 +773,7 @@ pub(crate) mod tests {
             mark: Some(StoredMark { px: 358_320, time_ns: 1_792_391_842_000_000_000 }),
             external: Some(357_970),
             last_trade: Some(358_300),
+            relayer_gap: Err(NoRelayerGap::SinceCheckpoint),
         });
         let gold = seed.hip3["flx:GOLD"];
         assert_eq!((gold.mark.map(|mark| mark.px), gold.external), (Some(41_883_000), Some(41_883_000)));

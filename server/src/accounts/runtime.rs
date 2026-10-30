@@ -766,7 +766,7 @@ fn record_lost_block(book: &mut AccountBook, marks: &mut NodeMarks, stream: Stre
 }
 
 fn report_marks_block(diagnostics: &mut AccountDiagnostics, height: u64, report: MarksBlockReport) {
-    let MarksBlockReport { unknown_coin_updates, unknown_coin_diffs, errors, log_overflowed, ambiguous_cuts, ambiguous_samples, fill_prices: _ } =
+    let MarksBlockReport { unknown_coin_updates, unknown_coin_diffs, errors, relayer_marks, log_overflowed, ambiguous_cuts, ambiguous_samples, fill_prices: _ } =
         report;
     NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label()]).inc_by(unknown_coin_updates as u64);
     NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.with_label_values(&[Stream::BookDiffs.label()]).inc_by(unknown_coin_diffs as u64);
@@ -775,6 +775,10 @@ fn report_marks_block(diagnostics: &mut AccountDiagnostics, height: u64, report:
         record_evidence(&ambiguous_cut_json(height, cut));
     }
     report_reconstruction_errors(diagnostics, &errors, height, "live");
+    // the local HIP-3 model's anchor input only: no data loss (design 000582)
+    for detail in relayer_marks {
+        diagnostics.report(Some(Stream::BlockActions), Cause::Hip3RelayerMarks, Some(height), || detail);
+    }
     if log_overflowed {
         diagnostics.report(None, Cause::MarkLogOverflow, Some(height), ||
             "node mark replay cache exceeded its bound; already-applied live state unchanged; historical rebuild waits for the next checkpoint grid".into());
