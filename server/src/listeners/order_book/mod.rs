@@ -64,6 +64,7 @@ use utils::{
 const MAX_CACHED_EVENTS: usize = 4_000_000;
 
 pub(crate) mod bbo;
+mod book_revision;
 mod l2_conflation;
 pub(crate) mod parallel;
 mod state;
@@ -531,6 +532,9 @@ pub(crate) struct OrderBookListener {
     // the full set, so no coin starves between publishes. Mutated only under the
     // listener lock (like l2_snapshot_cache). Bounded by the universe size.
     l2_conflation: l2_conflation::L2Conflation,
+    // Raised when the book inputs applied since its last raise have settled; the
+    // forced flow starts its near computations on it (hyperliquid-trade design 000587 r2).
+    book_revision: book_revision::BookRevision,
     // Node write time (unix ns) of the newest book line applied to the state,
     // for the publish stage of NODE_LINE_LAG.
     last_book_line_node_ns: Option<i64>,
@@ -586,6 +590,7 @@ impl OrderBookListener {
             trade_pairer: TradePairer::default(),
             l2_snapshot_cache: HashMap::new(),
             l2_conflation: l2_conflation::L2Conflation::default(),
+            book_revision: book_revision::BookRevision::new(),
             last_book_line_node_ns: None,
             active_l2_params,
             active_subs: ActiveSubs::default(),
@@ -645,6 +650,11 @@ impl OrderBookListener {
     /// Handle on the lock-free trust mirror, for the server's send paths.
     pub(crate) fn book_trust(&self) -> BookTrust {
         self.book_trust.clone()
+    }
+
+    /// The book revision's receiver, taken before the listener goes under its lock (like `book_trust`).
+    pub(crate) fn book_revision(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.book_revision.subscribe()
     }
 
     /// Push a change of `book_trusted()` to the mirror, the metrics and the log.
@@ -930,6 +940,8 @@ impl OrderBookListener {
         // recomputes every present coin fresh against the new book.
         self.l2_snapshot_cache = HashMap::new();
         self.l2_conflation.clear();
+        // the installed book and its replay are a book input to announce
+        self.book_revision.note_input(Instant::now());
         // Force the next flush to treat the active variant set as "changed" so the
         // empty cache is rebuilt against whatever shapes are currently subscribed.
         self.last_active_l2_params.clear();
@@ -1543,6 +1555,7 @@ impl OrderBookListener {
 
         // Collected here and applied after the state borrow ends.
         let mut desync_reason: Option<&'static str> = None;
+        let mut book_input_applied = false;
 
         let changed_coins: HashSet<Coin> = if let Some(state) = self.order_book_state.as_mut() {
             let result = match event_batch {
@@ -1641,6 +1654,7 @@ impl OrderBookListener {
                             .observe(parallel::seconds_since_node_write(node_ns));
                         self.last_book_line_node_ns = Some(node_ns);
                     }
+                    book_input_applied = is_book_batch;
                     coins
                 }
                 Err(err) => {
@@ -1661,6 +1675,9 @@ impl OrderBookListener {
         } else {
             HashSet::new()
         };
+        if book_input_applied {
+            self.book_revision.note_input(Instant::now());
+        }
         EVENT_PROCESSING_LATENCY.with_label_values(&[source_label]).observe(process_start.elapsed().as_secs_f64());
         // Staleness signal for /health: one atomic store per applied batch.
         // Only the live-apply path advances it - batches consumed by the
@@ -1753,8 +1770,23 @@ impl OrderBookListener {
         // path stays minimal: apply + BBO + accumulate.
     }
 
-    /// When the main loop should next call [`Self::flush_l2_if_due`]; `None` while
-    /// nothing can be published (no dirty coin, or the book is withheld).
+    /// When the main loop should next call [`Self::publish_if_due`]: the earlier of
+    /// the L2 publish's and the book revision's; `None` while neither is pending.
+    pub(crate) fn publish_deadline(&self) -> Option<Instant> {
+        match (self.l2_flush_deadline(), self.book_revision.deadline()) {
+            (Some(l2), Some(revision)) => Some(l2.min(revision)),
+            (l2, revision) => l2.or(revision),
+        }
+    }
+
+    /// The L2 publish and the book revision, each when due. O(1) when neither is.
+    pub(crate) fn publish_if_due(&mut self) {
+        self.flush_l2_if_due();
+        self.book_revision.raise_if_due(Instant::now());
+    }
+
+    /// When the L2 conflation buffer is next due; `None` while nothing can be
+    /// published (no dirty coin, or the book is withheld).
     pub(crate) fn l2_flush_deadline(&self) -> Option<Instant> {
         if !self.book_trusted() {
             return None;
@@ -2127,10 +2159,12 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
     let mut resync_backoff = RESYNC_BACKOFF_BASE;
     let mut next_fetch_allowed = Instant::now();
 
-    // When the L2 conflation buffer is next due (design 000260). Refreshed under
-    // the listener lock after every event batch and every L2 wake; a stale value
-    // (an install or a desync elsewhere cleared the buffer) costs one empty wake.
-    let mut l2_deadline: Option<Instant> = None;
+    // When the L2 conflation buffer (design 000260) or the book revision
+    // (hyperliquid-trade design 000587 r2) is next due. Refreshed under the
+    // listener lock after every event batch, every publish wake and every
+    // snapshot fetch's end; a stale value (an install or a desync elsewhere
+    // cleared the buffer) costs one empty wake.
+    let mut publish_deadline: Option<Instant> = None;
 
     // How many watcher events to drain per loop iteration. During block bursts
     // the old one-line-per-lock pattern paid a listener lock/unlock plus a
@@ -2154,18 +2188,18 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
         tokio::select! {
             biased;
 
-            // L2 publish FIRST under `biased`: the max-delay deadline is serviced
+            // Publish FIRST under `biased`: the max-delay deadline is serviced
             // even under continuous event load (during a burst tokio_rx is
             // perpetually ready, so a later-placed arm would be starved). It cannot
             // starve the event arm in return: it is Ready only at its deadline, and
-            // each wake either publishes (buffer drained, no deadline) or defers to
-            // a strictly later recheck.
-            () = sleep_until_or_pending(l2_deadline) => {
+            // each wake either publishes (nothing left pending) or defers to a
+            // strictly later recheck.
+            () = sleep_until_or_pending(publish_deadline) => {
                 let lock_start = Instant::now();
                 let mut guard = listener.lock().await;
                 LISTENER_LOCK_WAIT.observe(lock_start.elapsed().as_secs_f64());
-                guard.flush_l2_if_due();
-                l2_deadline = guard.l2_flush_deadline();
+                guard.publish_if_due();
+                publish_deadline = guard.publish_deadline();
             }
 
             // Process events from the file watchers, draining up to
@@ -2219,9 +2253,9 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                         }
                     }
                     // Publishes now if the max delay has passed (O(1) when not
-                    // due); otherwise the L2 arm sleeps until the new deadline.
-                    guard.flush_l2_if_due();
-                    l2_deadline = guard.l2_flush_deadline();
+                    // due); otherwise the publish arm sleeps until the new deadline.
+                    guard.publish_if_due();
+                    publish_deadline = guard.publish_deadline();
                 }
             }
 
@@ -2248,7 +2282,13 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
                 // Backoff bookkeeping: converged installs reset the spacing,
                 // anything else (fetch error, or an install that re-marked
                 // the book) doubles it so the next dump waits longer.
-                let converged = !listener.lock().await.needs_resync();
+                let converged = {
+                    let mut guard = listener.lock().await;
+                    // an install is a book input of its own: due with no batch after it (design 000587 r2)
+                    guard.publish_if_due();
+                    publish_deadline = guard.publish_deadline();
+                    !guard.needs_resync()
+                };
                 resync_backoff =
                     if converged { RESYNC_BACKOFF_BASE } else { (resync_backoff * 2).min(RESYNC_BACKOFF_MAX) };
                 next_fetch_allowed = Instant::now() + resync_backoff;
@@ -2460,6 +2500,53 @@ mod tests {
         listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1_000);
         assert!(listener.book_trusted() && listener.l2_conflation.is_empty());
         assert_eq!(listener.l2_flush_deadline(), None);
+    }
+
+    // ==================== Book revision (hyperliquid-trade design 000587 r2) ====================
+
+    /// Raises the book revision if anything is pending, as the main loop does once due.
+    fn raise_book_revision(listener: &mut OrderBookListener) {
+        listener.book_revision.age_for_test(l2_conflation::MAX_DELAY);
+        listener.publish_if_due();
+    }
+
+    /// An applied status or diff batch puts the book revision pending - the same block's later batch after a raise
+    /// again (r1 P2-1) -, raised with no L2 subscriber and while the book is withheld; a fill, or a book batch below the
+    /// installed snapshot, does not; an install does, with no batch after it.
+    #[test]
+    fn test_book_revision_follows_the_applied_book_inputs() {
+        let (mut listener, _rx) = ready_listener();
+        let revisions = listener.book_revision();
+        assert!(listener.book_revision.deadline().is_some(), "the install at 0 is an input");
+        raise_book_revision(&mut listener);
+        assert_eq!((*revisions.borrow(), listener.book_revision.deadline()), (1, None));
+
+        listener.apply_event_batch(5, EventBatch::Fills(make_fills_batch(&["BTC"], 5)), EventSource::Fills);
+        assert_eq!(listener.book_revision.deadline(), None, "a fill is no book input");
+
+        listener.apply_event_batch(5, EventBatch::Orders(make_status_batch("BTC", 1, 5)), EventSource::OrderStatuses);
+        let (l2, revision) = (listener.l2_flush_deadline(), listener.book_revision.deadline().expect("a status batch"));
+        assert_eq!(listener.publish_deadline(), Some(l2.map_or(revision, |l2| l2.min(revision))));
+        raise_book_revision(&mut listener);
+        assert_eq!(*revisions.borrow(), 2);
+        let new = serde_json::json!({"new": {"sz": "1.0"}});
+        listener.apply_event_batch(5, EventBatch::BookDiffs(make_diff_batch("BTC", 1, 5, new)), EventSource::OrderDiffs);
+        assert!(listener.book_revision.deadline().is_some(), "the same block's later batch");
+        raise_book_revision(&mut listener);
+        assert_eq!(*revisions.borrow(), 3);
+
+        apply_booked_order(&mut listener, 2, 6);
+        listener.mark_desynced("pending_cache_cleared");
+        assert!(!listener.book_trusted() && listener.publish_deadline().is_some(), "due while withheld");
+        raise_book_revision(&mut listener);
+        assert_eq!(*revisions.borrow(), 4, "no L2 subscriber, the book withheld");
+
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1_000);
+        assert!(listener.publish_deadline().is_some(), "the covering install, no batch after it");
+        raise_book_revision(&mut listener);
+        assert_eq!(*revisions.borrow(), 5);
+        apply_booked_order(&mut listener, 3, 7);
+        assert_eq!(listener.book_revision.deadline(), None, "below the installed snapshot: skipped");
     }
 
     // ==================== Event helpers ====================

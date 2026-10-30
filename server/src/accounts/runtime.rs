@@ -228,10 +228,12 @@ struct Supervised {
 /// Walk results in flight to the owner: at most one per (coin, side) request pending, so a few hundred.
 const WALK_RESULTS_CAPACITY: usize = 1_024;
 
-/// The order book the liquidation candidates walk (design 000443): the listener and its trust mirror.
+/// The order book the liquidation candidates walk (design 000443): the listener and its trust mirror; and the book
+/// revision the forced flow starts its near computations on (hyperliquid-trade design 000587 r2).
 pub(crate) struct BookSource {
     pub(crate) trust: BookTrust,
     pub(crate) listener: Arc<tokio::sync::Mutex<OrderBookListener>>,
+    pub(crate) revision: watch::Receiver<u64>,
 }
 
 /// The liquidation candidates and the walk results coming back to the owner; `walks` is `None` without a book.
@@ -243,7 +245,7 @@ pub(crate) struct CandidateFeed {
 impl CandidateFeed {
     /// With `book`, the walk task starts here.
     fn start(book: Option<&BookSource>) -> Self {
-        let Some(BookSource { trust, listener }) = book else {
+        let Some(BookSource { trust, listener, .. }) = book else {
             return Self { candidates: Candidates::new(None), walks: None };
         };
         let mailbox = Arc::new(WalkMailbox::default());

@@ -79,6 +79,11 @@ impl Tier {
             Self::Far => 5_000,
         })
     }
+
+    /// The near tiers start on each book revision as well as on their period (hyperliquid-trade design 000587 r2).
+    pub(crate) const fn follows_book(self) -> bool {
+        matches!(self, Self::Near | Self::NearWide)
+    }
 }
 
 /// Market or limit once triggered, from `orderType` (bm 10-21: `Stop Market`, `Take Profit Market`, `Trailing Stop

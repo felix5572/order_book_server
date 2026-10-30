@@ -144,8 +144,10 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     };
     // Lock-free trust mirror for the send paths below (design 000249 B).
     let book_trust = listener.book_trust();
+    let book_revision = listener.book_revision();
     let listener = Arc::new(Mutex::new(listener));
-    let accounts = start_account_view(&config, BookSource { trust: book_trust.clone(), listener: listener.clone() })?;
+    let accounts =
+        start_account_view(&config, BookSource { trust: book_trust.clone(), listener: listener.clone(), revision: book_revision })?;
     let local_marks = start_local_marks(&config, accounts.as_ref(), &listener)?;
     // the forced flow's local calibre (design 000451 r4 revision 8)
     if let (Some(accounts), Some(marks)) = (&accounts, &local_marks) {

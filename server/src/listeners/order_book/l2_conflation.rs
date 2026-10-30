@@ -16,7 +16,7 @@ use tokio::time::{Duration, Instant};
 /// window, not proof that the block is complete: in 2026-10-10 samples 90% of
 /// blocks had no gap over 0.72ms inside, ~5% one over 2ms (the longest 16.6ms).
 /// Such a block publishes its state so far, then the rest once it settles.
-const QUIET: Duration = Duration::from_millis(2);
+pub(super) const QUIET: Duration = Duration::from_millis(2);
 /// Longest a dirty coin waits for a quiet window, and the recheck spacing while
 /// nothing can be published (user's choice 2026-10-10: 20ms, not 50ms).
 pub(super) const MAX_DELAY: Duration = Duration::from_millis(20);
@@ -36,6 +36,13 @@ impl FlushTrigger {
             Self::Recheck => "recheck",
         }
     }
+}
+
+/// When something pending since `pending_since` is due: the book streams quiet [`QUIET`] since `last_event_at`, or
+/// [`MAX_DELAY`] waited. The L2 publish's rule, the book revision's too (hyperliquid-trade design 000587 r2).
+pub(super) fn burst_deadline(pending_since: Instant, last_event_at: Option<Instant>) -> Instant {
+    let max_delay = pending_since + MAX_DELAY;
+    last_event_at.map_or(max_delay, |event_at| (event_at + QUIET).min(max_delay))
 }
 
 /// Coins changed since the last L2 publish, and when to publish them. Owns the
@@ -70,8 +77,7 @@ impl L2Conflation {
         if let Some(recheck_at) = self.recheck_at {
             return Some(recheck_at);
         }
-        let max_delay = dirty_since + MAX_DELAY;
-        Some(self.last_book_event_at.map_or(max_delay, |event_at| (event_at + QUIET).min(max_delay)))
+        Some(burst_deadline(dirty_since, self.last_book_event_at))
     }
 
     pub(super) fn due(&self, now: Instant) -> Option<FlushTrigger> {

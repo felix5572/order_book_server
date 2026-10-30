@@ -10,7 +10,7 @@
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use log::error;
@@ -33,6 +33,11 @@ use crate::{
 const PX_SCALE: f64 = 1e8;
 /// A band is read this much wider than the distance; the entries' exact distances filter.
 const RANGE_MARGIN: f64 = 1e-6;
+/// A near key starts on a book revision only this long after it last began, in handling time: a node catching up
+/// raises revisions in a run, and each key would start again as soon as it ended, its reads crowding the listener
+/// lock the catch-up needs. Under the blocks' spacing (bm 2026-10-30: p10 54 ms, median 67 ms), so a block in the
+/// ordinary run is not held (hyperliquid-trade design 000587 r2).
+const BOOK_START_FLOOR: Duration = Duration::from_millis(50);
 
 /// `None`: every coin.
 pub(crate) type DemandKey = (Option<String>, Tier);
@@ -229,10 +234,43 @@ impl Pipeline {
             },
         }
     }
+
+    /// Its tier's period has run since it started, on the ticks' schedule (review 000586).
+    fn period_run(&self, tier: Tier, scheduled: Instant) -> bool {
+        self.started.is_none_or(|started| scheduled.duration_since(started) >= tier.period())
+    }
+
+    /// The book was revised since it started, and it began `BOOK_START_FLOOR` ago or more (design 000587 r2).
+    fn book_moved(&self, revision: u64, now: Instant) -> bool {
+        self.revision != revision && self.began.is_none_or(|began| now.duration_since(began) >= BOOK_START_FLOOR)
+    }
+
+    const fn idle(&self) -> bool {
+        matches!(self.stage, Stage::Idle)
+    }
+}
+
+/// When a computation starts (design 000587 r2 for P2-2): `period_base` its period is measured from - a tick's time on
+/// its schedule (review 000586), else when it was handled; `began` when it was handled, the book floor's.
+#[derive(Clone, Copy)]
+struct StartAt {
+    period_base: Instant,
+    began: Instant,
+}
+
+impl StartAt {
+    const fn handled(now: Instant) -> Self {
+        Self { period_base: now, began: now }
+    }
 }
 
 struct Pipeline {
+    /// The period base of its last computation; also what a waiting query is compared with.
     started: Option<Instant>,
+    /// When its last computation was handled.
+    began: Option<Instant>,
+    /// The book revision its last computation started at.
+    revision: u64,
     stage: Stage,
     /// The latest frame, published or not: its `seq` is the last published content's.
     frame: Option<Arc<FlowFrame>>,
@@ -258,6 +296,8 @@ pub(crate) struct ForcedFlow {
     waiters: Vec<Waiter>,
     /// Permanent until restart: the reader task is gone.
     stopped: Option<String>,
+    /// The listener's latest book revision the thread passed on.
+    book_revision: u64,
 }
 
 /// What the owner broadcasts after a step.
@@ -268,7 +308,7 @@ pub(crate) struct FlowOutput {
 
 impl ForcedFlow {
     pub(crate) fn new(demand: FlowDemand, link: Option<FlowLink>) -> Self {
-        Self { demand, link, local: LocalLink::Off, pipelines: FxHashMap::default(), version: 0, waiters: Vec::new(), stopped: None }
+        Self { demand, link, local: LocalLink::Off, pipelines: FxHashMap::default(), version: 0, waiters: Vec::new(), stopped: None, book_revision: 0 }
     }
 
     /// The local marks' snapshots from now on (r5 revision 13).
@@ -315,7 +355,7 @@ impl ForcedFlow {
             let mut wanted: Vec<(String, Tier)> = self.wanted(accounts).into_iter().collect();
             wanted.sort_unstable();
             for (coin, tier) in wanted {
-                self.start(&coin, tier, now, accounts, &mut output);
+                self.start(&coin, tier, StartAt::handled(now), accounts, &mut output);
             }
         }
         self.follow_ups(now, accounts, &mut output);
@@ -323,16 +363,35 @@ impl ForcedFlow {
         output
     }
 
-    /// Every demanded (coin, tier) whose period has run starts its pipeline. `scheduled`: the tick's time on its
-    /// schedule, not when the loop got to it - the periods are measured between those.
-    pub(crate) fn tick(&mut self, scheduled: Instant, accounts: &FlowAccounts) -> FlowOutput {
+    /// Every idle demanded (coin, tier) whose period has run starts its pipeline, and a near one the book was revised
+    /// for past the floor (one the floor held or a computation under way kept). `scheduled`: the tick's time on its
+    /// schedule, not when the loop got to it - the periods are measured between those; `now`: when it was handled.
+    pub(crate) fn tick(&mut self, scheduled: Instant, now: Instant, accounts: &FlowAccounts) -> FlowOutput {
+        let revision = self.book_revision;
         let mut output = FlowOutput::default();
         for (coin, tier) in self.demanded(accounts) {
             let due = self.pipelines.get(&(coin.clone(), tier)).is_none_or(|pipeline| {
-                matches!(pipeline.stage, Stage::Idle) && pipeline.started.is_none_or(|started| scheduled.duration_since(started) >= tier.period())
+                pipeline.idle() && (pipeline.period_run(tier, scheduled) || (tier.follows_book() && pipeline.book_moved(revision, now)))
             });
             if due {
-                self.start(&coin, tier, scheduled, accounts, &mut output);
+                self.start(&coin, tier, StartAt { period_base: scheduled, began: now }, accounts, &mut output);
+            }
+        }
+        output
+    }
+
+    /// The listener raised its book revision (design 000587 r2): every idle near key past the floor starts now; the
+    /// others are taken up by a later revision or tick.
+    pub(crate) fn on_book(&mut self, revision: u64, now: Instant, accounts: &FlowAccounts) -> FlowOutput {
+        self.book_revision = revision;
+        let mut output = FlowOutput::default();
+        for (coin, tier) in self.demanded(accounts) {
+            if !tier.follows_book() {
+                continue;
+            }
+            let due = self.pipelines.get(&(coin.clone(), tier)).is_none_or(|pipeline| pipeline.idle() && pipeline.book_moved(revision, now));
+            if due {
+                self.start(&coin, tier, StartAt::handled(now), accounts, &mut output);
             }
         }
         output
@@ -364,7 +423,7 @@ impl ForcedFlow {
             self.withdraw_local(key, output);
         }
         if was_ready.is_some_and(|was| was != now_ready) {
-            self.start(&key.0, key.1, now, accounts, output);
+            self.start(&key.0, key.1, StartAt::handled(now), accounts, output);
         }
     }
 
@@ -439,7 +498,7 @@ impl ForcedFlow {
         keys.sort_unstable();
         keys.dedup();
         for (coin, tier) in keys {
-            self.start(&coin, tier, now, accounts, output);
+            self.start(&coin, tier, StartAt::handled(now), accounts, output);
         }
     }
 
@@ -493,9 +552,11 @@ impl ForcedFlow {
     }
 
     /// Reads the coin's band for the tier around both marks, or finishes it unavailable.
-    fn start(&mut self, coin: &str, tier: Tier, now: Instant, accounts: &FlowAccounts, output: &mut FlowOutput) {
+    fn start(&mut self, coin: &str, tier: Tier, at: StartAt, accounts: &FlowAccounts, output: &mut FlowOutput) {
         let key = (coin.to_string(), tier);
-        self.pipelines.entry(key.clone()).or_insert(Pipeline { started: None, stage: Stage::Idle, frame: None }).started = Some(now);
+        let revision = self.book_revision;
+        let pipeline = self.pipelines.entry(key.clone()).or_insert(Pipeline { started: None, began: None, revision, stage: Stage::Idle, frame: None });
+        (pipeline.started, pipeline.began, pipeline.revision) = (Some(at.period_base), Some(at.began), revision);
         let unavailable = |reason: String| FlowContent::Unavailable(reason);
         if let Some(reason) = self.stopped.clone() {
             return self.finish(&key, FlowHeights::default(), unavailable(reason), output);
@@ -544,7 +605,7 @@ impl ForcedFlow {
         };
         if copy.generation() != read_generation {
             // the read was posted for facts the copy has replaced since (review 000566 r1 P2-1)
-            return self.start(coin, tier, now, accounts, output);
+            return self.start(coin, tier, StartAt::handled(now), accounts, output);
         }
         let Some(size_decimals) = copy.size_decimals(coin) else {
             return self.finish(&key, FlowHeights::default(), FlowContent::Unavailable(format!("no node marks of {coin}")), output);
@@ -557,7 +618,7 @@ impl ForcedFlow {
         let (need_lo, need_hi) = band(node_mark_raw, local_raw, size_decimals, tier);
         if need_lo < lo || need_hi > hi {
             // the marks moved past the band read: read the new one
-            return self.start(coin, tier, now, accounts, output);
+            return self.start(coin, tier, StartAt::handled(now), accounts, output);
         }
         // the account part's common lower bound: the candidates may be older than the positions (r2 revision 1)
         let (accounts_height, accounts_time_ms) = copy.accounts_at();
@@ -665,7 +726,7 @@ impl ForcedFlow {
         // entries and the cumulative walks of them dropped whole
         match accounts.serving() {
             Err(reason) => return self.finish(&key, FlowHeights::default(), FlowContent::Unavailable(reason), output),
-            Ok(copy) if !read.still_holds(copy, coin, tier) => return self.start(coin, tier, now, accounts, output),
+            Ok(copy) if !read.still_holds(copy, coin, tier) => return self.start(coin, tier, StartAt::handled(now), accounts, output),
             Ok(_) => {}
         }
         let link_trust = self.link.as_ref().map(|link| (link.trust.is_trusted(), link.trust.withheld_periods()));
@@ -933,9 +994,19 @@ mod tests {
             self.flow.on_local(closed, now, &accounts)
         }
 
+        /// A tick handled on its schedule.
         fn tick(&mut self, now: Instant) -> FlowOutput {
+            self.tick_late(now, now)
+        }
+
+        fn tick_late(&mut self, scheduled: Instant, now: Instant) -> FlowOutput {
             let (accounts, _validity) = self.accounts();
-            self.flow.tick(now, &accounts)
+            self.flow.tick(scheduled, now, &accounts)
+        }
+
+        fn book(&mut self, revision: u64, now: Instant) -> FlowOutput {
+            let (accounts, _validity) = self.accounts();
+            self.flow.on_book(revision, now, &accounts)
         }
 
         fn read(&mut self, read: FlowRead, now: Instant) -> FlowOutput {
@@ -1341,7 +1412,8 @@ mod tests {
         let mut flow = ForcedFlow::new(demand.clone(), None);
         let _guard = demand.acquire((None, Tier::Near));
         let (accounts, _validity) = serving(&book, &marks, &candidates);
-        let output = flow.tick(Instant::now(), &accounts);
+        let now = Instant::now();
+        let output = flow.tick(now, now, &accounts);
         assert_eq!(output.frames.len(), 1, "every coin with a node mark");
         assert_eq!(output.frames[0].content, FlowContent::Unavailable("the server runs without an order book".to_string()));
         flow.stop("the forced flow read task ended".to_string());
@@ -1361,7 +1433,7 @@ mod tests {
         let (mut accounts, _validity) = owner.accounts();
         accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_005, time_ms: 1_005_000, marks: Vec::new(), positions: Vec::new() });
         let now = Instant::now();
-        drop(owner.flow.tick(now, &accounts));
+        drop(owner.flow.tick(now, now, &accounts));
         let ((_, _, _), FlowJob::Band { version, .. }) = owner.job() else { panic!("a band job") };
         let read = band_at(Vec::new(), TriggerAvailability::Complete, true);
         let frame = owner.flow.on_read(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Mid, version, read: Some(read) }, now, &accounts).frames.remove(0);
@@ -1617,5 +1689,115 @@ mod tests {
         assert_eq!(frames.iter().map(|frame| frame.coin.as_str()).collect::<Vec<_>>(), ["BTC", PUMP]);
         let entry = &ready(&frames[1]).entries[0].entry;
         assert_eq!((entry.size_raw, entry.size_reason), (0, SizeReason::NoPositionToReduce), "the new generation's closed position");
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    /// The pending band job of (PUMP, `tier`) ended at once (no snapshot yet): the key idle again.
+    fn end_band(owner: &mut Owner, tier: Tier, now: Instant) {
+        let ((_, job_tier, kind), FlowJob::Band { version, .. }) = owner.job() else { panic!("a band job") };
+        assert_eq!((job_tier, kind), (tier, FlowJobKind::Band));
+        drop(owner.read(FlowRead::Band { coin: PUMP.to_string(), tier, version, read: None }, now));
+    }
+
+    /// Design 000587 r2: a book revision starts an idle near key at once, past the floor since it began; a revision
+    /// within the floor - the same block's later lines (r1 P2-1) - waits for the tick past it, not for the period.
+    #[test]
+    fn a_book_revision_starts_an_idle_near_key_past_the_floor() {
+        let mut owner = Owner::new();
+        let _near = owner.demand.acquire((Some(PUMP.to_string()), Tier::Near));
+        let start = Instant::now();
+        owner.tick(start);
+        end_band(&mut owner, Tier::Near, start);
+        owner.book(1, start + ms(60));
+        end_band(&mut owner, Tier::Near, start + ms(60));
+        owner.book(2, start + ms(70));
+        assert!(owner.mailbox.drain().is_empty(), "within the floor");
+        owner.tick(start + ms(100));
+        assert!(owner.mailbox.drain().is_empty(), "the floor not past, the period not run");
+        owner.tick(start + ms(150));
+        end_band(&mut owner, Tier::Near, start + ms(150));
+    }
+
+    /// Design 000587 r2: a revision while the key computes does not start it again; the tick past the floor after its
+    /// end takes the revision up.
+    #[test]
+    fn a_revision_while_a_near_key_computes_is_taken_up_after() {
+        let mut owner = Owner::new();
+        let _near = owner.demand.acquire((Some(PUMP.to_string()), Tier::Near));
+        let start = Instant::now();
+        owner.tick(start);
+        let ((_, _, _), FlowJob::Band { version, .. }) = owner.job() else { panic!("a band job") };
+        owner.book(1, start + ms(20));
+        assert!(owner.mailbox.drain().is_empty(), "under way");
+        drop(owner.read(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Near, version, read: None }, start + ms(30)));
+        assert!(owner.mailbox.drain().is_empty(), "ended, nothing started");
+        owner.tick(start + ms(50));
+        end_band(&mut owner, Tier::Near, start + ms(50));
+    }
+
+    /// Design 000587 r2 (r1 P2-2): a tick handled late starts the key at its schedule for the period, at its handling
+    /// for the floor - a revision soon after the late start waits for 50 ms past its handling.
+    #[test]
+    fn the_book_floor_runs_from_when_a_late_tick_was_handled() {
+        let mut owner = Owner::new();
+        let _near = owner.demand.acquire((Some(PUMP.to_string()), Tier::Near));
+        let start = Instant::now();
+        owner.tick_late(start, start + ms(60));
+        end_band(&mut owner, Tier::Near, start + ms(65));
+        owner.book(1, start + ms(65));
+        owner.book(2, start + ms(109));
+        assert!(owner.mailbox.drain().is_empty(), "under 50 ms since it was handled");
+        owner.book(3, start + ms(110));
+        end_band(&mut owner, Tier::Near, start + ms(110));
+    }
+
+    /// Without a revision a near key keeps its period, on the ticks' schedule (review 000586).
+    #[test]
+    fn without_a_revision_a_near_key_keeps_its_period() {
+        let mut owner = Owner::new();
+        let _near = owner.demand.acquire((Some(PUMP.to_string()), Tier::Near));
+        let start = Instant::now();
+        owner.tick(start);
+        end_band(&mut owner, Tier::Near, start);
+        owner.tick(start + ms(50));
+        assert!(owner.mailbox.drain().is_empty(), "the period not run");
+        owner.tick(start + ms(100));
+        end_band(&mut owner, Tier::Near, start + ms(100));
+    }
+
+    /// Design 000587 r2: the middle and far tiers keep their periods alone.
+    #[test]
+    fn a_middle_tier_does_not_follow_the_book() {
+        let mut owner = Owner::new();
+        let _mid = owner.demand.acquire((Some(PUMP.to_string()), Tier::Mid));
+        let start = Instant::now();
+        owner.tick(start);
+        end_band(&mut owner, Tier::Mid, start);
+        owner.book(1, start + ms(600));
+        owner.tick(start + ms(600));
+        assert!(owner.mailbox.drain().is_empty(), "not on the book");
+        owner.tick(start + ms(1_000));
+        end_band(&mut owner, Tier::Mid, start + ms(1_000));
+    }
+
+    /// A query that comes while a revision's computation is under way is not answered by it (review 000460 r2 P2-2):
+    /// the computation started for it once that one ended answers it.
+    #[test]
+    fn a_query_is_not_answered_by_a_revision_computation_started_before_it() {
+        let mut owner = Owner::new();
+        let _near = owner.demand.acquire((Some(PUMP.to_string()), Tier::Near));
+        let start = Instant::now();
+        owner.tick(start);
+        end_band(&mut owner, Tier::Near, start);
+        owner.book(1, start + ms(60));
+        let ((_, _, _), FlowJob::Band { version, .. }) = owner.job() else { panic!("a band job") };
+        let mut answer = owner.query(PUMP, Tier::Near, start + ms(61));
+        drop(owner.read(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Near, version, read: None }, start + ms(62)));
+        assert!(answer.try_recv().is_err(), "started before the query");
+        end_band(&mut owner, Tier::Near, start + ms(63));
+        assert_eq!(answer.try_recv().unwrap().unwrap().len(), 1);
     }
 }
