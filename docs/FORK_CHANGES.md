@@ -875,3 +875,22 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - `ema` 的 5 个测试；
   - snapshot 集成：4 秒空档继续可用，6 秒空档后等新写入，新写入后立即可用；`Unreadable` 撤回，同一次写入不能再用。
   - 变异检查：同一次写入也能重新锚定 → 7 个测试失败；空档上限改成 60 秒 → 集成测试失败；把读不出当成流丢失 → 验收测试失败。
+
+## 2026-10-30 `extMarkPrices` 本地腿加外部买一、卖一的加权中位数和各家报价（设计 000588 r1，用户 10-30 定）
+
+- **起因**：强平接货研究发现，挂单时接货价相对外部价的位置是区分赚亏的主要因素：接货价比外部还激进时，基本是 HL 落后于外部。用户要求列出外部各家的买一、卖一，以及与 `externalPx` 同口径的中位数。原来各家报价只在 `GET /extMarkInputs`，是另一次读取，和帧对不齐。
+- **改动**（`local_marks/snapshot.rs`、`prices_view.rs`）：
+  - 本 tick 有效的报价先各自乘 multiplier（`valid_quotes`），oracle 和 C 都从这里取各家中点的加权中位数（`mid_median`），结果和原来逐位相同。
+  - `LocalLeg.external_quotes`：C 用到的那组永续报价，买一、卖一各自的加权中位数（同样的家、同样的权重），以及每家明细。
+  - 本地腿在 `externalPx` 后加 `externalBidPx`、`externalAskPx`、`externalQuotes`（`{venue: {bidPx, askPx, receivedTsMs}}`）。价格是精确值，已乘 multiplier，不取整到价格网格；`externalPx` 照旧取整。本地腿撤回时这三项一起没有。
+  - 只加字段，`schemaVersion` 保持 2：网关只认 2，录制原样整行。缺这三项的帧来自加字段之前的服务。
+- **体量**：每帧约多 400 字节（+28%），`GET /extMarkPrices` 全部币约 260 KB → 330 KB（推算，上线后实测）。
+- **测试**：
+  - `snapshot::the_external_quotes_take_the_external_prices_venues_and_weights`：BTC 三家永续，Bybit 带 1,000 倍 multiplier；买一中位数取 Binance，卖一中位数取 Bybit 的 100,006.24（不在 0.1 网格上，不取整），C 是各家中点的 100,005，不是两侧中位数的中点；Binance 断线后三项和明细都剔除它。
+  - `prices_view` 帧测试：三个新字段的格式；撤回的本地腿没有它们。
+  - 变异检查：中位数换成取最高、不过滤有效性、买卖两侧写反、帧里买卖写反、明细不乘 multiplier、帧里单家买卖写反，各有测试失败。
+- **复现**：在独立 OB 仓库根目录运行以下命令；禁止 `cargo fmt`。
+
+  ```sh
+  cargo test -p server --lib -- local_marks
+  ```

@@ -6,13 +6,18 @@
 //! `GET /extMarkReferenceCaches`: each reference action updates its validator's member (the median refreshes per 3 s
 //! bucket), and they run to kilobytes a coin, so the frames leave them out (user 2026-10-27); a read samples the state,
 //! not every member update.
+//!
+//! The local leg's `externalBidPx`, `externalAskPx` and `externalQuotes` (design 000588) were added within schema 2:
+//! a frame without them is of a server before them.
+
+use std::collections::BTreeMap;
 
 use alloy::primitives::Address;
 use serde::Serialize;
 
 use super::{
     price::MAX_PERP_DECIMALS,
-    snapshot::{CoinMarks, Coverage, LocalLeg, LocalMarksSnapshot, NodeMark, Status, Withheld},
+    snapshot::{CoinMarks, Coverage, ExternalQuotes, LocalLeg, LocalMarksSnapshot, NodeMark, Status, VenueQuote, Withheld},
 };
 use crate::accounts::marks::{
     decimal::ExactDecimal,
@@ -126,6 +131,12 @@ struct LocalView {
     basis_adjusted_oracle_px: String,
     local_px: String,
     external_px: String,
+    /// The bids' and asks' weighted medians of the perp quotes C took, with C's weights: exact, in HL's price scale of
+    /// the coin (the listing's multiplier applied), not on its price grid as C is.
+    external_bid_px: String,
+    external_ask_px: String,
+    /// Each of those quotes, so scaled (`GET /extMarkInputs` has the venues' own prices), by venue.
+    external_quotes: BTreeMap<&'static str, ExternalQuoteView>,
     /// The venues' oracle, before the basis.
     oracle_px: String,
     basis_ratio: f64,
@@ -137,6 +148,19 @@ struct LocalView {
     node_block_time_ms: u64,
     book_time_ms: u64,
     book_height: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalQuoteView {
+    bid_px: String,
+    ask_px: String,
+    received_ts_ms: u64,
+}
+
+fn external_quotes(quotes: &ExternalQuotes) -> BTreeMap<&'static str, ExternalQuoteView> {
+    let view = |quote: &VenueQuote| ExternalQuoteView { bid_px: quote.bid.to_string(), ask_px: quote.ask.to_string(), received_ts_ms: quote.received_ms };
+    quotes.venues.iter().map(|quote| (quote.feed.venue.name(), view(quote))).collect()
 }
 
 pub(crate) fn price(units: u64, size_decimals: u32) -> String {
@@ -218,6 +242,9 @@ fn local_view(snapshot: &LocalMarksSnapshot, local: &LocalLeg) -> LegView<LocalV
         basis_adjusted_oracle_px: px(mark.basis_adjusted_oracle),
         local_px: px(mark.local),
         external_px: px(mark.external),
+        external_bid_px: local.external_quotes.bid.to_string(),
+        external_ask_px: local.external_quotes.ask.to_string(),
+        external_quotes: external_quotes(&local.external_quotes),
         oracle_px: px(mark.oracle),
         basis_ratio: mark.basis_ratio,
         basis_samples: mark.basis_samples,
@@ -332,12 +359,15 @@ mod tests {
         assert_eq!((local["status"].as_str(), local["referenceMarkPx"].as_str(), local["predictedMarkPx"].as_str()), (Some("ready"), Some("100002"), Some("100002")));
         assert_eq!(local["submittedMarkPx"].as_str(), Some("100002"), "an integer price keeps every digit");
         assert_eq!((local["oraclePx"].as_str(), local["externalPx"].as_str(), local["bidPx"].as_str()), (Some("100000.1"), Some("100004"), Some("100001")));
+        assert_eq!((local["externalBidPx"].as_str(), local["externalAskPx"].as_str()), (Some("100003.95"), Some("100004.05")), "off BTC's 0.1 grid, unrounded");
+        assert_eq!(local["externalQuotes"], serde_json::json!({"binance": {"bidPx": "100003.95", "askPx": "100004.05", "receivedTsMs": NOW_MS}}));
         assert_eq!((local["nodeHeight"].as_u64(), local["nodeBlockTimeMs"].as_u64(), local["bookTimeMs"].as_u64()), (Some(1_000), Some(NOW_MS - 500), Some(NOW_MS - 400)));
         assert_eq!(data["oracleCoverage"]["usedVenues"], serde_json::json!(["binance", "okx"]));
         let eth = CoinMarksView::of(&snapshot, "ETH", snapshot.coin("ETH").unwrap()).to_wire();
         let eth: serde_json::Value = serde_json::from_slice(&eth).unwrap();
         assert_eq!((eth["data"]["local"]["status"].as_str(), eth["data"]["local"]["reasonCode"].as_str()), (Some("unavailable"), Some("nodeCoin")));
         assert!(eth["data"]["local"]["reason"].as_str().unwrap().contains("does not claim ETH"));
+        assert!(eth["data"]["local"].get("externalQuotes").is_none(), "a withheld leg has no external quotes");
     }
 
     /// `GET /extMarkReferenceCaches`' rows: each cache's median, refresh time and members, of the node leg's state and

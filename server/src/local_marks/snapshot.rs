@@ -91,12 +91,42 @@ pub(crate) struct NodeMark {
 }
 
 /// The local leg: the marks and the book they read, in the coin's price units.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LocalLeg {
     pub(crate) size_decimals: u32,
     pub(crate) bid: u64,
     pub(crate) ask: u64,
     pub(crate) mark: LocalMark,
+    pub(crate) external_quotes: ExternalQuotes,
+}
+
+/// The perp quotes the external price C took (user 2026-10-30: a catch's price against the venues' best bids and asks,
+/// design 000588): their bids' and asks' weighted medians, of the same venues and weights as C, and each quote. Exact,
+/// in HL's price scale of the coin (the listing's multiplier applied) but not on its price grid, as C is: the bid median
+/// is never above the ask median, and the unrounded median of the midpoints lies between them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExternalQuotes {
+    pub(crate) bid: VenuePrice,
+    pub(crate) ask: VenuePrice,
+    pub(crate) venues: Vec<VenueQuote>,
+}
+
+impl ExternalQuotes {
+    /// `None` without a quote.
+    fn of(venues: Vec<VenueQuote>) -> Option<Self> {
+        let median = |side: fn(&VenueQuote) -> VenuePrice| weighted_median(venues.iter().map(|quote| (side(quote), quote.feed.weight())).collect());
+        let (bid, ask) = (median(|quote| quote.bid)?, median(|quote| quote.ask)?);
+        Some(Self { bid, ask, venues })
+    }
+}
+
+/// A venue's quote valid now, its listing's multiplier applied.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct VenueQuote {
+    pub(crate) feed: Feed,
+    pub(crate) bid: VenuePrice,
+    pub(crate) ask: VenuePrice,
+    pub(crate) received_ms: u64,
 }
 
 /// Which venues of a kind price the coin now (`Validity::Valid`), and their weights.
@@ -374,33 +404,46 @@ fn local_leg(coin: &str, listings: &[ListedMarket], tick: &Tick<'_>, index: usiz
         return Err(Withheld::unavailable("hlBook", format!("the HL book of {coin} has an empty side")));
     };
     let (bid, ask) = (book_units(bid, node.size_decimals)?, book_units(ask, node.size_decimals)?);
-    let oracle = venue_median(listings, tick, Kind::Spot, node.size_decimals)?
+    let oracle = mid_median(&valid_quotes(listings, tick, Kind::Spot)?, node.size_decimals)?
         .ok_or_else(|| Withheld::unavailable("oracleCoverage", format!("no spot venue quotes {coin} now")))?;
-    let external = venue_median(listings, tick, Kind::Perp, node.size_decimals)?
+    let perps = valid_quotes(listings, tick, Kind::Perp)?;
+    let external = mid_median(&perps, node.size_decimals)?
         .ok_or_else(|| Withheld::unavailable("externalCoverage", format!("no perp venue quotes {coin} now")))?;
+    let external_quotes = ExternalQuotes::of(perps).unwrap_or_else(|| unreachable!("the external price took a quote"));
     let inputs = MarkInputs { node, mark_cache, bid, ask, oracle, external, now_ns: tick.now_ms * 1_000_000 };
     let mark = local_mark(inputs).map_err(|err| Withheld::unavailable("calculation", format!("{coin}: {err}")))?;
-    Ok(LocalLeg { size_decimals: node.size_decimals, bid, ask, mark })
+    Ok(LocalLeg { size_decimals: node.size_decimals, bid, ask, mark, external_quotes })
 }
 
-/// The weighted median of the midpoints of the kind's venues quoting now, in the coin's price units; `None` when none
-/// does.
-fn venue_median(listings: &[ListedMarket], tick: &Tick<'_>, kind: Kind, size_decimals: u32) -> Result<Option<u64>, Withheld> {
-    let calculation = |detail: String| Withheld::unavailable("calculation", detail);
-    let mut mids = Vec::new();
+fn calculation(detail: String) -> Withheld {
+    Withheld::unavailable("calculation", detail)
+}
+
+/// The kind's venues quoting now, in the listings' order.
+fn valid_quotes(listings: &[ListedMarket], tick: &Tick<'_>, kind: Kind) -> Result<Vec<VenueQuote>, Withheld> {
+    let mut quotes = Vec::new();
     for listed in listings.iter().filter(|listed| listed.feed.kind == kind) {
         let (entry, validity) = tick.readings[listed.reading].2.entries[listed.market];
         if validity != Validity::Valid {
             continue;
         }
-        let quote = entry.and_then(|entry| entry.quote).unwrap_or_else(|| unreachable!("a valid entry holds a quote"));
-        let mid = quote
-            .bid
-            .midpoint(quote.ask)
-            .and_then(|mid| mid.scaled(listed.multiplier))
-            .ok_or_else(|| calculation(format!("{} midpoint of {quote:?} × {} is out of range", listed.feed.label(), listed.multiplier)))?;
-        mids.push((mid, listed.feed.weight()));
+        let entry = entry.unwrap_or_else(|| unreachable!("a valid entry holds a quote"));
+        let quote = entry.quote.unwrap_or_else(|| unreachable!("a valid entry holds a quote"));
+        let scaled = |px: VenuePrice| {
+            px.scaled(listed.multiplier).ok_or_else(|| calculation(format!("{} price {px} × {} is out of range", listed.feed.label(), listed.multiplier)))
+        };
+        quotes.push(VenueQuote { feed: listed.feed, bid: scaled(quote.bid)?, ask: scaled(quote.ask)?, received_ms: entry.received_ms });
     }
+    Ok(quotes)
+}
+
+/// The weighted median of the quotes' midpoints, in the coin's price units; `None` without a quote.
+fn mid_median(quotes: &[VenueQuote], size_decimals: u32) -> Result<Option<u64>, Withheld> {
+    let mids = quotes.iter().map(|quote| {
+        let mid = quote.bid.midpoint(quote.ask);
+        mid.map(|mid| (mid, quote.feed.weight())).ok_or_else(|| calculation(format!("{} midpoint of {} / {} is out of range", quote.feed.label(), quote.bid, quote.ask)))
+    });
+    let mids = mids.collect::<Result<Vec<_>, _>>()?;
     weighted_median(mids).map(|median| median.node_units(size_decimals).map_err(calculation)).transpose()
 }
 
@@ -436,8 +479,8 @@ pub(crate) mod tests {
         VenuePrice::parse(text).unwrap()
     }
 
-    /// The test's world: the sources, every market quoting (spot BTC 100,000 / 100,000.2, perp 100,004), the node state
-    /// of BTC at `NOW_MS`, and the book.
+    /// The test's world: the sources, every market quoting (spot BTC 100,000 / 100,000.2, perp 100,003.95 / 100,004.05),
+    /// the node state of BTC at `NOW_MS`, and the book.
     pub(crate) struct World {
         pub(crate) sources: MarkSources,
         table: Arc<CoinTable>,
@@ -448,7 +491,12 @@ pub(crate) mod tests {
 
     impl World {
         pub(crate) fn new() -> Self {
-            let sources = MarkSources::parse(SOURCES).unwrap();
+            Self::of(SOURCES)
+        }
+
+        /// The world of `sources`, which list BTC and ETH.
+        fn of(sources: &str) -> Self {
+            let sources = MarkSources::parse(sources).unwrap();
             let table = Arc::new(CoinTable::new(&sources, None));
             let quote = |bid: &str, ask: &str| {
                 (Some(Entry::for_test(Some(Quote { bid: price(bid), ask: price(ask) }), NOW_MS, 1)), Validity::Valid)
@@ -461,7 +509,7 @@ pub(crate) mod tests {
                         .iter()
                         .map(|(coin, _)| match (feed.kind, coin.as_str()) {
                             (Kind::Spot, "BTC") => quote("100000", "100000.2"),
-                            (Kind::Perp, "BTC") => quote("100004", "100004"),
+                            (Kind::Perp, "BTC") => quote("100003.95", "100004.05"),
                             _ => quote("4000", "4000.1"),
                         })
                         .collect();
@@ -488,10 +536,22 @@ pub(crate) mod tests {
         }
 
         fn set(&mut self, feed: Feed, coin: &str, validity: Validity) {
+            let (reading, index) = self.place(feed, coin);
+            self.readings[reading].entries[index].1 = validity;
+        }
+
+        /// The venue's quote of the coin, valid, as written and received at `received_ms`.
+        fn quote(&mut self, feed: Feed, coin: &str, (bid, ask): (&str, &str), received_ms: u64) {
+            let (reading, index) = self.place(feed, coin);
+            let entry = Entry::for_test(Some(Quote { bid: price(bid), ask: price(ask) }), received_ms, 1);
+            self.readings[reading].entries[index] = (Some(entry), Validity::Valid);
+        }
+
+        /// The feed's place in the readings and the coin's market in it.
+        fn place(&self, feed: Feed, coin: &str) -> (usize, usize) {
             let markets = self.sources.markets(feed).unwrap();
             let index = markets.coins.iter().position(|(listed, _)| listed == coin).unwrap();
-            let reading = self.sources.feeds().position(|(each, _)| each == feed).unwrap();
-            self.readings[reading].entries[index].1 = validity;
+            (self.sources.feeds().position(|(each, _)| each == feed).unwrap(), index)
         }
     }
 
@@ -589,6 +649,42 @@ pub(crate) mod tests {
         assert_eq!(statuses(&world.snapshot(NOW_MS), "BTC"), (None, Some("externalCoverage")));
         world.set(Feed { kind: Kind::Spot, venue: Venue::Okx }, "BTC", Validity::Expired);
         assert_eq!(statuses(&world.snapshot(NOW_MS), "BTC"), (None, Some("oracleCoverage")));
+    }
+
+    /// BTC on three perp venues, Bybit's contract a thousandth of HL's coin.
+    const THREE_PERPS: &str = r#"{"coins": {
+        "BTC": {"spot": {"binance": {"symbol": "BTCUSDT", "pxMultiplier": "1"}},
+                "perp": {"binance": {"symbol": "BTCUSDT", "pxMultiplier": "1"}, "okx": {"symbol": "BTC-USDT-SWAP", "pxMultiplier": "1"},
+                         "bybit": {"symbol": "MILLIBTCUSDT", "pxMultiplier": "1000"}}},
+        "ETH": {"spot": {"binance": {"symbol": "ETHUSDT", "pxMultiplier": "1"}},
+                "perp": {"binance": {"symbol": "ETHUSDT", "pxMultiplier": "1"}}}}}"#;
+
+    /// Design 000588: the perp quotes C took, each scaled by its listing's multiplier, and their bids' and asks' weighted
+    /// medians over C's venues and weights. BTC (0.1): Binance (weight 3) 100,003 / 100,005, OKX (2) 100,001 / 100,009,
+    /// Bybit (2) 100.006 / 100.00624 × 1,000: the bid median is Binance's, the ask median Bybit's 100,006.24 off the 0.1
+    /// grid, and C the midpoints' 100,005, not the side medians' midpoint 100,004.62. A venue gone leaves all three: OKX
+    /// and Bybit (2 and 2) give the higher of each side, C 100,006.12 rounded to 100,006.1.
+    #[test]
+    fn the_external_quotes_take_the_external_prices_venues_and_weights() {
+        let perp = |venue| Feed { kind: Kind::Perp, venue };
+        let mut world = World::of(THREE_PERPS);
+        world.quote(perp(Venue::Binance), "BTC", ("100003", "100005"), NOW_MS - 30);
+        world.quote(perp(Venue::Okx), "BTC", ("100001", "100009"), NOW_MS - 20);
+        world.quote(perp(Venue::Bybit), "BTC", ("100.006", "100.00624"), NOW_MS - 10);
+        let local = |world: &World| world.snapshot(NOW_MS).coin("BTC").unwrap().local.clone().unwrap();
+        let venues = |quotes: &ExternalQuotes| quotes.venues.iter().map(|quote| (quote.feed.venue, quote.bid, quote.ask, quote.received_ms)).collect::<Vec<_>>();
+        let all = local(&world);
+        assert_eq!((all.mark.external, all.external_quotes.bid, all.external_quotes.ask), (1_000_050, price("100003"), price("100006.24")));
+        let (binance, okx, bybit) = (
+            (Venue::Binance, price("100003"), price("100005"), NOW_MS - 30),
+            (Venue::Okx, price("100001"), price("100009"), NOW_MS - 20),
+            (Venue::Bybit, price("100006"), price("100006.24"), NOW_MS - 10),
+        );
+        assert_eq!(venues(&all.external_quotes), vec![binance, okx, bybit]);
+        world.set(perp(Venue::Binance), "BTC", Validity::NotConnected);
+        let without = local(&world);
+        assert_eq!((without.mark.external, without.external_quotes.bid, without.external_quotes.ask), (1_000_061, price("100006"), price("100009")));
+        assert_eq!(venues(&without.external_quotes), vec![okx, bybit]);
     }
 
     /// A quiet coin: nothing of it changed while both clocks advance; it keeps both legs.
