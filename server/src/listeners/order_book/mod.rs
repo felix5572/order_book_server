@@ -15,6 +15,7 @@ use crate::{
         CHECKPOINT_MISSED_TOTAL, RESYNC_PHASE_DURATION, SNAPSHOT_CHECKPOINT_HEIGHT, STALE_BATCHES_SKIPPED_TOTAL,
         TRADES_UNPAIRED_FILLS_TOTAL, REGRESSING_BOOK_BATCHES_SKIPPED_TOTAL,
     },
+    mailbox::Mailbox,
     order_book::{
         Coin, Px, PxBand, Side, Snapshot, Sz,
         multi_book::{BidAsk, ParentLinks, Snapshots, TriggerSection, load_snapshots_from_cli_json},
@@ -535,6 +536,11 @@ pub(crate) struct OrderBookListener {
     // Raised when the book inputs applied since its last raise have settled; the
     // forced flow starts its near computations on it (hyperliquid-trade design 000587 r2).
     book_revision: book_revision::BookRevision,
+    // The coins whose held trigger orders a `triggered` status took out, posted as
+    // their batch applies, with no wait: the node writes a block's triggered
+    // statuses last, after a pause of ~7 ms that the revision's quiet window ends
+    // in (hyperliquid-trade design 000591).
+    trigger_fires: Arc<Mailbox<String, ()>>,
     // Node write time (unix ns) of the newest book line applied to the state,
     // for the publish stage of NODE_LINE_LAG.
     last_book_line_node_ns: Option<i64>,
@@ -591,6 +597,7 @@ impl OrderBookListener {
             l2_snapshot_cache: HashMap::new(),
             l2_conflation: l2_conflation::L2Conflation::default(),
             book_revision: book_revision::BookRevision::new(),
+            trigger_fires: Arc::new(Mailbox::default()),
             last_book_line_node_ns: None,
             active_l2_params,
             active_subs: ActiveSubs::default(),
@@ -655,6 +662,11 @@ impl OrderBookListener {
     /// The book revision's receiver, taken before the listener goes under its lock (like `book_trust`).
     pub(crate) fn book_revision(&self) -> tokio::sync::watch::Receiver<u64> {
         self.book_revision.subscribe()
+    }
+
+    /// The trigger fires' mailbox, taken before the listener goes under its lock (like `book_trust`).
+    pub(crate) fn trigger_fires(&self) -> Arc<Mailbox<String, ()>> {
+        Arc::clone(&self.trigger_fires)
     }
 
     /// Push a change of `book_trusted()` to the mirror, the metrics and the log.
@@ -1556,6 +1568,7 @@ impl OrderBookListener {
         // Collected here and applied after the state borrow ends.
         let mut desync_reason: Option<&'static str> = None;
         let mut book_input_applied = false;
+        let mut fired_trigger_coins = Vec::new();
 
         let changed_coins: HashSet<Coin> = if let Some(state) = self.order_book_state.as_mut() {
             let result = match event_batch {
@@ -1655,6 +1668,7 @@ impl OrderBookListener {
                         self.last_book_line_node_ns = Some(node_ns);
                     }
                     book_input_applied = is_book_batch;
+                    fired_trigger_coins = state.take_fired_trigger_coins();
                     coins
                 }
                 Err(err) => {
@@ -1677,6 +1691,9 @@ impl OrderBookListener {
         };
         if book_input_applied {
             self.book_revision.note_input(Instant::now());
+        }
+        for coin in fired_trigger_coins {
+            self.trigger_fires.post(coin, ());
         }
         EVENT_PROCESSING_LATENCY.with_label_values(&[source_label]).observe(process_start.elapsed().as_secs_f64());
         // Staleness signal for /health: one atomic store per applied batch.
@@ -2549,6 +2566,22 @@ mod tests {
         assert_eq!(listener.book_revision.deadline(), None, "below the installed snapshot: skipped");
     }
 
+    /// hyperliquid-trade design 000591: a held trigger order's `triggered` status posts its coin as its batch applies,
+    /// with no wait; a batch below the installed snapshot does not.
+    #[test]
+    fn test_a_fired_trigger_posts_its_coin_at_once() {
+        let (mut listener, _rx) = ready_listener();
+        let fires = listener.trigger_fires();
+        listener.apply_event_batch(10, EventBatch::Orders(trigger_status_batch("BTC", 77, 10, "open")), EventSource::OrderStatuses);
+        assert!(fires.drain().is_empty(), "placed, not fired");
+        listener.apply_event_batch(11, EventBatch::Orders(trigger_status_batch("BTC", 77, 11, "triggered")), EventSource::OrderStatuses);
+        assert_eq!(fires.drain().into_keys().collect::<Vec<_>>(), ["BTC"]);
+        listener.apply_event_batch(12, EventBatch::Orders(trigger_status_batch("BTC", 78, 12, "open")), EventSource::OrderStatuses);
+        listener.init_from_snapshot(Snapshots::new(HashMap::new()), 1_000);
+        listener.apply_event_batch(13, EventBatch::Orders(trigger_status_batch("BTC", 78, 13, "triggered")), EventSource::OrderStatuses);
+        assert!(fires.drain().is_empty(), "below the installed snapshot: skipped");
+    }
+
     // ==================== Event helpers ====================
 
     fn make_l4_order_json(coin: &str, oid: u64) -> serde_json::Value {
@@ -2607,6 +2640,11 @@ mod tests {
 
     /// Status batch for an untriggered trigger order ("open" + isTrigger).
     fn make_trigger_status_batch(coin: &str, oid: u64, height: u64) -> Batch<NodeDataOrderStatus> {
+        trigger_status_batch(coin, oid, height, "open")
+    }
+
+    /// Status batch of a trigger order's `status`.
+    fn trigger_status_batch(coin: &str, oid: u64, height: u64, status: &str) -> Batch<NodeDataOrderStatus> {
         let mut order = make_l4_order_json(coin, oid);
         order["isTrigger"] = serde_json::json!(true);
         order["triggerPx"] = serde_json::json!("110.0");
@@ -2620,7 +2658,7 @@ mod tests {
                 "time": "2024-01-15T10:30:00.000000000",
                 "user": "0x0000000000000000000000000000000000000000",
                 "hash": "0xabc",
-                "status": "open",
+                "status": status,
                 "order": order,
             }]
         }))

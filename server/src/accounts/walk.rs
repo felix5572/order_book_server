@@ -11,20 +11,16 @@
 //! `MAX_WALK_LEVELS`), allocates them outside it, and returns the shares with the book's progress, trust and withheld
 //! periods; the owner takes a result only while the book is trusted in the same period and the request is the newest.
 
-use std::{
-    collections::HashMap,
-    future::Future,
-    sync::{Arc, Mutex, PoisonError},
-    time::Instant,
-};
+use std::{future::Future, sync::Arc, time::Instant};
 
 use alloy::primitives::Address;
 use log::error;
 use prometheus::Histogram;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
 use crate::{
     listeners::order_book::{OrderBookListener, TakerLevels},
+    mailbox::Mailbox,
     metrics::{LIQUIDATION_WALK_LOCK_HOLD_SECONDS, LIQUIDATION_WALK_LOCK_WAIT_SECONDS},
     order_book::{Coin, Px, Side, Sz},
 };
@@ -261,50 +257,9 @@ pub(crate) const fn walk_units(raw: u64, size_decimals: u32) -> u64 {
     units
 }
 
-/// The newest pending request of each key; one task drains it.
-#[derive(Debug)]
-pub(crate) struct Mailbox<K, V> {
-    pending: Mutex<HashMap<K, V>>,
-    notify: Notify,
-}
-
 /// The walk task's mailbox.
 pub(crate) type WalkMailbox = Mailbox<WalkKey, WalkRequest>;
 
-impl<K, V> Default for Mailbox<K, V> {
-    fn default() -> Self {
-        Self { pending: Mutex::new(HashMap::new()), notify: Notify::new() }
-    }
-}
-
-impl<K: Eq + std::hash::Hash, V> Mailbox<K, V> {
-    /// Replaces the key's pending request.
-    pub(crate) fn post(&self, key: K, request: V) {
-        self.lock().insert(key, request);
-        self.notify.notify_one();
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<K, V>> {
-        // the map is replaced or drained in one statement: a panic elsewhere cannot leave it half-written
-        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// The pending requests, taken (a test's view of what the task would get).
-    #[cfg(test)]
-    pub(crate) fn drain(&self) -> HashMap<K, V> {
-        std::mem::take(&mut *self.lock())
-    }
-
-    pub(crate) async fn take(&self) -> HashMap<K, V> {
-        loop {
-            let pending = std::mem::take(&mut *self.lock());
-            if !pending.is_empty() {
-                return pending;
-            }
-            self.notify.notified().await;
-        }
-    }
-}
 
 /// The histograms a reader times its copies under the listener lock with: waiting for the lock, holding it.
 #[derive(Clone)]

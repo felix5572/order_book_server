@@ -271,6 +271,8 @@ struct Pipeline {
     began: Option<Instant>,
     /// The book revision its last computation started at.
     revision: u64,
+    /// A held trigger order of its coin fired while it computed: computed once more when it ends (design 000591).
+    fired: bool,
     stage: Stage,
     /// The latest frame, published or not: its `seq` is the last published content's.
     frame: Option<Arc<FlowFrame>>,
@@ -397,6 +399,24 @@ impl ForcedFlow {
         output
     }
 
+    /// Held trigger orders of `coins` fired (design 000591): their near keys compute again at once, not held by the book
+    /// floor - a key computing does once it ends. A coin is computed as its fires come, at most one computation of a key
+    /// under way and one owed.
+    pub(crate) fn on_fires(&mut self, coins: &[String], now: Instant, accounts: &FlowAccounts) -> FlowOutput {
+        let mut output = FlowOutput::default();
+        for key in self.demanded(accounts) {
+            if !key.1.follows_book() || !coins.contains(&key.0) {
+                continue;
+            }
+            if let Some(pipeline) = self.pipelines.get_mut(&key).filter(|pipeline| !pipeline.idle()) {
+                pipeline.fired = true;
+                continue;
+            }
+            self.start(&key.0, key.1, StartAt::handled(now), accounts, &mut output);
+        }
+        output
+    }
+
     /// A new local snapshot, or its channel closed: every wanted (coin, tier) checked against the local leg now.
     pub(crate) fn on_local(&mut self, closed: bool, now: Instant, accounts: &FlowAccounts) -> FlowOutput {
         if closed {
@@ -505,9 +525,15 @@ impl ForcedFlow {
     /// A read back from the reader task.
     pub(crate) fn on_read(&mut self, read: FlowRead, now: Instant, accounts: &FlowAccounts) -> FlowOutput {
         let mut output = FlowOutput::default();
+        let key = match &read {
+            FlowRead::Band { coin, tier, .. } | FlowRead::Walk { coin, tier, .. } => (coin.clone(), *tier),
+        };
         match read {
             FlowRead::Band { coin, tier, version, read } => self.on_band(&coin, tier, version, read, now, accounts, &mut output),
             FlowRead::Walk { coin, tier, version, sides } => self.on_walks(&coin, tier, version, sides, now, accounts, &mut output),
+        }
+        if self.pipelines.get(&key).is_some_and(|pipeline| pipeline.fired && pipeline.idle()) {
+            self.start(&key.0, key.1, StartAt::handled(now), accounts, &mut output);
         }
         self.follow_ups(now, accounts, &mut output);
         self.answer_waiters();
@@ -555,8 +581,10 @@ impl ForcedFlow {
     fn start(&mut self, coin: &str, tier: Tier, at: StartAt, accounts: &FlowAccounts, output: &mut FlowOutput) {
         let key = (coin.to_string(), tier);
         let revision = self.book_revision;
-        let pipeline = self.pipelines.entry(key.clone()).or_insert(Pipeline { started: None, began: None, revision, stage: Stage::Idle, frame: None });
-        (pipeline.started, pipeline.began, pipeline.revision) = (Some(at.period_base), Some(at.began), revision);
+        let pipeline =
+            self.pipelines.entry(key.clone()).or_insert(Pipeline { started: None, began: None, revision, fired: false, stage: Stage::Idle, frame: None });
+        // a computation reads the trigger table after any fire before it
+        (pipeline.started, pipeline.began, pipeline.revision, pipeline.fired) = (Some(at.period_base), Some(at.began), revision, false);
         let unavailable = |reason: String| FlowContent::Unavailable(reason);
         if let Some(reason) = self.stopped.clone() {
             return self.finish(&key, FlowHeights::default(), unavailable(reason), output);
@@ -1007,6 +1035,20 @@ mod tests {
         fn book(&mut self, revision: u64, now: Instant) -> FlowOutput {
             let (accounts, _validity) = self.accounts();
             self.flow.on_book(revision, now, &accounts)
+        }
+
+        fn fires(&mut self, coins: &[&str], now: Instant) -> FlowOutput {
+            let (accounts, _validity) = self.accounts();
+            let coins: Vec<String> = coins.iter().map(ToString::to_string).collect();
+            self.flow.on_fires(&coins, now, &accounts)
+        }
+
+        /// Every pending band job ended at once (no snapshot yet): the keys idle again.
+        fn end_all_bands(&mut self, now: Instant) {
+            for ((coin, tier, kind), job) in self.mailbox.drain() {
+                let FlowJob::Band { version, .. } = job else { panic!("{coin} {tier:?} {kind:?}: a band job") };
+                drop(self.read(FlowRead::Band { coin, tier, version, read: None }, now));
+            }
         }
 
         fn read(&mut self, read: FlowRead, now: Instant) -> FlowOutput {
@@ -1799,5 +1841,57 @@ mod tests {
         assert!(answer.try_recv().is_err(), "started before the query");
         end_band(&mut owner, Tier::Near, start + ms(63));
         assert_eq!(answer.try_recv().unwrap().unwrap().len(), 1);
+    }
+
+    /// Design 000591: a fire of the coin's held trigger orders starts its idle near key at once, within the book floor.
+    #[test]
+    fn a_trigger_fire_starts_an_idle_near_key_within_the_floor() {
+        let mut owner = Owner::new();
+        let _near = owner.demand.acquire((Some(PUMP.to_string()), Tier::Near));
+        let start = Instant::now();
+        owner.tick(start);
+        end_band(&mut owner, Tier::Near, start);
+        owner.book(1, start + ms(60));
+        end_band(&mut owner, Tier::Near, start + ms(60));
+        owner.fires(&[PUMP], start + ms(67));
+        end_band(&mut owner, Tier::Near, start + ms(67));
+    }
+
+    /// Design 000591: fires while the key computes owe it one computation, started when its read comes back; the
+    /// computation started then reads after them, nothing more is owed.
+    #[test]
+    fn fires_while_a_near_key_computes_start_it_once_after() {
+        let mut owner = Owner::new();
+        let _near = owner.demand.acquire((Some(PUMP.to_string()), Tier::Near));
+        let start = Instant::now();
+        owner.tick(start);
+        let ((_, _, _), FlowJob::Band { version, .. }) = owner.job() else { panic!("a band job") };
+        owner.fires(&[PUMP], start + ms(5));
+        owner.fires(&[PUMP], start + ms(6));
+        assert!(owner.mailbox.drain().is_empty(), "under way");
+        drop(owner.read(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Near, version, read: None }, start + ms(8)));
+        end_band(&mut owner, Tier::Near, start + ms(9));
+        assert!(owner.mailbox.drain().is_empty(), "owed once");
+    }
+
+    /// Design 000591: a fire computes its coin's near keys alone - another coin's and a middle tier's stay; with every
+    /// coin demanded, the fired coin's key.
+    #[test]
+    fn a_trigger_fire_computes_its_coins_near_keys_alone() {
+        let mut owner = Owner::new();
+        let _mid = owner.demand.acquire((Some(PUMP.to_string()), Tier::Mid));
+        let _near = owner.demand.acquire((Some("BTC".to_string()), Tier::Near));
+        let start = Instant::now();
+        owner.tick(start);
+        owner.end_all_bands(start);
+        owner.fires(&[PUMP], start + ms(10));
+        assert!(owner.mailbox.drain().is_empty(), "PUMP's middle tier and BTC's near one stay");
+
+        let mut every = Owner::new();
+        let _all = every.demand.acquire((None, Tier::Near));
+        every.tick(start);
+        every.end_all_bands(start);
+        every.fires(&[PUMP], start + ms(10));
+        end_band(&mut every, Tier::Near, start + ms(10));
     }
 }

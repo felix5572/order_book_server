@@ -25,7 +25,7 @@ use super::{
     publish::FlowPublisher,
     runtime::BookSource,
 };
-use crate::{local_marks::snapshot::LocalMarksSnapshot, metrics::FORCED_FLOW_OWNER_SECONDS};
+use crate::{local_marks::snapshot::LocalMarksSnapshot, mailbox::Mailbox, metrics::FORCED_FLOW_OWNER_SECONDS};
 
 /// Reads in flight back to the forced flow: at most one per (coin, tier, kind) pending.
 const FLOW_READS_CAPACITY: usize = 1_024;
@@ -43,25 +43,26 @@ pub(crate) enum FlowQuery {
     AttachLocalMarks(watch::Receiver<Arc<LocalMarksSnapshot>>),
 }
 
-/// The forced flow, its reads coming back (design 000451) and the book's revisions (design 000587 r2); `reads` and
-/// `revisions` are `None` without a book.
+/// The forced flow, its reads coming back (design 000451), the book's revisions (design 000587 r2) and its trigger
+/// fires (design 000591); `reads`, `revisions` and `fires` are `None` without a book.
 struct FlowFeed {
     flow: ForcedFlow,
     reads: Option<mpsc::Receiver<FlowRead>>,
     revisions: Option<watch::Receiver<u64>>,
+    fires: Option<Arc<Mailbox<String, ()>>>,
 }
 
 impl FlowFeed {
     /// With `book`, the flow reader task starts here.
     fn start(book: Option<&BookSource>, demand: FlowDemand) -> Self {
-        let Some(BookSource { trust, listener, revision }) = book else {
-            return Self { flow: ForcedFlow::new(demand, None), reads: None, revisions: None };
+        let Some(BookSource { trust, listener, revision, fires }) = book else {
+            return Self { flow: ForcedFlow::new(demand, None), reads: None, revisions: None, fires: None };
         };
         let mailbox = Arc::new(FlowMailbox::default());
         let (results, reads) = mpsc::channel(FLOW_READS_CAPACITY);
         tokio::spawn(run_flow_reader(Arc::clone(listener), Arc::clone(&mailbox), results));
         let flow = ForcedFlow::new(demand, Some(FlowLink { trust: trust.clone(), mailbox }));
-        Self { flow, reads: Some(reads), revisions: Some(revision.clone()) }
+        Self { flow, reads: Some(reads), revisions: Some(revision.clone()), fires: Some(Arc::clone(fires)) }
     }
 }
 
@@ -86,7 +87,7 @@ async fn run_flow(
     mut queries: mpsc::Receiver<FlowQuery>,
     publisher: FlowPublisher,
 ) {
-    let FlowFeed { mut flow, reads: mut flow_reads, mut revisions } = feed;
+    let FlowFeed { mut flow, reads: mut flow_reads, mut revisions, fires } = feed;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut served = Served::default();
@@ -136,6 +137,9 @@ async fn run_flow(
                     continue;
                 };
                 publisher.publish(time_flow_step("book", || flow.on_book(revision, handled_now(), &accounts)));
+            }
+            coins = next_fires(fires.as_deref()) => {
+                publisher.publish(time_flow_step("fires", || flow.on_fires(&coins, handled_now(), &accounts)));
             }
             scheduled = tick.tick() => {
                 // the tick's time on its schedule: two handling times a period apart come out short of it about half the
@@ -207,6 +211,15 @@ async fn next_revision(revisions: &mut Option<watch::Receiver<u64>>) -> Option<u
     }
 }
 
+/// The coins whose held trigger orders fired since the last take; pending forever without a book. Cancel-safe: the
+/// mailbox is taken only once it holds coins.
+async fn next_fires(fires: Option<&Mailbox<String, ()>>) -> Vec<String> {
+    match fires {
+        Some(fires) => fires.take().await.into_keys().collect(),
+        None => std::future::pending().await,
+    }
+}
+
 /// Whether the local marks' next snapshot came (`false`) or their channel closed (`true`); pending forever while they
 /// are not attached. Cancel-safe.
 async fn next_local_snapshot(flow: &mut ForcedFlow) -> bool {
@@ -240,6 +253,7 @@ mod tests {
         mailbox: Arc<FlowMailbox>,
         reads_back: mpsc::Sender<FlowRead>,
         revision: watch::Sender<u64>,
+        fires: Arc<Mailbox<String, ()>>,
         thread: JoinHandle<()>,
         // held for the loop: its validity, demand, events, queries and frames' other ends
         _validity: watch::Sender<FlowAccountsValidity>,
@@ -264,9 +278,21 @@ mod tests {
             let (events_in, events) = mpsc::channel(1);
             let (queries_in, queries) = mpsc::channel(1);
             let (frames, received) = broadcast::channel(16);
-            let feed = FlowFeed { flow, reads: Some(reads), revisions: Some(revisions) };
+            let fires = Arc::new(Mailbox::default());
+            let feed = FlowFeed { flow, reads: Some(reads), revisions: Some(revisions), fires: Some(Arc::clone(&fires)) };
             let thread = tokio::spawn(run_flow(feed, accounts, events, queries, FlowPublisher::new(frames)));
-            Self { mailbox, reads_back, revision, thread, _validity: validity, _near: near, _events: events_in, _queries: queries_in, _frames: received }
+            Self {
+                mailbox,
+                reads_back,
+                revision,
+                fires,
+                thread,
+                _validity: validity,
+                _near: near,
+                _events: events_in,
+                _queries: queries_in,
+                _frames: received,
+            }
         }
 
         /// The band read the loop started since the last look, if any.
@@ -288,6 +314,10 @@ mod tests {
 
         fn raise(&self, revision: u64) {
             self.revision.send_replace(revision);
+        }
+
+        fn fire(&self) {
+            self.fires.post(PUMP.to_string(), ());
         }
     }
 
@@ -393,5 +423,24 @@ mod tests {
         accounts.apply(FlowAccountsEvent::CandidatesWithdrawn { generation: 2, reason: "the book walk task ended".to_string() });
         assert_eq!(served.after_step(&accounts), Some("the book walk task ended".to_string()));
         assert_eq!(served.after_step(&accounts), None, "withdrawn once");
+    }
+
+    /// Design 000591: a fire of the coin's held trigger orders starts its near key without waiting for the floor or a
+    /// tick - 7 ms after a revision's start, the triggered statuses coming last in their block.
+    #[tokio::test(start_paused = true)]
+    async fn a_trigger_fire_starts_a_near_key_at_once() {
+        let harness = Harness::start();
+        let first = harness.started().await.expect("the first tick");
+        harness.end(first).await;
+        tokio::time::advance(TICK).await;
+        assert_eq!(harness.started().await, None);
+        tokio::time::advance(Duration::from_millis(10)).await;
+        harness.raise(1);
+        let revised = harness.started().await.expect("started on the revision at 60 ms");
+        harness.end(revised).await;
+        tokio::time::advance(Duration::from_millis(7)).await;
+        harness.fire();
+        assert!(harness.started().await.is_some(), "the fire at 67 ms, within the floor");
+        harness.thread.abort();
     }
 }

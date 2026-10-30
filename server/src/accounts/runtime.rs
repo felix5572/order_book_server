@@ -53,6 +53,7 @@ use super::{
 };
 use crate::{
     local_marks::snapshot::LocalMarksSnapshot,
+    mailbox::Mailbox,
     listeners::order_book::{
         BookTrust, OrderBookListener,
         parallel::{FileLayout, LineStream, WatchLoss, spawn_line_watcher},
@@ -229,11 +230,14 @@ struct Supervised {
 const WALK_RESULTS_CAPACITY: usize = 1_024;
 
 /// The order book the liquidation candidates walk (design 000443): the listener and its trust mirror; and the book
-/// revision the forced flow starts its near computations on (hyperliquid-trade design 000587 r2).
+/// revision and the trigger fires the forced flow starts its near computations on (hyperliquid-trade designs 000587
+/// r2, 000591).
 pub(crate) struct BookSource {
     pub(crate) trust: BookTrust,
     pub(crate) listener: Arc<tokio::sync::Mutex<OrderBookListener>>,
     pub(crate) revision: watch::Receiver<u64>,
+    /// The coins whose held trigger orders fired, the forced flow's at once (hyperliquid-trade design 000591).
+    pub(crate) fires: Arc<Mailbox<String, ()>>,
 }
 
 /// The liquidation candidates and the walk results coming back to the owner; `walks` is `None` without a book.

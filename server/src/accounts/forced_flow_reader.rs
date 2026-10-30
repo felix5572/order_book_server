@@ -10,9 +10,10 @@ use tokio::sync::{Mutex, mpsc};
 
 use super::{
     forced_flow::Tier,
-    walk::{LevelSource, Limit, LockTimers, MAX_WALK_LEVELS, Mailbox, WalkPart, alone_walks, cumulative_walks, levels_truncated, mid_px, under_lock},
+    walk::{LevelSource, Limit, LockTimers, MAX_WALK_LEVELS, WalkPart, alone_walks, cumulative_walks, levels_truncated, mid_px, under_lock},
 };
 use crate::{
+    mailbox::Mailbox,
     listeners::order_book::{OrderBookListener, TriggerBandAt},
     metrics::{FORCED_FLOW_LOCK_HOLD_SECONDS, FORCED_FLOW_LOCK_WAIT_SECONDS, FORCED_FLOW_WALKED_ENTRIES_TOTAL},
     order_book::{Coin, Px, Side, Sz},

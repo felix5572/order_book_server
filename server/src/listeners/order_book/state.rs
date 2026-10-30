@@ -108,6 +108,9 @@ pub(super) struct OrderBookState {
     // Untriggered trigger orders (stop / TP-SL waiting for their trigger price): their own owner, with the index by
     // trigger price and whether the table is complete (design 000451 r3).
     triggers: TriggerTable,
+    // The coins of trigger orders the table held that a `triggered` status took out since the listener last drained
+    // them: the forced flow computes those coins again at once (hyperliquid-trade design 000591).
+    fired_trigger_coins: Vec<String>,
 }
 
 impl OrderBookState {
@@ -141,6 +144,7 @@ impl OrderBookState {
             last_loss_log: None,
             insert_before_fallbacks: 0,
             triggers,
+            fired_trigger_coins: Vec::new(),
         }
     }
 
@@ -149,6 +153,11 @@ impl OrderBookState {
     /// diverged from the stream and should be re-synced.
     pub(super) fn take_insert_before_fallbacks(&mut self) -> u64 {
         std::mem::take(&mut self.insert_before_fallbacks)
+    }
+
+    /// Drain the coins whose held trigger orders fired since the last drain (repeats possible).
+    pub(super) fn take_fired_trigger_coins(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.fired_trigger_coins)
     }
 
     /// Record that `insert_before` could not be honored for this order. The
@@ -458,6 +467,9 @@ impl OrderBookState {
                 // Labeled by status so a future non-terminal status string that starts wrongly evicting live triggers
                 // shows up in Prometheus immediately (today's vocabulary is all terminal-for-the-oid).
                 crate::metrics::UNTRIGGERED_EVICTIONS_TOTAL.with_label_values(&[&order_status.status]).inc();
+                if order_status.status == "triggered" {
+                    self.fired_trigger_coins.push(order_status.order.coin.clone());
+                }
             }
 
             // Check if there's a pending New diff for this order
@@ -960,6 +972,24 @@ mod tests {
             .apply_order_statuses_hft(make_status_batch(vec![make_trigger_status("BTC", 500, "canceled", "110.0")]))
             .unwrap();
         assert_eq!(state.untriggered_count(), 0);
+    }
+
+    /// hyperliquid-trade design 000591: a held trigger order taken out by `triggered` notes its coin for the forced flow;
+    /// one canceled, or a `triggered` of an order the table does not hold, does not.
+    #[test]
+    fn a_held_trigger_order_firing_notes_its_coin() {
+        let mut state = empty_state();
+        let open = vec![make_trigger_status("BTC", 500, "open", "110.0"), make_trigger_status("ETH", 501, "open", "110.0")];
+        state.apply_order_statuses_hft(make_status_batch(open)).unwrap();
+        assert!(state.take_fired_trigger_coins().is_empty(), "placed, not fired");
+        let ends = vec![
+            make_trigger_status("BTC", 500, "triggered", "110.0"),
+            make_trigger_status("ETH", 501, "canceled", "110.0"),
+            make_trigger_status("SOL", 502, "triggered", "110.0"),
+        ];
+        state.apply_order_statuses_hft(make_status_batch(ends)).unwrap();
+        assert_eq!(state.take_fired_trigger_coins(), ["BTC"]);
+        assert!(state.take_fired_trigger_coins().is_empty(), "taken");
     }
 
     #[test]
