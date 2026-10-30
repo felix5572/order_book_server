@@ -1512,13 +1512,19 @@ impl AccountBook {
 
     /// The replayed rows of `user`'s open positions with their coins and sizes (`marks` as for `coin_positions`).
     pub(crate) fn replayed_rows(&self, user: Address, marks: Option<&dyn MarksAt>) -> Vec<(&str, i64, Replayed)> {
-        self.holdings
-            .of(&user)
-            .filter_map(|coin| {
-                let record = &self.coins[coin].records[&user];
-                Some((coin, record.size_raw, self.replayed_row(user, coin, record, marks)?))
-            })
-            .collect()
+        let Some(replay) = self.replay.as_ref() else { return Vec::new() };
+        let Some(anchor) = self.anchor else { return Vec::new() };
+        let Some(applied) = self.block_actions.height.filter(|applied| *applied >= anchor.height) else { return Vec::new() };
+        let marks = marks.filter(|marks| marks.height() == applied);
+        let mark_of = |coin: &str| marks.and_then(|marks| marks.mark(coin));
+        let held = self.holdings.of(&user).map(|coin| {
+            let record = &self.coins[coin].records[&user];
+            HeldPosition { coin, size_raw: record.size_raw, table_id: record.table_id }
+        });
+        replay.current.replayed_rows(&user, held, mark_of).into_iter().map(|(position, row)| {
+            let mark = RowMark::of(position.size_raw, self.coins[position.coin].size_decimals, mark_of(position.coin), &row.liquidation_px);
+            (position.coin, position.size_raw, Replayed { height: applied, row, mark })
+        }).collect()
     }
 
     /// The other coins of `user`'s cross pool in `coin` (design 000443 r2 revision 5).
@@ -2188,6 +2194,44 @@ mod tests {
         assert_eq!(view_at(&book, holder, &earlier).replayed, None, "marks of another height");
         let view = view_at(&book, holder, &ListedMarks { height: 1_001, marks: vec![(PUMP, 4_000)] });
         assert_eq!((view.replayed, view.anchor_row.is_some()), (None, true), "BTC has no mark: the anchor's row");
+    }
+
+    #[test]
+    fn batched_replayed_rows_follow_height_fills_and_anchor_replacement() {
+        let holder = checkpoint_user(HOLDER);
+        let isolated = checkpoint_user(ISOLATED);
+        let check = |book: &AccountBook, marks: Option<&dyn MarksAt>| {
+            for user in [holder, isolated] {
+                let expected: Vec<_> = book.holdings.of(&user).filter_map(|coin| {
+                    let record = &book.coins[coin].records[&user];
+                    Some((coin, record.size_raw, book.replayed_row(user, coin, record, marks)?))
+                }).collect();
+                assert_eq!(book.replayed_rows(user, marks), expected);
+            }
+        };
+        let mut book = replay_book(1_000, 999, &[(holder, 1_000_000), (isolated, 100)]);
+        check(&book, None);
+        assert!(book.replayed_rows(holder, None).is_empty(), "the applied height has not reached the anchor");
+        book.apply_block_actions(block_actions(1_000, &[]));
+        check(&book, None);
+        book.apply_block_actions(block_actions(1_001, &[]));
+        book.apply_fills(fills(1_001, &[(holder, "BTC", "B", 1, "0.0", "0.001")]));
+        for height in [1_000, 1_001, 1_002] {
+            for marks in [vec![], vec![(PUMP, 4_000)], vec![("BTC", 828_576)], vec![(PUMP, 4_000), ("BTC", 828_576)]] {
+                check(&book, Some(&ListedMarks { height, marks }));
+            }
+        }
+        book.coins.get_mut("BTC").unwrap().records.get_mut(&holder).unwrap().table_id = None;
+        check(&book, Some(&ListedMarks { height: 1_001, marks: vec![(PUMP, 4_000), ("BTC", 828_576)] }));
+        book.apply_block_actions(block_actions(1_002, &[]));
+        book.apply_fills(fills(1_002, &[(holder, "BTC", "A", 2, "0.001", "0.001")]));
+        check(&book, None);
+        assert_eq!(book.replayed_rows(holder, None).len(), 1, "the closed member leaves the pool");
+        let mut next = anchor(1_003, &[(PUMP, 0, &[(holder, 9)]), ("BTC", 5, &[(holder, -123)])]);
+        next.margins = per_dex_with_main_cash(-1_234_567);
+        book.apply_block_actions(block_actions(1_003, &[]));
+        book.install_anchor(next);
+        check(&book, Some(&ListedMarks { height: 1_003, marks: vec![(PUMP, 5_000), ("BTC", 700_001)] }));
     }
 
     /// Design 000442 r2 revision 3: at an install a pool of two checks with the anchor's sizes, tables and stored marks;

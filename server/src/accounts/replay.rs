@@ -14,6 +14,7 @@
 mod isolated;
 pub(crate) mod routing;
 mod cross_capacity;
+mod rows;
 #[cfg(test)]
 mod capacity_tests;
 pub(crate) mod dust;
@@ -28,12 +29,12 @@ use serde_json::json;
 
 use super::{
     actions::BlockAction,
-    liquidation::{HeldAtMark, LiquidationPx, solve, solve_held},
+    liquidation::LiquidationPx,
     margin::MarginTable,
     marks::fill_prices::{CollateralPrices, FillMarkRange},
     checkpoint::{
         Account, AccountMode, AssetMarginMode, CheckpointAccounts, MAX_PERP_DECIMALS, MAX_SPOT_DECIMALS,
-        PositionMargin, SpotPair, base_size, spot_pair_of_coin,
+        PositionMargin, SpotPair, spot_pair_of_coin,
     },
     misc::{Balance, LedgerDelta, USDC_NAME},
     portfolio::USDC,
@@ -997,74 +998,6 @@ impl MarginStates {
     pub(crate) fn stop(&self, user: &Address) -> Option<&Stop> {
         self.accounts.get(user).and_then(|account| account.stop.as_ref())
     }
-
-    /// The replayed row of `user`'s position in `coin` (`size_raw` in 10^-szDecimals, margin table `table_id`), given
-    /// the account's open positions `held` (every coin, `coin` included or not) and `mark_of` the marks of the same
-    /// height in price units. `None` when it has none: the account is not tracked or stopped, the coin is not a USDC
-    /// perp of the anchor, or a cross position shares its pool (default / disabled: the same dex; unified: every USDC
-    /// dex) with a position of an unknown coin or table, or without a mark.
-    pub(crate) fn replayed_row<'c>(
-        &self,
-        user: &Address,
-        coin: &str,
-        size_raw: i64,
-        table_id: u32,
-        held: impl IntoIterator<Item = HeldPosition<'c>>,
-        mark_of: impl Fn(&str) -> Option<u64>,
-    ) -> Option<ReplayedRow> {
-        let account = self.accounts.get(user).filter(|account| account.stop.is_none())?;
-        let market = self.markets.perps.get(coin).filter(|market| self.markets.usdc_dexes[market.dex])?;
-        let table = self.markets.tables[market.dex].get(&table_id)?;
-        let size = base_size(size_raw, market.size_decimals);
-        if let Some(isolated_wei) = account.isolated.get(&(market.dex, market.asset)) {
-            let liquidation_px = solve(wei_to_usdc(*isolated_wei), 0.0, size, table);
-            return Some(ReplayedRow { isolated: true, pool_positions: 1, liquidation_px, cash_estimated: account.estimated });
-        }
-        let mut others = Vec::new();
-        for other in held.into_iter().filter(|other| other.coin != coin) {
-            let other_market = self.markets.perps.get(other.coin)?;
-            if !self.cross_member(account, market, other_market) {
-                continue;
-            }
-            others.push(HeldAtMark {
-                size_raw: other.size_raw,
-                mark_raw: mark_of(other.coin)?,
-                table: self.markets.tables[other_market.dex].get(&other.table_id?)?,
-            });
-        }
-        let cash_wei = match &account.pools {
-            Pools::PerDex(cross) => cross.get(&market.dex).copied().unwrap_or(0),
-            Pools::Unified(pool) => *pool,
-        };
-        let liquidation_px = solve_held(wei_to_usdc(cash_wei), &others, size, table);
-        Some(ReplayedRow { isolated: false, pool_positions: 1 + others.len(), liquidation_px, cash_estimated: account.estimated })
-    }
-}
-
-impl MarginStates {
-    /// Whether `other` is a cross position of the pool of `market`'s cross position (default / disabled: the same dex;
-    /// unified: every USDC dex).
-    fn cross_member(&self, account: &AccountMargin, market: &PerpMarket, other: &PerpMarket) -> bool {
-        let same_pool = match &account.pools {
-            Pools::PerDex(_) => other.dex == market.dex,
-            Pools::Unified(_) => self.markets.usdc_dexes[other.dex],
-        };
-        same_pool && !account.isolated.contains_key(&(other.dex, other.asset))
-    }
-
-    /// The other coins of `user`'s cross pool in `coin` among `held` (design 000443 r2 revision 5); empty for an isolated
-    /// position, an account not replaying, or a coin that is not a USDC perp of the anchor.
-    pub(crate) fn cross_pool_coins<'c>(&self, user: &Address, coin: &str, held: impl IntoIterator<Item = &'c str>) -> Vec<&'c str> {
-        let Some(account) = self.accounts.get(user).filter(|account| account.stop.is_none()) else { return Vec::new() };
-        let Some(market) = self.markets.perps.get(coin).filter(|market| self.markets.usdc_dexes[market.dex]) else {
-            return Vec::new();
-        };
-        if account.isolated.contains_key(&(market.dex, market.asset)) {
-            return Vec::new();
-        }
-        let member = |other: &str| self.markets.perps.get(other).is_some_and(|other| self.cross_member(account, market, other));
-        held.into_iter().filter(|other| *other != coin && member(other)).collect()
-    }
 }
 
 fn wei_to_usdc(wei: i64) -> f64 {
@@ -1197,6 +1130,7 @@ fn same_cash(replayed: &AccountMargin, anchored: &AccountMargin) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::accounts::liquidation::{HeldAtMark, solve, solve_held};
     use serde_json::json;
 
     use super::*;

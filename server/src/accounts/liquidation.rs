@@ -98,6 +98,11 @@ pub(crate) struct HeldAtMark<'a> {
 }
 
 impl HeldAtMark<'_> {
+    /// Signed notional less integer maintenance, kept exact until the whole other-member sum is known.
+    pub(crate) fn net_micro(&self) -> i128 {
+        i128::from(self.size_raw) * i128::from(self.mark_raw) - self.maintenance_micro()
+    }
+
     /// Raw size times mark is the exact notional in micro-USD.
     fn maintenance_micro(&self) -> i128 {
         self.table.maintenance_micro(u128::from(self.size_raw.unsigned_abs()) * u128::from(self.mark_raw))
@@ -246,9 +251,12 @@ fn solve_pool(
 pub(crate) fn solve_held(cash: f64, others: &[HeldAtMark<'_>], size: f64, table: &MarginTable) -> LiquidationPx {
     // Both signed notional and held maintenance are exact micro-USD. Net them before converting:
     // ASTER1196430000 otherwise alternates between zero and a spurious positive price with pool order.
-    let others_net_micro: i128 = others.iter().map(|member| {
-        i128::from(member.size_raw) * i128::from(member.mark_raw) - member.maintenance_micro()
-    }).sum();
+    let others_net_micro = others.iter().map(HeldAtMark::net_micro).sum();
+    solve_net(cash, others_net_micro, size, table)
+}
+
+/// Solve with the other members already netted in exact micro-USD (single-row and batched replay share this).
+pub(crate) fn solve_net(cash: f64, others_net_micro: i128, size: f64, table: &MarginTable) -> LiquidationPx {
     solve(cash + others_net_micro as f64 / 1e6, 0.0, size, table)
 }
 

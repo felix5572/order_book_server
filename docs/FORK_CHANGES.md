@@ -798,3 +798,31 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - 快照持仓比候选新时全部不列，确认追上后恢复。
   - walk 在途时，仓位清零、或刷新先确认了新数量：都重算，不发旧结果；只有无关仓位变了：照常发布，不重算。
   - 变异检查：把在途核对改回只看代次，两个在途测试失败；把全仓改成只看本币，两个副本测试失败。
+
+## 2026-10-29 清算候选批量读行：同一保证金池只估值一次（独立审查通过，未部署）
+
+- **问题**：`Candidates::reindex` 调用 `AccountBook::replayed_rows`，后者对每个仓位再次遍历该账户全部持仓、解析市场和保证金表、估值其他同池仓位。多仓账户的这部分工作近似 O(n²)。BM 10-29 21:14 UTC 的 15.019 秒窗口里，整个候选刷新累计耗时 11.280 秒；这个指标包含索引等工作，不等同于本次优化部分的耗时。
+- **实现**：`accounts/replay/rows.rs` 持有一次读取内的 `AccountRows`。按真实保证金池汇总 `size_raw * mark_raw - maintenance_micro`，每行用池总和减去自身；普通账户按 DEX，统一账户合并 USDC DEX，逐仓不参加全仓汇总。市场、表和持有价估值每成员处理一次，单仓直接求解。`CrossPool`、`RowTarget`、`HeldAtMark::net_micro` 和 `solve_net` 供批量及单仓路径共用，持仓输出顺序不变。
+- **状态与精度**：池和、扣除自身都使用 i128 微美元，扣除后才转换 f64；目标仓位的维持保证金档位仍由原求解器按待求价格选择。缺 mark / 表单独计数：目标缺 mark 可求其自身清算价，其他同池成员缺 mark 则不可求；未知市场仍按原规则撤回该账户全部全仓行，逐仓可用性不受其影响。不跨读取、区块或 checkpoint 保留任何估值缓存；`AccountBook` 的 anchor/applied 高度门控及 mark 同高度条件不变。
+- **范围**：本次只优化 live replay 的批量估值热路径。候选范围、mark 更新触发重算的范围、索引删除重建、checkpoint 的逐行核验和初始快照估值算法均未优化。没有服务级吞吐/延迟或线上验收结论。
+- **正确性验证**：完整 `cargo test -p server --lib`：1088 通过、12 ignored；`cargo check --workspace --bins` 通过。新增测试中的 f018925 旧扫描作为冻结参照（只在测试内），核对可用行、顺序、池大小、estimated 和清算价 f64 位模式；覆盖 PerDex/Unified/逐仓/非 USDC，缺失 mark/表/未知币，停止/未跟踪账户，开平仓、现金/表/池变化、高度错配和换 checkpoint。ASTER 1196430000 的 40 仓金样本覆盖所有轮转、正反顺序和 ±1 USDC wei；另覆盖超过 2^53 的整数贡献相消。Release 下新增的 9 项正确性测试也通过。
+- **隔离基准**：开发机 release，合成的单个 Unified 账户，保持约 20 万次仓位输出；每个规模交替新旧顺序跑 5 轮，取中位数。仅计 `MarginStates` 清算行计算和返回集合；不包含 `AccountBook` 外层投影、候选索引、网络或节点处理，不可外推为整体 OB 提速。
+
+  | 仓位数 | 重算次数/轮 | 旧扫描中位数 ms | 批量中位数 ms | 旧/新 |
+  | --- | --- | --- | --- | --- |
+  | 1 | 200000 | 8.674 | 7.586 | 1.14 |
+  | 4 | 50000 | 18.244 | 9.329 | 1.96 |
+  | 16 | 12500 | 63.092 | 8.514 | 7.41 |
+  | 64 | 3125 | 208.164 | 7.844 | 26.54 |
+  | 196 | 1020 | 594.714 | 7.620 | 78.05 |
+
+- **复现**：在独立 OB 仓库根目录运行以下命令；禁止 `cargo fmt`。
+
+  ```sh
+  cargo test -p server --lib
+  cargo check --workspace --bins
+  cargo test -p server --release --lib accounts::replay::rows::tests
+  cargo test -p server --release --lib accounts::replay::rows::tests::benchmark_pool_batch_against_original_scan -- --exact --ignored --nocapture
+  ```
+
+- **独立审查**：用户转交的 Claude 审查通过，无阻塞问题；复跑 accounts 模块 589 项、release 新增 9 项正确性测试及二进制编译检查通过。变更基于 f018925，含新增的 `server/src/accounts/replay/rows.rs` 及 `rows/tests.rs`；优先复核池归属、缺失成员扣除、整数/浮点转换顺序、批量与单仓一致性。原始测试及基准日志保存于 `/home/yfb222333/research-data/hyperliquid-trade/hl_node_perf_20261029/pool_rows_optimization/`。提交前清理本批新增的 12 条 clippy 告警（const、文档反引号、测试整数转换和 ignored 原因）；未部署。
