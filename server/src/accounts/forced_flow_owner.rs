@@ -323,15 +323,16 @@ impl ForcedFlow {
         output
     }
 
-    /// Every demanded (coin, tier) whose period has run starts its pipeline.
-    pub(crate) fn tick(&mut self, now: Instant, accounts: &FlowAccounts) -> FlowOutput {
+    /// Every demanded (coin, tier) whose period has run starts its pipeline. `scheduled`: the tick's time on its
+    /// schedule, not when the loop got to it - the periods are measured between those.
+    pub(crate) fn tick(&mut self, scheduled: Instant, accounts: &FlowAccounts) -> FlowOutput {
         let mut output = FlowOutput::default();
         for (coin, tier) in self.demanded(accounts) {
             let due = self.pipelines.get(&(coin.clone(), tier)).is_none_or(|pipeline| {
-                matches!(pipeline.stage, Stage::Idle) && pipeline.started.is_none_or(|started| now.duration_since(started) >= tier.period())
+                matches!(pipeline.stage, Stage::Idle) && pipeline.started.is_none_or(|started| scheduled.duration_since(started) >= tier.period())
             });
             if due {
-                self.start(&coin, tier, now, accounts, &mut output);
+                self.start(&coin, tier, scheduled, accounts, &mut output);
             }
         }
         output

@@ -117,8 +117,10 @@ async fn run_flow(
                 };
                 publisher.publish(time_flow_step("read", || flow.on_read(read, Instant::now(), &accounts)));
             }
-            _ = tick.tick() => {
-                publisher.publish(time_flow_step("tick", || flow.tick(Instant::now(), &accounts)));
+            scheduled = tick.tick() => {
+                // the tick's time on its schedule: two handling times a period apart come out short of it about half the
+                // time, and the key waited a tick more (bm 2026-10-30: a Near key started 6.4 times a second, not 10)
+                publisher.publish(time_flow_step("tick", || flow.tick(scheduled.into_std(), &accounts)));
             }
             closed = next_local_snapshot(&mut flow) => {
                 publisher.publish(time_flow_step("local", || flow.on_local(closed, Instant::now(), &accounts)));
@@ -194,9 +196,48 @@ mod tests {
         checkpoint::tests::{HOLDER, user as checkpoint_user},
         flow_accounts::{AccountsSnapshot, FlowAccountsValidity, link, tests::serving},
         forced_flow_owner::FlowContent,
+        forced_flow_reader::{FlowJob, FlowJobKind},
         publish::AccountsFrame,
         test_support::{ListedMarks, PUMP, replay_book},
     };
+    use crate::listeners::order_book::BookTrust;
+
+    /// bm 2026-10-30: a key starts its pipeline on each tick of its period - the period measured on the ticks'
+    /// schedule, not on when the loop handled them (a Near key started 6.4 times a second, not 10). The clock paused,
+    /// the handling instants stand still while the schedule moves on.
+    #[tokio::test(start_paused = true)]
+    async fn a_near_key_starts_its_pipeline_on_every_tick() {
+        let book = replay_book(1_000, 1_000, &[(checkpoint_user(HOLDER), 1_000_000)]);
+        let marks = ListedMarks { height: 1_000, marks: vec![(PUMP, 12_500)] };
+        let mut candidates = Candidates::new(None);
+        drop(candidates.refresh(&book, Some(&marks), &[]));
+        let (accounts, _validity) = serving(&book, &marks, &candidates);
+        let (mailbox, demand) = (Arc::new(FlowMailbox::default()), FlowDemand::default());
+        let _near = demand.acquire((Some(PUMP.to_string()), Tier::Near));
+        let (reads_back, reads) = mpsc::channel(FLOW_READS_CAPACITY);
+        let flow = ForcedFlow::new(demand, Some(FlowLink { trust: BookTrust::new(), mailbox: Arc::clone(&mailbox) }));
+        let (_events, events) = mpsc::channel(1);
+        let (_queries, queries) = mpsc::channel(1);
+        let (frames, _received) = broadcast::channel(16);
+        let thread = tokio::spawn(run_flow(FlowFeed { flow, reads: Some(reads) }, accounts, events, queries, FlowPublisher::new(frames)));
+        for round in 0..5 {
+            settle().await;
+            let jobs: Vec<_> = mailbox.drain().into_iter().collect();
+            let [((_, _, FlowJobKind::Band), FlowJob::Band { version, .. })] = jobs.as_slice() else { panic!("round {round}: one band read started, got {jobs:?}") };
+            // back without a book snapshot: the pipeline ends, idle until its next tick
+            reads_back.send(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Near, version: *version, read: None }).await.unwrap();
+            settle().await;
+            tokio::time::advance(Tier::Near.period()).await;
+        }
+        thread.abort();
+    }
+
+    /// Lets the spawned loop handle what is ready.
+    async fn settle() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
 
     /// Review 000563 r1 test 4: the account owner busy in a long synchronous step does not hold the forced flow - a
     /// query is answered while it runs - and its end withdraws the forced flow and ends the thread.
