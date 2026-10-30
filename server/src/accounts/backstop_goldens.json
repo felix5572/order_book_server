@@ -1,0 +1,564 @@
+{
+ "provenance": "bm 2026-10-29 20:01 UTC (Intel/Amazon earnings), hyperliquid-trade analyze/research/backstop_liquidation_20261029: fills from the node's fills stream (forced_flow_eval's hourly extract), cut to each case's backstop fills and their other sides; misc lines whole from the OB's ACCOUNTS_EVIDENCE log (`evidence`) or built from the official API's userNonFundingLedgerUpdates record, its delta and hash unchanged (`official`)",
+ "cases": [
+  {
+   "case": "isolated AMZN, one account in its block",
+   "block": 1201921840,
+   "misc_source": "evidence",
+   "misc": {
+    "local_time": "2026-10-29T20:01:15.443238609",
+    "block_time": "2026-10-29T20:01:09.698251083",
+    "block_number": 1201921840,
+    "events": [
+     {
+      "time": "2026-10-29T20:01:09.698251083",
+      "hash": "0x0154e364c24977fa02ce0447a3df30020dac004a5d4c96cca51d8eb7814d51e4",
+      "inner": {
+       "LedgerUpdate": {
+        "users": [
+         "0xba1e2daed5777184e779312711b4b5acb2cf2710"
+        ],
+        "delta": {
+         "type": "liquidation",
+         "liquidatedNtlPos": "671.12576",
+         "accountValue": "10.044596",
+         "leverageType": "Isolated",
+         "liquidatedPositions": [
+          {
+           "coin": "xyz:AMZN",
+           "szi": "2.776"
+          }
+         ]
+        }
+       }
+      }
+     }
+    ]
+   },
+   "fills": [
+    {
+     "local_time": "2026-10-29T20:01:15.443366049",
+     "block_time": "2026-10-29T20:01:09.698251083",
+     "block_number": 1201921840,
+     "events": [
+      [
+       "0x4000000000000000000000000000000000000001",
+       {
+        "coin": "xyz:AMZN",
+        "px": "238.141",
+        "sz": "2.776",
+        "side": "B",
+        "time": 1793304069698,
+        "startPosition": "0.0",
+        "dir": "Liquidated Isolated Long",
+        "closedPnl": "0.0",
+        "hash": "0x0154e364c24977fa02ce0447a3df30020dac004a5d4c96cca51d8eb7814d51e4",
+        "oid": 589783855656,
+        "crossed": true,
+        "fee": "0.0",
+        "tid": 886737955199976,
+        "liquidation": {
+         "liquidatedUser": "0xba1e2daed5777184e779312711b4b5acb2cf2710",
+         "markPx": "241.76",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    },
+    {
+     "local_time": "2026-10-29T20:01:15.443374755",
+     "block_time": "2026-10-29T20:01:09.698251083",
+     "block_number": 1201921840,
+     "events": [
+      [
+       "0xba1e2daed5777184e779312711b4b5acb2cf2710",
+       {
+        "coin": "xyz:AMZN",
+        "px": "238.141",
+        "sz": "2.776",
+        "side": "A",
+        "time": 1793304069698,
+        "startPosition": "2.776",
+        "dir": "Liquidated Isolated Long",
+        "closedPnl": "-30.227864",
+        "hash": "0x0154e364c24977fa02ce0447a3df30020dac004a5d4c96cca51d8eb7814d51e4",
+        "oid": 589783855656,
+        "crossed": false,
+        "fee": "0.0",
+        "tid": 886737955199976,
+        "liquidation": {
+         "liquidatedUser": "0xba1e2daed5777184e779312711b4b5acb2cf2710",
+         "markPx": "241.76",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "case": "isolated AMZN, two accounts of a 21-account block",
+   "block": 1201921938,
+   "misc_source": "evidence",
+   "misc": {
+    "local_time": "2026-10-29T20:01:23.271767852",
+    "block_time": "2026-10-29T20:01:16.962694007",
+    "block_number": 1201921938,
+    "events": [
+     {
+      "time": "2026-10-29T20:01:16.962694007",
+      "hash": "0xc0e531c34147eb78c25e0447a3df92020db200a8dc4b0a4a64addd16004bc563",
+      "inner": {
+       "LedgerUpdate": {
+        "users": [
+         "0x26bba72261c0c02f4f3868a8d663c24a0d55f385"
+        ],
+        "delta": {
+         "type": "liquidation",
+         "liquidatedNtlPos": "55321.2112",
+         "accountValue": "819.736464",
+         "leverageType": "Isolated",
+         "liquidatedPositions": [
+          {
+           "coin": "xyz:AMZN",
+           "szi": "231.16"
+          }
+         ]
+        }
+       }
+      }
+     },
+     {
+      "time": "2026-10-29T20:01:16.962694007",
+      "hash": "0xc0e531c34147eb78c25e0447a3df92020db200a8dc4b0a4a64addd16004bc563",
+      "inner": {
+       "LedgerUpdate": {
+        "users": [
+         "0x654291a9ac373119272f9c6e1b4e9615ecd2ec63"
+        ],
+        "delta": {
+         "type": "liquidation",
+         "liquidatedNtlPos": "37803.70516",
+         "accountValue": "560.163426",
+         "leverageType": "Isolated",
+         "liquidatedPositions": [
+          {
+           "coin": "xyz:AMZN",
+           "szi": "157.963"
+          }
+         ]
+        }
+       }
+      }
+     }
+    ]
+   },
+   "fills": [
+    {
+     "local_time": "2026-10-29T20:01:23.271773552",
+     "block_time": "2026-10-29T20:01:16.962694007",
+     "block_number": 1201921938,
+     "events": [
+      [
+       "0x4000000000000000000000000000000000000001",
+       {
+        "coin": "xyz:AMZN",
+        "px": "235.773",
+        "sz": "231.16",
+        "side": "B",
+        "time": 1793304076962,
+        "startPosition": "87.58",
+        "dir": "Liquidated Isolated Long",
+        "closedPnl": "0.0",
+        "hash": "0xc0e531c34147eb78c25e0447a3df92020db200a8dc4b0a4a64addd16004bc563",
+        "oid": 589784176703,
+        "crossed": true,
+        "fee": "0.0",
+        "tid": 724020785926811,
+        "liquidation": {
+         "liquidatedUser": "0x26bba72261c0c02f4f3868a8d663c24a0d55f385",
+         "markPx": "239.32",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    },
+    {
+     "local_time": "2026-10-29T20:01:23.271778361",
+     "block_time": "2026-10-29T20:01:16.962694007",
+     "block_number": 1201921938,
+     "events": [
+      [
+       "0x26bba72261c0c02f4f3868a8d663c24a0d55f385",
+       {
+        "coin": "xyz:AMZN",
+        "px": "235.773",
+        "sz": "231.16",
+        "side": "A",
+        "time": 1793304076962,
+        "startPosition": "231.16",
+        "dir": "Liquidated Isolated Long",
+        "closedPnl": "-2412.38576",
+        "hash": "0xc0e531c34147eb78c25e0447a3df92020db200a8dc4b0a4a64addd16004bc563",
+        "oid": 589784176703,
+        "crossed": false,
+        "fee": "0.0",
+        "tid": 724020785926811,
+        "liquidation": {
+         "liquidatedUser": "0x26bba72261c0c02f4f3868a8d663c24a0d55f385",
+         "markPx": "239.32",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    },
+    {
+     "local_time": "2026-10-29T20:01:23.272039062",
+     "block_time": "2026-10-29T20:01:16.962694007",
+     "block_number": 1201921938,
+     "events": [
+      [
+       "0x4000000000000000000000000000000000000001",
+       {
+        "coin": "xyz:AMZN",
+        "px": "235.773",
+        "sz": "157.963",
+        "side": "B",
+        "time": 1793304076962,
+        "startPosition": "385.531",
+        "dir": "Liquidated Isolated Long",
+        "closedPnl": "0.0",
+        "hash": "0xc0e531c34147eb78c25e0447a3df92020db200a8dc4b0a4a64addd16004bc563",
+        "oid": 589784176711,
+        "crossed": true,
+        "fee": "0.0",
+        "tid": 857527528837492,
+        "liquidation": {
+         "liquidatedUser": "0x654291a9ac373119272f9c6e1b4e9615ecd2ec63",
+         "markPx": "239.32",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    },
+    {
+     "local_time": "2026-10-29T20:01:23.272047187",
+     "block_time": "2026-10-29T20:01:16.962694007",
+     "block_number": 1201921938,
+     "events": [
+      [
+       "0x654291a9ac373119272f9c6e1b4e9615ecd2ec63",
+       {
+        "coin": "xyz:AMZN",
+        "px": "235.773",
+        "sz": "157.963",
+        "side": "A",
+        "time": 1793304076962,
+        "startPosition": "157.963",
+        "dir": "Liquidated Isolated Long",
+        "closedPnl": "-1694.469101",
+        "hash": "0xc0e531c34147eb78c25e0447a3df92020db200a8dc4b0a4a64addd16004bc563",
+        "oid": 589784176711,
+        "crossed": false,
+        "fee": "0.0",
+        "tid": 857527528837492,
+        "liquidation": {
+         "liquidatedUser": "0x654291a9ac373119272f9c6e1b4e9615ecd2ec63",
+         "markPx": "239.32",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "case": "cross INTC and AMZN, one account",
+   "block": 1201922305,
+   "misc_source": "official",
+   "misc": {
+    "local_time": "2026-10-29T20:01:51.208707458",
+    "block_time": "2026-10-29T20:01:42.779035016",
+    "block_number": 1201922305,
+    "events": [
+     {
+      "time": "2026-10-29T20:01:42.779035016",
+      "hash": "0xcaf8a544f601bed5cc720447a3e101020973002a9104dda76ec15097b50598c0",
+      "inner": {
+       "LedgerUpdate": {
+        "users": [
+         "0x937613997fb4119e563baee0f2122b753bb2633f"
+        ],
+        "delta": {
+         "type": "liquidation",
+         "liquidatedNtlPos": "1945.65688",
+         "accountValue": "48.901984",
+         "leverageType": "Cross",
+         "liquidatedPositions": [
+          {
+           "coin": "xyz:INTC",
+           "szi": "12.28"
+          },
+          {
+           "coin": "xyz:AMZN",
+           "szi": "3.649"
+          }
+         ]
+        }
+       }
+      }
+     }
+    ]
+   },
+   "fills": [
+    {
+     "local_time": "2026-10-29T20:01:51.208883890",
+     "block_time": "2026-10-29T20:01:42.779035016",
+     "block_number": 1201922305,
+     "events": [
+      [
+       "0x4000000000000000000000000000000000000001",
+       {
+        "coin": "xyz:INTC",
+        "px": "86.882",
+        "sz": "12.28",
+        "side": "B",
+        "time": 1793304102779,
+        "startPosition": "157.76",
+        "dir": "Liquidated Cross Long",
+        "closedPnl": "0.0",
+        "hash": "0xcaf8a544f601bed5cc720447a3e101020973002a9104dda76ec15097b50598c0",
+        "oid": 589785191014,
+        "crossed": true,
+        "fee": "0.0",
+        "tid": 17644239443549,
+        "liquidation": {
+         "liquidatedUser": "0x937613997fb4119e563baee0f2122b753bb2633f",
+         "markPx": "89.122",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    },
+    {
+     "local_time": "2026-10-29T20:01:51.208888448",
+     "block_time": "2026-10-29T20:01:42.779035016",
+     "block_number": 1201922305,
+     "events": [
+      [
+       "0x937613997fb4119e563baee0f2122b753bb2633f",
+       {
+        "coin": "xyz:INTC",
+        "px": "86.882",
+        "sz": "12.28",
+        "side": "A",
+        "time": 1793304102779,
+        "startPosition": "12.28",
+        "dir": "Liquidated Cross Long",
+        "closedPnl": "-66.22604",
+        "hash": "0xcaf8a544f601bed5cc720447a3e101020973002a9104dda76ec15097b50598c0",
+        "oid": 589785191014,
+        "crossed": false,
+        "fee": "0.0",
+        "tid": 17644239443549,
+        "liquidation": {
+         "liquidatedUser": "0x937613997fb4119e563baee0f2122b753bb2633f",
+         "markPx": "89.122",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    },
+    {
+     "local_time": "2026-10-29T20:01:51.208891784",
+     "block_time": "2026-10-29T20:01:42.779035016",
+     "block_number": 1201922305,
+     "events": [
+      [
+       "0x4000000000000000000000000000000000000001",
+       {
+        "coin": "xyz:AMZN",
+        "px": "227.416",
+        "sz": "3.649",
+        "side": "B",
+        "time": 1793304102779,
+        "startPosition": "5378.636",
+        "dir": "Liquidated Cross Long",
+        "closedPnl": "0.0",
+        "hash": "0xcaf8a544f601bed5cc720447a3e101020973002a9104dda76ec15097b50598c0",
+        "oid": 589785191015,
+        "crossed": true,
+        "fee": "0.0",
+        "tid": 1099420194957981,
+        "liquidation": {
+         "liquidatedUser": "0x937613997fb4119e563baee0f2122b753bb2633f",
+         "markPx": "233.28",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    },
+    {
+     "local_time": "2026-10-29T20:01:51.208894560",
+     "block_time": "2026-10-29T20:01:42.779035016",
+     "block_number": 1201922305,
+     "events": [
+      [
+       "0x937613997fb4119e563baee0f2122b753bb2633f",
+       {
+        "coin": "xyz:AMZN",
+        "px": "227.416",
+        "sz": "3.649",
+        "side": "A",
+        "time": 1793304102779,
+        "startPosition": "3.649",
+        "dir": "Liquidated Cross Long",
+        "closedPnl": "-75.548896",
+        "hash": "0xcaf8a544f601bed5cc720447a3e101020973002a9104dda76ec15097b50598c0",
+        "oid": 589785191015,
+        "crossed": false,
+        "fee": "0.0",
+        "tid": 1099420194957981,
+        "liquidation": {
+         "liquidatedUser": "0x937613997fb4119e563baee0f2122b753bb2633f",
+         "markPx": "233.28",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "case": "cross INTC, one account",
+   "block": 1201922433,
+   "misc_source": "official",
+   "misc": {
+    "local_time": "2026-10-29T20:02:00.809525873",
+    "block_time": "2026-10-29T20:01:51.763287927",
+    "block_number": 1201922433,
+    "events": [
+     {
+      "time": "2026-10-29T20:01:51.763287927",
+      "hash": "0x3fb2ff3fac04121c412c0447a3e1810209530025470730eee37baa926b07ec06",
+      "inner": {
+       "LedgerUpdate": {
+        "users": [
+         "0x0a9b063dbcb6c5e40b69edff6eedbeb912a220c5"
+        ],
+        "delta": {
+         "type": "liquidation",
+         "liquidatedNtlPos": "1535.4464",
+         "accountValue": "44.617144",
+         "leverageType": "Cross",
+         "liquidatedPositions": [
+          {
+           "coin": "xyz:INTC",
+           "szi": "17.56"
+          }
+         ]
+        }
+       }
+      }
+     }
+    ]
+   },
+   "fills": [
+    {
+     "local_time": "2026-10-29T20:02:00.809612726",
+     "block_time": "2026-10-29T20:01:51.763287927",
+     "block_number": 1201922433,
+     "events": [
+      [
+       "0x4000000000000000000000000000000000000001",
+       {
+        "coin": "xyz:INTC",
+        "px": "84.8991",
+        "sz": "17.56",
+        "side": "B",
+        "time": 1793304111763,
+        "startPosition": "251.26",
+        "dir": "Liquidated Cross Long",
+        "closedPnl": "0.0",
+        "hash": "0x3fb2ff3fac04121c412c0447a3e1810209530025470730eee37baa926b07ec06",
+        "oid": 589785517716,
+        "crossed": true,
+        "fee": "0.0",
+        "tid": 410932132615847,
+        "liquidation": {
+         "liquidatedUser": "0x0a9b063dbcb6c5e40b69edff6eedbeb912a220c5",
+         "markPx": "87.44",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    },
+    {
+     "local_time": "2026-10-29T20:02:00.809617305",
+     "block_time": "2026-10-29T20:01:51.763287927",
+     "block_number": 1201922433,
+     "events": [
+      [
+       "0x0a9b063dbcb6c5e40b69edff6eedbeb912a220c5",
+       {
+        "coin": "xyz:INTC",
+        "px": "84.8991",
+        "sz": "17.56",
+        "side": "A",
+        "time": 1793304111763,
+        "startPosition": "17.56",
+        "dir": "Liquidated Cross Long",
+        "closedPnl": "-142.023524",
+        "hash": "0x3fb2ff3fac04121c412c0447a3e1810209530025470730eee37baa926b07ec06",
+        "oid": 589785517716,
+        "crossed": false,
+        "fee": "0.0",
+        "tid": 410932132615847,
+        "liquidation": {
+         "liquidatedUser": "0x0a9b063dbcb6c5e40b69edff6eedbeb912a220c5",
+         "markPx": "87.44",
+         "method": "backstop"
+        },
+        "feeToken": "USDC",
+        "twapId": null
+       }
+      ]
+     ]
+    }
+   ]
+  }
+ ]
+}

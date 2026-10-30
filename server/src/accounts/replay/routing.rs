@@ -164,13 +164,13 @@ impl RoutingProjection {
         if !self.tracker_trusted { self.cash_micro = None; return None; }
         let capacity = match self.path {
             FundingPath::FrozenSpot { held_wei, execution: Some((height, tid)) }
-                if height == block && tid == fill.tid && fill.coin == self.coin && fill.crossed && !fill.backstop =>
+                if height == block && tid == fill.tid && fill.coin == self.coin && fill.crossed && fill.backstop.is_none() =>
                 aggregate_wei.checked_sub(held_wei).map(|cash| cash.max(0) / WEI_PER_MICRO),
             FundingPath::FrozenSpot { .. } => None,
             FundingPath::RestingMaker => self.maker_capacity(block, fill, cash_before, aggregate_wei),
             FundingPath::ReservedMaker => self.reserved_maker_capacity(fill, cash_before),
             FundingPath::OtherDexReserve { locked_micro, ioc_block: Some(height) }
-                if height == block && fill.coin == self.coin && fill.crossed && !fill.backstop =>
+                if height == block && fill.coin == self.coin && fill.crossed && fill.backstop.is_none() =>
                 (aggregate_wei / WEI_PER_MICRO).checked_sub(locked_micro).map(|cash| cash.max(0)),
             FundingPath::OtherDexReserve { .. } | FundingPath::AnchoredCrossMaker { .. } => None,
         };
@@ -180,7 +180,7 @@ impl RoutingProjection {
 
     #[allow(clippy::cast_precision_loss)]
     fn maker_capacity(&mut self, block: u64, fill: &FillEvent, cash_before: i64, aggregate_wei: i64) -> Option<i64> {
-        if fill.coin != self.coin || fill.backstop || fill.crossed { return None; }
+        if fill.coin != self.coin || fill.backstop.is_some() || fill.crossed { return None; }
         if self.last_fill_block.is_some_and(|last| last != block) { self.cash_micro = None; }
         let cash = self.cash_micro?;
         let mark = fill.mark.filter(|mark| mark.min_px_raw == mark.max_px_raw).filter(|mark| mark.size_decimals == self.decimals)?;
@@ -207,7 +207,7 @@ impl RoutingProjection {
         // inherit checkpoint holds after physical routing has changed.
         if matches!(self.path, FundingPath::AnchoredCrossMaker { .. } | FundingPath::FrozenSpot { .. }) { return None; }
         if let FundingPath::OtherDexReserve { ioc_block, .. } = self.path {
-            return (ioc_block == Some(block) && fill.crossed && !fill.backstop).then_some(());
+            return (ioc_block == Some(block) && fill.crossed && fill.backstop.is_none()).then_some(());
         }
         let quantity = u64::try_from(parse_size_raw(&fill.sz, self.decimals).ok()?).ok()?;
         let price = u64::try_from(parse_size_raw(&fill.px, 6 - self.decimals).ok()?).ok()?;

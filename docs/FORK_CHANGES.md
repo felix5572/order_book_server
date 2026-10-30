@@ -832,3 +832,30 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
 - **起因**：24e71a8 起帧的 `accountsHeight` 是所有账户输入的下界，候选落后时取候选确认的块；帧里的持仓和 `nodeMarkPx` 却是副本当前块，可以更新。hyperliquid-trade 的常驻评估器按 `accountsHeight` 把帧当成 mark 和持仓所在的块，取"块之前的最后一帧"时取到了已经含触发块新 mark、或已拿掉被清算仓位的帧：10-29 15 时起"触发条件在上一次价格变动时已满足"每小时 400–5,000 条，19 时起清算几乎都判"前一帧没列"。实例：BTC 块 1201986266 触发，`accountsHeight` 1201986264 的帧已带该块的新 mark 79403；xyz:STRC 0x9bafb90f77bedd8e917036d314b25ef044b752ae 块 1201920927 被清算，帧一直列到 20:00:03.093，`accountsHeight` 1201920926 的帧已没有它。
 - **改动**：`heights` 增 `positionsHeight` / `positionsTimeMs` = 副本当前块（`FlowAccounts::positions_at`，持仓和 mark 同块应用），不小于 `accountsHeight`。`accountsHeight` 含义不变，交易端的年龄门槛照旧读它；交易端的帧解析不拒绝未知字段。
 - **测试**：`the_account_part_is_of_its_oldest_input` 加 positions 1,005 / 1,005,000（候选 1,000）；清算在 walk 途中消失的用例加 positions 1,001；JSON 视图测试加两个字段。
+
+## 2026-10-30 后备清算接管按规则回放（`backstop`）
+
+- **起因**：10-29 20:01 UTC 英特尔、亚马逊盘后财报，xyz 预言机每次更新最多动 50bp，mark 落后盘口 5–8%，HIP-3 一小时内 706 个账户被后备清算接管。现金回放遇到后备成交就让账户停到下一个检查点，被接管账户的其他仓位在最剧烈的这段时间里清算价未知。
+- **规则（hyperliquid-trade `analyze/research/backstop_liquidation_20261029`）**：
+  - 同一块里，杂项事件有一条 `liquidation` 账本记录（`leverageType`、`accountValue`、`liquidatedNtlPos`、`liquidatedPositions`）；成交里每个仓位一对，被清算方和清算金库 0x4000000000000000000000000000000000000001 各一笔，手续费 0，带 `markPx`。
+  - 接管价 `px = mark × (1 − sign × accountValue / liquidatedNtlPos)`，截到价格精度。67 条全对：本服务证据日志 20 条，官方账本 47 条，其中全仓 38 条、两仓位 2 条；多头全向下截，偏差不超过 0.043bp。
+  - 这个价格让被清算的池子只剩截断尾差。
+- **改动**：
+  - `accounts/backstop.rs` 负责规则：每个被清算账户在本块的证据（指向它的记录和它的后备成交）组成 `TakeoverEvidence`，后备成交分为 `Liquidated(证据)`、`Liquidator` 和 `Unchecked(原因)`。
+  - 证据随成交事件写进事件日志。现金回放应用这笔成交时，才用当前锚点的 universe（币种精度）核对，所以检查点晚于接管块装入时结果也一样（审查 000577 r1 P2：原先在构造事件时就把判定定死，没有 universe 时判成"不在 universe 里"，检查点装入后也改不回来）。
+  - `misc.rs` 把 `liquidation` 解析成 `LedgerDelta::Liquidation`。其他 `leverageType` 照旧算未读类型。
+  - `book.rs` 在 `apply_block` 里用本块的杂项事件和成交收集证据，成交事件带着证据构造（`FillEvent::in_block`）。
+  - `replay.rs` 把被清算一侧当普通成交回放，账户标 `estimated`，并记下接管块；账本记录必须跟在同块接管之后，本身不动现金。
+  - 金库一侧、统一账户的全仓池、现货借贷清算、规则解释不了的接管，仍然停账户。停账户原因 `backstopLiquidation:<说明>` 现在带说明。
+- **未测量**：截断尾差最后去哪、统一账户全仓池、金库自己的现金。下一次后备清算发生时，由检查点逐账户核对到 10^-8 USDC，对不上会留 `replayMismatch` 证据。本次测试里接管前的现金是按记录反推的合成值，不是节点余额（当时的检查点已过保留期）。
+- **测试**：
+  - `backstop::tests`：4 个真实样例的判定；另一个截断方向的价格接受；价格再差一个单位、数量不对、没有记录或两条记录、缺一个仓位的成交、名义对不上、币种不在 universe 里，都判为解释不了。
+  - `replay::backstop_tests`：逐仓接管后交叉现金 −0.001748、全仓两仓位 −0.002952；统一账户全仓、池子和回放不一致、只有记录没有接管，都停账户。
+  - `book::tests::a_backstop_takeover_block_replays_its_liquidated_side`：走完整块路径，锚点在块前、块后装入各跑一次，结果相同。
+  - `misc::tests::reads_a_backstop_takeover_record`。
+- **复现**：在独立 OB 仓库根目录运行以下命令；禁止 `cargo fmt`。
+
+  ```sh
+  cargo test -p server --lib -- accounts::
+  cargo check --workspace --bins
+  ```

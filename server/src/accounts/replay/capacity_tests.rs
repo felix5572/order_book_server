@@ -160,7 +160,7 @@ fn replay_cross_dex(case: &serde_json::Value, omit_capacity: bool) -> (AccountMa
         let height = event["height"].as_u64().unwrap();
         if let Some(ledger) = event.get("ledger") {
             let delta: LedgerDelta = serde_json::from_value(ledger["delta"].clone()).unwrap();
-            apply_ledger(&mut account, &markets, case["user"].as_str().unwrap().parse().unwrap(), &delta).unwrap();
+            apply_ledger(&mut account, &markets, height, case["user"].as_str().unwrap().parse().unwrap(), &delta).unwrap();
             continue;
         }
         if let Some(action) = event.get("action") {
@@ -407,7 +407,7 @@ fn eur_delayed_system_send_funds_the_recorded_four_fill_window() {
             for batch in early {
                 for event in batch.events() {
                     let crate::accounts::misc::MiscEvent::Ledger { delta, .. } = event else { panic!() };
-                    apply_ledger(&mut account, &markets, who, &delta).unwrap();
+                    apply_ledger(&mut account, &markets, height, who, &delta).unwrap();
                 }
             }
             for event in case["events"].as_array().unwrap().iter().filter(|e| e["height"].as_u64() == Some(height)) {
@@ -417,7 +417,7 @@ fn eur_delayed_system_send_funds_the_recorded_four_fill_window() {
             for batch in misc {
                 for event in batch.events() {
                     let crate::accounts::misc::MiscEvent::Ledger { delta, .. } = event else { panic!() };
-                    apply_ledger(&mut account, &markets, who, &delta).unwrap();
+                    apply_ledger(&mut account, &markets, height, who, &delta).unwrap();
                 }
             }
         }

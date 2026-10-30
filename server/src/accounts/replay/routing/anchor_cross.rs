@@ -44,7 +44,7 @@ impl RoutingProjection {
     pub(in super::super) fn anchored_cross_capacity(&self, fill: &FillEvent, cash_before: i64,
         portfolios: &FxHashMap<usize, CrossCapacityProjection>, aggregate_micro: Option<i64>) -> Result<Option<i64>, String> {
         let FundingPath::AnchoredCrossMaker { dex } = self.path else { return Ok(None); };
-        if !self.tracker_trusted || self.cash_micro.is_none() || fill.coin != self.coin || fill.crossed || fill.backstop
+        if !self.tracker_trusted || self.cash_micro.is_none() || fill.coin != self.coin || fill.crossed || fill.backstop.is_some()
             || fill.usdc_fee_wei < 0 { return Ok(None); }
         let Some(mark) = fill.mark.filter(|m| m.min_px_raw > 0 && m.min_px_raw == m.max_px_raw)
             else { return Ok(None); };

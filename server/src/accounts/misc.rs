@@ -18,7 +18,10 @@ use serde::{
     de::{IgnoredAny, MapAccess, Visitor},
 };
 
-use super::usdc::usdc_wei;
+use super::{
+    backstop::{TakeoverPool, TakeoverRecord},
+    usdc::usdc_wei,
+};
 
 /// Kinds observed that never move perp margin of a USDC pool.
 const IRRELEVANT_KINDS: [&str; 6] =
@@ -108,10 +111,12 @@ pub(crate) enum LedgerDelta {
     AccountActivationGas { usdc_wei: Option<i64> },
     /// `borrowLend`: moves a unified account's spot collateral into or out of lending (direction unverified).
     BorrowLend,
+    /// `liquidation`: a backstop takeover's record (`backstop`); its cash moves with the block's fills.
+    Liquidation(TakeoverRecord),
     /// A type that moves no USDC (`TOKEN_TYPES_WITHOUT_USDC` with a token other than USDC).
     WithoutUsdc(String),
-    /// A type the replay does not read: `spotGenesis`, `liquidation` (the documented backstop record, never seen),
-    /// a `TOKEN_TYPES_WITHOUT_USDC` type moving USDC, and any type not listed here.
+    /// A type the replay does not read: `spotGenesis`, a `liquidation` of another `leverageType`, a
+    /// `TOKEN_TYPES_WITHOUT_USDC` type moving USDC, and any type not listed here.
     Unread(String),
 }
 
@@ -133,6 +138,7 @@ impl LedgerDelta {
             Self::RewardsClaim { .. } => "rewardsClaim",
             Self::AccountActivationGas { .. } => "accountActivationGas",
             Self::BorrowLend => "borrowLend",
+            Self::Liquidation(_) => "liquidation",
             Self::WithoutUsdc(delta_type) | Self::Unread(delta_type) => delta_type,
         }
     }
@@ -174,6 +180,17 @@ struct WireDelta {
     to_perp: Option<bool>,
     net_withdrawn_usd: Option<String>,
     commission: Option<String>,
+    account_value: Option<String>,
+    liquidated_ntl_pos: Option<String>,
+    leverage_type: Option<String>,
+    liquidated_positions: Option<Vec<WirePosition>>,
+}
+
+/// A `liquidatedPositions` entry.
+#[derive(Deserialize)]
+struct WirePosition {
+    coin: String,
+    szi: String,
 }
 
 impl WireDelta {
@@ -201,6 +218,21 @@ impl WireDelta {
         }
         self.usdc_wei(self.fee.as_ref(), "fee")
     }
+
+    /// A `liquidation`'s record; another `leverageType` than the two measured is not read.
+    fn liquidation(mut self) -> Result<LedgerDelta, String> {
+        let pool = match self.need(self.leverage_type.as_deref(), "leverageType")? {
+            "Cross" => TakeoverPool::Cross,
+            "Isolated" => TakeoverPool::Isolated,
+            other => return Ok(LedgerDelta::Unread(format!("liquidation leverageType {other:?}"))),
+        };
+        let value_wei = self.usdc_wei(self.account_value.as_ref(), "accountValue")?;
+        let notional_wei = self.usdc_wei(self.liquidated_ntl_pos.as_ref(), "liquidatedNtlPos")?;
+        let positions = self.liquidated_positions.take();
+        let positions = self.need(positions, "liquidatedPositions")?;
+        let positions = positions.into_iter().map(|WirePosition { coin, szi }| (coin, szi)).collect();
+        Ok(LedgerDelta::Liquidation(TakeoverRecord { pool, value_wei, notional_wei, positions }))
+    }
 }
 
 impl<'de> Deserialize<'de> for LedgerDelta {
@@ -214,6 +246,9 @@ impl TryFrom<WireDelta> for LedgerDelta {
     type Error = String;
 
     fn try_from(wire: WireDelta) -> Result<Self, String> {
+        if wire.delta_type == "liquidation" {
+            return wire.liquidation();
+        }
         let user = || wire.need(wire.user, "user");
         let destination = || wire.need(wire.destination, "destination");
         let usdc = || wire.usdc_wei(wire.usdc.as_ref(), "usdc");
@@ -438,8 +473,27 @@ mod tests {
         assert_eq!(delta(&[USER_A], hype_gas), Ok(LedgerDelta::WithoutUsdc("gossipPriorityGasAuction".to_string())));
         let usdc_gas = r#"{"type":"gossipPriorityGasAuction","token":"USDC","amount":"1.0"}"#;
         assert_eq!(delta(&[USER_A], usdc_gas), Ok(LedgerDelta::Unread("gossipPriorityGasAuction".to_string())));
-        let liquidation = r#"{"type":"liquidation","anything":[1]}"#;
-        assert_eq!(delta(&[USER_A], liquidation), Ok(LedgerDelta::Unread("liquidation".to_string())));
+        let other_pool = r#"{"type":"liquidation","liquidatedNtlPos":"1.0","accountValue":"0.1","leverageType":"Portfolio","liquidatedPositions":[]}"#;
+        assert_eq!(delta(&[USER_A], other_pool), Ok(LedgerDelta::Unread("liquidation leverageType \"Portfolio\"".to_string())));
+    }
+
+    /// bm block 1201921840 (OB evidence log, 2026-10-29): a backstop takeover's record.
+    #[test]
+    fn reads_a_backstop_takeover_record() {
+        let wire = r#"{"type":"liquidation","liquidatedNtlPos":"671.12576","accountValue":"10.044596","leverageType":"Isolated","liquidatedPositions":[{"coin":"xyz:AMZN","szi":"2.776"}]}"#;
+        let expected = TakeoverRecord {
+            pool: TakeoverPool::Isolated,
+            value_wei: 1_004_459_600,
+            notional_wei: 67_112_576_000,
+            positions: vec![("xyz:AMZN".to_string(), "2.776".to_string())],
+        };
+        assert_eq!(delta(&["0xba1e2daed5777184e779312711b4b5acb2cf2710"], wire), Ok(LedgerDelta::Liquidation(expected)));
+        for missing in ["accountValue", "liquidatedNtlPos", "leverageType", "liquidatedPositions"] {
+            let mut broken: serde_json::Value = serde_json::from_str(wire).unwrap();
+            broken.as_object_mut().unwrap().remove(missing);
+            let err = delta(&[USER_A], &broken.to_string()).unwrap_err();
+            assert!(err.contains(&format!("without {missing}")), "{err}");
+        }
     }
 
     #[test]

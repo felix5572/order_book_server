@@ -42,7 +42,7 @@ impl RoutingProjection {
 
     #[allow(clippy::cast_precision_loss)]
     pub(super) fn reserved_maker_capacity(&self, fill: &FillEvent, cash_before: i64) -> Option<i64> {
-        if fill.coin != self.coin || fill.crossed || fill.backstop || fill.usdc_fee_wei < 0 { return None; }
+        if fill.coin != self.coin || fill.crossed || fill.backstop.is_some() || fill.usdc_fee_wei < 0 { return None; }
         let mark = fill.mark.filter(|m| m.size_decimals == self.decimals && m.min_px_raw > 0 && m.min_px_raw == m.max_px_raw)?;
         let start = parse_size_raw(&fill.start_position, self.decimals).ok()?;
         let quantity = parse_size_raw(&fill.sz, self.decimals).ok()?;

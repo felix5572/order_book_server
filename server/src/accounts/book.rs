@@ -907,6 +907,12 @@ impl AccountBook {
             batch.retain_events(|event| !matches!(event, MiscEvent::Funding(_)));
             funding_reports.push(report);
         }
+        // a takeover's record is a misc event after its fills; the evidence goes with the fill events, checked when the
+        // cash replays (an anchor may install after this block)
+        let takeovers = super::backstop::Takeovers::of(
+            misc_events.iter().chain(&cash_order.before_fills).flat_map(Batch::events_ref),
+            fills.iter().flat_map(Batch::events_ref),
+        );
         funding_reports.extend(cash_order.before_fills.into_iter().map(|batch| self.apply_misc_events(batch)));
         let (height, time_ms) = (actions.height, actions.time_ms);
         let mut block_actions = self.apply_block_actions(actions);
@@ -918,7 +924,7 @@ impl AccountBook {
         };
         self.liquidations.record_block(time_ms, fills.iter().flat_map(Batch::events_ref), size_fill);
         let dust = super::replay::dust::DustBlock::of(fills.iter().flat_map(Batch::events_ref));
-        let fills = fills.into_iter().map(|batch| self.apply_fills_at_marks(batch, fill_prices, &dust)).collect();
+        let fills = fills.into_iter().map(|batch| self.apply_fills_at_marks(batch, fill_prices, &dust, &takeovers)).collect();
         if !self.covered(height) {
             let events = cash_order.after_fills.into_iter().map(|(action, user)| (user, AccountEvent::Action(action)));
             self.record_all(events, height, &mut block_actions.touched, &mut block_actions.marks_dropped);
@@ -936,10 +942,11 @@ impl AccountBook {
     #[cfg(test)]
     pub(crate) fn apply_fills(&mut self, batch: Batch<NodeDataFill>) -> FillsReport {
         let dust = super::replay::dust::DustBlock::of(batch.events_ref().iter());
-        self.apply_fills_at_marks(batch, &super::marks::fill_prices::FillMarkPrices::default(), &dust)
+        self.apply_fills_at_marks(batch, &super::marks::fill_prices::FillMarkPrices::default(), &dust, &super::backstop::Takeovers::default())
     }
 
-    fn apply_fills_at_marks(&mut self, batch: Batch<NodeDataFill>, prices: &super::marks::fill_prices::FillMarkPrices, dust: &super::replay::dust::DustBlock) -> FillsReport {
+    fn apply_fills_at_marks(&mut self, batch: Batch<NodeDataFill>, prices: &super::marks::fill_prices::FillMarkPrices,
+        dust: &super::replay::dust::DustBlock, takeovers: &super::backstop::Takeovers) -> FillsReport {
         let block = batch.block_number();
         raise(&mut self.fills.height, block);
         let mut report = FillsReport::default();
@@ -948,7 +955,7 @@ impl AccountBook {
             return report;
         }
         for NodeDataFill(user, fill) in batch.events() {
-            let event = FillEvent::at_mark(&fill, prices.get(block, &fill.coin, fill.tid)).map_or_else(
+            let event = FillEvent::in_block(&fill, user, prices.get(block, &fill.coin, fill.tid), takeovers).map_or_else(
                 |err| {
                     report.errors.push(format!("block {block} {user}: {err}"));
                     raise(&mut self.fills.lost_block, block);
@@ -2674,6 +2681,37 @@ mod tests {
             assert_eq!(book.events.len(), before);
             let check = book.replay.as_ref().unwrap().current.check_against(&expected, &expected);
             assert!(check.compared.values().all(|v| v.mismatched == 0 && v.estimated == 0));
+        }
+    }
+
+    /// A takeover's fills and its `liquidation` record arrive in one block (`backstop`): the liquidated side's fill
+    /// replays, then the record; the liquidator's side stops. Alike when the anchor installs after the block (its
+    /// universe is what checks the evidence, review 000577 r1).
+    #[test]
+    fn a_backstop_takeover_block_replays_its_liquidated_side() {
+        use crate::accounts::{backstop::Backstop, replay::backstop_tests::{ISOLATED_USER, fill_batches, golden, misc_batch, replay}};
+        let case = golden(0);
+        let block = case["block"].as_u64().unwrap();
+        let liquidated: Address = ISOLATED_USER.parse().unwrap();
+        let liquidator: Address = "0x4000000000000000000000000000000000000001".parse().unwrap();
+        for anchor_first in [true, false] {
+            let mut book = AccountBook::new(0);
+            book.apply_fills(fills(100, &[]));
+            book.apply_misc_events(misc(100, &[]));
+            book.apply_block_actions(block_actions(block - 1, &[]));
+            let mut first = anchor(block - 1, &[("xyz:AMZN", 3, &[(liquidated, 2_776)])]);
+            first.margins = replay(serde_json::json!({"s": "v"}), false);
+            let mut first = Some(first);
+            if anchor_first { book.install_anchor(first.take().unwrap()); }
+            book.apply_block(block_actions(block, &[]), fill_batches(&case), vec![misc_batch(&case)], |_| None,
+                &crate::accounts::marks::fill_prices::FillMarkPrices::default(), crate::accounts::cash_order::OrderedCashEvents::default());
+            if let Some(late) = first { book.install_anchor(late); }
+            let current = &book.replay.as_ref().unwrap().current;
+            assert!(current.replays(&liquidated), "anchor first {anchor_first}: {:?}", current.stop(&liquidated));
+            let logged: Vec<_> = book.events.iter().filter(|logged| logged.user == liquidated).map(|logged| &logged.event).collect();
+            let [AccountEvent::Fill(fill), AccountEvent::Ledger(LedgerDelta::Liquidation(_))] = logged.as_slice() else { panic!("{logged:?}") };
+            assert!(matches!(fill.backstop(), Some(Backstop::Liquidated(_))));
+            assert!(matches!(current.stop(&liquidator), Some(stop) if stop.reason.text() == "backstopLiquidation:liquidator"));
         }
     }
 

@@ -17,6 +17,8 @@ mod cross_capacity;
 mod rows;
 #[cfg(test)]
 mod capacity_tests;
+#[cfg(test)]
+pub(crate) mod backstop_tests;
 pub(crate) mod dust;
 
 use std::collections::BTreeMap;
@@ -29,6 +31,7 @@ use serde_json::json;
 
 use super::{
     actions::BlockAction,
+    backstop::{self, Backstop, TakeoverPool, Takeovers},
     liquidation::LiquidationPx,
     margin::MarginTable,
     marks::fill_prices::{CollateralPrices, FillMarkRange},
@@ -43,9 +46,6 @@ use super::{
 };
 use crate::{order_book::Side, types::Fill};
 
-/// The direction of an ADL fill; the other side of the same trade carries the same `backstop` method.
-const ADL_DIR: &str = "Auto-Deleveraging";
-const BACKSTOP_METHOD: &str = "backstop";
 /// Mismatches kept as evidence per anchor.
 const MAX_MISMATCH_SAMPLES: usize = 50;
 
@@ -139,8 +139,8 @@ pub(crate) struct FillEvent {
     start_position: String,
     /// `fee` when `feeToken` is USDC, else 0 (it includes builder and deployer fees).
     usdc_fee_wei: i64,
-    /// A backstop liquidation other than ADL.
-    backstop: bool,
+    /// A backstop liquidation's fill other than ADL, as its block's takeover record explains it (`backstop`).
+    backstop: Option<Backstop>,
     /// System conversion of sub-lot spot balances; it does not obey ordinary order quantity precision.
     spot_dust_conversion: bool,
     dust_share: Option<dust::DustShare>,
@@ -153,14 +153,18 @@ impl FillEvent {
     #[cfg(test)]
     pub(crate) fn of(fill: &Fill) -> Result<Self, String> { Self::at_mark(fill, None) }
 
+    /// `user`'s fill of a block whose takeovers are `takeovers`.
+    pub(crate) fn in_block(fill: &Fill, user: Address, mark: Option<FillMarkRange>, takeovers: &Takeovers) -> Result<Self, String> {
+        Ok(Self { backstop: takeovers.backstop(user, fill), ..Self::at_mark(fill, mark)? })
+    }
+
+    /// A fill not checked against its block: a backstop one stays unexplained.
     pub(crate) fn at_mark(fill: &Fill, mark: Option<FillMarkRange>) -> Result<Self, String> {
         let usdc_fee_wei = if fill.fee_token == USDC_NAME {
             usdc_wei(&fill.fee).map_err(|err| format!("{} tid {} fee: {err}", fill.coin, fill.tid))?
         } else {
             0
         };
-        let backstop = fill.liquidation.as_ref().is_some_and(|liquidation| liquidation.method == BACKSTOP_METHOD)
-            && fill.dir != ADL_DIR;
         Ok(Self {
             tid: fill.tid,
             crossed: fill.crossed,
@@ -170,7 +174,7 @@ impl FillEvent {
             sz: fill.sz.clone(),
             start_position: fill.start_position.clone(),
             usdc_fee_wei,
-            backstop,
+            backstop: backstop::unchecked(fill),
             spot_dust_conversion: fill.dir == dust::DUST_DIR,
             dust_share: None,
             collateral_marks: None,
@@ -179,6 +183,9 @@ impl FillEvent {
     }
 
     pub(crate) fn attach_dust(&mut self, share: Option<dust::DustShare>) { self.dust_share = share; }
+
+    #[cfg(test)]
+    pub(crate) const fn backstop(&self) -> Option<&Backstop> { self.backstop.as_ref() }
 
     /// Replace only this block/trade's projection using a completed trusted seed replay, never a current mark.
     pub(crate) fn restore_mark(&mut self, block: u64, prices: &super::marks::fill_prices::FillMarkPrices) -> bool {
@@ -212,8 +219,9 @@ pub(crate) enum StopReason {
     /// A fill of an asset whose isolated setting or leverage changed in the same block: the order of the two inside
     /// the block is not measured (review 000435 r1 P2).
     IsolatedFill,
-    /// The cross positions and margin may move to the liquidator wholesale, without events.
-    BackstopLiquidation,
+    /// A backstop fill no measured rule covers (the text says which): the liquidator's side, a takeover its block's
+    /// record does not explain, a unified account's cross pool, a spot borrow liquidation.
+    BackstopLiquidation(String),
     AccountModeSwitch,
     /// Moves a unified account's spot USDC into or out of lending; the direction is unverified.
     BorrowLend,
@@ -245,7 +253,8 @@ impl StopReason {
     /// The view's `replayStoppedReason`: the label, and what the reason names when it names one.
     pub(crate) fn text(&self) -> String {
         match self {
-            Self::UnknownAccountMode(detail) | Self::UnreadLedger(detail) | Self::UnknownMarket(detail) | Self::SpotDustConversion(detail) | Self::Contradiction(detail) => {
+            Self::UnknownAccountMode(detail) | Self::UnreadLedger(detail) | Self::UnknownMarket(detail) | Self::SpotDustConversion(detail)
+            | Self::BackstopLiquidation(detail) | Self::Contradiction(detail) => {
                 format!("{}:{detail}", self.label())
             }
             Self::TopUpIsolatedOnlyMargin { asset, target_leverage } =>
@@ -261,7 +270,7 @@ impl StopReason {
             Self::FundingBalanceUnknown => "fundingBalanceUnknown",
             Self::UnknownAccountMode(_) => "unknownAccountMode",
             Self::IsolatedFill => "isolatedFill",
-            Self::BackstopLiquidation => "backstopLiquidation",
+            Self::BackstopLiquidation(_) => "backstopLiquidation",
             Self::AccountModeSwitch => "accountModeSwitch",
             Self::BorrowLend => "borrowLend",
             Self::UnreadLedger(_) => "unreadLedger",
@@ -324,6 +333,8 @@ pub(crate) struct AccountMargin {
     margin_updates: Option<(u64, Vec<usize>)>,
     /// A transfer since the anchor lacked execution marks, capacity or Unified routing determining one exact micro-USDC amount.
     estimated: bool,
+    /// The block of the account's last backstop takeover, which its `liquidation` ledger update shares.
+    takeover: Option<u64>,
     stop: Option<Stop>,
 }
 
@@ -340,6 +351,7 @@ impl AccountMargin {
             switched: None,
             margin_updates: None,
             estimated: false,
+            takeover: None,
             stop: Some(Stop { block: None, reason }),
         };
         let unified = match &account.mode {
@@ -384,7 +396,10 @@ impl AccountMargin {
         } else {
             Pools::PerDex(cross)
         };
-        Self { pools, routing: None, isolated, isolated_leverage, cross_exposure_seen, cross_capacity, unified_routing_known, switched: None, margin_updates: None, estimated: false, stop: None }
+        Self {
+            pools, routing: None, isolated, isolated_leverage, cross_exposure_seen, cross_capacity, unified_routing_known, switched: None,
+            margin_updates: None, estimated: false, takeover: None, stop: None,
+        }
     }
 
     /// Identify one USDC dex portfolio. Spot funds do not prove physical execution funding; that is tracked separately.
@@ -572,7 +587,7 @@ impl MarginStates {
             AccountEvent::Funding { coin, amount_wei } | AccountEvent::FundingBalance { coin, amount_wei } =>
                 apply_funding(account, markets, coin, *amount_wei),
             AccountEvent::FundingBalanceUnknown => Err(StopReason::FundingBalanceUnknown),
-            AccountEvent::Ledger(delta) => { account.routing = None; apply_ledger(account, markets, user, delta) },
+            AccountEvent::Ledger(delta) => { account.routing = None; apply_ledger(account, markets, block, user, delta) },
             AccountEvent::Action(action) => { account.routing = None; apply_action(account, markets, block, action) },
             AccountEvent::Routing(update) => { routing::apply_update(account, block, update); Ok(()) },
         };
@@ -647,9 +662,6 @@ impl Market {
 /// are ordered separately by the block owner.
 fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, fill: &FillEvent) -> Applied {
     let market = perp(markets, &fill.coin)?;
-    if fill.backstop {
-        return Err(StopReason::BackstopLiquidation);
-    }
     let key = (market.dex, market.asset);
     if account.switched_in(block, key) {
         return Err(StopReason::IsolatedFill);
@@ -659,6 +671,9 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
         AssetMarginMode::Normal => account.isolated_leverage.contains_key(&key),
         AssetMarginMode::Unknown(mode) => return Err(StopReason::UnknownMarket(format!("{} marginMode {mode:?}", fill.coin))),
     };
+    if let Some(backstop) = &fill.backstop {
+        take_over(account, markets, block, backstop, isolated)?;
+    }
     let cash = fill.cash_wei(market.size_decimals, MAX_PERP_DECIMALS - market.size_decimals).map_err(StopReason::Contradiction)?;
     if !isolated {
         account.routing = None;
@@ -679,6 +694,24 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
     account.estimated |= account.margin_updated_in(block, market.dex);
     let leverage = account.isolated_leverage.get(&key).copied().unwrap_or(market.default_leverage);
     apply_isolated_fill_at(account, market, block, fill, cash, leverage).map_err(StopReason::Contradiction)
+}
+
+/// A backstop takeover's liquidated side is an ordinary fill of its pool: the rule's price leaves the pool its rounding
+/// alone (`backstop`), checked here against this anchor's universe. Where that remainder goes is not measured, so the
+/// account's cash is estimated until the next anchor checks it. The record's pool must be the one the replay holds the
+/// position in.
+fn take_over(account: &mut AccountMargin, markets: &Markets, block: u64, backstop: &Backstop, isolated: bool) -> Applied {
+    let pool = backstop.takeover(|coin| markets.perps.get(coin).map(|market| market.size_decimals))
+        .map_err(StopReason::BackstopLiquidation)?;
+    if (pool == TakeoverPool::Isolated) != isolated {
+        return Err(StopReason::Contradiction(format!("a {pool:?} takeover of a position the replay holds {}", if isolated { "isolated" } else { "cross" })));
+    }
+    if pool == TakeoverPool::Cross && account.unified() {
+        return Err(StopReason::BackstopLiquidation("unified cross pool".to_string()));
+    }
+    account.estimated = true;
+    account.takeover = Some(block);
+    Ok(())
 }
 
 /// An isolated position's fill, in the node's micro USDC (research "逐仓成交的划转", checkpoints 1192420000 →
@@ -792,9 +825,9 @@ fn apply_spot_fill(account: &mut AccountMargin, markets: &Markets, fill: &FillEv
         return Ok(());
     }
     // Borrow-liquidation proceeds settle debt, not ordinary spendable spot cash. The fill stream
-    // does not supply that settlement; preserve the same unsupported-backstop boundary as perps.
-    if fill.backstop {
-        return Err(StopReason::BackstopLiquidation);
+    // does not supply that settlement.
+    if fill.backstop.is_some() {
+        return Err(StopReason::BackstopLiquidation("spot".to_string()));
     }
     let pair = index.and_then(|index| markets.spot_pairs.get(index)).ok_or_else(|| StopReason::UnknownMarket(fill.coin.clone()))?;
     if pair.quote_token != USDC {
@@ -828,7 +861,7 @@ const fn spot_fee_source(account: &AccountMargin, usdc_fee_wei: i64) -> Applied 
 }
 
 /// `user` is the account the event is applied to; its role (sender, receiver, vault) comes from the delta.
-fn apply_ledger(account: &mut AccountMargin, markets: &Markets, user: Address, delta: &LedgerDelta) -> Applied {
+fn apply_ledger(account: &mut AccountMargin, markets: &Markets, block: u64, user: Address, delta: &LedgerDelta) -> Applied {
     match delta {
         LedgerDelta::Send { user: sender, destination, source, destination_balance, usdc_wei, usdc_fee_wei, .. } => {
             if user == *sender {
@@ -906,6 +939,12 @@ fn apply_ledger(account: &mut AccountMargin, markets: &Markets, user: Address, d
         LedgerDelta::BorrowLend => {
             if account.unified() {
                 return Err(StopReason::BorrowLend);
+            }
+        }
+        // the takeover's cash moved with its fills, which precede the block's misc events
+        LedgerDelta::Liquidation(_) => {
+            if account.takeover != Some(block) {
+                return Err(StopReason::Contradiction("a liquidation record without a takeover fill in its block".to_string()));
             }
         }
         LedgerDelta::Unread(delta_type) => return Err(StopReason::UnreadLedger(delta_type.clone())),
@@ -1140,7 +1179,7 @@ pub(crate) mod tests {
     };
 
     /// The fixture's state (`checkpoint::tests::fixture`), with `edit` applied to its wire JSON first.
-    fn states(edit: impl FnOnce(&mut serde_json::Value)) -> MarginStates {
+    pub(crate) fn states(edit: impl FnOnce(&mut serde_json::Value)) -> MarginStates {
         let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
         edit(&mut checkpoint);
         MarginStates::from_checkpoint(&parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap()).unwrap()
@@ -1199,7 +1238,8 @@ pub(crate) mod tests {
         assert_eq!(per_dex().accounts[&user(HOLDER)].pools, per_dex_pools(&[(0, -1_200_000_000_000), (1, 3_026_970_000)]));
     }
 
-    /// README 5: a fill moves −side × px × sz − fee; ADL is an ordinary fill, the other backstop fills stop.
+    /// README 5: a fill moves −side × px × sz − fee; ADL is an ordinary fill, a backstop fill its block did not
+    /// explain stops (`backstop_takeover_*` below for the explained ones).
     #[test]
     fn a_cross_fill_moves_its_dex_cash() {
         let mut states = per_dex();
@@ -1208,7 +1248,8 @@ pub(crate) mod tests {
         let main = -1_200_000_000_000 - 895_400_000 - 100_000 + 8_285_760_000 - 5_000_000;
         assert_eq!(cross(&states, HOLDER), per_dex_pools(&[(0, main), (1, 3_026_970_000)]));
         states.apply(7, user(HOLDER), &fill("BTC", "A", "82857.6", "0.001", "0.0", Some(("backstop", "Liquidated Cross Long"))));
-        assert_eq!(states.accounts[&user(HOLDER)].stop, Some(Stop { block: Some(7), reason: StopReason::BackstopLiquidation }));
+        let unchecked = StopReason::BackstopLiquidation("not checked against its block".to_string());
+        assert_eq!(states.accounts[&user(HOLDER)].stop, Some(Stop { block: Some(7), reason: unchecked }));
         states.apply(8, user(HOLDER), &fill(PUMP_COIN, "B", "0.004477", "1.0", "0.0", None));
         assert_eq!(cross(&states, HOLDER), per_dex_pools(&[(0, main), (1, 3_026_970_000)]), "a stopped account stays");
     }
@@ -1229,7 +1270,7 @@ pub(crate) mod tests {
                 assert!(replay.apply(block, user(HOLDER), &event));
                 assert_eq!(replay.accounts[&user(HOLDER)].json(), before, "both liquidated and backstop legs, including zero-size events");
                 if unified {
-                    assert_eq!(stop(&replay, HOLDER), Some(StopReason::BackstopLiquidation));
+                    assert_eq!(stop(&replay, HOLDER), Some(StopReason::BackstopLiquidation("spot".to_string())));
                     assert!(!replay.apply(block, user(HOLDER), &event), "a stopped replay cannot apply the event again");
                     assert_eq!(replay.replayed_row(&user(HOLDER), PUMP_COIN, 1_000_000, 52, [], |_| None), None);
                 } else {

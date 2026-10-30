@@ -130,7 +130,7 @@ fn insufficient_unknown_or_opposite_maker_never_turns_cash_floor_into_upper_cap(
             1 => fill.mark = None,
             2 => fill.mark.as_mut().unwrap().max_px_raw += 1,
             3 => fill.crossed = true,
-            4 => fill.backstop = true,
+            4 => fill.backstop = Some(crate::accounts::backstop::Backstop::Liquidator),
             5 => fill.usdc_fee_wei = -100,
             6 => fill.side = Side::Ask,
             7 => fill.start_position = "0".into(),

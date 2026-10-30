@@ -259,8 +259,14 @@ mod tests {
     fn rare_ledger_types_and_unknown_kinds_are_evidence() {
         let send = send_inner((user(1), ""), (user(2), ""), "1.0");
         assert_eq!(misc_line_reason(&misc(1_100, &[&send])), None);
-        let liquidation = unread_ledger_inner(user(1), "liquidation");
+        // read since the backstop takeover rule, still a rare research sample (bm block 1201921840)
+        let liquidation = format!(
+            r#"{{"LedgerUpdate":{{"users":["{:#x}"],"delta":{{"type":"liquidation","liquidatedNtlPos":"671.12576","accountValue":"10.044596","leverageType":"Isolated","liquidatedPositions":[{{"coin":"xyz:AMZN","szi":"2.776"}}]}}}}}}"#,
+            user(1)
+        );
         assert_eq!(misc_line_reason(&misc(1_100, &[&liquidation])).as_deref(), Some("ledger type \"liquidation\""));
+        let genesis = unread_ledger_inner(user(1), "spotGenesis");
+        assert_eq!(misc_line_reason(&misc(1_100, &[&genesis])).as_deref(), Some("ledger type \"spotGenesis\""));
         assert_eq!(misc_line_reason(&misc(1_100, &[r#"{"NewKind":{}}"#])).as_deref(), Some("misc kind \"NewKind\""));
         assert_eq!(misc_line_reason(&misc(1_100, &[r#"{"Funding":{"deltas":[]}}"#])), None);
     }
