@@ -99,6 +99,8 @@ pub(crate) struct FlowFrameDto<'a> {
 struct HeightsDto {
     accounts_height: u64,
     accounts_time_ms: u64,
+    positions_height: u64,
+    positions_time_ms: u64,
     trigger_generation: u64,
     trigger_version: u64,
     listener_height: u64,
@@ -281,6 +283,8 @@ impl<'a> FlowFrameDto<'a> {
         let FlowHeights {
             accounts_height,
             accounts_time_ms,
+            positions_height,
+            positions_time_ms,
             trigger_generation,
             trigger_version,
             listener_height,
@@ -301,6 +305,8 @@ impl<'a> FlowFrameDto<'a> {
             heights: HeightsDto {
                 accounts_height,
                 accounts_time_ms,
+                positions_height,
+                positions_time_ms,
                 trigger_generation,
                 trigger_version,
                 listener_height,
@@ -534,6 +540,7 @@ mod tests {
         assert_eq!((entries[0]["size"].as_str(), entries[0]["source"].as_str(), entries[0]["expectedOrder"]["walkSize"].as_str()), (Some("1000000.0"), Some("liquidation"), Some("1000000.0")));
         assert_eq!(entries[0]["cashEstimated"], serde_json::json!(false), "a liquidation says whether its cash is modelled");
         assert!(data["heights"]["triggerStatusHeight"].is_u64(), "the trigger table's own height beside the listener's");
+        assert!(data["heights"]["positionsHeight"].is_u64() && data["heights"]["positionsTimeMs"].is_u64(), "the mark's block beside the lower bound");
         let bands = &data["bands"]["node"][0];
         assert_eq!((bands["direction"].as_str(), bands["side"].as_str()), (Some("down"), Some("A")));
         let hundred = bands["bands"].as_array().unwrap().iter().find(|band| band["edgeBps"] == 100).unwrap();

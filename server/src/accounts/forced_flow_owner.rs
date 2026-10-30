@@ -142,6 +142,10 @@ pub(crate) struct ReadyFlow {
 pub(crate) struct FlowHeights {
     pub(crate) accounts_height: u64,
     pub(crate) accounts_time_ms: u64,
+    /// The block of the positions and the node mark the frame read (`FlowAccounts::positions_at`); `accounts_height`
+    /// is the lower bound of every account input, the candidates' confirmed block when they lag.
+    pub(crate) positions_height: u64,
+    pub(crate) positions_time_ms: u64,
     pub(crate) trigger_generation: u64,
     pub(crate) trigger_version: u64,
     pub(crate) listener_height: u64,
@@ -556,9 +560,12 @@ impl ForcedFlow {
         }
         // the account part's common lower bound: the candidates may be older than the positions (r2 revision 1)
         let (accounts_height, accounts_time_ms) = copy.accounts_at();
+        let (positions_height, positions_time_ms) = copy.positions_at();
         let heights = FlowHeights {
             accounts_height,
             accounts_time_ms,
+            positions_height,
+            positions_time_ms,
             trigger_generation: read.band.generation,
             trigger_version: read.band.version,
             listener_height: read.height,
@@ -1343,7 +1350,9 @@ mod tests {
     }
 
     /// Review 000563 r2 revision 1: the positions at block 1,005, the candidates confirmed at 1,000: the frame's account
-    /// part is of 1,000 - every account input's common lower bound, the one the trader's age gate reads.
+    /// part is of 1,000 - every account input's common lower bound, the one the trader's age gate reads; the positions
+    /// and the node mark it read say their own block, 1,005 (bm 2026-10-29: the evaluator took the lower bound for the
+    /// mark's block and judged triggers at a mark the frame already had from the trigger block).
     #[test]
     fn the_account_part_is_of_its_oldest_input() {
         let mut owner = Owner::new();
@@ -1356,6 +1365,7 @@ mod tests {
         let read = band_at(Vec::new(), TriggerAvailability::Complete, true);
         let frame = owner.flow.on_read(FlowRead::Band { coin: PUMP.to_string(), tier: Tier::Mid, version, read: Some(read) }, now, &accounts).frames.remove(0);
         assert_eq!((frame.heights.accounts_height, frame.heights.accounts_time_ms), (1_000, 1_000_000));
+        assert_eq!((frame.heights.positions_height, frame.heights.positions_time_ms), (1_005, 1_005_000));
     }
 
     /// Review 000563 r2 revision 2: the copy stopping serving withdraws the published frame at once, voids the read
@@ -1532,6 +1542,7 @@ mod tests {
         let frame = computed_anew(&mut owner, &accounts, now);
         assert!(liquidations(&frame).is_empty(), "{frame:?}");
         assert_eq!((trigger_oids(&frame), frame.heights.accounts_height), (vec![1], 1_000), "the stop kept; the candidates' height still");
+        assert_eq!(frame.heights.positions_height, 1_001, "the positions without HOLDER's are of the copy's block");
     }
 
     /// Review 000569 r2 P2-1: while the walks are out, HOLDER's position is cut, the refresh updates the candidate and

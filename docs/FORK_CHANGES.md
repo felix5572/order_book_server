@@ -826,3 +826,9 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   ```
 
 - **独立审查**：用户转交的 Claude 审查通过，无阻塞问题；复跑 accounts 模块 589 项、release 新增 9 项正确性测试及二进制编译检查通过。变更基于 f018925，含新增的 `server/src/accounts/replay/rows.rs` 及 `rows/tests.rs`；优先复核池归属、缺失成员扣除、整数/浮点转换顺序、批量与单仓一致性。原始测试及基准日志保存于 `/home/yfb222333/research-data/hyperliquid-trade/hl_node_perf_20261029/pool_rows_optimization/`。提交前清理本批新增的 12 条 clippy 告警（const、文档反引号、测试整数转换和 ignored 原因）；未部署。
+
+## 2026-10-29 被迫成交帧标出持仓和 mark 所在的块（`positionsHeight`）
+
+- **起因**：24e71a8 起帧的 `accountsHeight` 是所有账户输入的下界，候选落后时取候选确认的块；帧里的持仓和 `nodeMarkPx` 却是副本当前块，可以更新。hyperliquid-trade 的常驻评估器按 `accountsHeight` 把帧当成 mark 和持仓所在的块，取"块之前的最后一帧"时取到了已经含触发块新 mark、或已拿掉被清算仓位的帧：10-29 15 时起"触发条件在上一次价格变动时已满足"每小时 400–5,000 条，19 时起清算几乎都判"前一帧没列"。实例：BTC 块 1201986266 触发，`accountsHeight` 1201986264 的帧已带该块的新 mark 79403；xyz:STRC 0x9bafb90f77bedd8e917036d314b25ef044b752ae 块 1201920927 被清算，帧一直列到 20:00:03.093，`accountsHeight` 1201920926 的帧已没有它。
+- **改动**：`heights` 增 `positionsHeight` / `positionsTimeMs` = 副本当前块（`FlowAccounts::positions_at`，持仓和 mark 同块应用），不小于 `accountsHeight`。`accountsHeight` 含义不变，交易端的年龄门槛照旧读它；交易端的帧解析不拒绝未知字段。
+- **测试**：`the_account_part_is_of_its_oldest_input` 加 positions 1,005 / 1,005,000（候选 1,000）；清算在 walk 途中消失的用例加 positions 1,001；JSON 视图测试加两个字段。

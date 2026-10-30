@@ -364,6 +364,12 @@ impl AccountsCopy {
         }
     }
 
+    /// The (height, block time) of the positions and node marks the copy holds: the account view's applied block, at or
+    /// above `accounts_at`.
+    pub(crate) const fn positions_at(&self) -> (u64, u64) {
+        (self.height, self.time_ms)
+    }
+
     /// The coin's size decimals; `None` outside the anchor's universe.
     pub(crate) fn size_decimals(&self, coin: &str) -> Option<u32> {
         self.coins.get(coin).copied()
