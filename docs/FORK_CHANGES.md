@@ -1003,3 +1003,25 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   ```sh
   cargo test -p server --lib -- local_marks
   ```
+
+## 2026-10-30 清算候选重算: 未变的候选不再复制盘口估计
+
+- **起因**（bm 10-30 15:42，f9d7a16）：账户线程 `accounts-owner` CPU 约 69%，强平候选刷新占用约 62% 时间（`orderbook_liquidation_candidates_refresh_seconds` 每秒 0.62 秒）。帧里的持仓和节点 mark 比盘口晚，中位 147 ms，p90 398 ms。
+- **perf**（30 秒，499 Hz，10,264 个样本）自身耗时：
+  - `reevaluate` 19.2%（含内联的 `evaluate`）；
+  - `reindex` 12.7%；
+  - 按地址的候选哈希表约 11%；
+  - **`WalkShare::clone` 9.4%**；
+  - `refresh_candidates` 5.8%；
+  - 地址排序约 4%。
+- **原因**：`evaluate` 对 mark 动了的币，把盘口附近的每个候选都重新建一遍，并复制已发布候选的盘口估计（`old.walk.clone()`，带最多 100 档明细）。随后多数候选比较下来没变，新建的连同复制的估计一起丢弃。
+- **改动**（`accounts/candidates.rs`）：
+  - 本轮候选先用进入时的估计（`NoBook` / `Untrusted` / `Pending`，不分配内存），收进按地址排序的列表，替代原来的哈希表加排序。
+  - 未变的已发布候选原样保留；变了的，把已发布候选的估计移进新候选（`mem::replace`），不复制。
+  - `differs` 不再比较估计：估计总是从已发布候选照搬，只经 `apply_walk` 和 `walk_book` 改变。
+  - 输出的 enter / update / exit 内容和顺序不变。
+- **测试**：新增 `a_reevaluated_candidate_keeps_its_published_walk`：
+  - 估计完成后，重读不变 → `Unchanged`，估计不变；
+  - 下一块 mark 上调 1% → update 带原估计，不回 pending，不重新请求。
+  - 变异检查：估计不移交、`differs` 恢复比较估计、退出判定失效，三项都有测试失败。
+- **预期**（推算，上线后 perf 复测）：去掉约 9% 的复制，以及部分哈希表操作。`reindex` 和多币账户重算（约 13%），以及每次刷新都重排全部扫单顺序（`sequences`），本批未动。

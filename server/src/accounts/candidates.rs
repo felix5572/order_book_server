@@ -117,7 +117,8 @@ impl Candidate {
 
     /// Whether a subscriber holding `self` needs `other` (r1 section 4): the distance to the bp, the price, the size,
     /// the pool and the order's cooldown and sizes. The mark and the notional alone move with every mark update and push
-    /// nothing; a sent candidate keeps the ones it was sent with.
+    /// nothing; a sent candidate keeps the ones it was sent with. The walk is not compared: `evaluate` carries the
+    /// published one over, and a walk changes through `apply_walk` and `walk_book` alone.
     fn differs(&self, other: &Self) -> bool {
         let fields = |candidate: &Self| {
             let order = &candidate.order;
@@ -131,7 +132,7 @@ impl Candidate {
                 (order.cooldown, order.first_order_raw, order.cooldown_order_raw, order.walk_raw),
             )
         };
-        fields(self) != fields(other) || self.cross_pool_coins != other.cross_pool_coins || self.walk != other.walk
+        fields(self) != fields(other) || self.cross_pool_coins != other.cross_pool_coins
     }
 }
 
@@ -572,12 +573,15 @@ impl Candidates {
         coins
     }
 
-    /// The coin's candidates at its current mark, against the published ones.
+    /// The coin's candidates at its current mark, against the published ones. A published candidate unchanged is left
+    /// as it is; a changed one takes the published walk over, moved, not copied: after a mark update thousands of
+    /// candidates are evaluated, most unchanged, and a copied walk carries its levels (bm perf 2026-10-30 15:42 under
+    /// f9d7a16: the walks' copies 9.4% of the account owner thread, the refreshes 62% of it).
     fn evaluate(&mut self, book: &AccountBook, marks: &dyn MarksAt, coin: &str, changes: &mut CandidateChanges) {
         let entering = self.entering_walk();
         let mark_raw = marks.mark(coin);
         self.marks_seen.insert(coin.to_string(), mark_raw);
-        let mut current: FxHashMap<Address, Candidate> = FxHashMap::default();
+        let mut current: Vec<(Address, Candidate)> = Vec::new();
         if let (Some(mark_raw), Some(index)) = (mark_raw, self.index.get(coin)) {
             let mark = super::checkpoint::mark_px(mark_raw, index.size_decimals);
             for (user, row) in index.near(mark) {
@@ -586,7 +590,7 @@ impl Candidates {
                     continue;
                 };
                 let shared = !row.isolated && row.pool_positions > 1;
-                current.insert(user, Candidate {
+                current.push((user, Candidate {
                     size_raw: row.size_raw,
                     size_decimals: index.size_decimals,
                     height: changes.height,
@@ -598,28 +602,33 @@ impl Candidates {
                     cash_estimated: row.cash_estimated,
                     cross_pool_coins: if shared { book.cross_pool_coins(user, coin) } else { Vec::new() },
                     order: ExpectedOrder::of(row.size_raw, mark_raw, book.cooldown(&user)),
-                    // the last result stays until a newer one replaces it
-                    walk: self.published.get(coin).and_then(|published| published.get(&user)).map_or_else(|| entering.clone(), |old| old.walk.clone()),
-                });
+                    // a new one's; a published one's is its walk, below
+                    walk: entering.clone(),
+                }));
             }
         }
+        current.sort_unstable_by_key(|(user, _)| *user);
         let published = self.published.entry(coin.to_string()).or_default();
-        let mut exits: Vec<Address> = published.keys().filter(|user| !current.contains_key(*user)).copied().collect();
+        let mut exits: Vec<Address> = published.keys().filter(|user| current.binary_search_by_key(*user, |(listed, _)| *listed).is_err()).copied().collect();
         exits.sort_unstable();
         for user in exits {
             published.remove(&user);
             changes.exit.push((coin.to_string(), user));
         }
-        let mut users: Vec<Address> = current.keys().copied().collect();
-        users.sort_unstable();
-        for user in users {
-            let candidate = current.remove(&user).unwrap_or_else(|| unreachable!("listed above"));
-            match published.get(&user) {
-                None => changes.enter.push((coin.to_string(), user, candidate.clone())),
-                Some(old) if old.differs(&candidate) => changes.update.push((coin.to_string(), user, candidate.clone())),
-                Some(_) => continue,
+        for (user, mut candidate) in current {
+            match published.get_mut(&user) {
+                None => {
+                    changes.enter.push((coin.to_string(), user, candidate.clone()));
+                    published.insert(user, candidate);
+                }
+                Some(old) if old.differs(&candidate) => {
+                    // the last result stays until a newer one replaces it
+                    candidate.walk = std::mem::replace(&mut old.walk, BookWalk::Pending);
+                    changes.update.push((coin.to_string(), user, candidate.clone()));
+                    *old = candidate;
+                }
+                Some(_) => {}
             }
-            published.insert(user, candidate);
         }
         if published.is_empty() {
             self.published.remove(coin);
@@ -1007,6 +1016,30 @@ mod walk_tests {
         assert_eq!(pending, [a, b], "X walked the same prefix");
         assert!(matches!(candidates.published[PUMP][&x].walk, BookWalk::Walked { .. }));
         assert_eq!(mailbox.drain()[&key].version, request.version + 1);
+    }
+
+    /// bm perf 2026-10-30: a re-evaluated candidate unchanged stays as published, walk and all; a changed one is
+    /// published with its walk carried over - not sent back to pending, the walk order unchanged.
+    #[test]
+    fn a_reevaluated_candidate_keeps_its_published_walk() {
+        let (mut book, marks) = book_and_marks();
+        let (mut candidates, _trust, mailbox) = linked();
+        let holder = checkpoint_user(HOLDER);
+        candidates.refresh(&book, Some(&marks), &[]);
+        let key: WalkKey = (PUMP.to_string(), Side::Ask);
+        let version = mailbox.drain()[&key].version;
+        assert!(matches!(candidates.apply_walk(result(&key, version, 0)), Refresh::Changes(_)));
+        let walked = candidates.published[PUMP][&holder].walk.clone();
+        assert!(matches!(walked, BookWalk::Walked { .. }));
+        assert_eq!(candidates.refresh(&book, Some(&marks), &[holder]), Refresh::Unchanged, "re-read, unchanged");
+        assert_eq!(candidates.published[PUMP][&holder].walk, walked);
+        book.apply_block_actions(block_actions(1_001, &[]));
+        let mark = marks.marks[0].1;
+        let higher = ListedMarks { height: 1_001, marks: vec![(PUMP, mark + mark / 100)] };
+        let Refresh::Changes(changes) = candidates.refresh(&book, Some(&higher), &[]) else { panic!("the distance moved") };
+        assert_eq!(changes.update.iter().map(|(_, user, candidate)| (*user, &candidate.walk)).collect::<Vec<_>>(), [(holder, &walked)]);
+        assert_eq!(candidates.published[PUMP][&holder].walk, walked);
+        assert!(mailbox.drain().is_empty(), "the same walk order");
     }
 
     /// Review 000446 r1 P2-2: a walk estimated before the book was withheld is not published as one, by the snapshot or
