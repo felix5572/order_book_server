@@ -967,3 +967,39 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - 线程（暂停时钟）：修订开算后 7 ms 来触发，立即开算。
   - 变异检查 6 项，均有测试失败：不区分 status、监听器不发、快速通道受下限、没有补算、开算不清 `fired`、线程忽略信箱。
 - **预期**（推算，上线实测）：止损删除的 OB 段中位降到个位数至十几毫秒。
+
+## 2026-10-30 `extMarkPrices` 本地腿加常态基差 `externalBasis`（设计 000594 r1，用户 10-30 定）
+
+- **起因**：forced_flow_trader 的接货外部价过滤，把外部同一侧中位数先换到 HL 的水平，再比较。HL 主站中间价相对外部永续有常态偏差（一半的币超过 5 基点，HMSTR、USUAL、SAGA 这类达几十基点），不扣掉会把这些币的一个方向整个挡死。用户定：由 OB 算好推出来；最近 10 分钟、每秒一个样本取中位数，不用指数平均；至少 120 个样本才发；价格档位粗的币先不细化。
+- **研究依据**（hyperliquid-trade `analyze/research/ob_external_basis_20261030/`，bm marks 录制 10-27..10-30，176 币）：
+  - 常态基差变得慢：10 分钟中位数 1 小时内变 1.9 基点（各币中位）。
+  - 跟踪误差：10 分钟窗 0.64 基点，30 分钟窗 1.01 基点。
+  - INIT、PYTH 触发时 HL 分别偏离 92、15 基点，三种基线都只动了不到 1 基点。
+  - 时间加权的指数平均，断档后的第一个样本占 39% 的权重。
+- **改动**：
+  - 新增 `local_marks/external_basis.rs`：
+    - `sample`：HL 盘口中点 ÷ 外部两侧中位数的中点 − 1，f64 计算。
+    - `ExternalBasisWindow`：按单调时钟，每 `SAMPLE_INTERVAL` 最多取一个样本，每个 tick 剔除 `WINDOW` 之前的样本，只在窗口变化时重算中位数（偶数个样本取上中位数，和 `weighted_median` 在等权时一致）；样本少于 `MIN_SAMPLES` 时撤回为 `externalBasisSamples`。
+  - `snapshot.rs`：
+    - 跨 tick 的状态合成 `OwnerState { hip3, external_basis }`，由 `CoinTable::owner_state()` 创建，`assemble` 拿 `&mut OwnerState`（原来是 `hip3_states`）。
+    - 永续报价在 `coin_marks` 里每 tick 算一次（`valid_quotes(..).map(ExternalQuotes::of)`），同时给采样和 `local_leg` 用；本地腿的检查顺序和撤回码不变。
+    - 采样只看自己的输入：盘口新鲜且可信、HL 两边都有价、至少一家永续报价、feeds 没停。不看节点状态，所以节点落后时照样采样。
+    - `LocalLeg.external_basis`：`Result<ExternalBasis, Withheld>`。
+  - `prices_view.rs`：本地腿加 `externalBasis`，就绪时是 `{status, ratio, samples}`，不可用时带撤回码和原因。本地腿撤回时没有这一项。
+  - `price.rs`：新增 `VenuePrice::to_f64`。
+  - `schemaVersion` 保持 2，只加字段。
+- **已知限制**（README）：
+  - 价格档位粗的币（28 个币一档 ≥ 2 基点），基差的精度只有半档。
+  - 盘口比外部报价落后约 0.7 s。
+  - 外部各家本身不一致时，基差是相对加权中位数的。
+  - 用录制数据复算只能对照趋势，不能逐值相等（审查 000594 P3）。
+- **测试**：
+  - `external_basis`：120 个样本才发布；偶数个样本取上中位数；窗口采满时，短于半个窗口的偏离不挪动中位数，到半个窗口才挪（预热和断档后由偏离样本在窗口里的占比决定，审查 000595 P3）；样本到期离开窗口；50 ms 一个 tick 时每秒只取一个样本；样本比值。
+  - `snapshot`：节点落后但盘口新鲜时照样采样，到 120 个样本时就绪的本地腿带上基差，比值等于 100,002 ÷ 100,004 − 1；盘口落后、不可信、一边没价、没有永续报价、feeds 停止时都不采样。
+  - `prices_view`：就绪和不可用两种帧形状；撤回的本地腿没有这一项。
+  - 变异检查 7 项，各有测试失败：中位数换成平均数、不剔除旧样本、每个 tick 都采样、比值写反、取下中位数、采样不看盘口新鲜度、采样受节点状态约束。
+- **复现**：在独立 OB 仓库根目录运行以下命令；禁止 `cargo fmt`。
+
+  ```sh
+  cargo test -p server --lib -- local_marks
+  ```

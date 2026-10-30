@@ -3,6 +3,7 @@
 
 pub(crate) mod compute;
 pub(crate) mod connection;
+pub(crate) mod external_basis;
 pub(crate) mod feeds;
 pub(crate) mod hip3;
 pub(crate) mod owner;

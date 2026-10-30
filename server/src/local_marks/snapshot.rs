@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use super::{
     feeds::EquityReadings,
     compute::{LocalMark, MarkInputs, local_mark, weighted_median},
+    external_basis::{self, ExternalBasis, ExternalBasisWindow},
     hip3::{
         snapshot::{Hip3CoinMarks, Hip3CoinState, Hip3Gates, Hip3Table, hip3_marks},
         sources::Hip3SipSources,
@@ -98,6 +99,8 @@ pub(crate) struct LocalLeg {
     pub(crate) ask: u64,
     pub(crate) mark: LocalMark,
     pub(crate) external_quotes: ExternalQuotes,
+    /// The coin's normal basis to those quotes (design 000594), withheld for too few samples.
+    pub(crate) external_basis: Result<ExternalBasis, Withheld>,
 }
 
 /// The perp quotes the external price C took (user 2026-10-30: a catch's price against the venues' best bids and asks,
@@ -274,15 +277,25 @@ impl CoinTable {
         Self { names, book_coins, listings, by_name, feeds, hip3 }
     }
 
-    /// One state per HIP-3 coin (its EMA, SIP midpoints and offset carry), none sampled: the owner's across ticks.
-    pub(crate) fn hip3_states(&self) -> Vec<Hip3CoinState> {
-        vec![Hip3CoinState::default(); self.hip3.names().len()]
+    /// The owner's state across ticks, nothing sampled yet.
+    pub(crate) fn owner_state(&self) -> OwnerState {
+        let hip3 = vec![Hip3CoinState::default(); self.hip3.names().len()];
+        OwnerState { hip3, external_basis: vec![ExternalBasisWindow::default(); self.names.len()] }
     }
 
     /// The coins to read from the HL book, in the table's order.
     pub(crate) fn book_coins(&self) -> &[Coin] {
         &self.book_coins
     }
+}
+
+/// What the local marks' owner keeps across ticks, by the table's coins.
+#[derive(Debug, Clone)]
+pub(crate) struct OwnerState {
+    /// Each HIP-3 coin's EMA, SIP midpoints and offset carry (design 000535 r2 revision 4, 000537).
+    pub(crate) hip3: Vec<Hip3CoinState>,
+    /// Each main-dex coin's basis samples (design 000594).
+    pub(crate) external_basis: Vec<ExternalBasisWindow>,
 }
 
 /// What one tick read.
@@ -301,21 +314,27 @@ pub(crate) struct Tick<'a> {
     pub(crate) equity: Option<&'a EquityReadings>,
 }
 
-/// `hip3_states`: the owner's, one per HIP-3 coin; this tick moves them.
-pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, hip3_states: &mut [Hip3CoinState]) -> LocalMarksSnapshot {
+/// `state`: the owner's (`CoinTable::owner_state`); this tick moves it.
+pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, state: &mut OwnerState) -> LocalMarksSnapshot {
     assert!(
         tick.readings.iter().map(|(feed, _, _)| *feed).eq(table.feeds.iter().copied()),
         "the readings follow the sources' feeds"
     );
+    assert_eq!(state.external_basis.len(), table.names.len(), "one basis window per main-dex coin");
     let node_withheld = node_withheld(tick);
     let book_withheld = book_withheld(tick);
     let stopped = tick.stopped.as_ref().map(|reason| Withheld::unavailable("stopped", reason.clone()));
     let local_withheld = stopped.clone().or_else(|| node_withheld.clone()).or_else(|| book_withheld.clone());
-    let coins = (0..table.names.len())
-        .map(|index| coin_marks(table, index, tick, node_withheld.as_ref(), local_withheld.as_ref()))
+    // the basis reads the book and the venues, not the node state (design 000594)
+    let basis_inputs = stopped.is_none() && book_withheld.is_none();
+    let coins = state
+        .external_basis
+        .iter_mut()
+        .enumerate()
+        .map(|(index, basis)| coin_marks(table, index, tick, node_withheld.as_ref(), local_withheld.as_ref(), basis_inputs, basis))
         .collect();
     let gates = Hip3Gates { node: node_withheld.as_ref(), book: book_withheld.as_ref(), stopped: stopped.as_ref() };
-    let hip3 = hip3_marks(&table.hip3, tick, table.names.len(), gates, hip3_states);
+    let hip3 = hip3_marks(&table.hip3, tick, table.names.len(), gates, &mut state.hip3);
     LocalMarksSnapshot {
         computed_ms: tick.now_ms,
         node: tick.node.as_ref().map(|prices| NodeProgress { seed_height: prices.seed_height, height: prices.height, block_time_ms: prices.block_time_ms }).map_err(Clone::clone),
@@ -352,7 +371,16 @@ fn book_withheld(tick: &Tick<'_>) -> Option<Withheld> {
         .then(|| Withheld::stale("bookProgress", format!("the HL book's block {} is {lag_ms} ms behind the local clock", book.height)))
 }
 
-fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, node_withheld: Option<&Withheld>, local_withheld: Option<&Withheld>) -> CoinMarks {
+/// `basis_inputs`: the book and the feeds usable this tick, whatever the node state.
+fn coin_marks(
+    table: &CoinTable,
+    index: usize,
+    tick: &Tick<'_>,
+    node_withheld: Option<&Withheld>,
+    local_withheld: Option<&Withheld>,
+    basis_inputs: bool,
+    basis: &mut ExternalBasisWindow,
+) -> CoinMarks {
     let coin = table.names[index].as_str();
     let listings = &table.listings[index];
     let (mut oracle_coverage, mut external_coverage) = (Coverage::default(), Coverage::default());
@@ -364,6 +392,8 @@ fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, node_withheld: O
             Kind::Equity | Kind::EquityOvernight => unreachable!("a main-dex coin lists no Alpaca market (`Feed::ALL`)"),
         }
     }
+    let perps = valid_quotes(listings, tick, Kind::Perp).map(ExternalQuotes::of);
+    basis.observe(tick.instant, basis_inputs.then(|| basis_sample(tick, index, &perps)).flatten());
     let state = match (node_withheld, tick.node) {
         (Some(withheld), _) => Err(withheld.clone()),
         (None, Ok(prices)) => prices.coins.get(coin).ok_or_else(|| {
@@ -389,12 +419,34 @@ fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, node_withheld: O
     let local = match (local_withheld, state) {
         (Some(withheld), _) => Err(withheld.clone()),
         (None, Err(withheld)) => Err(withheld),
-        (None, Ok(state)) => local_leg(coin, listings, tick, index, state),
+        (None, Ok(state)) => local_leg(coin, listings, tick, index, state, perps, basis.published()),
     };
     CoinMarks { node, local, oracle_coverage, external_coverage }
 }
 
-fn local_leg(coin: &str, listings: &[ListedMarket], tick: &Tick<'_>, index: usize, node: &CoinPriceState) -> Result<LocalLeg, Withheld> {
+/// This tick's basis sample of the coin: its HL book's two sides against the perp quotes valid now; `None` without
+/// either.
+fn basis_sample(tick: &Tick<'_>, index: usize, perps: &Result<Option<ExternalQuotes>, Withheld>) -> Option<f64> {
+    let book = tick.book.unwrap_or_else(|| unreachable!("the book is read before a basis sample"));
+    let (Some(bid), Some(ask)) = book.prices[index] else {
+        return None;
+    };
+    let Ok(Some(quotes)) = perps else {
+        return None;
+    };
+    Some(external_basis::sample(bid, ask, quotes))
+}
+
+/// `perps`: the coin's perp quotes valid now, `None` without one.
+fn local_leg(
+    coin: &str,
+    listings: &[ListedMarket],
+    tick: &Tick<'_>,
+    index: usize,
+    node: &CoinPriceState,
+    perps: Result<Option<ExternalQuotes>, Withheld>,
+    external_basis: Result<ExternalBasis, Withheld>,
+) -> Result<LocalLeg, Withheld> {
     if !node.reference_modes.ordinary() {
         return Err(Withheld::unavailable("referenceMode", "this coin takes submitted node prices; the ordinary spot-reference local prediction does not apply"));
     }
@@ -406,13 +458,11 @@ fn local_leg(coin: &str, listings: &[ListedMarket], tick: &Tick<'_>, index: usiz
     let (bid, ask) = (book_units(bid, node.size_decimals)?, book_units(ask, node.size_decimals)?);
     let oracle = mid_median(&valid_quotes(listings, tick, Kind::Spot)?, node.size_decimals)?
         .ok_or_else(|| Withheld::unavailable("oracleCoverage", format!("no spot venue quotes {coin} now")))?;
-    let perps = valid_quotes(listings, tick, Kind::Perp)?;
-    let external = mid_median(&perps, node.size_decimals)?
-        .ok_or_else(|| Withheld::unavailable("externalCoverage", format!("no perp venue quotes {coin} now")))?;
-    let external_quotes = ExternalQuotes::of(perps).unwrap_or_else(|| unreachable!("the external price took a quote"));
+    let external_quotes = perps?.ok_or_else(|| Withheld::unavailable("externalCoverage", format!("no perp venue quotes {coin} now")))?;
+    let external = mid_median(&external_quotes.venues, node.size_decimals)?.unwrap_or_else(|| unreachable!("the external quotes hold a quote"));
     let inputs = MarkInputs { node, mark_cache, bid, ask, oracle, external, now_ns: tick.now_ms * 1_000_000 };
     let mark = local_mark(inputs).map_err(|err| Withheld::unavailable("calculation", format!("{coin}: {err}")))?;
-    Ok(LocalLeg { size_decimals: node.size_decimals, bid, ask, mark, external_quotes })
+    Ok(LocalLeg { size_decimals: node.size_decimals, bid, ask, mark, external_quotes, external_basis })
 }
 
 fn calculation(detail: String) -> Withheld {
@@ -458,6 +508,8 @@ pub(crate) fn book_units(px: Px, size_decimals: u32) -> Result<u64, Withheld> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::{
         accounts::marks::NativePriceSnapshot,
@@ -529,10 +581,20 @@ pub(crate) mod tests {
             Self { sources, table, readings, node, book }
         }
 
+        /// A first tick: the owner's state new.
         pub(crate) fn snapshot(&self, now_ms: u64) -> LocalMarksSnapshot {
+            self.snapshot_at(&mut self.owner_state(), now_ms, Instant::now())
+        }
+
+        pub(crate) fn owner_state(&self) -> OwnerState {
+            self.table.owner_state()
+        }
+
+        /// A tick at `now_ms` and `instant` of the owner's `state`.
+        pub(crate) fn snapshot_at(&self, state: &mut OwnerState, now_ms: u64, instant: Instant) -> LocalMarksSnapshot {
             let readings: Vec<_> = self.sources.feeds().zip(&self.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
-            let tick = Tick { now_ms, instant: Instant::now(), stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, equity: None };
-            assemble(&self.table, &tick, &mut [])
+            let tick = Tick { now_ms, instant, stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, equity: None };
+            assemble(&self.table, &tick, state)
         }
 
         fn set(&mut self, feed: Feed, coin: &str, validity: Validity) {
@@ -567,7 +629,7 @@ pub(crate) mod tests {
         book.prices.push((None, None));
         let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
         let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: None, node: &world.node, book: Some(&book), readings: &readings, equity: None };
-        let shared = assemble(&table, &tick, &mut table.hip3_states());
+        let shared = assemble(&table, &tick, &mut table.owner_state());
         let frames = |snapshot: &LocalMarksSnapshot| {
             snapshot.coins().map(|(coin, marks)| super::super::prices_view::CoinMarksView::of(snapshot, coin, marks).to_wire()).collect::<Vec<_>>()
         };
@@ -632,7 +694,7 @@ pub(crate) mod tests {
         let world = World::new();
         let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
         let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: Some("gone".to_string()), node: &world.node, book: world.book.as_ref(), readings: &readings, equity: None };
-        let stopped = assemble(&world.table, &tick, &mut []);
+        let stopped = assemble(&world.table, &tick, &mut world.owner_state());
         assert_eq!(statuses(&stopped, "BTC"), (None, Some("stopped")), "the node leg does not read the feeds");
     }
 
@@ -685,6 +747,55 @@ pub(crate) mod tests {
         let without = local(&world);
         assert_eq!((without.mark.external, without.external_quotes.bid, without.external_quotes.ask), (1_000_061, price("100006"), price("100009")));
         assert_eq!(venues(&without.external_quotes), vec![okx, bybit]);
+    }
+
+    /// Design 000594: the basis samples the book and the venues once a second whatever the node state; a ready local
+    /// leg carries it from its minimum samples on. BTC's book 100,001 / 100,003 against the perp 100,003.95 /
+    /// 100,004.05: 100,002 / 100,004 - 1.
+    #[test]
+    fn the_basis_samples_the_book_and_the_venues_whatever_the_node() {
+        let mut world = World::new();
+        let mut state = world.owner_state();
+        let start = Instant::now();
+        let at = |second: u64| start + Duration::from_secs(second);
+        let node_behind = NOW_MS - 500 + MAX_PROGRESS_LAG_MS + 1;
+        world.book.as_mut().unwrap().time = node_behind - 400;
+        for second in 0..119 {
+            assert_eq!(statuses(&world.snapshot_at(&mut state, node_behind, at(second)), "BTC"), (Some("nodeProgress"), Some("nodeProgress")));
+        }
+        world.book.as_mut().unwrap().time = NOW_MS - 400;
+        let snapshot = world.snapshot_at(&mut state, NOW_MS, at(119));
+        let basis = snapshot.coin("BTC").unwrap().local.as_ref().unwrap().external_basis.clone().unwrap();
+        assert_eq!(basis.samples, 120);
+        assert!((basis.ratio - (100_002.0 / 100_004.0 - 1.0)).abs() < 1e-15, "{}", basis.ratio);
+        assert_eq!(state.external_basis[1].published().unwrap_err().detail, "0 of the 120 samples needed over the last 600 s", "ETH has no book");
+    }
+
+    /// Design 000594: no sample without the book fresh and trusted with both sides, a perp quote and the feeds running.
+    #[test]
+    fn the_basis_takes_no_sample_without_its_inputs() {
+        let sampled = |world: &World, now_ms: u64| {
+            let mut state = world.owner_state();
+            world.snapshot_at(&mut state, now_ms, Instant::now());
+            state.external_basis[0].published().unwrap_err().detail.starts_with("1 of")
+        };
+        assert!(sampled(&World::new(), NOW_MS));
+        assert!(!sampled(&World::new(), NOW_MS - 400 + MAX_PROGRESS_LAG_MS + 1), "the book behind");
+        let mut world = World::new();
+        world.book.as_mut().unwrap().trusted = false;
+        assert!(!sampled(&world, NOW_MS), "the book withheld after a data loss");
+        let mut world = World::new();
+        world.book.as_mut().unwrap().prices[0].0 = None;
+        assert!(!sampled(&world, NOW_MS), "an empty side");
+        let mut world = World::new();
+        world.set(Feed { kind: Kind::Perp, venue: Venue::Binance }, "BTC", Validity::NotQuoted);
+        assert!(!sampled(&world, NOW_MS), "no perp quote");
+        let world = World::new();
+        let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
+        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: Some("gone".to_string()), node: &world.node, book: world.book.as_ref(), readings: &readings, equity: None };
+        let mut state = world.owner_state();
+        assemble(&world.table, &tick, &mut state);
+        assert!(state.external_basis[0].published().unwrap_err().detail.starts_with("0 of"), "the feeds stopped");
     }
 
     /// A quiet coin: nothing of it changed while both clocks advance; it keeps both legs.

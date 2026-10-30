@@ -7,8 +7,8 @@
 //! bucket), and they run to kilobytes a coin, so the frames leave them out (user 2026-10-27); a read samples the state,
 //! not every member update.
 //!
-//! The local leg's `externalBidPx`, `externalAskPx` and `externalQuotes` (design 000588) were added within schema 2:
-//! a frame without them is of a server before them.
+//! The local leg's `externalBidPx`, `externalAskPx` and `externalQuotes` (design 000588), then `externalBasis` (design
+//! 000594), were added within schema 2: a frame without them is of a server before them.
 
 use std::collections::BTreeMap;
 
@@ -137,6 +137,9 @@ struct LocalView {
     external_ask_px: String,
     /// Each of those quotes, so scaled (`GET /extMarkInputs` has the venues' own prices), by venue.
     external_quotes: BTreeMap<&'static str, ExternalQuoteView>,
+    /// The coin's normal basis to those medians (`external_basis`): an external side × (1 + ratio) is that side at HL's
+    /// level; withheld below its minimum samples.
+    external_basis: LegView<ExternalBasisView>,
     /// The venues' oracle, before the basis.
     oracle_px: String,
     basis_ratio: f64,
@@ -148,6 +151,15 @@ struct LocalView {
     node_block_time_ms: u64,
     book_time_ms: u64,
     book_height: u64,
+}
+
+/// The median of HL's book midpoint over the external bid and ask medians' midpoint - 1, of `samples` taken once a
+/// second over the window.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalBasisView {
+    ratio: f64,
+    samples: usize,
 }
 
 #[derive(Serialize)]
@@ -245,6 +257,7 @@ fn local_view(snapshot: &LocalMarksSnapshot, local: &LocalLeg) -> LegView<LocalV
         external_bid_px: local.external_quotes.bid.to_string(),
         external_ask_px: local.external_quotes.ask.to_string(),
         external_quotes: external_quotes(&local.external_quotes),
+        external_basis: local.external_basis.as_ref().map_or_else(withheld, |basis| LegView::Ready(ExternalBasisView { ratio: basis.ratio, samples: basis.samples })),
         oracle_px: px(mark.oracle),
         basis_ratio: mark.basis_ratio,
         basis_samples: mark.basis_samples,
@@ -361,6 +374,8 @@ mod tests {
         assert_eq!((local["oraclePx"].as_str(), local["externalPx"].as_str(), local["bidPx"].as_str()), (Some("100000.1"), Some("100004"), Some("100001")));
         assert_eq!((local["externalBidPx"].as_str(), local["externalAskPx"].as_str()), (Some("100003.95"), Some("100004.05")), "off BTC's 0.1 grid, unrounded");
         assert_eq!(local["externalQuotes"], serde_json::json!({"binance": {"bidPx": "100003.95", "askPx": "100004.05", "receivedTsMs": NOW_MS}}));
+        let basis_withheld = serde_json::json!({"status": "unavailable", "reasonCode": "externalBasisSamples", "reason": "1 of the 120 samples needed over the last 600 s"});
+        assert_eq!(local["externalBasis"], basis_withheld, "the first tick's sample alone");
         assert_eq!((local["nodeHeight"].as_u64(), local["nodeBlockTimeMs"].as_u64(), local["bookTimeMs"].as_u64()), (Some(1_000), Some(NOW_MS - 500), Some(NOW_MS - 400)));
         assert_eq!(data["oracleCoverage"]["usedVenues"], serde_json::json!(["binance", "okx"]));
         let eth = CoinMarksView::of(&snapshot, "ETH", snapshot.coin("ETH").unwrap()).to_wire();
@@ -368,6 +383,24 @@ mod tests {
         assert_eq!((eth["data"]["local"]["status"].as_str(), eth["data"]["local"]["reasonCode"].as_str()), (Some("unavailable"), Some("nodeCoin")));
         assert!(eth["data"]["local"]["reason"].as_str().unwrap().contains("does not claim ETH"));
         assert!(eth["data"]["local"].get("externalQuotes").is_none(), "a withheld leg has no external quotes");
+        assert!(eth["data"]["local"].get("externalBasis").is_none(), "nor a basis");
+    }
+
+    /// Design 000594: from its minimum samples on, the basis is their median and count: BTC's 100,002 / 100,004 - 1.
+    #[test]
+    fn a_frame_shows_the_basis_from_its_minimum_samples_on() {
+        let world = World::new();
+        let mut state = world.owner_state();
+        let start = tokio::time::Instant::now();
+        let at = |second| start + std::time::Duration::from_secs(second);
+        for second in 0..119 {
+            world.snapshot_at(&mut state, NOW_MS, at(second));
+        }
+        let snapshot = world.snapshot_at(&mut state, NOW_MS, at(119));
+        let frame: serde_json::Value = serde_json::from_slice(&CoinMarksView::of(&snapshot, "BTC", snapshot.coin("BTC").unwrap()).to_wire()).unwrap();
+        let basis = &frame["data"]["local"]["externalBasis"];
+        assert_eq!((basis["status"].as_str(), basis["samples"].as_u64()), (Some("ready"), Some(120)));
+        assert!((basis["ratio"].as_f64().unwrap() - (100_002.0 / 100_004.0 - 1.0)).abs() < 1e-15, "{basis}");
     }
 
     /// `GET /extMarkReferenceCaches`' rows: each cache's median, refresh time and members, of the node leg's state and

@@ -82,6 +82,14 @@ impl VenuePrice {
         if exponent >= 0 { mantissa * power } else { mantissa / power }
     }
 
+    /// The value, to f64's precision (design 000594: a ratio of prices).
+    pub(crate) fn to_f64(self) -> f64 {
+        let scale = i32::try_from(self.scale).unwrap_or_else(|_| unreachable!("a scale is at most MAX_SCALE"));
+        #[expect(clippy::cast_precision_loss, reason = "a price's digits; f64 is the ratio's precision")]
+        let mantissa = self.mantissa as f64;
+        mantissa / 10_f64.powi(scale)
+    }
+
     /// The value in 10^-decimals; `None` when it has more decimals or is out of range.
     #[cfg(test)]
     pub(crate) fn exact_units(self, decimals: u32) -> Option<u128> {

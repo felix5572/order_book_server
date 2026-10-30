@@ -248,7 +248,7 @@ mod tests {
         local_marks::{
             price::VenuePrice,
             slot::Entry,
-            snapshot::{CoinTable, Status, assemble},
+            snapshot::{CoinTable, OwnerState, Status, assemble},
             sources::MarkSources,
         },
         order_book::Px,
@@ -274,7 +274,7 @@ mod tests {
         node: NodePrices,
         book: Option<BestPricesAt>,
         equity: EquityReadings,
-        states: Vec<Hip3CoinState>,
+        state: OwnerState,
         instant: tokio::time::Instant,
     }
 
@@ -296,8 +296,9 @@ mod tests {
             let sip = FeedProjection { connections: Vec::new(), messages: 1, entries: vec![quote("405.765", "405.775", NOW_MS - 1_000)] };
             let boats = FeedProjection { connections: Vec::new(), messages: 0, entries: vec![(None, Validity::NotConnected)] };
             let instant = tokio::time::Instant::now();
-            let states = vec![Hip3CoinState { ema: Hip3Ema::anchored_for_test(-20.0, WRITE_NS, instant), ..Hip3CoinState::default() }];
-            Self { sources, table, node, book, equity: EquityReadings { sip, boats }, states, instant }
+            let mut state = table.owner_state();
+            state.hip3[0] = Hip3CoinState { ema: Hip3Ema::anchored_for_test(-20.0, WRITE_NS, instant), ..Hip3CoinState::default() };
+            Self { sources, table, node, book, equity: EquityReadings { sip, boats }, state, instant }
         }
 
         fn marks(&mut self, now_ms: u64) -> Hip3CoinMarks {
@@ -307,7 +308,7 @@ mod tests {
             }).collect();
             self.instant += Duration::from_millis(50);
             let tick = Tick { now_ms, instant: self.instant, stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, equity: Some(&self.equity) };
-            let snapshot = assemble(&self.table, &tick, &mut self.states);
+            let snapshot = assemble(&self.table, &tick, &mut self.state);
             snapshot.hip3_coin("xyz:TSLA").unwrap().clone()
         }
 
@@ -372,7 +373,7 @@ mod tests {
         world.equity.sip.entries[0].0 = Some(Entry::for_test_at(Some(Quote { bid: price("405.765"), ask: price("405.775") }), NOW_MS, None, 1));
         assert_eq!(code(&world.marks(NOW_MS)), Some("quoteUnavailable"), "no SIP time: no age, no prediction");
         let mut world = World::new();
-        world.states = vec![Hip3CoinState::default()];
+        world.state.hip3[0] = Hip3CoinState::default();
         assert_eq!(code(&world.marks(NOW_MS)), None, "a fresh EMA anchors at the relayer's write at once: no warmup");
         for missing in [NoRelayerGap::SinceCheckpoint, NoRelayerGap::Unreadable] {
             let mut world = World::new();
@@ -397,7 +398,7 @@ mod tests {
         }).collect();
         world.instant += Duration::from_millis(50);
         let tick = Tick { now_ms: NOW_MS, instant: world.instant, stopped: None, node: &world.node, book: world.book.as_ref(), readings: &readings, equity: Some(&world.equity) };
-        let snapshot = assemble(&world.table, &tick, &mut world.states);
+        let snapshot = assemble(&world.table, &tick, &mut world.state);
         assert_eq!(snapshot.local_predicted("xyz:TSLA").map(|local| local.map_err(|withheld| withheld.code)), Some(Ok(405_760)));
         assert_eq!(snapshot.local_predicted("BTC").map(|local| local.map_err(|withheld| withheld.code)), Some(Err("nodeCoin")), "the main dex's through the same entry");
         assert_eq!(snapshot.local_predicted("xyz:NVDA"), None);
@@ -431,7 +432,7 @@ mod tests {
         for step in (1..=40).rev() {
             let time_ms = NOW_MS - 500 - 3_000 * step;
             let write = OracleWrite { time_ns: time_ms * 1_000_000, oracle: 406_070, size_decimals: 3, on_external: true };
-            world.states[0].carry.write(write, &mids);
+            world.state.hip3[0].carry.write(write, &mids);
         }
         let marks = world.marks(NOW_MS);
         let local = marks.local.unwrap();
