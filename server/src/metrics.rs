@@ -707,6 +707,51 @@ lazy_static! {
             .buckets(vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
     ).expect("metric can be created");
 
+    /// The listener's time, under its lock, to fork its book for the pending book's replica (hyperliquid-trade design
+    /// 000604).
+    pub static ref PENDING_BOOK_FORK_SECONDS: Histogram = Histogram::with_opts(
+        HistogramOpts::new("orderbook_pending_book_fork_seconds", "Pending book replica fork time under the listener lock")
+            .buckets(vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5])
+    ).expect("metric can be created");
+
+    /// Forks the pending book's replica took.
+    pub static ref PENDING_BOOK_FORKS_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_pending_book_forks_total",
+        "Pending book replica forks"
+    ).expect("metric can be created");
+
+    /// The pending book's replica feed broken, by cause: `queue_full`, `book_untrusted`, `backlog_budget`,
+    /// `apply_error`, `pending_cleared`, `consumer_gone`.
+    pub static ref PENDING_BOOK_BREAKS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_breaks_total", "Pending book replica feed breaks"),
+        &["cause"]
+    ).expect("metric can be created");
+
+    /// The height the pending book's replica stands at the end of; 0 while it has none aligned.
+    pub static ref PENDING_BOOK_CONFIRMED_HEIGHT: IntGauge = IntGauge::new(
+        "orderbook_pending_book_confirmed_height",
+        "Pending book replica confirmed height"
+    ).expect("metric can be created");
+
+    /// Blocks the pending book's replica stands behind the furthest batch it received.
+    pub static ref PENDING_BOOK_ALIGNMENT_BLOCKS: IntGauge = IntGauge::new(
+        "orderbook_pending_book_alignment_blocks",
+        "Pending book replica blocks behind its newest batch"
+    ).expect("metric can be created");
+
+    /// Events in the batches waiting for the slower book stream in the pending book's replica.
+    pub static ref PENDING_BOOK_BACKLOG_EVENTS: IntGauge = IntGauge::new(
+        "orderbook_pending_book_backlog_events",
+        "Pending book replica backlog events"
+    ).expect("metric can be created");
+
+    /// Levels of the pending book replica whose queue order is not proven (an insertBefore anchor missing, or a New
+    /// diff overtaken while it waited for its status; review 000606 r1 P2-1, r2).
+    pub static ref PENDING_BOOK_UNPROVEN_LEVELS: IntGauge = IntGauge::new(
+        "orderbook_pending_book_unproven_levels",
+        "Pending book replica levels whose queue order is unproven"
+    ).expect("metric can be created");
+
     /// Entries the forced flow walked (each alone over its side's levels).
     pub static ref FORCED_FLOW_WALKED_ENTRIES_TOTAL: IntCounter = IntCounter::new(
         "orderbook_forced_flow_walked_entries_total",
@@ -863,6 +908,13 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(FORCED_FLOW_ACCOUNTS_QUEUE_DEPTH.clone())).ok();
     REGISTRY.register(Box::new(FORCED_FLOW_ACCOUNTS_SNAPSHOT_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(FORCED_FLOW_WALKED_ENTRIES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_FORK_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_FORKS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_BREAKS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_CONFIRMED_HEIGHT.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_ALIGNMENT_BLOCKS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_BACKLOG_EVENTS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_UNPROVEN_LEVELS.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL.clone())).ok();

@@ -68,6 +68,7 @@ pub(crate) mod bbo;
 mod book_revision;
 mod l2_conflation;
 pub(crate) mod parallel;
+pub(crate) mod replica;
 mod state;
 pub(crate) mod triggers;
 pub(crate) mod utils;
@@ -285,9 +286,9 @@ async fn install_snapshot_phased_impl(
     residual_events_max: usize,
     max_chase_rounds: usize,
 ) -> Result<()> {
-    let (ignore_spot, track_untriggered) = {
+    let (ignore_spot, track_untriggered, track_unproven_levels) = {
         let guard = listener.lock().await;
-        (guard.ignore_spot, guard.track_untriggered)
+        (guard.ignore_spot, guard.track_untriggered, guard.track_unproven_levels)
     };
 
     // Phase 1 - build: pure CPU over every coin/order in the market. Run on a
@@ -295,7 +296,12 @@ async fn install_snapshot_phased_impl(
     // runtime worker that connection tasks need.
     let build_start = Instant::now();
     let mut new_state = tokio::task::spawn_blocking(move || {
-        OrderBookState::from_snapshot(snapshot, untriggered, &parents, height, 0, true, ignore_spot, track_untriggered)
+        let mut state = OrderBookState::from_snapshot(snapshot, untriggered, &parents, height, 0, true, ignore_spot, track_untriggered);
+        // a snapshot's book is a block's end: its queues are the node's
+        if track_unproven_levels {
+            state.track_unproven_levels();
+        }
+        state
     })
     .await?;
     let build_elapsed = build_start.elapsed();
@@ -402,6 +408,15 @@ fn replay_batch_above(state: &mut OrderBookState, batch: EventBatch, height: u64
         return true;
     }
     false
+}
+
+/// The pending book replica's copy of a book batch; `None` for the side streams.
+fn replica_copy_of(event_batch: &EventBatch) -> Option<replica::BookBatch> {
+    match event_batch {
+        EventBatch::Orders(batch) => Some(replica::BookBatch::Statuses(batch.clone())),
+        EventBatch::BookDiffs(batch) => Some(replica::BookBatch::Diffs(batch.clone())),
+        EventBatch::Fills(_) | EventBatch::OracleUpdates(_) => None,
+    }
 }
 
 /// Lock-free mirror of [`OrderBookListener::book_trusted`] for the send paths
@@ -561,6 +576,12 @@ pub(crate) struct OrderBookListener {
     // every 1000 batches (~18 lines/s on mainnet, ~90% of all output), pushing
     // everything else out of the terminal scrollback within a minute.
     last_progress_log: Option<Instant>,
+    // The pending book's replica feed (--pending-book, hyperliquid-trade design 000604): a fork of the state when the
+    // pending thread asks, then a copy of every book batch applied.
+    replica_feed: Option<replica::ReplicaFeed>,
+    // Each installed state tracks the levels whose queue order it cannot prove, for the replica it is forked into
+    // (review 000606 r2); set with the feed.
+    track_unproven_levels: bool,
 }
 
 impl OrderBookListener {
@@ -603,7 +624,15 @@ impl OrderBookListener {
             active_subs: ActiveSubs::default(),
             last_active_l2_params: HashSet::new(),
             last_progress_log: None,
+            replica_feed: None,
+            track_unproven_levels: false,
         }
+    }
+
+    /// Feed the pending book's replica from now on (--pending-book).
+    pub(crate) fn attach_replica_feed(&mut self, feed: replica::ReplicaFeed) {
+        self.replica_feed = Some(feed);
+        self.track_unproven_levels = true;
     }
 
     /// Clone of the shared active-variant registry, for handing to connections.
@@ -677,6 +706,9 @@ impl OrderBookListener {
         }
         self.book_trust.set(trusted);
         ORDERBOOK_BOOK_TRUSTED.set(i64::from(trusted));
+        if !trusted && let Some(feed) = &mut self.replica_feed {
+            feed.on_untrusted();
+        }
         if trusted {
             let untrusted = self.untrusted_since.take().map_or(Duration::ZERO, |since| since.elapsed());
             ORDERBOOK_UNTRUSTED_SECONDS_TOTAL.inc_by(untrusted.as_secs_f64());
@@ -829,6 +861,9 @@ impl OrderBookListener {
             self.ignore_spot,
             self.track_untriggered,
         );
+        if self.track_unproven_levels {
+            new_state.track_unproven_levels();
+        }
         // Mirror the production succession (install_snapshot_phased_impl): a snapshot without a trigger section
         // must not wipe the accumulated table.
         if let Some(old_state) = self.order_book_state.as_ref() {
@@ -907,6 +942,10 @@ impl OrderBookListener {
         // keeps the count from being misattributed to the first live batch.
         let replay_fallbacks = new_state.take_insert_before_fallbacks();
         let prior_loss_height = self.max_loss_height;
+        // the pending book's replica stands on the state replaced
+        if let Some(feed) = &mut self.replica_feed {
+            feed.on_untrusted();
+        }
         self.order_book_state = Some(new_state);
         // Every install commit goes through here, so this is the single owner
         // of the stale-batch boundary for the live path.
@@ -1569,8 +1608,18 @@ impl OrderBookListener {
         let mut desync_reason: Option<&'static str> = None;
         let mut book_input_applied = false;
         let mut fired_trigger_coins = Vec::new();
+        let (book_trusted, withheld_periods) = (self.book_trusted(), self.book_trust.withheld_periods());
 
         let changed_coins: HashSet<Coin> = if let Some(state) = self.order_book_state.as_mut() {
+            // The pending book's replica: forked before this batch applies, when asked; its copy of the batch sent
+            // once the batch applied here (hyperliquid-trade design 000604).
+            let replica_copy = match &mut self.replica_feed {
+                Some(feed) if is_book_batch => {
+                    feed.before_apply(state, book_trusted, withheld_periods);
+                    feed.feeding().then(|| replica_copy_of(&event_batch)).flatten()
+                }
+                _ => None,
+            };
             let result = match event_batch {
                 EventBatch::Orders(batch) => {
                     // Broadcast L4 order statuses for L4Book / orderUpdates
@@ -1661,6 +1710,9 @@ impl OrderBookListener {
 
             match result {
                 Ok(coins) => {
+                    if let (Some(feed), Some(copy)) = (&mut self.replica_feed, replica_copy) {
+                        feed.applied(copy);
+                    }
                     if let Some(node_ns) = book_line_node_ns {
                         NODE_LINE_LAG
                             .with_label_values(&["apply", source_label])
@@ -2810,6 +2862,44 @@ mod tests {
             EventBatch::BookDiffs(make_diff_batch(coin, oid, height, serde_json::json!({"new": {"sz": "1.0"}}))),
             EventSource::OrderDiffs,
         );
+    }
+
+    /// hyperliquid-trade design 000604: once the pending thread requests a generation, the listener forks its book
+    /// before the next book batch, then hands over a copy of each book batch it applied (not fills); the replica built
+    /// from them stands at the end of the blocks both streams passed. A desync ends the generation at once (review
+    /// 000606 r1 P2-4): nothing more is copied.
+    #[test]
+    fn the_listener_feeds_the_pending_books_replica() {
+        let (mut listener, _rx) = ready_listener();
+        let (feed, mut inputs) = replica::link(64);
+        listener.attach_replica_feed(feed);
+        feed_order(&mut listener, "BTC", 1, 10);
+        assert!(inputs.forks.try_recv().is_err(), "not requested");
+        inputs.control.request(1);
+        feed_order(&mut listener, "BTC", 2, 11);
+        let mut replica = replica::BookReplica::new(inputs.forks.try_recv().unwrap(), 1_000);
+        listener.apply_event_batch(12, EventBatch::Fills(serde_json::from_value(serde_json::json!({
+            "local_time": "2024-01-15T10:30:00.000000000", "block_time": "2024-01-15T10:30:00.000000000",
+            "block_number": 12, "events": [],
+        })).unwrap()), EventSource::Fills);
+        feed_order(&mut listener, "BTC", 3, 12);
+        let mut copies = 0;
+        while let Ok(batch) = inputs.batches.try_recv() {
+            assert_eq!(batch.generation, 1);
+            replica.push(batch.batch).unwrap();
+            copies += 1;
+        }
+        assert_eq!((copies, replica.confirmed()), (4, Some(11)), "11's and 12's statuses and diffs; 12 not passed");
+        let oids = |state: &OrderBookState| {
+            let (_, _, snapshot) = state.compute_snapshot_for_coin(&Coin::new("BTC"), PxBand::default()).unwrap();
+            snapshot.as_ref()[0].iter().map(|order| order.oid).collect::<Vec<_>>()
+        };
+        assert_eq!(oids(replica.state()), [1, 2], "the end of 11");
+        assert_eq!(oids(listener.order_book_state.as_ref().unwrap()), [1, 2, 3]);
+        listener.mark_desynced("test");
+        assert_eq!(inputs.control.ended(), 1, "ended by the desync itself, no batch needed");
+        feed_order(&mut listener, "BTC", 4, 13);
+        assert!(inputs.batches.try_recv().is_err(), "nothing copied after it");
     }
 
     /// Drain the broadcast receiver until the next Snapshot message; panics if

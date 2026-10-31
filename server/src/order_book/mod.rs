@@ -144,6 +144,14 @@ impl<O: InnerOrder> OrderBook<O> {
         false
     }
 
+    /// Whether a level rests at `px` on `side`.
+    pub(crate) fn has_level(&self, side: Side, px: Px) -> bool {
+        match side {
+            Side::Ask => self.asks.contains_key(&px),
+            Side::Bid => self.bids.contains_key(&px),
+        }
+    }
+
     pub(crate) fn cancel_order(&mut self, oid: Oid) -> bool {
         if let Some((side, px)) = self.oid_to_side_px.remove(&oid) {
             let map = match side {

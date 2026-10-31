@@ -124,6 +124,11 @@ impl<O: InnerOrder> OrderBooks<O> {
             .collect()
     }
 
+    /// Whether `coin`'s book has a level at `px` on `side`.
+    pub(crate) fn has_level(&self, coin: &Coin, side: Side, px: Px) -> bool {
+        self.order_books.get(coin).is_some_and(|book| book.has_level(side, px))
+    }
+
     /// One coin's best bid and ask prices; `(None, None)` without its book.
     #[must_use]
     pub(crate) fn best_prices(&self, coin: &Coin) -> BidAsk {

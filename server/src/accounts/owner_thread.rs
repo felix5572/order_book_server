@@ -11,8 +11,8 @@ use tokio::{runtime::Builder, sync::oneshot, task::JoinHandle};
 /// keep normal Tokio semantics. The OS thread owns its executor until that task
 /// is dropped, including an abort before its first poll. The thread then exits; dropping a handle alone still detaches, like `tokio::spawn`.
 /// Cancellation is cooperative: a synchronous step finishes before it takes effect.
-/// `name`: the thread's (`accounts-owner`, `forced-flow`: each owner on its own, review 000563).
-pub(super) fn spawn_owner(name: &'static str, future: impl Future<Output = ()> + Send + 'static) -> io::Result<JoinHandle<()>> {
+/// `name`: the thread's (`accounts-owner`, `forced-flow`, `pending-book`: each owner on its own, review 000563).
+pub(crate) fn spawn_owner(name: &'static str, future: impl Future<Output = ()> + Send + 'static) -> io::Result<JoinHandle<()>> {
     let (ready, started) = mpsc::sync_channel(1);
     thread::Builder::new().name(name.into()).spawn(move || {
         let runtime = match Builder::new_current_thread().enable_time().build() {

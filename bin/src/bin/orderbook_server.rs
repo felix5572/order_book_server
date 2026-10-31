@@ -126,6 +126,17 @@ struct Args {
     /// extForcedFlow's local distances.
     #[arg(long, default_value = "false")]
     hip3_sip_marks: bool,
+
+    /// The pending book (hyperliquid-trade design 000604): a replica of the book on its own thread, block-aligned,
+    /// fed by the listener (a fork of its book, then a copy of each book batch it applies). Not with --no-resync or
+    /// --bbo-only.
+    #[arg(long, default_value = "false")]
+    pending_book: bool,
+
+    /// The pending book replica's budget, in events, for the batches waiting on the slower book stream (~1 KB
+    /// each): past it the replica stops until both streams are within two blocks of each other again.
+    #[arg(long, default_value = "200000")]
+    pending_backlog_events: usize,
 }
 
 /// Start the Prometheus metrics HTTP server
@@ -194,6 +205,8 @@ async fn main() -> Result<()> {
         accounts: args.accounts,
         local_marks: args.local_marks,
         hip3_sip_marks: args.hip3_sip_marks,
+        pending_book: args.pending_book,
+        pending_backlog_events: args.pending_backlog_events,
     };
 
     println!("Orderbook Server v{}", env!("CARGO_PKG_VERSION"));
@@ -225,6 +238,9 @@ async fn main() -> Result<()> {
     }
     if config.no_resync {
         println!("  Re-sync: DISABLED (--no-resync) — drift tolerated, book will NOT self-heal");
+    }
+    if config.pending_book {
+        println!("  Pending book: ON (book replica, backlog budget {} events)", config.pending_backlog_events);
     }
     println!();
 

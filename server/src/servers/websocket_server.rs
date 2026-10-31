@@ -13,7 +13,8 @@ use crate::{
     accounts::runtime::{AccountsHandle, BookSource, start_accounts},
     listeners::order_book::{
         ActiveL2Params, ActiveSubGuard, ActiveSubs, BookTrust, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey,
-        L2ParamGuard, L2SnapshotParams, OrderBookListener, bbo::{BboKey, key as bbo_key}, hl_listen_hft, triggers::TriggerAvailability,
+        L2ParamGuard, L2SnapshotParams, OrderBookListener, bbo::{BboKey, key as bbo_key}, hl_listen_hft, replica,
+        triggers::TriggerAvailability,
     },
     local_marks::{
         feeds::{EquityFeedsConfig, LocalMarkFeeds},
@@ -27,6 +28,7 @@ use crate::{
         WS_CONNECTIONS_TOTAL, WS_SEND_ERRORS_TOTAL,
     },
     order_book::{Coin, PxBand, Snapshot},
+    pending::spawn_pending_book,
     prelude::*,
     types::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
@@ -140,6 +142,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         // BBO-only deployments are sized for a lightweight envelope and have no
         // consumers for /untriggeredOrders - skip maintaining the side table.
         listener.set_track_untriggered(!config.bbo_only);
+        start_pending_book(&config, &mut listener)?;
         listener
     };
     // Lock-free trust mirror for the send paths below (design 000249 B).
@@ -338,6 +341,30 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
 
 /// Starts the local marks when `--local-marks` is set (design 000454): the venue feeds and the owner, which reads the
 /// node replica of the account view and the listener's book.
+/// The pending book's thread and the listener's feed of it (--pending-book, hyperliquid-trade design 000604).
+fn start_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) -> Result<()> {
+    if !config.pending_book {
+        return Ok(());
+    }
+    if config.no_resync {
+        return Err("--pending-book cannot run with --no-resync: its block alignment needs each book stream's heights to only go up".into());
+    }
+    if config.bbo_only {
+        return Err("--pending-book cannot run with --bbo-only: its replica copies the whole book".into());
+    }
+    let (feed, inputs) = replica::link(replica::REPLICA_QUEUE_BATCHES);
+    listener.attach_replica_feed(feed);
+    let thread = spawn_pending_book(inputs, config.pending_backlog_events)?;
+    // the shadow's end is no reason to stop the book: logged, and the feed stops on its closed queue
+    tokio::spawn(async move {
+        match thread.await {
+            Ok(()) => error!("pending book: the pending thread ended"),
+            Err(err) => error!("pending book: the pending thread failed: {err}"),
+        }
+    });
+    Ok(())
+}
+
 fn start_local_marks(
     config: &ServerConfig,
     accounts: Option<&AccountsHandle>,

@@ -35,7 +35,66 @@ impl StreamProgress {
     }
 }
 
+/// A New diff waiting for its status: the resting size and price, the queue anchor, its block, and the add count
+/// when it came (the level overtaking it since is known by it, review 000606 r2).
+#[derive(Clone)]
+struct PendingNewDiff {
+    sz: crate::order_book::types::Sz,
+    px: Px,
+    insert_before: Option<Oid>,
+    block: u64,
+    adds_before: u64,
+}
+
+/// A price level: the coin, the side, the price.
+type LevelKey = (Coin, crate::order_book::Side, Px);
+
+/// The levels whose queue order a state cannot prove (hyperliquid-trade review 000606 r1 P2-1, r2), for the pending
+/// book's fill attribution: an order rested at the back because its insertBefore anchor was missing, or a New diff
+/// that waited for its status while a later order rested at its level, leaves its level's order unproven - and every
+/// order placed relative to it after - until the level empties. Tracked only when switched on (`--pending-book`): the
+/// listener's book carries it into the replica's fork.
+#[derive(Clone, Default)]
+struct UnprovenLevels {
+    tracking: bool,
+    levels: rustc_hash::FxHashSet<LevelKey>,
+    /// Resting adds so far, and each level's latest: kept while a New diff that came before it still waits.
+    adds: u64,
+    last_add: rustc_hash::FxHashMap<LevelKey, u64>,
+}
+
+impl UnprovenLevels {
+    fn level_of(&self, order: &InnerL4Order) -> Option<LevelKey> {
+        self.tracking.then(|| (order.coin.clone(), order.side(), order.limit_px()))
+    }
+
+    fn added_since(&self, level: &LevelKey, since: u64) -> bool {
+        self.last_add.get(level).is_some_and(|added| *added > since)
+    }
+
+    fn note_add(&mut self, level: LevelKey) {
+        self.adds += 1;
+        self.last_add.insert(level, self.adds);
+    }
+
+    /// The levels emptied leave: their next orders' order is the node's again.
+    fn forget_emptied(&mut self, book: &OrderBooks<InnerL4Order>) {
+        if !self.levels.is_empty() {
+            self.levels.retain(|(coin, side, px)| book.has_level(coin, *side, *px));
+        }
+    }
+
+    /// The adds no waiting New diff came before: none can overtake it any more.
+    fn forget_adds(&mut self, oldest_waiting: Option<u64>) {
+        match oldest_waiting {
+            Some(since) => self.last_add.retain(|_, added| *added > since),
+            None => self.last_add.clear(),
+        }
+    }
+}
+
 /// A resting-type status waiting for its New diff (the two share one block).
+#[derive(Clone)]
 struct PendingStatus {
     status: NodeDataOrderStatus,
     block: u64,
@@ -81,7 +140,7 @@ pub(super) struct OrderBookState {
     // true resting price - trigger/converted orders can carry a different px on the status.
     // The anchor must survive the cache so a late-pairing priority ALO order still splices
     // into the right queue position. The trailing u64 is the diff's block (see above).
-    pending_new_diffs: rustc_hash::FxHashMap<Oid, (crate::order_book::types::Sz, Px, Option<Oid>, u64)>,
+    pending_new_diffs: rustc_hash::FxHashMap<Oid, PendingNewDiff>,
     // Orders an Update to size 0 already removed from the book (`modify_sz` drops a
     // zero-size order). For a fully filled order the node sends Update(newSz=0) and
     // then Remove (every zero update in a 28s mainnet sample, 2026-10-09); this
@@ -111,6 +170,12 @@ pub(super) struct OrderBookState {
     // The coins of trigger orders the table held that a `triggered` status took out since the listener last drained
     // them: the forced flow computes those coins again at once (hyperliquid-trade design 000591).
     fired_trigger_coins: Vec<String>,
+    // Whether this state reports to the process-wide book metrics and their logs: the listener's does; the pending
+    // book's replica (a fork fed the same batches, hyperliquid-trade design 000604) does not, so each event counts once.
+    reports: bool,
+    // The levels whose queue order this state cannot prove, for the pending book (hyperliquid-trade review 000606 r1
+    // P2-1, r2): tracked only once switched on.
+    unproven: UnprovenLevels,
 }
 
 impl OrderBookState {
@@ -145,6 +210,33 @@ impl OrderBookState {
             insert_before_fallbacks: 0,
             triggers,
             fired_trigger_coins: Vec::new(),
+            reports: true,
+            unproven: UnprovenLevels::default(),
+        }
+    }
+
+    /// The pending book's replica (hyperliquid-trade design 000604 revision 1): the book, both pairing caches and both
+    /// streams' progress as they stand, so that the batches applied after it bring it where the listener's goes; no
+    /// untriggered table, counters from zero, and silent on the process-wide metrics.
+    pub(super) fn fork(&self) -> Self {
+        Self {
+            order_book: self.order_book.clone(),
+            latest: self.latest,
+            statuses: self.statuses,
+            diffs: self.diffs,
+            ignore_spot: self.ignore_spot,
+            pending_order_statuses: self.pending_order_statuses.clone(),
+            pending_new_diffs: self.pending_new_diffs.clone(),
+            zeroed_awaiting_remove: self.zeroed_awaiting_remove.clone(),
+            missing_diff_targets: 0,
+            orphan_statuses: 0,
+            lost_new_diffs: 0,
+            last_loss_log: None,
+            insert_before_fallbacks: 0,
+            triggers: TriggerTable::seeded(TriggerSection::Absent, &ParentLinks::default(), Vec::new(), false, self.ignore_spot),
+            fired_trigger_coins: Vec::new(),
+            reports: false,
+            unproven: self.unproven.clone(),
         }
     }
 
@@ -166,14 +258,55 @@ impl OrderBookState {
     /// only naming the order that fell back.
     fn note_insert_before_fallback(&mut self, oid: &Oid, coin: &Coin, anchor: Option<&Oid>, px: Px) {
         self.insert_before_fallbacks += 1;
+        if !self.reports {
+            return;
+        }
         log::warn!(
             "insertBefore anchor {anchor:?} missing at px={} for oid={oid:?} coin={coin:?}; rested at back of level",
             px.to_str()
         );
     }
 
+    /// Rests `order` in front of `insert_before` (at the back without one), as the node's diff says, and keeps the
+    /// level bookkeeping: an anchor missing is a fallback; a New diff that waited for its status since the add count
+    /// `waited_since` is overtaken when its level had an add meanwhile (review 000606 r2) - at the back, or before an
+    /// anchor a later order also went before -, its place then not the node's either.
+    fn rest(&mut self, order: InnerL4Order, insert_before: Option<Oid>, waited_since: Option<u64>) {
+        let (oid, coin, px) = (order.oid(), order.coin.clone(), order.limit_px());
+        let level = self.unproven.level_of(&order);
+        let overtaken = waited_since.zip(level.as_ref()).is_some_and(|(since, level)| self.unproven.added_since(level, since));
+        let anchor = insert_before.clone();
+        let fell_back = self.order_book.add_order_before(order, insert_before);
+        if fell_back {
+            self.note_insert_before_fallback(&oid, &coin, anchor.as_ref(), px);
+        } else if anchor.is_some() && self.reports {
+            crate::metrics::INSERT_BEFORE_HONORED_TOTAL.inc();
+        }
+        let Some(level) = level else { return };
+        if fell_back || overtaken {
+            self.unproven.levels.insert(level.clone());
+        }
+        self.unproven.note_add(level);
+    }
+
     pub(super) const fn height(&self) -> u64 {
         self.latest.height
+    }
+
+    /// Track the levels whose queue order this state cannot prove (the pending book, review 000606 r2): from a state
+    /// whose book is a block's end - a snapshot's install, before any batch.
+    pub(super) const fn track_unproven_levels(&mut self) {
+        self.unproven.tracking = true;
+    }
+
+    /// Levels whose queue order is not proven: their orders' places may not be the node's.
+    pub(super) fn unproven_levels(&self) -> usize {
+        self.unproven.levels.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn level_unproven(&self, coin: &str, side: crate::order_book::Side, px: Px) -> bool {
+        self.unproven.levels.contains(&(Coin::new(coin), side, px))
     }
 
     pub(super) const fn ignore_spot(&self) -> bool {
@@ -351,9 +484,11 @@ impl OrderBookState {
             }
             keep
         });
+        if orphans > 0 && self.reports {
+            crate::metrics::PENDING_ORPHANS_EVICTED_TOTAL.inc_by(orphans);
+        }
         if orphans > 0 {
             self.orphan_statuses += orphans;
-            crate::metrics::PENDING_ORPHANS_EVICTED_TOTAL.inc_by(orphans);
             log::debug!("Evicted {orphans} orphan pending_order_statuses (both streams passed their block)");
         }
 
@@ -362,13 +497,19 @@ impl OrderBookState {
         // metric-only, so its wall-clock age stays.
         self.zeroed_awaiting_remove.retain(|_, at| at.elapsed() < ZEROED_MAX_AGE);
 
+        // only with the pending book on: off, no add is noted and the waiting diffs need no scan (review 000606 r3 P3)
+        if self.unproven.tracking {
+            let oldest_waiting = self.pending_new_diffs.values().map(|pending| pending.adds_before).min();
+            self.unproven.forget_adds(oldest_waiting);
+        }
+
         let statuses_applied = self.statuses.height;
         let before = self.pending_new_diffs.len();
-        self.pending_new_diffs.retain(|_, (_, _, _, block)| *block >= statuses_applied);
+        self.pending_new_diffs.retain(|_, pending| pending.block >= statuses_applied);
         let lost = before - self.pending_new_diffs.len();
         if lost > 0 {
             self.lost_new_diffs += lost as u64;
-            if super::throttled_log_due(&mut self.last_loss_log, tokio::time::Instant::now()) {
+            if self.reports && super::throttled_log_due(&mut self.last_loss_log, tokio::time::Instant::now()) {
                 log::warn!(
                     "Evicted {lost} pending_new_diffs: the status stream passed their block (status height \
                      {statuses_applied}) without their status - data loss; {} since install (lines at most \
@@ -380,21 +521,25 @@ impl OrderBookState {
         }
 
         if self.pending_order_statuses.len() > cap {
-            log::warn!(
-                "Clearing pending_order_statuses at the {cap} cap: {} entries (status height {statuses_applied}, \
-                 diff height {diffs_applied})",
-                self.pending_order_statuses.len()
-            );
+            if self.reports {
+                log::warn!(
+                    "Clearing pending_order_statuses at the {cap} cap: {} entries (status height {statuses_applied}, \
+                     diff height {diffs_applied})",
+                    self.pending_order_statuses.len()
+                );
+            }
             self.pending_order_statuses = rustc_hash::FxHashMap::default();
             cleared = true;
         }
 
         if self.pending_new_diffs.len() > cap {
-            log::warn!(
-                "Clearing pending_new_diffs at the {cap} cap: {} entries (status height {statuses_applied}, \
-                 diff height {diffs_applied})",
-                self.pending_new_diffs.len()
-            );
+            if self.reports {
+                log::warn!(
+                    "Clearing pending_new_diffs at the {cap} cap: {} entries (status height {statuses_applied}, \
+                     diff height {diffs_applied})",
+                    self.pending_new_diffs.len()
+                );
+            }
             self.pending_new_diffs = rustc_hash::FxHashMap::default();
             cleared = true;
         }
@@ -473,7 +618,7 @@ impl OrderBookState {
             }
 
             // Check if there's a pending New diff for this order
-            if let Some((sz, px, insert_before, _)) = self.pending_new_diffs.remove(&oid) {
+            if let Some(PendingNewDiff { sz, px, insert_before, adds_before, .. }) = self.pending_new_diffs.remove(&oid) {
                 // Both arrived - add order immediately!
                 let time = order_status.time.and_utc().timestamp_millis();
                 let order_coin = Coin::new(&order_status.order.coin);
@@ -482,13 +627,7 @@ impl OrderBookState {
                 // Official PR#9: resting px comes from the diff, not the status.
                 inner_order.modify_px(px);
                 inner_order.convert_trigger(time.max(0) as u64);
-                let px = inner_order.limit_px();
-                let anchor = insert_before.clone();
-                if self.order_book.add_order_before(inner_order, insert_before) {
-                    self.note_insert_before_fallback(&oid, &order_coin, anchor.as_ref(), px);
-                } else if anchor.is_some() {
-                    crate::metrics::INSERT_BEFORE_HONORED_TOTAL.inc();
-                }
+                self.rest(inner_order, insert_before, Some(adds_before));
                 changed_coins.insert(order_coin.clone());
                 log::debug!("Order added (status arrived after diff): oid={:?} coin={:?}", oid, order_coin);
             } else if order_status.is_inserted_into_book() {
@@ -561,13 +700,7 @@ impl OrderBookState {
                         inner_order.modify_px(diff_px);
                         #[allow(clippy::unwrap_used)]
                         inner_order.convert_trigger(time.try_into().unwrap());
-                        let px = inner_order.limit_px();
-                        let anchor = insert_before.clone();
-                        if self.order_book.add_order_before(inner_order, insert_before) {
-                            self.note_insert_before_fallback(&oid, &order_coin, anchor.as_ref(), px);
-                        } else if anchor.is_some() {
-                            crate::metrics::INSERT_BEFORE_HONORED_TOTAL.inc();
-                        }
+                        self.rest(inner_order, insert_before, None);
                         changed_coins.insert(order_coin.clone());
                         log::debug!("Order added (diff arrived after status): oid={:?} coin={:?}", oid, order_coin);
                     } else if diff.special_address() {
@@ -594,16 +727,12 @@ impl OrderBookState {
                             cloid: None,
                         };
                         // Same queue-anchor handling as a paired order (upstream insertBefore).
-                        let anchor = insert_before.clone();
-                        if self.order_book.add_order_before(inner_order, insert_before) {
-                            self.note_insert_before_fallback(&oid, &coin, anchor.as_ref(), diff_px);
-                        } else if anchor.is_some() {
-                            crate::metrics::INSERT_BEFORE_HONORED_TOTAL.inc();
-                        }
+                        self.rest(inner_order, insert_before, None);
                         changed_coins.insert(coin);
                     } else {
                         // Status hasn't arrived yet - cache the diff size + resting px + queue anchor
-                        self.pending_new_diffs.insert(oid.clone(), (sz, diff_px, insert_before, height));
+                        let adds_before = self.unproven.adds;
+                        self.pending_new_diffs.insert(oid.clone(), PendingNewDiff { sz, px: diff_px, insert_before, block: height, adds_before });
                     }
                 }
                 // An order whose New diff still waits for its status is not on the book
@@ -616,15 +745,17 @@ impl OrderBookState {
                         // the Remove that follows pairs with this record, and the
                         // late status goes the existing orphan way.
                         self.zeroed_awaiting_remove.insert(oid, Instant::now());
-                    } else if let Some((pending_sz, _, _, _)) = self.pending_new_diffs.get_mut(&oid) {
-                        *pending_sz = new_sz;
+                    } else if let Some(pending) = self.pending_new_diffs.get_mut(&oid) {
+                        pending.sz = new_sz;
                     } else if self.order_book.modify_sz(oid.clone(), coin.clone(), new_sz) {
                         if new_sz.is_zero() {
                             self.zeroed_awaiting_remove.insert(oid, Instant::now());
                         }
                     } else {
                         self.missing_diff_targets += 1;
-                        note_diff_target_missing("update", &oid, &coin);
+                        if self.reports {
+                            note_diff_target_missing("update", &oid, &coin);
+                        }
                     }
                     changed_coins.insert(coin);
                 }
@@ -634,12 +765,15 @@ impl OrderBookState {
                         && !self.order_book.cancel_order(oid.clone(), coin.clone())
                     {
                         self.missing_diff_targets += 1;
-                        note_diff_target_missing("remove", &oid, &coin);
+                        if self.reports {
+                            note_diff_target_missing("remove", &oid, &coin);
+                        }
                     }
                     changed_coins.insert(coin);
                 }
             }
         }
+        self.unproven.forget_emptied(&self.order_book);
         Ok(changed_coins)
     }
 }
@@ -677,6 +811,28 @@ mod tests {
     use crate::types::{L4Order, OrderDiff};
     use alloy::primitives::Address;
     use chrono::NaiveDateTime;
+
+    /// Review 000606 r2: an add counts against a waiting New diff only if it came after it; the adds no waiting diff
+    /// came before are forgotten, and all of them once none waits.
+    #[test]
+    fn unproven_levels_keep_the_adds_a_waiting_diff_needs() {
+        let level = |px: u64| (Coin::new("BTC"), crate::order_book::Side::Ask, Px::new(px));
+        let mut levels = UnprovenLevels { tracking: true, ..UnprovenLevels::default() };
+        levels.note_add(level(1));
+        let waiting_since = levels.adds;
+        assert!(!levels.added_since(&level(1), waiting_since));
+        levels.note_add(level(2));
+        levels.note_add(level(1));
+        assert!(levels.added_since(&level(1), waiting_since));
+        levels.forget_adds(Some(waiting_since));
+        assert!(levels.added_since(&level(1), waiting_since), "still after the waiting diff");
+        assert_eq!(levels.last_add.len(), 2);
+        levels.forget_adds(Some(levels.adds));
+        assert!(levels.last_add.is_empty());
+        levels.note_add(level(3));
+        levels.forget_adds(None);
+        assert!(levels.last_add.is_empty(), "none waits");
+    }
 
     fn empty_state() -> OrderBookState {
         let snapshots = Snapshots::new(HashMap::new());

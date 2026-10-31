@@ -5,6 +5,7 @@ mod local_marks;
 mod mailbox;
 pub mod metrics;
 mod order_book;
+mod pending;
 mod prelude;
 mod servers;
 mod types;
@@ -81,6 +82,13 @@ pub struct ServerConfig {
     /// Run the HIP-3 US stocks' local marks (design 000535, 000543; needs `local_marks`): the Alpaca SIP and BOATS
     /// feeds, their key from the environment.
     pub hip3_sip_marks: bool,
+    /// Run the pending book (hyperliquid-trade design 000604): a replica of the book on its own thread, fed by the
+    /// listener. Refused with `no_resync` (its block alignment needs every stream's heights to only go up) and with
+    /// `bbo_only` (it copies the whole book).
+    pub pending_book: bool,
+    /// The pending book replica's budget, in events, for the batches waiting on the slower book stream: past it the
+    /// replica stops until both streams are near each other again.
+    pub pending_backlog_events: usize,
 }
 
 impl ServerConfig {
