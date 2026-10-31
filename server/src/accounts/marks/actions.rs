@@ -12,7 +12,10 @@ use serde::Deserialize;
 use super::{decimal::ExactDecimal, orders::OrderKey, pairing::IocPairingMismatch};
 use crate::accounts::{
     checkpoint::node_time_ns,
-    replica::{OrderRef, PairedAction, ReplicaLine, WireCancel, WireCancelByCloid, WireModify, WireOrder},
+    replica::{
+        CANCEL_CATEGORY, OrderRef, PairedAction, ReplicaLine, WireCancel, WireCancelByCloid, WireModify, WireOrder,
+        placing_category,
+    },
 };
 
 /// (bundle, category, position): actions run in this order.
@@ -196,7 +199,7 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
             anchors.ordinary_order = true;
             anchors.resting_reduce_only = resting_reduce_only(user, &orders, &statuses)?;
             anchors.single_ioc_order = orders.len() == 1 && orders[0].t.limit.as_ref().is_some_and(|limit| limit.tif == "Ioc");
-            (category(orders.iter().all(WireOrder::is_alo)), MarkAction::Book(anchors))
+            (placing_category(orders.iter().all(WireOrder::is_alo)), MarkAction::Book(anchors))
         }
         "modify" => {
             let order: WireOrder = action.field(action.order.as_ref(), "order")?;
@@ -210,7 +213,7 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
                 anchors.unreceipted_modify = Some(Box::new(ReplacementRequest { old: old.clone(), asset: order.a, key }));
             }
             old.add_to(&mut anchors);
-            (category(order.is_alo()), MarkAction::Book(anchors))
+            (placing_category(order.is_alo()), MarkAction::Book(anchors))
         }
         "batchModify" => {
             let modifies: Vec<WireModify> = action.field(action.modifies.as_ref(), "modifies")?;
@@ -226,17 +229,17 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
                     modify.oid.add_to(&mut anchors);
                 }
             }
-            (category(modifies.iter().all(|modify| modify.order.is_alo())), MarkAction::Book(anchors))
+            (placing_category(modifies.iter().all(|modify| modify.order.is_alo())), MarkAction::Book(anchors))
         }
         "cancel" => {
             let cancels: Vec<WireCancel> = action.field(action.cancels.as_ref(), "cancels")?;
             let cancelled = succeeded(cancels.iter().map(|cancel| cancel.o), &statuses()?)?;
-            (2, MarkAction::Book(BookAnchors { cancelled, ..BookAnchors::default() }))
+            (CANCEL_CATEGORY, MarkAction::Book(BookAnchors { cancelled, ..BookAnchors::default() }))
         }
         "cancelByCloid" => {
             let cancels: Vec<WireCancelByCloid> = action.field(action.cancels.as_ref(), "cancels")?;
             let cancelled_cloids = succeeded(cancels.into_iter().map(|cancel| cancel.cloid), &statuses()?)?;
-            (2, MarkAction::Book(BookAnchors { cancelled_cloids, ..BookAnchors::default() }))
+            (CANCEL_CATEGORY, MarkAction::Book(BookAnchors { cancelled_cloids, ..BookAnchors::default() }))
         }
         "vaultTransfer" => {
             let deposit: bool = action.field(action.is_deposit.as_ref(), "isDeposit")?;
@@ -386,10 +389,6 @@ fn order_anchors<'o>(orders: impl IntoIterator<Item = &'o WireOrder>, statuses: 
 /// The orders that may trade on entry; a limit price that does not read breaks the contract.
 fn takers<'o>(orders: impl IntoIterator<Item = &'o WireOrder>) -> Result<Vec<Taker>, String> {
     orders.into_iter().filter_map(WireOrder::taker).collect()
-}
-
-const fn category(all_alo: bool) -> u8 {
-    if all_alo { 1 } else { 3 }
 }
 
 /// The oids an order or batchModify response placed (resting, or filled at once), and their cloids.

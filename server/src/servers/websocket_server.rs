@@ -28,7 +28,7 @@ use crate::{
         WS_CONNECTIONS_TOTAL, WS_SEND_ERRORS_TOTAL,
     },
     order_book::{Coin, PxBand, Snapshot},
-    pending::{MempoolInputs, mempool::watch_mempool, spawn_pending_book},
+    pending::{PendingFeeds, PendingParams, mempool::watch_mempool, spawn_pending_book, watch_blocks},
     prelude::*,
     types::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
@@ -134,7 +134,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
 
     // Resolve data directory
     // Central task: listen to messages and forward them for distribution
-    let (listener, pending_replica) = {
+    let (listener, pending_setup) = {
         let internal_message_tx = internal_message_tx.clone();
         let mut listener =
             OrderBookListener::new(Some(internal_message_tx), ignore_spot, active_l2_params.clone(), market_filter);
@@ -142,8 +142,8 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         // BBO-only deployments are sized for a lightweight envelope and have no
         // consumers for /untriggeredOrders - skip maintaining the side table.
         listener.set_track_untriggered(!config.bbo_only);
-        let pending_replica = attach_pending_book(&config, &mut listener)?;
-        (listener, pending_replica)
+        let pending_setup = attach_pending_book(&config, &mut listener)?;
+        (listener, pending_setup)
     };
     // Lock-free trust mirror for the send paths below (design 000249 B).
     let book_trust = listener.book_trust();
@@ -153,8 +153,8 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         &config,
         BookSource { trust: book_trust.clone(), listener: listener.clone(), revision: book_revision, fires: trigger_fires },
     )?;
-    if let Some(replica) = pending_replica {
-        start_pending_book(&config, replica, accounts.as_ref())?;
+    if let Some(setup) = pending_setup {
+        start_pending_book(&config, setup, accounts.as_ref())?;
     }
     let local_marks = start_local_marks(&config, accounts.as_ref(), &listener)?;
     // the forced flow's local calibre (design 000451 r4 revision 8)
@@ -345,9 +345,15 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
 /// Starts the local marks when `--local-marks` is set (design 000454): the venue feeds and the owner, which reads the
 /// node replica of the account view and the listener's book.
 /// The pending book's thread and the listener's feed of it (--pending-book, hyperliquid-trade design 000604).
+/// What `--pending-book` sets up before the listener starts: its replica feed attached, its parameters checked.
+struct PendingSetup {
+    replica: replica::ReplicaInputs,
+    params: PendingParams,
+}
+
 /// The pending book's replica feed attached to the listener, when `--pending-book` is set; its thread starts once the
 /// account view does (`start_pending_book`).
-fn attach_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) -> Result<Option<replica::ReplicaInputs>> {
+fn attach_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) -> Result<Option<PendingSetup>> {
     if !config.pending_book {
         return Ok(None);
     }
@@ -357,22 +363,27 @@ fn attach_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) 
     if config.bbo_only {
         return Err("--pending-book cannot run with --bbo-only: its replica copies the whole book".into());
     }
-    let (feed, inputs) = replica::link(replica::REPLICA_QUEUE_BATCHES);
+    let params = PendingParams::from_ms(
+        config.pending_expiry_ms,
+        config.pending_max_late_ms,
+        config.pending_max_span_ms,
+        config.pending_max_actions,
+        config.pending_mempool_silence_ms,
+    )?;
+    let (feed, replica) = replica::link(replica::REPLICA_QUEUE_BATCHES);
     listener.attach_replica_feed(feed);
-    Ok(Some(inputs))
+    Ok(Some(PendingSetup { replica, params }))
 }
 
-/// The pending thread, reading the mempool below the node's data directory.
-fn start_pending_book(
-    config: &ServerConfig,
-    replica: replica::ReplicaInputs,
-    accounts: Option<&AccountsHandle>,
-) -> Result<()> {
+/// The pending thread, reading the mempool and the block log below the node's data directory.
+fn start_pending_book(config: &ServerConfig, setup: PendingSetup, accounts: Option<&AccountsHandle>) -> Result<()> {
     let accounts =
         accounts.ok_or("--pending-book needs --accounts: the mempool's asset ids are named by the account view's anchor")?;
-    let (feed, _watcher) = watch_mempool(&config.resolved_data_dir()?);
-    let mempool = MempoolInputs { feed, action_coins: accounts.action_coins() };
-    let thread = spawn_pending_book(replica, mempool, config.pending_backlog_events)?;
+    let data_dir = config.resolved_data_dir()?;
+    let (mempool, _mempool_watcher) = watch_mempool(&data_dir);
+    let (block_log, _block_log_watcher) = watch_blocks(&data_dir);
+    let feeds = PendingFeeds { mempool, block_log, action_coins: accounts.action_coins() };
+    let thread = spawn_pending_book(setup.replica, feeds, config.pending_backlog_events, setup.params, config.include_spot)?;
     // the shadow's end is no reason to stop the book: logged, and the feed stops on its closed queue
     tokio::spawn(async move {
         match thread.await {

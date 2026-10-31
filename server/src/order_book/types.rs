@@ -11,6 +11,15 @@ pub(crate) enum Side {
     Bid,
 }
 
+impl Side {
+    pub(crate) const fn opposite(self) -> Self {
+        match self {
+            Self::Ask => Self::Bid,
+            Self::Bid => Self::Ask,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Oid(u64);
 

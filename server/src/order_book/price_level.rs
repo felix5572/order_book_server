@@ -133,6 +133,15 @@ impl<O: InnerOrder> PriceLevel<O> {
         self.orders.to_vec()
     }
 
+    /// The orders in queue order.
+    pub(crate) fn orders(&self) -> impl Iterator<Item = &O> {
+        self.orders.iter()
+    }
+
+    pub(crate) fn order(&self, oid: &Oid) -> Option<&O> {
+        self.orders.node_value(oid)
+    }
+
     #[cfg(test)]
     pub(crate) fn slab_len(&self) -> usize {
         self.orders.slab_len()

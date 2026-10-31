@@ -8,8 +8,8 @@
 
 use lazy_static::lazy_static;
 use prometheus::{
-    Counter, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
-    Registry,
+    Counter, CounterVec, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    Opts, Registry,
 };
 
 lazy_static! {
@@ -847,6 +847,101 @@ lazy_static! {
 
 }
 
+
+lazy_static! {
+    // ==================== PENDING BOOK, BATCH 2B (hyperliquid-trade design 000604) ====================
+
+    /// Orders the pending book replica's cloid index holds (each coin's, kept from the statuses; batch 2b).
+    pub static ref PENDING_BOOK_CLOID_INDEX_ORDERS: IntGauge = IntGauge::new(
+        "orderbook_pending_book_cloid_index_orders",
+        "Pending book replica cloid index orders"
+    ).expect("metric can be created");
+
+    /// The pending set's actions leaving it or never held, by `op` (`place_alo`, `place_gtc`, `place_ioc`, `cancel`,
+    /// `cancel_by_cloid`, `modify`; `line`, `any`) and `outcome`: at arrival `held_already` (a line again),
+    /// `expired_on_arrival`, `late` (a block the replica confirmed holds its line); settled `confirmed` (its line's
+    /// block confirmed), `expired`; `over_cap` (the set dropped whole; hyperliquid-trade design 000604 r6, batch 2b).
+    pub static ref PENDING_BOOK_ACTIONS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_actions_total", "Pending book actions by outcome"),
+        &["op", "outcome"]
+    ).expect("metric can be created");
+
+    /// The pending actions' first application to their coin's overlay, by `op` and `outcome`: `rested`, `took`,
+    /// `missed` (an IOC with nothing to take), `alo_crossed`, `canceled`, `target_missing`, `target_ambiguous`,
+    /// `gtc_would_take`, `taker_not_supported` (a modify without always_place).
+    pub static ref PENDING_BOOK_OVERLAY_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_overlay_total", "Pending book overlay applications by outcome"),
+        &["op", "outcome"]
+    ).expect("metric can be created");
+
+    /// Fills predicted for pending takers while the book could be served, by `maker`: `confirmed`, `pending`,
+    /// `unattributed` (a level whose queue order the replica cannot prove).
+    pub static ref PENDING_BOOK_PREDICTED_FILLS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_predicted_fills_total", "Pending book predicted fills"),
+        &["maker"]
+    ).expect("metric can be created");
+
+    /// Actions the pending set holds, by `state`: `known` (overlaid) or `unknown` (a gap, its warm-up, ambiguous).
+    pub static ref PENDING_BOOK_HELD_ACTIONS: IntGaugeVec = IntGaugeVec::new(
+        Opts::new("orderbook_pending_book_held_actions", "Pending book held actions"),
+        &["state"]
+    ).expect("metric can be created");
+
+    /// Input gaps of the pending book, by `cause`: `start`, `loss`, `read_after_loss`, `no_asset_table`, `silence`,
+    /// `over_cap` (the mempool's); `block_log_start`, `block_log_loss`, `block_log_after_loss`, `block_log_hole` (the
+    /// block log's); `replica`.
+    pub static ref PENDING_BOOK_GAPS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_gaps_total", "Pending book input gaps"),
+        &["cause"]
+    ).expect("metric can be created");
+
+    /// The newest mempool line's time less the replica's confirmed block time.
+    pub static ref PENDING_BOOK_SPAN_SECONDS: Gauge = Gauge::new(
+        "orderbook_pending_book_span_seconds",
+        "Pending book mempool lead on the confirmed blocks"
+    ).expect("metric can be created");
+
+    /// Block log lines the pending book took, by `outcome`: `read`, `read_after_unreported_loss`, `unreadable`.
+    pub static ref PENDING_BOOK_BLOCK_LOG_LINES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_block_log_lines_total", "Pending book block log lines"),
+        &["outcome"]
+    ).expect("metric can be created");
+
+    /// Block log lines the pending book's watcher lost, by `cause`: `positioning`, `discard`.
+    pub static ref PENDING_BOOK_BLOCK_LOG_LOSSES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_block_log_losses_total", "Pending book block log line losses"),
+        &["cause"]
+    ).expect("metric can be created");
+
+    /// Blocks the pending book's block record holds above the replica's confirmed height (capped, design 000604 r7).
+    pub static ref PENDING_BOOK_BLOCK_LOG_LEAD_BLOCKS: IntGauge = IntGauge::new(
+        "orderbook_pending_book_block_log_lead_blocks",
+        "Pending book block log blocks ahead of the replica"
+    ).expect("metric can be created");
+
+    /// Coins whose merged best levels (the overlay over the replica) differ from the replica's.
+    pub static ref PENDING_BOOK_MOVED_COINS: IntGauge = IntGauge::new(
+        "orderbook_pending_book_moved_coins",
+        "Pending book coins whose predicted best levels differ from the confirmed"
+    ).expect("metric can be created");
+
+    /// Seconds the pending book could not be served, by `reason`: `replica`, a mempool or block log gap's cause,
+    /// `block_log_behind`, `warming_up`, `span`.
+    pub static ref PENDING_BOOK_UNAVAILABLE_SECONDS_TOTAL: CounterVec = CounterVec::new(
+        Opts::new("orderbook_pending_book_unavailable_seconds_total", "Pending book unavailable seconds"),
+        &["reason"]
+    ).expect("metric can be created");
+
+    /// The pending thread's time per `step`: `transaction` (a mempool line's actions held and overlaid), `replica` (a
+    /// replica push applied, the set settled, the coins replayed), `block_log` (a block's hashes recorded, the set
+    /// settled).
+    pub static ref PENDING_BOOK_STEP_SECONDS: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("orderbook_pending_book_step_seconds", "Pending book step time")
+            .buckets(vec![0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]),
+        &["step"]
+    ).expect("metric can be created");
+}
+
 /// Register all metrics with the registry
 pub fn register_metrics() {
     // Connection metrics
@@ -957,6 +1052,19 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(PENDING_BOOK_MEMPOOL_ACTIONS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_MEMPOOL_ORDERS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_MEMPOOL_UNNAMED_ASSETS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_CLOID_INDEX_ORDERS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_ACTIONS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_OVERLAY_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_PREDICTED_FILLS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_HELD_ACTIONS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_GAPS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_SPAN_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_MOVED_COINS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LINES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LOSSES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LEAD_BLOCKS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_UNAVAILABLE_SECONDS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_STEP_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL.clone())).ok();

@@ -1,6 +1,5 @@
 use crate::prelude::*;
 use itertools::Itertools;
-use price_level::PriceLevel;
 use std::collections::{BTreeMap, HashSet};
 
 pub(crate) mod levels;
@@ -9,10 +8,11 @@ pub(crate) mod multi_book;
 mod price_level;
 pub(crate) mod types;
 
+pub(crate) use price_level::PriceLevel;
 pub(crate) use types::{Coin, InnerOrder, Oid, Px, PxBand, Side, Sz};
 
 /// One side's levels, best first.
-type LevelsFromBest<'a, O> = Box<dyn Iterator<Item = (&'a Px, &'a PriceLevel<O>)> + 'a>;
+pub(crate) type LevelsFromBest<'a, O> = Box<dyn Iterator<Item = (&'a Px, &'a PriceLevel<O>)> + 'a>;
 
 /// What a market order of one side meets (`OrderBook::taker_levels`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +142,28 @@ impl<O: InnerOrder> OrderBook<O> {
             return add_order_to_book(resting_book, order, insert_before);
         }
         false
+    }
+
+    /// One side's levels, best first (the pending book's overlay walks them, hyperliquid-trade design 000604).
+    pub(crate) fn levels_from_best(&self, side: Side) -> LevelsFromBest<'_, O> {
+        match side {
+            Side::Ask => Box::new(self.asks.iter()),
+            Side::Bid => Box::new(self.bids.iter().rev()),
+        }
+    }
+
+    /// The level at `px` on `side`.
+    pub(crate) fn level(&self, side: Side, px: Px) -> Option<&PriceLevel<O>> {
+        match side {
+            Side::Ask => self.asks.get(&px),
+            Side::Bid => self.bids.get(&px),
+        }
+    }
+
+    /// A resting order by its oid.
+    pub(crate) fn order(&self, oid: &Oid) -> Option<&O> {
+        let (side, px) = self.oid_to_side_px.get(oid)?;
+        self.level(*side, *px)?.order(oid)
     }
 
     /// Whether a level rests at `px` on `side`.

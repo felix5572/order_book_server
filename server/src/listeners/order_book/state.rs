@@ -348,6 +348,16 @@ impl OrderBookState {
         self.unproven.count()
     }
 
+    /// A coin's unproven levels.
+    pub(super) fn unproven_in(&self, coin: &Coin) -> &[(crate::order_book::Side, Px)] {
+        self.unproven.levels.get(coin).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every coin's book.
+    pub(super) const fn books(&self) -> &std::collections::BTreeMap<Coin, crate::order_book::OrderBook<InnerL4Order>> {
+        self.order_book.as_ref()
+    }
+
     #[cfg(test)]
     pub(super) fn level_unproven(&self, coin: &str, side: crate::order_book::Side, px: Px) -> bool {
         self.unproven.levels.get(&Coin::new(coin)).is_some_and(|levels| levels.contains(&(side, px)))

@@ -12,10 +12,11 @@
 //!   both streams within `MAX_FORK_SKEW_BLOCKS` of each other (revisions 6, 10; review 000606 r1 P2-3). A full queue or
 //!   its book turning untrusted - at the moment it turns (review 000606 r1 P2-4) - ends the generation it feeds.
 //! - The pending thread's side (`BookReplica`) applies the heights both streams have passed (revision 1), within an
-//!   event budget for the batches waiting on the slower stream (revision 6).
+//!   event budget for the batches waiting on the slower stream (revision 6). The aligned replica keeps its orders by
+//!   cloid (`CloidIndex`, batch 2b) for the overlay's reads of one coin (`CoinBase`).
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -23,6 +24,7 @@ use std::{
 };
 
 use log::error;
+use rustc_hash::FxHashMap;
 use tokio::{
     sync::mpsc::{self, error::TrySendError},
     time::Instant,
@@ -31,6 +33,8 @@ use tokio::{
 use super::state::OrderBookState;
 use crate::{
     metrics::{PENDING_BOOK_BREAKS_TOTAL, PENDING_BOOK_FORK_SECONDS, PENDING_BOOK_FORKS_TOTAL},
+    order_book::{Coin, Oid, Side},
+    pending::overlay::{CoinBase, CoinCloids},
     types::node_data::{Batch, NodeDataOrderDiff, NodeDataOrderStatus},
 };
 
@@ -231,9 +235,68 @@ impl ReplicaStop {
     }
 }
 
+/// The replica's orders by cloid, each coin's: the overlay finds a cancel's or a modify's target by it (design 000604
+/// revision 8). Built from the book once the replica first stands at a block's end - an order whose status the
+/// listener applied before the fork rests in the replica only when its New diff comes after (review 000611 r1 P2-1),
+/// within the blocks up to the alignment -, then kept from each status applied: past the alignment an order's status
+/// and its New diff are in the same block, both through the replica; a status resting an order adds it, any other
+/// takes it out. A lookup takes only the orders the book holds (`CoinBase::with_cloid`): a resting status comes before
+/// its order rests when its New diff is late, and the order may never rest.
+#[derive(Default)]
+struct CloidIndex(FxHashMap<Coin, CoinCloids>);
+
+impl CloidIndex {
+    fn of(state: &OrderBookState) -> Self {
+        let mut index = Self::default();
+        for (coin, book) in state.books() {
+            for side in [Side::Bid, Side::Ask] {
+                for (_, level) in book.levels_from_best(side) {
+                    for order in level.orders() {
+                        index.add(coin, order.cloid.as_ref(), order.oid);
+                    }
+                }
+            }
+        }
+        index
+    }
+
+    fn on_status(&mut self, status: &NodeDataOrderStatus) {
+        let order = &status.order;
+        let Some(cloid) = &order.cloid else { return };
+        let coin = Coin::new(&order.coin);
+        if status.is_inserted_into_book() {
+            return self.add(&coin, Some(cloid), order.oid);
+        }
+        let Some(cloids) = self.0.get_mut(&coin) else { return };
+        let Some(oids) = cloids.get_mut(cloid) else { return };
+        oids.retain(|oid| *oid != Oid::new(order.oid));
+        if oids.is_empty() {
+            cloids.remove(cloid);
+            if cloids.is_empty() {
+                self.0.remove(&coin);
+            }
+        }
+    }
+
+    fn add(&mut self, coin: &Coin, cloid: Option<&String>, oid: u64) {
+        let Some(cloid) = cloid else { return };
+        let oids = self.0.entry(coin.clone()).or_default().entry(cloid.clone()).or_default();
+        let oid = Oid::new(oid);
+        if !oids.contains(&oid) {
+            oids.push(oid);
+        }
+    }
+
+    fn orders(&self) -> usize {
+        self.0.values().flat_map(FxHashMap::values).map(Vec::len).sum()
+    }
+}
+
 /// A fork's state plus the batches applied after it, each block applied once both streams passed it (revision 1).
 pub(crate) struct BookReplica {
     state: OrderBookState,
+    /// From the first alignment on.
+    cloids: Option<CloidIndex>,
     statuses: VecDeque<Batch<NodeDataOrderStatus>>,
     diffs: VecDeque<Batch<NodeDataOrderDiff>>,
     /// The highest height each stream delivered: the fork's progress to start with.
@@ -252,6 +315,7 @@ impl BookReplica {
     pub(crate) fn new(fork: ReplicaFork, budget_events: usize) -> Self {
         let (seen_statuses, seen_diffs) = (fork.state.status_height(), fork.state.diff_height());
         Self {
+            cloids: None,
             state: *fork.state,
             statuses: VecDeque::new(),
             diffs: VecDeque::new(),
@@ -271,6 +335,23 @@ impl BookReplica {
         if self.through >= self.aligned_from { Some(self.through) } else { None }
     }
 
+    /// The confirmed height's block time, unix ms: the furthest block applied (a height without a line on either
+    /// stream applies nothing, the time then the block's before it).
+    pub(crate) const fn confirmed_time_ms(&self) -> Option<u64> {
+        if self.confirmed().is_some() { Some(self.state.time()) } else { None }
+    }
+
+    /// One coin of the book, as the overlay reads it.
+    pub(crate) fn coin(&self, coin: &Coin) -> CoinBase<'_> {
+        let cloids = self.cloids.as_ref().and_then(|index| index.0.get(coin));
+        CoinBase::new(self.state.books().get(coin), self.state.unproven_in(coin), cloids)
+    }
+
+    /// The orders the cloid index holds.
+    pub(crate) fn cloid_orders(&self) -> usize {
+        self.cloids.as_ref().map_or(0, CloidIndex::orders)
+    }
+
     /// Blocks between the confirmed height and the newest batch received.
     pub(crate) fn alignment_blocks(&self) -> u64 {
         self.seen_statuses.max(self.seen_diffs).saturating_sub(self.through)
@@ -286,8 +367,9 @@ impl BookReplica {
         self.state.unproven_levels()
     }
 
-    /// A batch the listener applied: queued, then every height both streams have passed applied.
-    pub(crate) fn push(&mut self, batch: BookBatch) -> Result<(), ReplicaStop> {
+    /// A batch the listener applied: queued, then every height both streams have passed applied; the coins whose book
+    /// changed.
+    pub(crate) fn push(&mut self, batch: BookBatch) -> Result<HashSet<Coin>, ReplicaStop> {
         let height = batch.height();
         // an empty batch takes a place in the budget too (review 000604 r3 P2-1)
         self.backlog_events += batch_events(&batch);
@@ -309,8 +391,9 @@ impl BookReplica {
 
     /// Each height both streams have passed - one of them delivered a later one - applied whole, statuses then diffs:
     /// an order's status and its New diff share a block, and the state pairs them either way round.
-    fn apply_passed(&mut self) -> Result<(), ReplicaStop> {
+    fn apply_passed(&mut self) -> Result<HashSet<Coin>, ReplicaStop> {
         let passed = self.seen_statuses.min(self.seen_diffs).saturating_sub(1);
+        let mut changed = HashSet::new();
         loop {
             let next = [self.statuses.front().map(Batch::block_number), self.diffs.front().map(Batch::block_number)]
                 .into_iter()
@@ -319,17 +402,23 @@ impl BookReplica {
             let Some(height) = next.filter(|height| *height <= passed) else { break };
             while let Some(batch) = self.statuses.pop_front_if(|batch| batch.block_number() == height) {
                 self.backlog_events -= batch_events_of(&batch);
-                self.state.apply_order_statuses_hft(batch).map_err(|err| ReplicaStop::Apply(err.to_string()))?;
+                if let Some(cloids) = &mut self.cloids {
+                    batch.events_ref().iter().for_each(|status| cloids.on_status(status));
+                }
+                changed.extend(self.state.apply_order_statuses_hft(batch).map_err(|err| ReplicaStop::Apply(err.to_string()))?);
                 self.applied()?;
             }
             while let Some(batch) = self.diffs.pop_front_if(|batch| batch.block_number() == height) {
                 self.backlog_events -= batch_events_of(&batch);
-                self.state.apply_order_diffs_hft(batch).map_err(|err| ReplicaStop::Apply(err.to_string()))?;
+                changed.extend(self.state.apply_order_diffs_hft(batch).map_err(|err| ReplicaStop::Apply(err.to_string()))?);
                 self.applied()?;
             }
         }
         self.through = self.through.max(passed);
-        Ok(())
+        if self.cloids.is_none() && self.confirmed().is_some() {
+            self.cloids = Some(CloidIndex::of(&self.state));
+        }
+        Ok(changed)
     }
 
     /// The listener's cleanup cadence on the replica's own pairing caches.
@@ -449,8 +538,57 @@ pub(crate) mod tests {
         serde_json::json!({"new": {"sz": "1.0"}})
     }
 
-    fn remove() -> serde_json::Value {
+    pub(crate) fn remove() -> serde_json::Value {
         serde_json::json!("remove")
+    }
+
+    /// The pending book's blocks: `height` at `height` x 100 ms.
+    pub(crate) const fn block_time_ms(height: u64) -> u64 {
+        height * 100
+    }
+
+    fn node_time(ms: u64) -> String {
+        let time = chrono::DateTime::from_timestamp_millis(i64::try_from(ms).unwrap()).unwrap().naive_utc();
+        time.format("%Y-%m-%dT%H:%M:%S%.9f").to_string()
+    }
+
+    /// A status of a BTC order of user 0x..01: `oid` on `side` at `px`, `sz` of it left, placed at `placed_ms`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn btc_status(oid: u64, side: &str, px: &str, sz: &str, status: &str, cloid: Option<&str>, tif: &str, placed_ms: u64) -> serde_json::Value {
+        serde_json::json!({
+            "time": node_time(placed_ms), "user": "0x0000000000000000000000000000000000000001", "hash": null, "status": status,
+            "order": {
+                "coin": BTC, "side": side, "limitPx": px, "sz": sz, "oid": oid, "timestamp": placed_ms,
+                "triggerCondition": "N/A", "isTrigger": false, "triggerPx": "0.0", "children": [], "isPositionTpsl": false,
+                "reduceOnly": false, "orderType": "Limit", "origSz": "1.0", "tif": tif, "cloid": cloid
+            },
+        })
+    }
+
+    /// A BTC diff of user 0x..01's `oid`.
+    pub(crate) fn btc_diff(oid: u64, side: &str, px: &str, diff: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"user": "0x0000000000000000000000000000000000000001", "oid": oid, "side": side, "px": px, "coin": BTC, "raw_book_diff": diff})
+    }
+
+    pub(crate) fn new_diff(sz: &str) -> serde_json::Value {
+        serde_json::json!({"new": {"sz": sz}})
+    }
+
+    /// Block `height`'s line on each stream, statuses then diffs.
+    pub(crate) fn block_lines(height: u64, statuses: Vec<serde_json::Value>, diffs: Vec<serde_json::Value>) -> [BookBatch; 2] {
+        let line = |events: Vec<serde_json::Value>| {
+            let time = node_time(block_time_ms(height));
+            serde_json::json!({"local_time": time, "block_time": time, "block_number": height, "events": events})
+        };
+        [
+            BookBatch::Statuses(serde_json::from_value(line(statuses)).unwrap()),
+            BookBatch::Diffs(serde_json::from_value(line(diffs)).unwrap()),
+        ]
+    }
+
+    /// A replica of an empty book, standing at the end of height 0.
+    pub(crate) fn replica_of_empty_book() -> BookReplica {
+        fork_of(&empty_state(), 1_000_000)
     }
 
     /// A book's BTC orders, bids then asks.
@@ -575,7 +713,7 @@ pub(crate) mod tests {
             replica.push(BookBatch::Diffs(diffs(height, &[]))).unwrap();
         }
         assert_eq!(replica.backlog_events(), 3);
-        assert_eq!(replica.push(BookBatch::Diffs(diffs(4, &[]))), Err(ReplicaStop::Budget { events: 4 }));
+        assert_eq!(replica.push(BookBatch::Diffs(diffs(4, &[]))).err(), Some(ReplicaStop::Budget { events: 4 }));
     }
 
     /// A batch the replica cannot apply is a contract violation, reported for the feed to break.
@@ -583,7 +721,7 @@ pub(crate) mod tests {
     fn a_batch_that_does_not_apply_stops_the_replica() {
         let mut replica = fork_of(&empty_state(), 1_000);
         replica.push(BookBatch::Statuses(statuses(1, &[]))).unwrap();
-        let stop = replica.push(BookBatch::Diffs(diffs(1, &[(9, "B", "not a price", new_order())]))).and_then(|()| {
+        let stop = replica.push(BookBatch::Diffs(diffs(1, &[(9, "B", "not a price", new_order())]))).and_then(|_| {
             replica.push(BookBatch::Statuses(statuses(2, &[])))?;
             replica.push(BookBatch::Diffs(diffs(2, &[])))
         });
@@ -591,7 +729,7 @@ pub(crate) mod tests {
     }
 
     fn ask_101_unproven(state: &OrderBookState) -> bool {
-        state.level_unproven(BTC, crate::order_book::Side::Ask, crate::order_book::Px::parse_from_str("101.0").unwrap())
+        state.level_unproven(BTC, Side::Ask, crate::order_book::Px::parse_from_str("101.0").unwrap())
     }
 
     /// The reference book through `height` of `lines`, applied block by block.
@@ -729,6 +867,55 @@ pub(crate) mod tests {
         assert!(!ask_101_unproven(&state), "3 rested on an empty level");
     }
 
+    /// The cloid index follows the statuses - a resting one adds its order, any other takes it out - and a lookup
+    /// reads only what the book holds; the coins changed come back.
+    #[test]
+    fn the_cloid_index_follows_the_statuses() {
+        let mut replica = replica_of_empty_book();
+        let at = block_time_ms(1);
+        let statuses = vec![
+            btc_status(1, "A", "101.0", "1.0", "open", Some("0x01"), "Alo", at),
+            btc_status(5, "B", "101.0", "1.0", "open", Some("0x05"), "Ioc", at),
+            btc_status(5, "B", "101.0", "0.0", "filled", Some("0x05"), "Ioc", at),
+        ];
+        let mut changed = HashSet::new();
+        for batch in block_lines(1, statuses, vec![btc_diff(1, "A", "101.0", new_diff("1.0"))]).into_iter().chain(block_lines(2, vec![], vec![])) {
+            changed.extend(replica.push(batch).unwrap());
+        }
+        assert_eq!(changed, HashSet::from([Coin::new(BTC)]));
+        assert_eq!(replica.confirmed_time_ms(), Some(100));
+        assert!(replica.coin(&Coin::new(BTC)).holds(&Oid::new(1)));
+        assert_eq!(replica.cloid_orders(), 1, "the IOC's open left with its fill");
+        let filled = block_lines(2, vec![btc_status(1, "A", "101.0", "0.0", "filled", Some("0x01"), "Alo", at)], vec![btc_diff(1, "A", "101.0", remove())]);
+        for batch in filled.into_iter().chain(block_lines(3, vec![], vec![])) {
+            replica.push(batch).unwrap();
+        }
+        assert_eq!(replica.cloid_orders(), 0);
+    }
+
+    /// Review 000611 r1 P2-1: the listener applied an order's `open` before the fork, its New diff comes after - the
+    /// order rests in the replica only then. The cloid index, built once the replica is aligned, holds it, with the
+    /// fork's resting orders; before, there is none.
+    #[test]
+    fn the_cloid_index_holds_an_order_paired_across_the_fork() {
+        let mut listener = empty_state();
+        let [statuses, diffs] = block_lines(1, vec![btc_status(1, "A", "101.0", "1.0", "open", Some("0x01"), "Alo", 100)], vec![btc_diff(1, "A", "101.0", new_diff("1.0"))]);
+        apply(&mut listener, statuses);
+        apply(&mut listener, diffs);
+        let [statuses, _] = block_lines(2, vec![btc_status(2, "A", "102.0", "1.0", "open", Some("0x02"), "Alo", 200)], vec![]);
+        apply(&mut listener, statuses);
+        let mut replica = fork_of(&listener, 1_000);
+        assert_eq!(replica.cloid_orders(), 0, "not aligned");
+        let [_, diffs] = block_lines(2, vec![], vec![btc_diff(2, "A", "102.0", new_diff("1.0"))]);
+        replica.push(diffs).unwrap();
+        for batch in block_lines(3, vec![], vec![]) {
+            replica.push(batch).unwrap();
+        }
+        assert_eq!(replica.confirmed(), Some(2));
+        assert!(replica.coin(&Coin::new(BTC)).holds(&Oid::new(2)));
+        assert_eq!(replica.cloid_orders(), 2);
+    }
+
     fn copy(batch: &BookBatch) -> BookBatch {
         match batch {
             BookBatch::Statuses(batch) => BookBatch::Statuses(batch.clone()),
@@ -839,8 +1026,9 @@ pub(crate) mod tests {
     }
 
     /// Batch 1's measure (review 000604 r1, r3): the fork's time under the listener lock at bm's size - 524,302
-    /// resting orders over 1,238 coins on 2026-10-31 - with mainnet's strings (order type, tif, a cloid). Run in
-    /// release: `cargo test -p server --release --lib -- --ignored a_fork_at_mainnet_size --nocapture`.
+    /// resting orders over 1,238 coins on 2026-10-31 - with mainnet's strings (order type, tif, a cloid); and batch
+    /// 2b's cloid index built from it, on the pending thread. Run in release: `cargo test -p server --release --lib --
+    /// --ignored a_fork_at_mainnet_size --nocapture`.
     #[test]
     #[ignore = "a timing, run on demand in release"]
     fn a_fork_at_mainnet_size() {
@@ -884,6 +1072,9 @@ pub(crate) mod tests {
             drop(fork);
         }
         println!("fork of {} orders over {COINS} coins: {times:?}", state.order_count());
+        let started = std::time::Instant::now();
+        let index = CloidIndex::of(&state);
+        println!("cloid index of {} orders (built on the pending thread): {:?}", index.orders(), started.elapsed());
     }
 
     /// The fork is the listener's state, silent on the process-wide metrics: applying to it leaves the listener's

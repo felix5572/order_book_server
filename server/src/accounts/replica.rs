@@ -176,6 +176,16 @@ impl WireOrder {
     }
 }
 
+/// An `order`, `modify` or `batchModify`'s category in its bundle's execution: 1 when its new orders are all ALO, else
+/// 3; a `cancel`'s or `cancelByCloid`'s is `CANCEL_CATEGORY`, between them. Each category runs in the bundle's listed
+/// order (Codex, binary 6911b792 0x231ae60; research `mempool_pending_book_20261031`, 6.7M actions of 10,000 blocks:
+/// 99.83% of neighbours). The node marks' full ladder is in `marks::actions`; the pending book orders the mempool's by it.
+pub(crate) const fn placing_category(all_alo: bool) -> u8 {
+    if all_alo { 1 } else { 3 }
+}
+
+pub(crate) const CANCEL_CATEGORY: u8 = 2;
+
 /// One of a `batchModify`'s `modifies` (a `modify` carries the same two fields in its action).
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct WireModify {

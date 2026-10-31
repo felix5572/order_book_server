@@ -90,6 +90,18 @@ pub struct ServerConfig {
     /// The pending book replica's budget, in events, for the batches waiting on the slower book stream: past it the
     /// replica stops until both streams are near each other again.
     pub pending_backlog_events: usize,
+    /// The pending set's E: a mempool line no block confirmed this long after it leaves, by block time.
+    pub pending_expiry_ms: u64,
+    /// The pending set's H: how late after its block a mempool line may come and still be told apart by its hash;
+    /// also the warm-up after a block log gap.
+    pub pending_max_late_ms: u64,
+    /// The pending book is served while the mempool's newest line is at most this far ahead of the replica's
+    /// confirmed block time.
+    pub pending_max_span_ms: u64,
+    /// Mempool actions the pending set holds at most: past it they are dropped, a gap.
+    pub pending_max_actions: usize,
+    /// The pending set's S: no mempool line for this long before the confirmed block time is a gap.
+    pub pending_mempool_silence_ms: u64,
 }
 
 impl ServerConfig {

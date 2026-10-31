@@ -138,6 +138,29 @@ struct Args {
     /// each): past it the replica stops until both streams are within two blocks of each other again.
     #[arg(long, default_value = "200000")]
     pending_backlog_events: usize,
+
+    /// The pending set's expiry E (design 000604): a mempool line no block confirmed this long after it leaves the set,
+    /// by block time.
+    #[arg(long, default_value = "1000")]
+    pending_expiry_ms: u64,
+
+    /// The pending set's H: how late after its block a mempool line may come and still be told apart by its hash
+    /// (bm 10-31: up to 2.3 s); also the warm-up after a block log gap.
+    #[arg(long, default_value = "5000")]
+    pending_max_late_ms: u64,
+
+    /// The pending book is served while the mempool's newest line is at most this far ahead of the replica's
+    /// confirmed block time.
+    #[arg(long, default_value = "10000")]
+    pending_max_span_ms: u64,
+
+    /// Mempool actions the pending set holds at most: past it they are all dropped, an input gap.
+    #[arg(long, default_value = "500000")]
+    pending_max_actions: usize,
+
+    /// The pending set's S: no mempool line for this long before the confirmed block time is an input gap.
+    #[arg(long, default_value = "2000")]
+    pending_mempool_silence_ms: u64,
 }
 
 /// Start the Prometheus metrics HTTP server
@@ -208,6 +231,11 @@ async fn main() -> Result<()> {
         hip3_sip_marks: args.hip3_sip_marks,
         pending_book: args.pending_book,
         pending_backlog_events: args.pending_backlog_events,
+        pending_expiry_ms: args.pending_expiry_ms,
+        pending_max_late_ms: args.pending_max_late_ms,
+        pending_max_span_ms: args.pending_max_span_ms,
+        pending_max_actions: args.pending_max_actions,
+        pending_mempool_silence_ms: args.pending_mempool_silence_ms,
     };
 
     println!("Orderbook Server v{}", env!("CARGO_PKG_VERSION"));
@@ -241,7 +269,15 @@ async fn main() -> Result<()> {
         println!("  Re-sync: DISABLED (--no-resync) — drift tolerated, book will NOT self-heal");
     }
     if config.pending_book {
-        println!("  Pending book: ON (book replica, backlog budget {} events; mempool)", config.pending_backlog_events);
+        println!(
+            "  Pending book: ON (book replica, backlog budget {} events; mempool, expiry {} ms, max late {} ms, max span {} ms, max {} actions, silence {} ms)",
+            config.pending_backlog_events,
+            config.pending_expiry_ms,
+            config.pending_max_late_ms,
+            config.pending_max_span_ms,
+            config.pending_max_actions,
+            config.pending_mempool_silence_ms
+        );
     }
     println!();
 

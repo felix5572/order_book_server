@@ -3,33 +3,24 @@
 //! "nonce", "vaultAddress"?, "expiresAfter"?, "isFrontend"?, "signature"}]}]` (bm 10-31 09:10-09:11: 2,011 lines, ~140
 //! signed actions a line, the longest 1.6 MB). The watcher thread reads the lines from the end of the current file and
 //! parses each whole (signatures and unread fields skipped), in the file's order; the pending thread names each asset
-//! id by its coin. Batch 2a counts what it reads; the overlay comes with batch 2b.
+//! id by its coin (`MempoolIngest`), whose pending set takes each transaction (batch 2b, `shadow`).
 
-use std::{
-    path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    thread,
-};
+use std::{path::Path, sync::Arc, thread};
 
 use alloy::primitives::{Address, B256};
 use log::error;
 use serde::Deserialize;
 use sonic_rs::LazyValue;
-use tokio::{
-    sync::{mpsc, watch},
-    time::Instant,
-};
+use tokio::{sync::watch, time::Instant};
 
+use super::feed::{self, Feed, FeedEvent, FeedLosses, FeedReports};
 use crate::{
     accounts::{
         book::ActionCoins,
         replica::{Action, OrderRef, WireCancel, WireCancelByCloid, WireModify, WireOrder},
     },
     listeners::order_book::{
-        parallel::{FileLayout, LineShape, LineStream, LossCounts, WatchLoss, seconds_since_node_write, spawn_line_watcher},
+        parallel::{FileLayout, LineShape, LineStream, seconds_since_node_write},
         throttled_log_due,
     },
     metrics::{
@@ -104,56 +95,6 @@ pub(crate) struct Modify {
     pub(crate) order: RequestedOrder,
 }
 
-/// What the watcher sends, in the file's order.
-#[derive(Debug)]
-pub(crate) enum MempoolEvent {
-    /// A line read whole.
-    Tx(MempoolTx),
-    /// A terminated line that does not read (`parse_line`'s error): its actions are lost, at no time of its own.
-    /// `through` is its own place in the count of unreadable lines.
-    Unreadable { error: String, through: u64 },
-    /// Lines the reader skipped at its start, or discarded (a cut, overlong or not `[...]` line, a file lost);
-    /// `through` is the reader's loss count when it went out: every loss it counted up to then is reported.
-    Lost { loss: WatchLoss, through: u64 },
-}
-
-/// The watcher's events in the file's order, and its counts of what it lost.
-pub(crate) struct MempoolFeed {
-    pub(crate) events: mpsc::Receiver<MempoolEvent>,
-    pub(crate) losses: MempoolLosses,
-}
-
-/// What the watcher lost, each count raised the moment the loss is found (review 000609 r1-r2 P2-1): the lines after
-/// it, and the event reporting it, may wait behind a full queue. The reader's losses (`LossCounts`: found as soon as
-/// known, an overflow included) are reported by `Lost`, each through those the watcher had flagged when it went out
-/// (review 000609 r7: not through those merely found, an overflow still queued behind it); the lines that did not read
-/// by `Unreadable`. Each count has its own reports, in its own order, so a report never covers a loss found after the
-/// ones it reports.
-#[derive(Clone, Default)]
-pub(crate) struct MempoolLosses {
-    reader: LossCounts,
-    unreadable: Arc<AtomicU64>,
-}
-
-impl MempoolLosses {
-    /// (reader losses, unreadable lines) found so far.
-    fn found(&self) -> (u64, u64) {
-        (self.reader.found.load(Ordering::Acquire), self.unreadable.load(Ordering::Acquire))
-    }
-
-    /// A line read: its transaction, or its error counted.
-    fn event(&self, line: &str) -> MempoolEvent {
-        parse_line(line).map_or_else(
-            |error| MempoolEvent::Unreadable { error, through: self.unreadable.fetch_add(1, Ordering::Release) + 1 },
-            MempoolEvent::Tx,
-        )
-    }
-
-    fn lost(&self, loss: WatchLoss) -> MempoolEvent {
-        MempoolEvent::Lost { loss, through: self.reader.flagged.load(Ordering::Acquire) }
-    }
-}
-
 #[derive(Deserialize)]
 struct WireTx<'a> {
     tx_hash: B256,
@@ -171,9 +112,7 @@ struct WireSignedAction<'a> {
 
 /// Starts the watcher of `<data_dir>/mempool_txs`; its events come in order on the feed, which closes when the
 /// watcher ends (its inotify watch not set up).
-pub(crate) fn watch_mempool(data_dir: &Path) -> (MempoolFeed, thread::JoinHandle<()>) {
-    let (tx, events) = mpsc::channel(QUEUE_LINES);
-    let losses = MempoolLosses::default();
+pub(crate) fn watch_mempool(data_dir: &Path) -> (Feed<MempoolTx>, thread::JoinHandle<()>) {
     let stream = LineStream {
         name: "Mempool",
         lag_label: "mempool",
@@ -182,13 +121,9 @@ pub(crate) fn watch_mempool(data_dir: &Path) -> (MempoolFeed, thread::JoinHandle
         start_skip_is_loss: true,
         layout: FileLayout::Hourly,
         shape: LineShape::Array,
-        loss_counts: Some(losses.reader.clone()),
+        loss_counts: None,
     };
-    let (parsing, reporting) = (losses.clone(), losses.clone());
-    let wrap = move |line: String| parsing.event(&line);
-    let lost = move |loss| reporting.lost(loss);
-    let watcher = spawn_line_watcher(stream, tx, None, wrap, lost, None);
-    (MempoolFeed { events, losses }, watcher)
+    feed::watch(stream, QUEUE_LINES, parse_line)
 }
 
 /// One mempool line; an `Err` says what does not read.
@@ -314,52 +249,66 @@ impl ActionKind {
     }
 }
 
+/// What a mempool event brings the pending set.
+#[derive(Debug)]
+pub(crate) enum MempoolInput {
+    /// A transaction; `after_loss` when taken while the watcher had found a loss not yet reported (it may follow it).
+    Tx { tx: MempoolTx, after_loss: bool },
+    /// Lines lost.
+    Loss,
+}
+
 /// The pending thread's reading of the mempool: the anchor's asset table, the losses reported so far, and the events
 /// counted (batch 2a).
 pub(crate) struct MempoolIngest {
     action_coins: watch::Receiver<Option<Arc<ActionCoins>>>,
-    losses: MempoolLosses,
-    /// (reader losses, unreadable lines) the events taken so far reported through.
-    reported: (u64, u64),
+    reports: FeedReports,
     last_unreadable_log: Option<Instant>,
 }
 
 impl MempoolIngest {
-    pub(crate) const fn new(
-        action_coins: watch::Receiver<Option<Arc<ActionCoins>>>,
-        losses: MempoolLosses,
-    ) -> Self {
-        Self { action_coins, losses, reported: (0, 0), last_unreadable_log: None }
+    pub(crate) const fn new(action_coins: watch::Receiver<Option<Arc<ActionCoins>>>, losses: FeedLosses) -> Self {
+        Self { action_coins, reports: FeedReports::new(losses), last_unreadable_log: None }
     }
 
     /// Whether the watcher found a loss no event taken yet reports: what was taken since may follow it in the file.
     pub(crate) fn loss_unreported(&self) -> bool {
-        let (reader, unreadable) = self.losses.found();
-        reader > self.reported.0 || unreadable > self.reported.1
+        self.reports.loss_unreported()
     }
 
-    pub(crate) fn on_event(&mut self, event: MempoolEvent) {
+    /// The anchor's asset table; `None` before the first anchor.
+    pub(crate) fn action_coins(&self) -> Option<Arc<ActionCoins>> {
+        self.action_coins.borrow().clone()
+    }
+
+    pub(crate) fn on_event(&mut self, event: FeedEvent<MempoolTx>) -> MempoolInput {
+        self.reports.take(&event);
         match event {
-            MempoolEvent::Tx(tx) => self.on_tx(&tx),
-            MempoolEvent::Unreadable { error, through } => {
-                self.reported.1 = self.reported.1.max(through);
+            FeedEvent::Line(tx) => {
+                let after_loss = self.on_tx(&tx);
+                MempoolInput::Tx { tx, after_loss }
+            }
+            FeedEvent::Unreadable { error, .. } => {
                 PENDING_BOOK_MEMPOOL_LINES_TOTAL.with_label_values(&["unreadable"]).inc();
                 if throttled_log_due(&mut self.last_unreadable_log, Instant::now()) {
                     error!("pending book: a mempool line does not read, its actions lost: {error}");
                 }
+                MempoolInput::Loss
             }
-            MempoolEvent::Lost { loss, through } => {
-                self.reported.0 = self.reported.0.max(through);
-                PENDING_BOOK_MEMPOOL_LOSSES_TOTAL.with_label_values(&[loss_label(loss)]).inc();
+            FeedEvent::Lost { loss, .. } => {
+                PENDING_BOOK_MEMPOOL_LOSSES_TOTAL.with_label_values(&[feed::loss_label(loss)]).inc();
+                MempoolInput::Loss
             }
         }
     }
 
-    fn on_tx(&self, tx: &MempoolTx) {
+    /// Counts a transaction; whether it was taken after a loss not yet reported.
+    fn on_tx(&self, tx: &MempoolTx) -> bool {
         NODE_LINE_LAG.with_label_values(&["apply", "mempool"]).observe(seconds_since_node_write(tx.seen_ns));
-        let outcome = if self.loss_unreported() { "read_after_unreported_loss" } else { "read" };
+        let after_loss = self.loss_unreported();
+        let outcome = if after_loss { "read_after_unreported_loss" } else { "read" };
         PENDING_BOOK_MEMPOOL_LINES_TOTAL.with_label_values(&[outcome]).inc();
-        let coins = self.action_coins.borrow().clone();
+        let coins = self.action_coins();
         for action in &tx.actions {
             PENDING_BOOK_MEMPOOL_ACTIONS_TOTAL.with_label_values(&[action.kind.label()]).inc();
             for order in action.kind.orders() {
@@ -371,6 +320,7 @@ impl MempoolIngest {
                 PENDING_BOOK_MEMPOOL_UNNAMED_ASSETS_TOTAL.with_label_values(&[reason]).inc_by(unnamed);
             }
         }
+        after_loss
     }
 }
 
@@ -380,16 +330,12 @@ fn unnamed_assets(coins: Option<&ActionCoins>, assets: &[u32]) -> u64 {
     u64::try_from(unnamed).unwrap_or(u64::MAX)
 }
 
-const fn loss_label(loss: WatchLoss) -> &'static str {
-    match loss {
-        WatchLoss::Positioning => "positioning",
-        WatchLoss::Discard => "discard",
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use super::*;
+    use crate::listeners::order_book::parallel::WatchLoss;
 
     const SEEN: &str = "2026-10-31T09:14:38.693300829";
     const TX_HASH: &str = "0x49ed0336871d4fc91663a015ae3cac1388cf48566a4b25b69f240a89c0ee6666";
@@ -563,18 +509,18 @@ mod tests {
     /// own report, taken, clears it alone.
     #[test]
     fn a_line_that_does_not_read_is_counted_before_it_goes_out() {
-        let losses = MempoolLosses::default();
+        let losses = FeedLosses::default();
         let mut ingest = MempoolIngest::new(watch::channel(None).1, losses.clone());
         let bad_hash = line(&[CANCEL_F]).replace(TX_HASH, "0x49ed");
-        let unreadable = losses.event(&bad_hash);
+        let unreadable = losses.event(parse_line(&bad_hash));
         assert!(ingest.loss_unreported(), "known before the event is taken");
         losses.reader.found.fetch_add(1, Ordering::Release);
         losses.reader.flagged.fetch_add(1, Ordering::Release);
         ingest.on_event(unreadable);
         assert!(ingest.loss_unreported(), "the reader's loss stays unreported");
-        ingest.on_event(losses.lost(WatchLoss::Discard));
+        ingest.on_event(losses.lost::<MempoolTx>(WatchLoss::Discard));
         assert!(!ingest.loss_unreported());
-        assert!(matches!(losses.event(&line(&[CANCEL_F])), MempoolEvent::Tx(_)), "a line that reads counts nothing");
+        assert!(matches!(losses.event(parse_line(&line(&[CANCEL_F]))), FeedEvent::Line(_)), "a line that reads counts nothing");
         assert!(!ingest.loss_unreported());
     }
 
@@ -582,18 +528,18 @@ mod tests {
     /// `Lost` reports the line alone, the overflow stays unreported until its own.
     #[test]
     fn a_report_covers_the_losses_flagged_before_it_alone() {
-        let losses = MempoolLosses::default();
+        let losses = FeedLosses::default();
         let mut ingest = MempoolIngest::new(watch::channel(None).1, losses.clone());
         losses.reader.found.fetch_add(1, Ordering::Release);
         losses.reader.flagged.fetch_add(1, Ordering::Release);
         // the overflow comes while the watcher waits to send the line's report
         losses.reader.found.fetch_add(1, Ordering::Release);
-        let line_lost = losses.lost(WatchLoss::Discard);
-        assert!(matches!(line_lost, MempoolEvent::Lost { through: 1, .. }));
+        let line_lost = losses.lost::<MempoolTx>(WatchLoss::Discard);
+        assert!(matches!(line_lost, FeedEvent::Lost { through: 1, .. }));
         ingest.on_event(line_lost);
         assert!(ingest.loss_unreported(), "the overflow, found before the line's report went out, is not in it");
         losses.reader.flagged.fetch_add(1, Ordering::Release);
-        ingest.on_event(losses.lost(WatchLoss::Discard));
+        ingest.on_event(losses.lost::<MempoolTx>(WatchLoss::Discard));
         assert!(!ingest.loss_unreported());
     }
 
@@ -611,7 +557,7 @@ mod tests {
         fs::create_dir_all(&hour).unwrap();
         let path = hour.join("9");
         fs::write(&path, format!("{}\n", line(&[CANCEL_F]))).unwrap();
-        let (MempoolFeed { mut events, losses }, _watcher) = watch_mempool(&dir);
+        let (Feed { mut events, losses }, _watcher) = watch_mempool(&dir);
         let mut ingest = MempoolIngest::new(watch::channel(None).1, losses);
         let append = |text: String| fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(text.as_bytes()).unwrap();
         let mut next = || {
@@ -619,7 +565,7 @@ mod tests {
             loop {
                 match events.try_recv() {
                     Ok(event) => return event,
-                    Err(mpsc::error::TryRecvError::Empty) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
                     Err(err) => panic!("no mempool event: {err}"),
                 }
             }
@@ -629,25 +575,25 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         append(format!("{}\n", line(&[CANCEL_BY_CLOID])));
         let positioning = next();
-        assert!(matches!(positioning, MempoolEvent::Lost { loss: WatchLoss::Positioning, through: 0 }));
+        assert!(matches!(positioning, FeedEvent::Lost { loss: WatchLoss::Positioning, through: 0 }));
         ingest.on_event(positioning);
         assert!(!ingest.loss_unreported());
         let unreadable = line(&[ALO_BATCH.replacen(r#""tif":"Alo""#, r#""tif":"Fok""#, 1).as_str()]);
         append(format!("{}\n{unreadable}\n{{\"local_time\":\"{SEEN}\"}}\n{}\n", line(&[ALO_BATCH]), line(&[CANCEL_F])));
         let alo = next();
-        assert!(matches!(&alo, MempoolEvent::Tx(tx) if matches!(tx.actions[0].kind, ActionKind::Order(_))));
+        assert!(matches!(&alo, FeedEvent::Line(tx) if matches!(tx.actions[0].kind, ActionKind::Order(_))));
         assert!(ingest.loss_unreported(), "counted before the read's lines go out");
         ingest.on_event(alo);
         let unreadable = next();
-        assert!(matches!(unreadable, MempoolEvent::Unreadable { through: 1, .. }));
+        assert!(matches!(unreadable, FeedEvent::Unreadable { through: 1, .. }));
         ingest.on_event(unreadable);
         assert!(ingest.loss_unreported(), "the unreadable line reported, not the discarded one found before it");
         let cancel = next();
-        assert!(matches!(&cancel, MempoolEvent::Tx(tx) if matches!(tx.actions[0].kind, ActionKind::Cancel { .. })));
+        assert!(matches!(&cancel, FeedEvent::Line(tx) if matches!(tx.actions[0].kind, ActionKind::Cancel { .. })));
         assert!(ingest.loss_unreported(), "the cancel after the discarded line, taken knowing of the loss");
-        ingest.on_event(cancel);
+        assert!(matches!(ingest.on_event(cancel), MempoolInput::Tx { after_loss: true, .. }));
         let lost = next();
-        assert!(matches!(lost, MempoolEvent::Lost { loss: WatchLoss::Discard, through: 1 }), "the object line");
+        assert!(matches!(lost, FeedEvent::Lost { loss: WatchLoss::Discard, through: 1 }), "the object line");
         ingest.on_event(lost);
         assert!(!ingest.loss_unreported());
         fs::remove_dir_all(&dir).ok();
