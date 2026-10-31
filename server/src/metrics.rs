@@ -858,7 +858,9 @@ lazy_static! {
     ).expect("metric can be created");
 
     /// The pending set's actions leaving it or never held, by `op` (`place_alo`, `place_gtc`, `place_ioc`, `cancel`,
-    /// `cancel_by_cloid`, `modify`; `line`, `any`) and `outcome`: at arrival `held_already` (a line again),
+    /// `cancel_by_cloid`, `modify`; `line`, `any`) and `outcome`: refused by HL's rules before any book `expires_after`
+    /// (its action past its `expiresAfter` when its line came), `off_grid` (a price or size off its coin's grid; batch
+    /// 2d); at arrival `held_already` (a line again),
     /// `expired_on_arrival`, `late` (a block the replica confirmed holds its line); settled `confirmed` (its line's
     /// block confirmed), `expired`; `over_cap` (the set dropped whole; hyperliquid-trade design 000604 r6, batch 2b).
     pub static ref PENDING_BOOK_ACTIONS_TOTAL: IntCounterVec = IntCounterVec::new(
@@ -867,7 +869,8 @@ lazy_static! {
     ).expect("metric can be created");
 
     /// The pending actions' first application to their coin's overlay, by `op` and `outcome`: `rested`, `took`,
-    /// `missed` (an IOC with nothing to take), `alo_crossed`, `canceled`, `target_missing`, `target_ambiguous`,
+    /// `missed` (an IOC with nothing to take), `alo_crossed`, `min_notional` (worth under HL's 10 of the quote; batch
+    /// 2d), `canceled`, `target_missing`, `target_ambiguous`,
     /// `gtc_would_take`, `taker_not_supported` (a modify without always_place).
     pub static ref PENDING_BOOK_OVERLAY_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_pending_book_overlay_total", "Pending book overlay applications by outcome"),

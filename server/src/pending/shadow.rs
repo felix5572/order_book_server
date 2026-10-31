@@ -32,7 +32,7 @@ use alloy::primitives::{Address, B256};
 use rustc_hash::FxHashMap;
 
 use super::{
-    actions::{ActionId, PendingAction, Placement, book_actions},
+    actions::{ActionId, BookActions, PendingAction, Placement, book_actions},
     blocks::BlockHashes,
     mempool::MempoolTx,
     overlay::{BestLevel, CoinBase, Fill, Maker, Overlay},
@@ -267,7 +267,10 @@ impl Shadow {
         self.mempool_gaps(tx.seen_ns, after_loss, coins.is_some(), aligned);
         self.newest_seen_ns = Some(self.newest_seen_ns.map_or(tx.seen_ns, |newest| newest.max(tx.seen_ns)));
         let Some(coins) = coins else { return step };
-        let actions = book_actions(tx, coins, self.spot);
+        let BookActions { held: actions, refused } = book_actions(tx, coins, self.spot);
+        for labels in refused {
+            PENDING_BOOK_ACTIONS_TOTAL.with_label_values(&labels).inc();
+        }
         if let Some(outcome) = self.not_held(tx, aligned) {
             for (_, action) in &actions {
                 count_action(action, outcome);
@@ -698,7 +701,7 @@ pub(crate) mod tests {
             let tx = MempoolTx {
                 seen_ns: seen_ms * NS_PER_MS,
                 tx_hash: hash(byte),
-                actions: actions.into_iter().map(|kind| SignedAction { vault: None, kind }).collect(),
+                actions: actions.into_iter().map(|kind| SignedAction { vault: None, expires_after_ms: None, kind }).collect(),
             };
             self.shadow.on_tx(&tx, false, Some(&coins()), Some(&self.replica))
         }
@@ -944,7 +947,7 @@ pub(crate) mod tests {
         let tx = MempoolTx {
             seen_ns: 1_000 * NS_PER_MS,
             tx_hash: hash(1),
-            actions: vec![SignedAction { vault: None, kind: ActionKind::Order(vec![requested(10_107, true, "100", RequestedTif::Alo, Some("0x0a"))]) }],
+            actions: vec![SignedAction { vault: None, expires_after_ms: None, kind: ActionKind::Order(vec![requested(10_107, true, "100", RequestedTif::Alo, Some("0x0a"))]) }],
         };
         shadow.on_tx(&tx, false, Some(&coins()), None);
         assert_eq!(shadow.held("@107"), NONE_HELD);

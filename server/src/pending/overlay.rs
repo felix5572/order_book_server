@@ -13,6 +13,9 @@
 //!   the target left.
 //! - A level whose queue order the replica cannot prove names none of its replica orders as a fill's maker; its
 //!   pending orders queue behind them all the same, so what a taker takes past the replica's part is theirs.
+//! - An order worth less than HL's minimum, 10 of the quote at the price it would first trade at - its limit, or the
+//!   merged opposite best when that is better -, is rejected (the node's `minTradeNtlRejected`); a modify placing one
+//!   is rejected whole, its target left (an inference: no case seen).
 //! - Self-trades, margin, reduce-only and price bands are not modelled (design 000604's non-goals).
 
 use std::collections::{BTreeMap, VecDeque};
@@ -26,6 +29,9 @@ use crate::{
     order_book::{Oid, OrderBook, PriceLevel, Px, Side, Sz},
     types::inner::InnerL4Order,
 };
+
+/// HL's minimum order value, 10 of the quote, in a price's units times a size's (1e-8 each).
+const MIN_NOTIONAL: u128 = 10 * 100_000_000 * 100_000_000;
 
 /// A coin's orders by cloid in the replica.
 pub(crate) type CoinCloids = FxHashMap<String, Vec<Oid>>;
@@ -190,6 +196,9 @@ impl Overlay {
     }
 
     fn place(&mut self, base: CoinBase<'_>, id: ActionId, order: &Placement) -> Effect {
+        if self.below_min_notional(base, order, &Target::Missing) {
+            return Effect::of("min_notional");
+        }
         match order.tif {
             Tif::Alo if self.crosses(base, order.side, order.limit_px) => Effect::of("alo_crossed"),
             Tif::Alo => {
@@ -227,6 +236,9 @@ impl Overlay {
             OrderRef::Oid(oid) => self.confirmed_target(base, &Oid::new(*oid)),
             OrderRef::Cloid(cloid) => self.cloid_target(base, cloid),
         };
+        if self.below_min_notional(base, order, &target) {
+            return Effect::of("min_notional");
+        }
         if always_place {
             self.remove(target);
             return self.place(base, id, order);
@@ -288,6 +300,20 @@ impl Overlay {
             }
             Target::Missing | Target::Ambiguous => {}
         }
+    }
+
+    /// Whether HL refuses `order` for its value: under `MIN_NOTIONAL` at the price it would first trade at, its limit
+    /// or the merged opposite best (`target` out) when better - an order resting, and an ALO, is worth its limit (research
+    /// `mempool_pending_book_20261031`, bm 10-31 18:00-18:05: 8,949 non-ALO orders at the last trade price, every one
+    /// as the node ruled; 18:01-18:03, 425k ALOs at their limit, likewise; reduce-only ones too but for one closing a
+    /// whole position, which the set cannot tell).
+    fn below_min_notional(&self, base: CoinBase<'_>, order: &Placement, target: &Target) -> bool {
+        // an ALO never takes: its limit, crossing or not (review 000617 r1 P2-2)
+        let first = (order.tif != Tif::Alo)
+            .then(|| self.best_without(base, order.side.opposite(), target).filter(|best| reaches(order.side, order.limit_px, *best)))
+            .flatten();
+        let px = first.unwrap_or(order.limit_px);
+        u128::from(px.value()) * u128::from(order.sz.value()) < MIN_NOTIONAL
     }
 
     /// Whether an ALO of `side` at `px` would take: the merged opposite side's best reaches it.
@@ -734,8 +760,49 @@ mod tests {
     fn a_coin_without_a_book_has_its_pending_orders_alone() {
         let base = CoinBase::new(None, &[], None);
         let mut overlay = Overlay::default();
-        let effect = overlay.apply(base, &place(0, Side::Bid, "5", "1", Tif::Gtc, None));
+        let effect = overlay.apply(base, &place(0, Side::Bid, "5", "3", Tif::Gtc, None));
         assert_eq!(effect.outcome, "rested");
-        assert_eq!(overlay.bbo(base), (Some(level("5", "1", 1)), None));
+        assert_eq!(overlay.bbo(base), (Some(level("5", "3", 1)), None));
+    }
+
+    /// Batch 2d: HL's minimum, 10 of the quote at the price an order would first trade at. An IOC buying 0.099 up to
+    /// 200 is worth 9.999 at the best ask 101: refused, nothing taken; one selling 0.101 down to 50 is worth 9.999 at
+    /// the best bid 99. An ALO rests at its limit and is worth it: 0.0995 at 100.5 refused, 0.1 rests, 0.1 at 100 (10
+    /// exactly) too; an IOC of 0.1 then takes at 100.5.
+    #[test]
+    fn an_order_under_the_minimum_value_is_refused() {
+        let (effects, bbo) = run(&[
+            place(0, Side::Bid, "200", "0.099", Tif::Ioc, None),
+            place(1, Side::Ask, "50", "0.101", Tif::Ioc, None),
+            place(2, Side::Ask, "100.5", "0.0995", Tif::Alo, None),
+            place(3, Side::Ask, "100.5", "0.1", Tif::Alo, None),
+            place(4, Side::Bid, "100", "0.1", Tif::Alo, None),
+            place(5, Side::Bid, "200", "0.1", Tif::Ioc, None),
+        ]);
+        assert_eq!(outcomes(&effects), ["min_notional", "min_notional", "min_notional", "rested", "rested", "took"]);
+        assert_eq!(effects[5].fills, [Fill { px: px("100.5"), sz: sz("0.1"), maker: Maker::Pending { id: id(3), cloid: None } }]);
+        assert_eq!(bbo, (Some(level("100", "0.1", 1)), Some(level("101", "2", 2))));
+    }
+
+    /// Batch 2d: a modify whose new order is under the minimum is refused whole, its target left.
+    #[test]
+    fn a_modify_under_the_minimum_value_leaves_its_target() {
+        let modify = BookOp::Modify { target: OrderRef::Oid(1), always_place: true, order: order(Side::Bid, "99", "0.05", Tif::Alo, None) };
+        let (effects, bbo) = run(&[action(0, modify)]);
+        assert_eq!(outcomes(&effects), ["min_notional"]);
+        assert_eq!(bbo.0, Some(level("99", "1", 1)));
+    }
+
+    /// Review 000617 r1 P2-2: an ALO modify is worth its limit, crossing or not. Selling 0.102 at 98 is 9.996 - refused,
+    /// the ask 101 (oid 3) it targets left whole -, though 10.098 at the bid 99; buying 0.095 at 110 with `always_place` is
+    /// 10.45 - its target, the bid 99, goes, and the ALO crossing the ask 101 is refused -, though 9.595 at the ask.
+    #[test]
+    fn an_alo_modify_is_worth_its_limit() {
+        let sell = BookOp::Modify { target: OrderRef::Oid(3), always_place: false, order: order(Side::Ask, "98", "0.102", Tif::Alo, None) };
+        let (effects, bbo) = run(&[action(0, sell)]);
+        assert_eq!((outcomes(&effects), bbo.1), (vec!["min_notional"], Some(level("101", "2", 2))));
+        let buy = BookOp::Modify { target: OrderRef::Oid(1), always_place: true, order: order(Side::Bid, "110", "0.095", Tif::Alo, None) };
+        let (effects, bbo) = run(&[action(0, buy)]);
+        assert_eq!((outcomes(&effects), bbo.0), (vec!["alo_crossed"], Some(level("98", "2", 1))));
     }
 }

@@ -468,7 +468,7 @@ mod tests {
         install(&mut book, 1_000);
         publisher.track(&book);
         let first = coins.borrow_and_update().clone().unwrap();
-        assert_eq!((first.anchor_height, first.coins.get(&110_000).map(String::as_str)), (1_000, Some("xyz:TSLA")));
+        assert_eq!((first.anchor_height, first.coins.get(&110_000).map(|asset| asset.coin.as_str())), (1_000, Some("xyz:TSLA")));
         // review 000609 r1 P2-3: the table is the book's, built as the anchor installed, not at each step
         for _ in 0..128 {
             publisher.track(&book);

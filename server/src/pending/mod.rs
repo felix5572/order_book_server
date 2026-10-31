@@ -346,7 +346,7 @@ mod tests {
         let tx = MempoolTx {
             seen_ns: seen_ms * 1_000_000,
             tx_hash: alloy::primitives::B256::repeat_byte(hash),
-            actions: actions.into_iter().map(|kind| SignedAction { vault: None, kind }).collect(),
+            actions: actions.into_iter().map(|kind| SignedAction { vault: None, expires_after_ms: None, kind }).collect(),
         };
         MempoolInput::Tx { tx, after_loss: false }
     }

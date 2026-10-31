@@ -121,7 +121,17 @@ pub(crate) struct Available {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActionCoins {
     pub(crate) anchor_height: u64,
-    pub(crate) coins: FxHashMap<u32, String>,
+    pub(crate) coins: FxHashMap<u32, ActionAsset>,
+}
+
+/// An action asset id's coin and its order grid (HL API docs "Tick and lot size").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActionAsset {
+    pub(crate) coin: String,
+    /// `szDecimals`: sizes in at most these decimals.
+    pub(crate) size_decimals: u32,
+    /// `MAX_PERP_DECIMALS` or `MAX_SPOT_DECIMALS`: prices in at most these minus `size_decimals` decimals.
+    pub(crate) max_decimals: u32,
 }
 
 /// Why the view may not be served.

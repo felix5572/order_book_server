@@ -52,6 +52,8 @@ pub(crate) struct MempoolTx {
 pub(crate) struct SignedAction {
     /// The vault or subaccount it acts for; otherwise the signer acts, whom the line does not name.
     pub(crate) vault: Option<Address>,
+    /// Its `expiresAfter`, unix ms: HL refuses it past then.
+    pub(crate) expires_after_ms: Option<u64>,
     pub(crate) kind: ActionKind,
 }
 
@@ -74,9 +76,34 @@ pub(crate) struct RequestedOrder {
     pub(crate) is_buy: bool,
     pub(crate) limit_px: Px,
     pub(crate) sz: Sz,
+    /// The price and the size as written, for the coin's grid; `None` when not a plain decimal.
+    pub(crate) px_shape: Option<DecimalShape>,
+    pub(crate) sz_shape: Option<DecimalShape>,
     pub(crate) reduce_only: bool,
     pub(crate) cloid: Option<String>,
     pub(crate) tif: RequestedTif,
+}
+
+/// A plain decimal as written, trailing zeros of its fraction dropped: its decimals and its significant digits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecimalShape {
+    pub(crate) decimals: u32,
+    pub(crate) significant: u32,
+}
+
+impl DecimalShape {
+    /// `None` unless digits, optionally a point and more digits.
+    pub(crate) fn of(text: &str) -> Option<Self> {
+        let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+        let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+        if whole.is_empty() || !digits(whole) || !digits(fraction) {
+            return None;
+        }
+        let fraction = fraction.trim_end_matches('0');
+        let leading = whole.trim_start_matches('0');
+        let significant = if leading.is_empty() { fraction.trim_start_matches('0').len() } else { leading.len() + fraction.len() };
+        Some(Self { decimals: u32::try_from(fraction.len()).ok()?, significant: u32::try_from(significant).ok()? })
+    }
 }
 
 /// A limit order's time in force, or a trigger order.
@@ -108,6 +135,8 @@ struct WireSignedAction<'a> {
     action: Action<'a>,
     #[serde(rename = "vaultAddress")]
     vault_address: Option<Address>,
+    #[serde(rename = "expiresAfter")]
+    expires_after: Option<u64>,
 }
 
 /// Starts the watcher of `<data_dir>/mempool_txs`; its events come in order on the feed, which closes when the
@@ -170,7 +199,7 @@ fn signed_action(signed: &WireSignedAction<'_>) -> Result<SignedAction, String> 
         }
         _ => ActionKind::Other,
     };
-    Ok(SignedAction { vault: signed.vault_address, kind })
+    Ok(SignedAction { vault: signed.vault_address, expires_after_ms: signed.expires_after, kind })
 }
 
 /// An action's flag that is omitted when false (a modify's `a`, a cancel's `f`).
@@ -189,6 +218,8 @@ fn requested(order: &WireOrder) -> Result<RequestedOrder, String> {
         is_buy: order.b,
         limit_px: Px::parse_from_str(&order.p).map_err(|err| format!("order price {:?}: {err}", order.p))?,
         sz: Sz::parse_from_str(&order.s).map_err(|err| format!("order size {:?}: {err}", order.s))?,
+        px_shape: DecimalShape::of(&order.p),
+        sz_shape: DecimalShape::of(&order.s),
         reduce_only: order.r,
         cloid: order.c.clone(),
         tif,
@@ -239,7 +270,8 @@ impl ActionKind {
         }
     }
 
-    fn orders(&self) -> impl Iterator<Item = &RequestedOrder> {
+    /// The orders it places: an `order`'s, a modify's new ones; trigger orders among them.
+    pub(crate) fn orders(&self) -> impl Iterator<Item = &RequestedOrder> {
         let (orders, modifies) = match self {
             Self::Order(orders) => (orders.as_slice(), [].as_slice()),
             Self::Modify { modifies, .. } => ([].as_slice(), modifies.as_slice()),
@@ -335,6 +367,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
+    use crate::accounts::book::ActionAsset;
     use crate::listeners::order_book::parallel::WatchLoss;
 
     const SEEN: &str = "2026-10-31T09:14:38.693300829";
@@ -365,6 +398,8 @@ mod tests {
             is_buy,
             limit_px: Px::parse_from_str(px).unwrap(),
             sz: Sz::parse_from_str(sz).unwrap(),
+            px_shape: DecimalShape::of(px),
+            sz_shape: DecimalShape::of(sz),
             reduce_only,
             cloid: cloid.map(str::to_string),
             tif,
@@ -389,6 +424,7 @@ mod tests {
         let expected = vec![
             SignedAction {
                 vault: Some(address("0xfcf104006bfff47695c1dc21dad3e9de1e72098e")),
+                expires_after_ms: None,
                 kind: ActionKind::Order(vec![
                     order(0, true, "77387", "0.135", false, Some("0x0000000000000000000001a18b7b1eef"), Alo),
                     order(0, true, "77386", "0.135", false, Some("0x0000000000000000000001a18b7b1ef0"), Alo),
@@ -396,17 +432,20 @@ mod tests {
             },
             SignedAction {
                 vault: None,
+                expires_after_ms: Some(1_793_438_084_016),
                 kind: ActionKind::Order(vec![order(207, true, "0.00001", "1", false, Some("0x000000000000000018de99016980e8f8"), Ioc)]),
             },
-            SignedAction { vault: None, kind: ActionKind::Order(vec![order(159, false, "80.47", "0.12", false, None, FrontendMarket)]) },
-            SignedAction { vault: None, kind: ActionKind::Order(vec![order(15, true, "0.046304", "13490", true, None, Trigger)]) },
-            SignedAction { vault: None, kind: ActionKind::Cancel { fast: false, cancels: vec![WireCancel { a: 151, o: 591_362_660_114 }] } },
+            SignedAction { vault: None, expires_after_ms: None, kind: ActionKind::Order(vec![order(159, false, "80.47", "0.12", false, None, FrontendMarket)]) },
+            SignedAction { vault: None, expires_after_ms: None, kind: ActionKind::Order(vec![order(15, true, "0.046304", "13490", true, None, Trigger)]) },
+            SignedAction { vault: None, expires_after_ms: None, kind: ActionKind::Cancel { fast: false, cancels: vec![WireCancel { a: 151, o: 591_362_660_114 }] } },
             SignedAction {
                 vault: Some(address("0x80196a7475464e06de641df6c66e6e278cd364d5")),
+                expires_after_ms: None,
                 kind: ActionKind::Cancel { fast: true, cancels: vec![WireCancel { a: 159, o: 591_362_624_677 }] },
             },
             SignedAction {
                 vault: Some(address("0x7a9d45682babd8a2d79181623c75a7f615990b27")),
+                expires_after_ms: Some(1_793_438_083_555),
                 kind: ActionKind::CancelByCloid {
                     fast: true,
                     cancels: vec![WireCancelByCloid { asset: 26, cloid: "0xe6d9f86348a64e6a84800e9d88ab3b0a".to_string() }],
@@ -414,6 +453,7 @@ mod tests {
             },
             SignedAction {
                 vault: None,
+                expires_after_ms: None,
                 kind: ActionKind::Modify {
                     always_place: false,
                     modifies: vec![Modify {
@@ -424,6 +464,7 @@ mod tests {
             },
             SignedAction {
                 vault: None,
+                expires_after_ms: Some(1_793_438_093_687),
                 kind: ActionKind::Modify {
                     always_place: true,
                     modifies: vec![Modify { target: OrderRef::Oid(591_179_694_313), order: order(200, true, "0.004512", "0", true, None, Trigger) }],
@@ -431,6 +472,7 @@ mod tests {
             },
             SignedAction {
                 vault: None,
+                expires_after_ms: None,
                 kind: ActionKind::Modify {
                     always_place: true,
                     modifies: vec![Modify {
@@ -441,6 +483,7 @@ mod tests {
             },
             SignedAction {
                 vault: None,
+                expires_after_ms: None,
                 kind: ActionKind::Modify {
                     always_place: false,
                     modifies: vec![Modify {
@@ -449,8 +492,8 @@ mod tests {
                     }],
                 },
             },
-            SignedAction { vault: None, kind: ActionKind::Other },
-            SignedAction { vault: Some(address("0x9e1733b7d499d6a2a6d3f5d74b942bbf5266a34d")), kind: ActionKind::Other },
+            SignedAction { vault: None, expires_after_ms: None, kind: ActionKind::Other },
+            SignedAction { vault: Some(address("0x9e1733b7d499d6a2a6d3f5d74b942bbf5266a34d")), expires_after_ms: None, kind: ActionKind::Other },
         ];
         assert_eq!(tx.actions, expected);
     }
@@ -493,15 +536,30 @@ mod tests {
         assert_eq!(parse_line(&line(&[])).unwrap().actions, Vec::new(), "a transaction of no actions reads");
     }
 
+    /// Batch 2d: a price or a size as written, for its coin's grid; only plain decimals are shaped.
+    #[test]
+    fn a_decimal_reads_its_decimals_and_significant_digits() {
+        let shape = |text: &str| DecimalShape::of(text).map(|shape| (shape.decimals, shape.significant));
+        assert_eq!(shape("77655"), Some((0, 5)));
+        assert_eq!(shape("0.004246"), Some((6, 4)));
+        assert_eq!(shape("1043.630"), Some((2, 6)));
+        assert_eq!(shape("100000"), Some((0, 6)));
+        assert_eq!(shape("0.0"), Some((0, 0)));
+        for text in ["1e-5", ".5", "-1", "1.2.3", ""] {
+            assert_eq!(shape(text), None, "{text:?}");
+        }
+    }
+
     #[test]
     fn the_assets_named_are_one_per_order_cancel_or_modify() {
         let tx = parse_line(&line(&[ALO_BATCH, CANCEL_F, CANCEL_BY_CLOID, BATCH_MODIFY_ALWAYS, UPDATE_LEVERAGE])).unwrap();
         let assets: Vec<Vec<u32>> = tx.actions.iter().map(|action| action.kind.assets()).collect();
         assert_eq!(assets, vec![vec![0, 0], vec![159], vec![26], vec![110_060], vec![]]);
-        let mut coins = ActionCoins { anchor_height: 1, coins: [(0, "BTC".to_string()), (26, "AVAX".to_string())].into_iter().collect() };
+        let asset = |coin: &str| ActionAsset { coin: coin.to_string(), size_decimals: 2, max_decimals: 6 };
+        let mut coins = ActionCoins { anchor_height: 1, coins: [(0, asset("BTC")), (26, asset("AVAX"))].into_iter().collect() };
         assert_eq!(unnamed_assets(Some(&coins), &[0, 0, 159, 26]), 1);
         assert_eq!(unnamed_assets(None, &[0, 26]), 2, "no anchor names none");
-        coins.coins.insert(159, "xyz:TSLA".to_string());
+        coins.coins.insert(159, asset("xyz:TSLA"));
         assert_eq!(unnamed_assets(Some(&coins), &[0, 0, 159, 26]), 0);
     }
 

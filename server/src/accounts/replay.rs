@@ -32,6 +32,7 @@ use serde_json::json;
 use super::{
     actions::BlockAction,
     backstop::{self, Backstop, TakeoverPool, Takeovers},
+    book::ActionAsset,
     liquidation::LiquidationPx,
     margin::MarginTable,
     marks::fill_prices::{CollateralPrices, FillMarkRange},
@@ -553,12 +554,19 @@ impl MarginStates {
         self.markets.action_assets.get(&asset).map(String::as_str)
     }
 
-    /// Every exchange action asset id of the anchor's universe and the coin the node's streams name it by: each dex's
-    /// perps (`action_coin`'s) and the spot pairs (`SPOT_ORDER_ASSET_OFFSET` plus the pair, `spot_pair_coin`).
-    pub(crate) fn action_coins(&self) -> FxHashMap<u32, String> {
-        let spot = (0..self.markets.spot_pairs.len())
-            .filter_map(|pair| Some((SPOT_ORDER_ASSET_OFFSET.checked_add(u32::try_from(pair).ok()?)?, spot_pair_coin(pair))));
-        self.markets.action_assets.clone().into_iter().chain(spot).collect()
+    /// Every exchange action asset id of the anchor's universe, the coin the node's streams name it by and its order
+    /// grid: each dex's perps (`action_coin`'s) and the spot pairs (`SPOT_ORDER_ASSET_OFFSET` plus the pair,
+    /// `spot_pair_coin`, the base token's `szDecimals`).
+    pub(crate) fn action_coins(&self) -> FxHashMap<u32, ActionAsset> {
+        let perps = self.markets.action_assets.iter().map(|(asset, coin)| {
+            let size_decimals = self.markets.perps[coin].size_decimals;
+            (*asset, ActionAsset { coin: coin.clone(), size_decimals, max_decimals: MAX_PERP_DECIMALS })
+        });
+        let spot = self.markets.spot_pairs.iter().enumerate().filter_map(|(pair, spot)| {
+            let asset = SPOT_ORDER_ASSET_OFFSET.checked_add(u32::try_from(pair).ok()?)?;
+            Some((asset, ActionAsset { coin: spot_pair_coin(pair), size_decimals: spot.size_decimals, max_decimals: MAX_SPOT_DECIMALS }))
+        });
+        perps.chain(spot).collect()
     }
 
     pub(crate) fn routing_coin(&self, user: &Address) -> Option<&str> {
@@ -1199,16 +1207,20 @@ pub(crate) mod tests {
     }
 
     /// The pending book's asset table: each dex's perps by their action ids (HIP-3's 100000 + 10000 × its index), and
-    /// the spot pairs at 10000 + the pair, named as the node's streams name them.
+    /// the spot pairs at 10000 + the pair, named as the node's streams name them, each with its order grid.
     #[test]
     fn the_action_coins_name_every_perp_and_spot_pair_of_the_anchor() {
-        let mut coins: Vec<(u32, String)> = per_dex().action_coins().into_iter().collect();
+        let mut coins: Vec<(u32, String, u32, u32)> =
+            per_dex().action_coins().into_iter().map(|(asset, named)| (asset, named.coin, named.size_decimals, named.max_decimals)).collect();
         coins.sort();
+        let markets = per_dex();
+        let perp = |coin: &str| markets.markets.perps[coin].size_decimals;
+        let spot = |pair: usize| markets.markets.spot_pairs[pair].size_decimals;
         let expected = [
-            (0, "BTC"), (1, "PUMP"), (10_000, "PURR/USDC"), (10_001, "@1"), (10_002, "@2"), (110_000, "xyz:TSLA"),
-            (120_000, "flx:GOLD"),
+            (0, "BTC", perp("BTC"), 6), (1, "PUMP", perp("PUMP"), 6), (10_000, "PURR/USDC", spot(0), 8), (10_001, "@1", spot(1), 8),
+            (10_002, "@2", spot(2), 8), (110_000, "xyz:TSLA", perp("xyz:TSLA"), 6), (120_000, "flx:GOLD", perp("flx:GOLD"), 6),
         ];
-        assert_eq!(coins, expected.map(|(asset, coin)| (asset, coin.to_string())));
+        assert_eq!(coins, expected.map(|(asset, coin, size_decimals, max_decimals)| (asset, coin.to_string(), size_decimals, max_decimals)));
     }
 
     /// `per_dex` with HOLDER's main dex cash at `micro`.
