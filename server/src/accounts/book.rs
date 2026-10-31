@@ -132,6 +132,9 @@ pub(crate) struct ActionAsset {
     pub(crate) size_decimals: u32,
     /// `MAX_PERP_DECIMALS` or `MAX_SPOT_DECIMALS`: prices in at most these minus `size_decimals` decimals.
     pub(crate) max_decimals: u32,
+    /// A perp's largest market order value in its quote, a limit order's 10 times it (`max_market_order_value`);
+    /// `None` for a spot pair, none documented.
+    pub(crate) max_market_value: Option<u64>,
 }
 
 /// Why the view may not be served.

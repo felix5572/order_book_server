@@ -105,7 +105,8 @@ pub(crate) struct PendingAction {
 }
 
 /// A line's book actions: those held, in execution order, and those HL refuses by rule before any book - each one's
-/// [op label, why] (`expires_after`; `off_grid`, or `off_grid_batch` for one on the grid refused with its action).
+/// [op label, why] (`expires_after`; `off_grid`, or `off_grid_batch` for one on the grid refused with its action;
+/// `too_large`).
 #[derive(Debug, Default)]
 pub(crate) struct BookActions {
     pub(crate) held: Vec<(Coin, PendingAction)>,
@@ -131,6 +132,10 @@ pub(crate) fn book_actions(tx: &MempoolTx, coins: &ActionCoins, spot: bool) -> B
             if expired || batch_off_grid {
                 let why = if expired { "expires_after" } else if order.is_some_and(off_grid) { "off_grid" } else { "off_grid_batch" };
                 actions.refused.push([op.label(), why]);
+                continue;
+            }
+            if order.is_some_and(|order| too_large(order, named)) {
+                actions.refused.push([op.label(), "too_large"]);
                 continue;
             }
             let id = ActionId { tx_hash: tx.tx_hash, action: index, item };
@@ -161,6 +166,16 @@ fn category(kind: &ActionKind) -> Option<u8> {
         ActionKind::Cancel { .. } | ActionKind::CancelByCloid { .. } => Some(CANCEL_CATEGORY),
         ActionKind::Other => None,
     }
+}
+
+/// Whether HL refuses an order for its value: worth more at its limit than its coin's largest market order value, a
+/// limit order 10 times it - an IOC taken as a limit order, an inference (HL docs "Contract specifications"). HL fails
+/// that order alone, the action's others going on (bm 10-31 block responses, "Order value too large. Max is $500000":
+/// LIT market orders from $509,879; HYPE's "Max is $2000000" at $2,027,003; every one a `FrontendMarket`).
+fn too_large(order: &RequestedOrder, asset: &ActionAsset) -> bool {
+    let Some(market) = asset.max_market_value else { return false };
+    let cap = if order.tif == RequestedTif::FrontendMarket { market } else { market * 10 };
+    u128::from(order.limit_px.value()) * u128::from(order.sz.value()) > u128::from(cap) * 10_000_000_000_000_000
 }
 
 /// Each (place in the action, asset, op, the order it places as requested) of an action, in its order; a trigger
@@ -205,11 +220,13 @@ pub(crate) mod tests {
         pending::mempool::{DecimalShape, Modify, SignedAction},
     };
 
-    /// BTC, ETH and a spot pair, at their mainnet `szDecimals`.
+    /// BTC, ETH and a spot pair, at their mainnet `szDecimals`; ETH's largest market order $500k, as a 5x coin's.
     pub(crate) fn coins() -> ActionCoins {
-        let coins: FxHashMap<u32, ActionAsset> = [(0, "BTC", 5, 6), (1, "ETH", 4, 6), (10_107, "@107", 2, 8)]
+        let coins: FxHashMap<u32, ActionAsset> = [(0, "BTC", 5, 6, Some(30_000_000)), (1, "ETH", 4, 6, Some(500_000)), (10_107, "@107", 2, 8, None)]
             .into_iter()
-            .map(|(asset, coin, size_decimals, max_decimals)| (asset, ActionAsset { coin: coin.to_string(), size_decimals, max_decimals }))
+            .map(|(asset, coin, size_decimals, max_decimals, max_market_value)| {
+                (asset, ActionAsset { coin: coin.to_string(), size_decimals, max_decimals, max_market_value })
+            })
             .collect();
         ActionCoins { anchor_height: 1, coins }
     }
@@ -265,6 +282,22 @@ pub(crate) mod tests {
         refused[4] = ["place_alo", "off_grid_batch"];
         assert_eq!(actions.refused, refused);
         assert_eq!(actions.held.iter().map(|(coin, action)| (coin.value(), action.id.action)).collect::<Vec<_>>(), [("BTC".to_string(), 1)]);
+    }
+
+    /// Batch 2e: an order worth more at its limit than its coin's largest - ETH's market order $500k here, a limit
+    /// order 10 times it - is refused alone, the action's others going on.
+    #[test]
+    fn an_order_worth_too_much_is_refused_alone() {
+        use RequestedTif::{FrontendMarket, Ioc};
+        let order = |px: &str, size: &str, tif| RequestedOrder {
+            sz: Sz::parse_from_str(size).unwrap(),
+            sz_shape: DecimalShape::of(size),
+            ..requested(1, true, px, tif, None)
+        };
+        let orders = vec![order("2000", "255", FrontendMarket), order("2000", "227", FrontendMarket), order("2000", "255", Ioc), order("2000", "2501", Ioc)];
+        let actions = book_actions(&tx(vec![ActionKind::Order(orders)]), &coins(), false);
+        assert_eq!(actions.held.iter().map(|(_, action)| action.id.item).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(actions.refused, [["place_ioc", "too_large"]; 2]);
     }
 
     const MIXED_TICK_ACTION: &str = r#"{"signature":{"r":"0xb8e8a2ed193ba5cda5b6599d5e5d67c476c9e115b9f86ce17fe347b1f2f8e145","s":"0x89a7eab30cebce29300ad9ac703e761085230a00b6253aa91ae9b6c2b9dad44","v":27},"vaultAddress":"0xf36c562be0598b8ce109998b6aa2d53ffcd8316b","action":{"type":"order","orders":[{"a":0,"b":false,"p":"77896.3","s":"0.62909","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405259"},{"a":0,"b":false,"p":"77807.6","s":"0.47182","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405258"},{"a":0,"b":false,"p":"77741.1","s":"0.31454","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405257"},{"a":0,"b":false,"p":"77696.7","s":"0.12582","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405256"},{"a":0,"b":false,"p":"77679","s":"0.03145","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405255"},{"a":0,"b":true,"p":"77395.7","s":"0.64086","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405254"},{"a":0,"b":true,"p":"77501.4","s":"0.48064","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405253"},{"a":0,"b":true,"p":"77580.7","s":"0.32043","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405252"},{"a":0,"b":true,"p":"77633.6","s":"0.12817","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405251"},{"a":0,"b":true,"p":"77653.5","s":"0.03204","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405250"}],"grouping":"na"},"nonce":1793469848762,"expiresAfter":1793469858741}"#;

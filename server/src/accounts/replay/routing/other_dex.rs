@@ -90,7 +90,7 @@ mod tests {
         markets.asset_names[1] = vec!["unused fixture slot".into(); 4];
         markets.asset_names[1][3] = "xyz:GOLD".into();
         markets.perps.insert("xyz:GOLD".into(), PerpMarket { dex: 1, asset: 3, size_decimals: 4,
-            margin_mode: AssetMarginMode::Normal, default_leverage: 20 });
+            margin_mode: AssetMarginMode::Normal, max_leverage: 20 });
         (cp, markets, who)
     }
 

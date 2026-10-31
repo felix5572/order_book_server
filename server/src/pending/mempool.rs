@@ -555,7 +555,7 @@ mod tests {
         let tx = parse_line(&line(&[ALO_BATCH, CANCEL_F, CANCEL_BY_CLOID, BATCH_MODIFY_ALWAYS, UPDATE_LEVERAGE])).unwrap();
         let assets: Vec<Vec<u32>> = tx.actions.iter().map(|action| action.kind.assets()).collect();
         assert_eq!(assets, vec![vec![0, 0], vec![159], vec![26], vec![110_060], vec![]]);
-        let asset = |coin: &str| ActionAsset { coin: coin.to_string(), size_decimals: 2, max_decimals: 6 };
+        let asset = |coin: &str| ActionAsset { coin: coin.to_string(), size_decimals: 2, max_decimals: 6, max_market_value: None };
         let mut coins = ActionCoins { anchor_height: 1, coins: [(0, asset("BTC")), (26, asset("AVAX"))].into_iter().collect() };
         assert_eq!(unnamed_assets(Some(&coins), &[0, 0, 159, 26]), 1);
         assert_eq!(unnamed_assets(None, &[0, 26]), 2, "no anchor names none");

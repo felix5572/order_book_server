@@ -46,7 +46,7 @@ mod tests {
         // Keep the checkpoint scaffold's dex/asset indices; the ETH fill arithmetic uses recorded precision.
         markets.asset_names[1][0] = "ETH".into();
         markets.perps.insert("ETH".into(), PerpMarket { dex: 1, asset: 0, size_decimals: 4,
-            margin_mode: AssetMarginMode::Normal, default_leverage: 20 });
+            margin_mode: AssetMarginMode::Normal, max_leverage: 20 });
         (cp, markets, who)
     }
 

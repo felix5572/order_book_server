@@ -25,7 +25,7 @@ fn seeded_case(case: &serde_json::Value) -> (CheckpointAccounts, Markets, Addres
         markets.asset_names[dex][asset] = name.into();
         markets.perps.insert(name.into(), PerpMarket { dex, asset,
             size_decimals: value["szDecimals"].as_u64().unwrap() as u32,
-            margin_mode: if dex == 1 { AssetMarginMode::NoCross } else { AssetMarginMode::Normal }, default_leverage: 3 });
+            margin_mode: if dex == 1 { AssetMarginMode::NoCross } else { AssetMarginMode::Normal }, max_leverage: 3 });
     }
     markets.tables[1].insert(3, MarginTable::single(3).unwrap());
     let source = cp.accounts.get_mut(&who).unwrap();

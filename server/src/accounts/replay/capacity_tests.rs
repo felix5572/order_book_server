@@ -10,7 +10,7 @@ fn source(case: &serde_json::Value) -> (Account, Markets) {
         let asset = markets.asset_names[0].len();
         markets.asset_names[0].push(coin.clone());
         markets.perps.insert(coin.clone(), PerpMarket { dex: 0, asset, margin_mode: AssetMarginMode::Normal,
-            default_leverage: 4, size_decimals: u32::try_from(meta["size_decimals"].as_u64().unwrap()).unwrap() });
+            max_leverage: 4, size_decimals: u32::try_from(meta["size_decimals"].as_u64().unwrap()).unwrap() });
         let raw = &case["before"]["positions"][coin];
         let size_raw = raw["s"].as_i64().unwrap();
         let margin = if let Some(isolated) = raw["l"].get("I") {
@@ -117,7 +117,7 @@ fn cross_dex_source(case: &serde_json::Value) -> (Account, Markets) {
                 "normal" => AssetMarginMode::Normal, "noCross" => AssetMarginMode::NoCross,
                 mode => panic!("unhandled recorded margin mode {mode}"),
             },
-            default_leverage: u32::try_from(meta["default_leverage"].as_u64().unwrap()).unwrap(),
+            max_leverage: u32::try_from(meta["default_leverage"].as_u64().unwrap()).unwrap(),
             size_decimals: u32::try_from(meta["size_decimals"].as_u64().unwrap()).unwrap(),
         });
         let action_asset = if dex == 0 { asset } else { 100_000 + dex * 10_000 + asset };

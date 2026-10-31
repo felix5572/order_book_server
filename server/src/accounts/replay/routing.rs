@@ -400,7 +400,7 @@ pub(crate) mod tests {
     #[test]
     fn anth_nine_fills_close_the_split_under_native_last_alo_reservation() {
         let golden: serde_json::Value = serde_json::from_str(include_str!("unified_routing_golden.json")).unwrap();
-        let market = PerpMarket { dex: 10, asset: 1, size_decimals: 3, margin_mode: AssetMarginMode::NoCross, default_leverage: 4 };
+        let market = PerpMarket { dex: 10, asset: 1, size_decimals: 3, margin_mode: AssetMarginMode::NoCross, max_leverage: 4 };
         let markets = Markets { perps: std::iter::once(("io:ANTH".into(), market)).collect(), usdc_dexes: vec![true; 11], ..Markets::default() };
         let before = &golden["before"];
         let source = Account { mode: AccountMode::Unified, spot: vec![(USDC, before["spot_usdc_wei"].as_i64().unwrap())], lending: vec![],

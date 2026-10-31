@@ -57,10 +57,31 @@ struct PerpMarket {
     asset: usize,
     size_decimals: u32,
     margin_mode: AssetMarginMode,
+    /// Its margin table's first-tier max leverage: the default leverage's cap source (`default_leverage`) and its
+    /// largest order value's (`max_market_order_value`).
+    max_leverage: u32,
+}
+
+impl PerpMarket {
     /// A position opened without a setting takes min(first-tier max leverage, 20). Client 6911b792's constructor
     /// 0x44ce291..0x44ce2b6 caps only this default; a stored or successful explicit setting takes precedence.
     /// JPY H1192705810 / checkpoints1192700000..1192710000 confirm 20 on a 50x table (see the golden).
-    default_leverage: u32,
+    const fn default_leverage(&self) -> u32 {
+        if self.max_leverage < 20 { self.max_leverage } else { 20 }
+    }
+}
+
+/// A perp's largest market order value, in its quote, by its max leverage (HL docs "Contract specifications": $30M
+/// at 25x and over, $5M from 20x, $2M from 10x, else $500k; a limit order 10 times it). bm 10-31: LIT (5x) market
+/// orders refused from $509,879 ("Max is $500000"), $454,423 accepted; HYPE (10x) refused at $2,027,003 ("Max is
+/// $2000000").
+pub(crate) const fn max_market_order_value(max_leverage: u32) -> u64 {
+    match max_leverage {
+        25.. => 30_000_000,
+        20..=24 => 5_000_000,
+        10..=19 => 2_000_000,
+        _ => 500_000,
+    }
 }
 
 /// Where an event's money goes, resolved against the anchor's universe.
@@ -99,7 +120,7 @@ impl Markets {
                     asset: asset_index,
                     size_decimals: asset.size_decimals,
                     margin_mode: asset.margin_mode.clone(),
-                    default_leverage: table.first_max_leverage().min(20),
+                    max_leverage: table.first_max_leverage(),
                 };
                 markets.perps.insert(asset.name.clone(), market);
             }
@@ -559,12 +580,14 @@ impl MarginStates {
     /// `spot_pair_coin`, the base token's `szDecimals`).
     pub(crate) fn action_coins(&self) -> FxHashMap<u32, ActionAsset> {
         let perps = self.markets.action_assets.iter().map(|(asset, coin)| {
-            let size_decimals = self.markets.perps[coin].size_decimals;
-            (*asset, ActionAsset { coin: coin.clone(), size_decimals, max_decimals: MAX_PERP_DECIMALS })
+            let market = &self.markets.perps[coin];
+            let max_market_value = Some(max_market_order_value(market.max_leverage));
+            (*asset, ActionAsset { coin: coin.clone(), size_decimals: market.size_decimals, max_decimals: MAX_PERP_DECIMALS, max_market_value })
         });
         let spot = self.markets.spot_pairs.iter().enumerate().filter_map(|(pair, spot)| {
             let asset = SPOT_ORDER_ASSET_OFFSET.checked_add(u32::try_from(pair).ok()?)?;
-            Some((asset, ActionAsset { coin: spot_pair_coin(pair), size_decimals: spot.size_decimals, max_decimals: MAX_SPOT_DECIMALS }))
+            let named = ActionAsset { coin: spot_pair_coin(pair), size_decimals: spot.size_decimals, max_decimals: MAX_SPOT_DECIMALS, max_market_value: None };
+            Some((asset, named))
         });
         perps.chain(spot).collect()
     }
@@ -708,7 +731,7 @@ fn apply_perp_fill(account: &mut AccountMargin, markets: &Markets, block: u64, f
     // Same-block updateIsolatedMargin and a fill do not commute: reduction shares and opening capacity change.
     // This is an ordering/estimation gap, not a failed action or a reason to stop the account's replay.
     account.estimated |= account.margin_updated_in(block, market.dex);
-    let leverage = account.isolated_leverage.get(&key).copied().unwrap_or(market.default_leverage);
+    let leverage = account.isolated_leverage.get(&key).copied().unwrap_or_else(|| market.default_leverage());
     apply_isolated_fill_at(account, market, block, fill, cash, leverage).map_err(StopReason::Contradiction)
 }
 
@@ -1212,8 +1235,15 @@ pub(crate) mod tests {
     fn the_action_coins_name_every_perp_and_spot_pair_of_the_anchor() {
         let mut coins: Vec<(u32, String, u32, u32)> =
             per_dex().action_coins().into_iter().map(|(asset, named)| (asset, named.coin, named.size_decimals, named.max_decimals)).collect();
-        coins.sort();
+        let values: Vec<(u32, Option<u64>)> = {
+            let mut values: Vec<_> = per_dex().action_coins().into_iter().map(|(asset, named)| (asset, named.max_market_value)).collect();
+            values.sort_unstable();
+            values
+        };
         let markets = per_dex();
+        let leverage = |coin: &str| Some(max_market_order_value(markets.markets.perps[coin].max_leverage));
+        assert_eq!(values, [(0, leverage("BTC")), (1, leverage("PUMP")), (10_000, None), (10_001, None), (10_002, None), (110_000, leverage("xyz:TSLA")), (120_000, leverage("flx:GOLD"))]);
+        coins.sort();
         let perp = |coin: &str| markets.markets.perps[coin].size_decimals;
         let spot = |pair: usize| markets.markets.spot_pairs[pair].size_decimals;
         let expected = [
@@ -1221,6 +1251,14 @@ pub(crate) mod tests {
             (10_002, "@2", spot(2), 8), (110_000, "xyz:TSLA", perp("xyz:TSLA"), 6), (120_000, "flx:GOLD", perp("flx:GOLD"), 6),
         ];
         assert_eq!(coins, expected.map(|(asset, coin, size_decimals, max_decimals)| (asset, coin.to_string(), size_decimals, max_decimals)));
+    }
+
+    /// Batch 2e: the largest market order value by max leverage, at each tier's edges (HL docs "Contract
+    /// specifications").
+    #[test]
+    fn the_largest_market_order_value_goes_by_max_leverage() {
+        let values = [3, 9, 10, 19, 20, 24, 25, 40].map(max_market_order_value);
+        assert_eq!(values, [500_000, 500_000, 2_000_000, 2_000_000, 5_000_000, 5_000_000, 30_000_000, 30_000_000]);
     }
 
     /// `per_dex` with HOLDER's main dex cash at `micro`.
@@ -1970,7 +2008,7 @@ pub(crate) mod tests {
             account.isolated.insert((0, 0), case["before"][1].as_i64().unwrap() * WEI_PER_MICRO);
         }
         let before_total = totals(account).get(&0).copied().unwrap_or(0);
-        let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, default_leverage: 1 };
+        let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, max_leverage: 1 };
         let cash_flow = event.cash_wei(decimals, MAX_PERP_DECIMALS - decimals).unwrap();
         let leverage = u32::try_from(case["before"][2].as_u64().unwrap()).unwrap();
         apply_isolated_fill(account, &market, &event, cash_flow, leverage).unwrap();
@@ -2008,7 +2046,7 @@ pub(crate) mod tests {
         }
         account.pools = per_dex_pools(&[(0, 1_000_000_000_000_000_000)]);
         account.cross_exposure_seen.clear();
-        let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, default_leverage: leverage };
+        let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, max_leverage: leverage };
         let coin = case["coin"].as_str().unwrap().to_string();
         let markets = Markets { perps: FxHashMap::from_iter([(coin.clone(), market.clone())]),
             action_assets: FxHashMap::from_iter([(0, coin)]), usdc_dexes: vec![true], ..Markets::default() };
@@ -2138,7 +2176,7 @@ pub(crate) mod tests {
         account.unified_routing_known = false;
         account.cross_exposure_seen.clear();
         let market = PerpMarket { dex: 0, asset: 0, size_decimals: 0,
-            margin_mode: AssetMarginMode::Normal, default_leverage: leverage };
+            margin_mode: AssetMarginMode::Normal, max_leverage: leverage };
         let events = golden["events"].as_array().unwrap();
         assert_eq!(events.len(), expected_fills);
         for recorded in events {
@@ -2179,7 +2217,7 @@ pub(crate) mod tests {
             account.pools = per_dex_pools(&[(0, 1_000_000_000_000_000_000)]);
             account.cross_exposure_seen.clear();
             let market = PerpMarket { dex: 0, asset: 0, size_decimals: decimals,
-                margin_mode: AssetMarginMode::NoCross, default_leverage: leverage };
+                margin_mode: AssetMarginMode::NoCross, max_leverage: leverage };
             let mut fills = 0;
             for leg in golden["event"]["legs"].as_array().unwrap().iter().filter(|leg| leg[0] == case["user"]) {
                 let fill: Fill = serde_json::from_value(leg[1].clone()).unwrap();
@@ -2204,7 +2242,7 @@ pub(crate) mod tests {
                 checkpoint["exchange"]["locus"]["cls"][0]["meta"]["marginTableIdToMarginTable"][1][1]
                     ["margin_tiers"][0]["max_leverage"] = json!(maximum);
             });
-            assert_eq!(states.markets.perps["BTC"].default_leverage, expected);
+            assert_eq!(states.markets.perps["BTC"].default_leverage(), expected);
             assert_eq!(states.accounts[&user(ISOLATED)].isolated_leverage[&(0, 0)], 5, "stored settings are not defaults");
         }
     }
@@ -2265,7 +2303,7 @@ pub(crate) mod tests {
     fn unified_anth_routing_gap_is_estimated_but_total_cash_errors_are_not() {
         use crate::accounts::checkpoint::{DexAccount, Position};
         let golden: serde_json::Value = serde_json::from_str(include_str!("replay/unified_routing_golden.json")).unwrap();
-        let market = PerpMarket { dex: 10, asset: 1, size_decimals: 3, margin_mode: AssetMarginMode::NoCross, default_leverage: 4 };
+        let market = PerpMarket { dex: 10, asset: 1, size_decimals: 3, margin_mode: AssetMarginMode::NoCross, max_leverage: 4 };
         let markets = Markets { perps: std::iter::once(("io:ANTH".into(), market)).collect(),
             usdc_dexes: vec![true; 11], ..Markets::default() };
         let source = |endpoint: &serde_json::Value| Account {
@@ -2337,7 +2375,7 @@ pub(crate) mod tests {
                 let meta = &golden["markets"][&fill.coin];
                 let asset = meta["asset"].as_u64().unwrap() as usize;
                 let decimals = u32::try_from(meta["size_decimals"].as_u64().unwrap()).unwrap();
-                let market = PerpMarket { dex: 0, asset, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, default_leverage: 1 };
+                let market = PerpMarket { dex: 0, asset, size_decimals: decimals, margin_mode: AssetMarginMode::NoCross, max_leverage: 1 };
                 let event = FillEvent::of(&fill).unwrap(); // No fabricated execution mark in these samples.
                 let cash_flow = event.cash_wei(decimals, MAX_PERP_DECIMALS - decimals).unwrap();
                 let before_total = totals(&account)[&0];
@@ -2366,7 +2404,7 @@ pub(crate) mod tests {
             markets.action_assets.insert(u32::try_from(asset).unwrap(), coin.into());
             markets.perps.insert(coin.into(), PerpMarket { dex: 0, asset,
                 size_decimals: u32::try_from(meta["szDecimals"].as_u64().unwrap()).unwrap(),
-                margin_mode: AssetMarginMode::Normal, default_leverage: 10 });
+                margin_mode: AssetMarginMode::Normal, max_leverage: 10 });
         }
         let dex_states = golden["before"].as_array().unwrap().iter().map(|dex| {
             let mut positions = Vec::new();
@@ -2481,7 +2519,7 @@ pub(crate) mod tests {
         }).collect();
         account.cross_capacity.insert(0, cross_capacity::CrossCapacityProjection { holdings, advanced: false });
         account.cross_exposure_seen.insert(0);
-        let market = PerpMarket { dex: 0, asset: 0, size_decimals: 2, margin_mode: AssetMarginMode::NoCross, default_leverage: 1 };
+        let market = PerpMarket { dex: 0, asset: 0, size_decimals: 2, margin_mode: AssetMarginMode::NoCross, max_leverage: 1 };
         for e in golden["events"].as_array().unwrap() {
             let fill: Fill = serde_json::from_value(e["fill"].clone()).unwrap();
             let px = e["isolated_mark_raw"].as_u64().unwrap();

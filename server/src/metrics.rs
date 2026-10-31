@@ -859,8 +859,9 @@ lazy_static! {
 
     /// The pending set's actions leaving it or never held, by `op` (`place_alo`, `place_gtc`, `place_ioc`, `cancel`,
     /// `cancel_by_cloid`, `modify`; `line`, `any`) and `outcome`: refused by HL's rules before any book `expires_after`
-    /// (its action past its `expiresAfter` when its line came), `off_grid` (a price or size off its coin's grid; batch
-    /// 2d); at arrival `held_already` (a line again),
+    /// (its action past its `expiresAfter` when its line came), `off_grid` (a price or size off its coin's grid) and
+    /// `off_grid_batch` (one on it, refused with its action; batch 2d), `too_large` (worth more than its coin's largest
+    /// order; batch 2e); at arrival `held_already` (a line again),
     /// `expired_on_arrival`, `late` (a block the replica confirmed holds its line); settled `confirmed` (its line's
     /// block confirmed), `expired`; `over_cap` (the set dropped whole; hyperliquid-trade design 000604 r6, batch 2b).
     pub static ref PENDING_BOOK_ACTIONS_TOTAL: IntCounterVec = IntCounterVec::new(
