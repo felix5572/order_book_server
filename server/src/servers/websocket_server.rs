@@ -4,10 +4,12 @@ mod forced_flow;
 mod liquidation_candidates;
 mod mark_inputs;
 mod mark_prices;
+mod pending_book;
 
 use delivery::{BboDelivery, ConnectionDiagnostics, UserFillsDelivery, record_lag};
 use coin_positions::{AccountsSession, coin_positions_handler};
 use mark_prices::{MarkPricesSession, mark_prices_handler, reference_caches_handler};
+use pending_book::PendingBookSession;
 
 use crate::{
     accounts::runtime::{AccountsHandle, BookSource, start_accounts},
@@ -28,7 +30,7 @@ use crate::{
         WS_CONNECTIONS_TOTAL, WS_SEND_ERRORS_TOTAL,
     },
     order_book::{Coin, PxBand, Snapshot},
-    pending::{PendingFeeds, PendingParams, mempool::watch_mempool, spawn_pending_book, watch_blocks},
+    pending::{PendingBookHandle, PendingFeeds, PendingParams, mempool::watch_mempool, spawn_pending_book, watch_blocks},
     prelude::*,
     types::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
@@ -153,9 +155,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         &config,
         BookSource { trust: book_trust.clone(), listener: listener.clone(), revision: book_revision, fires: trigger_fires },
     )?;
-    if let Some(setup) = pending_setup {
-        start_pending_book(&config, setup, accounts.as_ref())?;
-    }
+    let pending_book = pending_setup.map(|setup| start_pending_book(&config, setup, accounts.as_ref())).transpose()?;
     let local_marks = start_local_marks(&config, accounts.as_ref(), &listener)?;
     // the forced flow's local calibre (design 000451 r4 revision 8)
     if let (Some(accounts), Some(marks)) = (&accounts, &local_marks) {
@@ -199,6 +199,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                 let book_trust = book_trust.clone();
                 let accounts = accounts.clone();
                 let local_marks = local_marks.clone();
+                let pending_book = pending_book.clone();
                 move |ws_upgrade, ConnectInfo(peer): ConnectInfo<SocketPeer>| async move {
                     ws_handler(
                         ws_upgrade,
@@ -208,6 +209,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                         book_trust.clone(),
                         accounts.clone(),
                         local_marks.clone(),
+                        pending_book.clone(),
                         bbo_only,
                         l2book_heartbeat_ms,
                         bbo_heartbeat_ms,
@@ -375,23 +377,28 @@ fn attach_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) 
     Ok(Some(PendingSetup { replica, params }))
 }
 
-/// The pending thread, reading the mempool and the block log below the node's data directory.
-fn start_pending_book(config: &ServerConfig, setup: PendingSetup, accounts: Option<&AccountsHandle>) -> Result<()> {
+/// The pending thread, reading the mempool and the block log below the node's data directory; the handle the connections
+/// take its frames from.
+fn start_pending_book(config: &ServerConfig, setup: PendingSetup, accounts: Option<&AccountsHandle>) -> Result<PendingBookHandle> {
     let accounts =
         accounts.ok_or("--pending-book needs --accounts: the mempool's asset ids are named by the account view's anchor")?;
     let data_dir = config.resolved_data_dir()?;
     let (mempool, _mempool_watcher) = watch_mempool(&data_dir);
     let (block_log, _block_log_watcher) = watch_blocks(&data_dir);
     let feeds = PendingFeeds { mempool, block_log, action_coins: accounts.action_coins() };
-    let thread = spawn_pending_book(setup.replica, feeds, config.pending_backlog_events, setup.params, config.include_spot)?;
-    // the shadow's end is no reason to stop the book: logged, and the feed stops on its closed queue
+    let handle = PendingBookHandle::new();
+    let thread = spawn_pending_book(setup.replica, feeds, config.pending_backlog_events, setup.params, config.include_spot, handle.clone())?;
+    // the shadow's end is no reason to stop the book: logged, the feed stops on its closed queue, and every
+    // subscription is told the pending book stopped
+    let ended = handle.clone();
     tokio::spawn(async move {
         match thread.await {
             Ok(()) => error!("pending book: the pending thread ended"),
             Err(err) => error!("pending book: the pending thread failed: {err}"),
         }
+        ended.end();
     });
-    Ok(())
+    Ok(handle)
 }
 
 fn start_local_marks(
@@ -489,6 +496,7 @@ fn ws_handler(
     book_trust: BookTrust,
     accounts: Option<AccountsHandle>,
     local_marks: Option<LocalMarks>,
+    pending_book: Option<PendingBookHandle>,
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
@@ -522,6 +530,7 @@ fn ws_handler(
             book_trust,
             accounts,
             local_marks,
+            pending_book,
             bbo_only,
             l2book_heartbeat_ms,
             bbo_heartbeat_ms,
@@ -542,6 +551,7 @@ async fn handle_socket(
     book_trust: BookTrust,
     accounts: Option<AccountsHandle>,
     local_marks: Option<LocalMarks>,
+    pending_book: Option<PendingBookHandle>,
     bbo_only: bool,
     l2book_heartbeat_ms: u64,
     bbo_heartbeat_ms: u64,
@@ -598,6 +608,7 @@ async fn handle_socket(
     // Joined at connect time, like the book's broadcast above.
     let mut coin_positions = accounts.map(|accounts| AccountsSession::new(accounts, book_trust.clone()));
     let mut mark_prices = local_marks.as_ref().map(MarkPricesSession::new);
+    let mut pending_book = pending_book.map(PendingBookSession::new);
 
     // Split the socket into an owned write half (driven by the writer task) and
     // a read half polled by this session task. Every send enqueues onto a
@@ -631,6 +642,7 @@ async fn handle_socket(
             &mut sub_guards,
             &mut coin_positions,
             &mut mark_prices,
+            &mut pending_book,
             &listener,
             &l4_cache,
             &book_trust,
@@ -696,6 +708,7 @@ async fn run_session(
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
     coin_positions: &mut Option<AccountsSession>,
     mark_prices: &mut Option<MarkPricesSession>,
+    pending_book: &mut Option<PendingBookSession>,
     listener: &Arc<Mutex<OrderBookListener>>,
     l4_cache: &Arc<L4SnapshotCache>,
     book_trust: &BookTrust,
@@ -855,7 +868,7 @@ async fn run_session(
                             outbound.diagnostics, internal_message_rx.len(), last_market_receive.elapsed().as_millis(), outbound.pending(), manager.subscriptions().len(), affected.len());
                         }
                         for sub in affected.iter().cloned() {
-                            alive &= receive_client_message(outbound, manager, ClientMessage::Unsubscribe { subscription: sub }, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, user_fills, bbo_delivery).await;
+                            alive &= receive_client_message(outbound, manager, ClientMessage::Unsubscribe { subscription: sub }, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, pending_book, user_fills, bbo_delivery).await;
                         }
                         if !affected.is_empty() {
                             alive &= outbound.send_message(ServerResponse::Error("Market event subscriptions withdrawn after a broadcast gap; resubscribe and reconcile missing events".to_string())).await;
@@ -886,7 +899,7 @@ async fn run_session(
                         bbo_delivery.lagged(n, outbound);
                         let affected: Vec<_> = manager.subscriptions().iter().filter(|s| matches!(s, Subscription::Bbo { .. })).cloned().collect();
                         for sub in affected {
-                            alive &= receive_client_message(outbound, manager, ClientMessage::Unsubscribe { subscription: sub }, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, user_fills, bbo_delivery).await;
+                            alive &= receive_client_message(outbound, manager, ClientMessage::Unsubscribe { subscription: sub }, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, pending_book, user_fills, bbo_delivery).await;
                         }
                         alive &= outbound.send_message(ServerResponse::Error("BBO subscriptions withdrawn after a broadcast gap; resubscribe for current prices".to_string())).await;
                     }
@@ -930,6 +943,13 @@ async fn run_session(
                 let _activity = outbound.diagnostics.activity("local_marks");
                 if let Some(session) = mark_prices.as_mut() {
                     alive &= session.on_snapshot(outbound, manager, snapshot).await;
+                }
+            }
+
+            received = next_pending_book(pending_book) => {
+                let _activity = outbound.diagnostics.activity("pending_book");
+                if let Some(session) = pending_book.as_mut() {
+                    alive &= session.on_event(outbound, manager, received).await;
                 }
             }
 
@@ -1006,7 +1026,7 @@ async fn run_session(
                                         alive &= outbound.send_pong();
                                     }
                                     _ => {
-                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, user_fills, bbo_delivery).await;
+                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, pending_book, user_fills, bbo_delivery).await;
                                     }
                                 }
                             }
@@ -1056,6 +1076,7 @@ async fn receive_client_message(
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
     coin_positions: &mut Option<AccountsSession>,
     mark_prices: &mut Option<MarkPricesSession>,
+    pending_book: &mut Option<PendingBookSession>,
     user_fills: &mut UserFillsDelivery,
     bbo_delivery: &mut BboDelivery,
 ) -> bool {
@@ -1101,6 +1122,13 @@ async fn receive_client_message(
             return outbound.send_message(ServerResponse::Error(refused)).await;
         };
         return session.on_client_message(outbound, manager, client_message, market, coin).await;
+    }
+    if matches!(subscription, Subscription::PendingBbo(_) | Subscription::PendingTrades(_)) {
+        let Some(session) = pending_book.as_mut() else {
+            let refused = format!("{} needs the server started with --pending-book", subscription.type_label());
+            return outbound.send_message(ServerResponse::Error(refused)).await;
+        };
+        return session.on_client_message(outbound, manager, client_message, subscription).await;
     }
     if let Subscription::LiquidationCandidates { coin, max_distance_bps } = subscription {
         let Some(session) = coin_positions.as_mut() else {
@@ -1211,6 +1239,16 @@ async fn next_coin_positions_frame(
 ) -> std::result::Result<Arc<crate::accounts::publish::AccountsFrame>, tokio::sync::broadcast::error::RecvError> {
     match session {
         Some(session) => session.next_frame().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The next pending book event of a connection; pending forever without `--pending-book` or a subscription. Cancel-safe.
+async fn next_pending_book(
+    session: &mut Option<PendingBookSession>,
+) -> std::result::Result<crate::pending::PendingEvent, tokio::sync::broadcast::error::RecvError> {
+    match session.as_mut() {
+        Some(session) => session.next().await,
         None => std::future::pending().await,
     }
 }
@@ -2296,7 +2334,7 @@ mod tests {
             get(move |incoming| {
                 let (listener, tx, cache, trust, accounts) =
                     (listener.clone(), tx.clone(), cache.clone(), trust.clone(), accounts.clone());
-                async move { ws_handler(incoming, tx, listener, cache, trust, accounts, None, false, 0, 0, yawc::Options::default(), None) }
+                async move { ws_handler(incoming, tx, listener, cache, trust, accounts, None, None, false, 0, 0, yawc::Options::default(), None) }
             }),
         );
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2437,7 +2475,7 @@ mod tests {
                     let (listener, tx) = (listener.clone(), tx.clone());
                     move |incoming, ConnectInfo(peer): ConnectInfo<SocketPeer>| {
                         let (listener, tx, cache, trust) = (listener.clone(), tx.clone(), cache.clone(), trust.clone());
-                        async move { ws_handler(incoming, tx, listener, cache, trust, None, None, false, 0, 50, yawc::Options::default(), Some(peer.0)) }
+                        async move { ws_handler(incoming, tx, listener, cache, trust, None, None, None, false, 0, 50, yawc::Options::default(), Some(peer.0)) }
                     }
                 }),
             );

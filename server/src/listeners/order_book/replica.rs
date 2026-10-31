@@ -341,6 +341,11 @@ impl BookReplica {
         if self.confirmed().is_some() { Some(self.state.time()) } else { None }
     }
 
+    /// The coins whose book holds an order.
+    pub(crate) fn coins(&self) -> impl Iterator<Item = &Coin> {
+        self.state.books().keys()
+    }
+
     /// One coin of the book, as the overlay reads it.
     pub(crate) fn coin(&self, coin: &Coin) -> CoinBase<'_> {
         let cloids = self.cloids.as_ref().and_then(|index| index.0.get(coin));

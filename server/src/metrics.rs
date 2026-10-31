@@ -919,6 +919,13 @@ lazy_static! {
         "Pending book block log blocks ahead of the replica"
     ).expect("metric can be created");
 
+    /// Frames the pending book published, by `kind`: `bbo` (a coin's moved best levels), `trades` (a step's predicted
+    /// trades), `availability` (a change of whether it may be served; batch 2c).
+    pub static ref PENDING_BOOK_FRAMES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_frames_total", "Pending book frames published"),
+        &["kind"]
+    ).expect("metric can be created");
+
     /// Coins whose merged best levels (the overlay over the replica) differ from the replica's.
     pub static ref PENDING_BOOK_MOVED_COINS: IntGauge = IntGauge::new(
         "orderbook_pending_book_moved_coins",
@@ -1060,6 +1067,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(PENDING_BOOK_GAPS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_SPAN_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_MOVED_COINS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LINES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LOSSES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LEAD_BLOCKS.clone())).ok();

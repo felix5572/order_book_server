@@ -36,6 +36,7 @@ use super::{
     blocks::BlockHashes,
     mempool::MempoolTx,
     overlay::{BestLevel, CoinBase, Fill, Maker, Overlay},
+    publish::{BestLevels, CoinPending},
     record::{BlockRecord, MAX_LEAD_BLOCKS},
 };
 use crate::{
@@ -113,6 +114,8 @@ pub(crate) enum Unavailable {
     WarmingUp,
     /// The mempool past the span limit ahead of the confirmed blocks.
     Span,
+    /// The pending thread ended: for good.
+    Stopped,
 }
 
 impl Unavailable {
@@ -123,6 +126,7 @@ impl Unavailable {
             Self::BlockLogBehind => "block_log_behind",
             Self::WarmingUp => "warming_up",
             Self::Span => "span",
+            Self::Stopped => "stopped",
         }
     }
 }
@@ -143,11 +147,20 @@ pub(crate) struct PendingTrade {
     pub(crate) vault: Option<Address>,
 }
 
-/// What a step changed: the trades predicted, and the coins whose merged book may have moved.
+/// What a step changed: the trades predicted, and the coins whose merged book may have moved. A change of every coin -
+/// the overlays dropped whole, a new generation - is the set's `take_refresh_all`.
 #[derive(Debug, Default)]
 pub(crate) struct Step {
     pub(crate) trades: Vec<PendingTrade>,
     pub(crate) changed: HashSet<Coin>,
+}
+
+/// One coin as the pending book serves it: the merged book's best levels, the replica's, and what the set holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CoinView {
+    pub(crate) bbo: BestLevels,
+    pub(crate) basis_bbo: BestLevels,
+    pub(crate) pending: CoinPending,
 }
 
 /// A coin's held actions in execution order, and their overlay.
@@ -211,6 +224,8 @@ pub(crate) struct Shadow {
     gaps: Gaps,
     held: usize,
     newest_seen_ns: Option<i64>,
+    /// The overlays were dropped or rebuilt whole since the publisher last framed every coin (review 000614 r1 P1-1).
+    refresh_all: bool,
     /// Settling steps taken with a replica aligned.
     #[cfg(test)]
     settles: usize,
@@ -234,6 +249,7 @@ impl Shadow {
             },
             held: 0,
             newest_seen_ns: None,
+            refresh_all: false,
             #[cfg(test)]
             settles: 0,
         }
@@ -317,6 +333,13 @@ impl Shadow {
         PENDING_BOOK_GAPS_TOTAL.with_label_values(&["replica"]).inc();
         self.gaps.replica = true;
         self.coins.values_mut().for_each(|actions| actions.overlay = Overlay::default());
+        self.refresh_all = true;
+    }
+
+    /// Whether every coin's frame is to be built again - the overlays dropped or rebuilt whole since it last was -, the
+    /// flag taken. The publisher takes it when it can frame, a replica aligned.
+    pub(crate) const fn take_refresh_all(&mut self) -> bool {
+        std::mem::replace(&mut self.refresh_all, false)
     }
 
     /// Whether the pending thread takes the log's next block: the record holds fewer than `MAX_LEAD_BLOCKS` above the
@@ -371,6 +394,23 @@ impl Shadow {
         self.coins.get(coin).map_or_else(|| Overlay::default().bbo(base), |actions| actions.overlay.bbo(base))
     }
 
+    /// `coin` as served: its merged and its replica's best levels, and its actions held.
+    pub(crate) fn coin_view(&self, coin: &Coin, replica: &BookReplica) -> CoinView {
+        let actions = self.coins.get(coin).map_or(&[][..], |actions| actions.actions.as_slice());
+        let seen_ms = |seen_ns: Option<i64>| seen_ns.map(unix_ms);
+        let pending = CoinPending {
+            actions: actions.len(),
+            oldest_seen_ms: seen_ms(actions.iter().map(|action| action.seen_ns).min()),
+            newest_seen_ms: seen_ms(actions.iter().map(|action| action.seen_ns).max()),
+        };
+        CoinView { bbo: self.bbo(coin, replica), basis_bbo: Overlay::default().bbo(replica.coin(coin)), pending }
+    }
+
+    /// The coins the set holds actions on.
+    pub(crate) fn coins(&self) -> impl Iterator<Item = &Coin> {
+        self.coins.keys()
+    }
+
     /// A line's bearing on the mempool's gaps: one taken after a loss, or without an asset table, opens one; a fresh one
     /// - no more than S older than the confirmed block time - ends it (review 000611 r1 P1-2).
     fn mempool_gaps(&mut self, seen_ns: i64, after_loss: bool, named: bool, aligned: Option<Aligned<'_>>) {
@@ -410,9 +450,10 @@ impl Shadow {
                 }
                 step.trades.extend(effect.fills.into_iter().map(|fill| predicted(&coin, &action, order, fill)));
             }
-            step.changed.insert(coin);
         }
         actions.actions.push(action);
+        // its frame's pending counts change even when its book does not
+        step.changed.insert(coin);
     }
 
     /// The one settling step (r7 revision 18): the lines a block at or below the confirmed height holds, and those
@@ -432,6 +473,7 @@ impl Shadow {
         self.record.evict(height, unix_ms(confirmed_ns - self.params.retention_ns()));
         if new_generation {
             changed.extend(self.coins.keys().cloned());
+            self.refresh_all = true;
         }
         for coin in &changed {
             if let Some(actions) = self.coins.get_mut(coin) {
@@ -493,6 +535,7 @@ impl Shadow {
             actions.actions.iter_mut().for_each(|action| action.unknown = true);
             actions.overlay = Overlay::default();
         }
+        self.refresh_all = true;
     }
 
     /// The block log's gap ended at `t_end_ns`, the time of the block after it (r7 revision 19).
@@ -512,6 +555,7 @@ impl Shadow {
         self.coins.clear();
         self.lines.clear();
         self.held = 0;
+        self.refresh_all = true;
         if let Some(newest_seen_ns) = self.newest_seen_ns {
             self.gaps.ready_from(newest_seen_ns + self.params.expiry_ns);
         }
@@ -525,6 +569,13 @@ impl Shadow {
     #[cfg(test)]
     fn held(&self, coin: &str) -> Vec<(usize, bool)> {
         self.coins.get(&Coin::new(coin)).map_or_else(Vec::new, |actions| actions.actions.iter().map(|action| (action.id.action, action.unknown)).collect())
+    }
+}
+
+impl PendingTrade {
+    /// The taker's line's `local_time`, unix ms.
+    pub(crate) fn seen_ms(&self) -> u64 {
+        unix_ms(self.seen_ns)
     }
 }
 

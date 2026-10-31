@@ -2143,11 +2143,13 @@ impl ActiveSubs {
             // Low-frequency side stream: the listener broadcasts it whenever any receiver
             // exists (it never touches the book), so it registers no gated family.
             Subscription::Oracle { .. } => Vec::new(),
-            // Pushed by the account view's own broadcast, or the local marks', never through the book.
+            // Pushed by the account view's own broadcast, the local marks' or the pending book's, never through the book.
             Subscription::CoinPositions { .. }
             | Subscription::LiquidationCandidates { .. }
             | Subscription::MarkPrices { .. }
             | Subscription::Hip3MarkPrices { .. }
+            | Subscription::PendingBbo(_)
+            | Subscription::PendingTrades(_)
             | Subscription::ForcedFlow(_) => Vec::new(),
         }
     }

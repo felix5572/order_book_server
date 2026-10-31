@@ -37,6 +37,10 @@ pub(crate) const EXT_LIQUIDATION_CANDIDATES: &str = "extLiquidationCandidates";
 /// The subscription type and channel of the forced flow, and the `GET` path of the same (design 000451).
 pub(crate) const EXT_FORCED_FLOW: &str = "extForcedFlow";
 pub(crate) const EXT_FORCED_FLOW_PATH: &str = "/extForcedFlow";
+/// The pending book's channels (hyperliquid-trade design 000604 section 4): the merged book's best levels, and the
+/// predicted trades.
+pub(crate) const EXT_PENDING_BBO: &str = "extPendingBbo";
+pub(crate) const EXT_PENDING_TRADES: &str = "extPendingTrades";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "method")]
@@ -89,6 +93,29 @@ pub(crate) enum Subscription {
     /// `--hip3-sip-marks`.
     #[serde(rename = "extHip3MarkPrices", rename_all = "camelCase")]
     Hip3MarkPrices { coin: String },
+    /// `extPendingBbo`: one coin's best levels as the mempool's pending actions will leave the book, beside the
+    /// confirmed ones (hyperliquid-trade design 000604 section 4); needs `--pending-book`.
+    #[serde(rename = "extPendingBbo")]
+    PendingBbo(PendingBboParams),
+    /// `extPendingTrades`: the trades predicted for the mempool's pending takers, of one coin, of one user (the maker,
+    /// or the taker's vault), or all; needs `--pending-book`.
+    #[serde(rename = "extPendingTrades")]
+    PendingTrades(PendingTradesParams),
+}
+
+/// `extPendingBbo`'s parameters: an unknown one refuses the subscription (design 000604 section 4).
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PendingBboParams {
+    pub(crate) coin: String,
+}
+
+/// `extPendingTrades`'s parameters, each a filter when given; an unknown one refuses the subscription.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PendingTradesParams {
+    pub(crate) coin: Option<String>,
+    pub(crate) user: Option<String>,
 }
 
 /// `extForcedFlow`'s parameters: an unknown one refuses the subscription (design 000451 r4 revision 9), so a misspelt
@@ -158,7 +185,7 @@ impl Subscription {
                 debug!("Valid subscription");
                 true
             }
-            Self::L4Book { coin } | Self::Bbo { coin } | Self::BookDiffs { coin } => {
+            Self::L4Book { coin } | Self::Bbo { coin } | Self::BookDiffs { coin } | Self::PendingBbo(PendingBboParams { coin }) => {
                 if !universe.contains(coin) {
                     debug!("Invalid subscription: coin not found");
                     return false;
@@ -180,6 +207,9 @@ impl Subscription {
             Self::ForcedFlow(_) => true,
             Self::LiquidationCandidates { coin, max_distance_bps } => {
                 coin.as_ref().is_none_or(|coin| !coin.is_empty()) && *max_distance_bps <= MAX_CANDIDATE_DISTANCE_BPS
+            }
+            Self::PendingTrades(PendingTradesParams { coin, user }) => {
+                coin.as_ref().is_none_or(|coin| universe.contains(coin)) && user.as_deref().is_none_or(is_user_address)
             }
         }
     }
@@ -214,6 +244,8 @@ impl Subscription {
             Self::MarkPrices { .. } => EXT_MARK_PRICES,
             Self::Hip3MarkPrices { .. } => EXT_HIP3_MARK_PRICES,
             Self::ForcedFlow(_) => EXT_FORCED_FLOW,
+            Self::PendingBbo(_) => EXT_PENDING_BBO,
+            Self::PendingTrades(_) => EXT_PENDING_TRADES,
         }
     }
 }
