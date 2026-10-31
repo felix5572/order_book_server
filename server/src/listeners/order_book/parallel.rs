@@ -3,7 +3,7 @@
 
 use crate::{
     metrics::{NODE_LINE_LAG, NODE_FILE_IO_ERRORS_TOTAL},
-    types::node_data::{EventSource, line_local_time_unix_nanos},
+    types::node_data::{EventSource, array_line_local_time_unix_nanos, line_local_time_unix_nanos},
 };
 use log::{error, info, warn};
 use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
@@ -14,7 +14,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
     },
     thread,
     time::{Duration, Instant},
@@ -109,15 +109,40 @@ pub(super) fn now_unix_ms() -> u64 {
 }
 
 /// Seconds since a node write stamped `node_unix_nanos` (same host clock).
-pub(super) fn seconds_since_node_write(node_unix_nanos: i64) -> f64 {
+pub(crate) fn seconds_since_node_write(node_unix_nanos: i64) -> f64 {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     (i128::try_from(now).unwrap_or(i128::MAX) - i128::from(node_unix_nanos)) as f64 / 1e9
 }
 
 /// How fresh the data is when the watcher sees it: lag of the newest line read.
-fn observe_read_lag(label: &str, lines: &[String]) {
-    if let Some(node_ns) = lines.last().and_then(|line| line_local_time_unix_nanos(line)) {
+fn observe_read_lag(label: &str, shape: LineShape, lines: &[String]) {
+    if let Some(node_ns) = lines.last().and_then(|line| shape.local_time_unix_nanos(line)) {
         NODE_LINE_LAG.with_label_values(&["read", label]).observe(seconds_since_node_write(node_ns));
+    }
+}
+
+/// The JSON value each line of a stream holds: an object in the node's book, fill and account streams, an array in its
+/// mempool (`[local_time, tx]`). A terminated line of another shape is discarded as malformed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineShape {
+    Object,
+    Array,
+}
+
+impl LineShape {
+    fn holds(self, line: &str) -> bool {
+        match self {
+            Self::Object => line.starts_with('{') && line.ends_with('}'),
+            Self::Array => line.starts_with('[') && line.ends_with(']'),
+        }
+    }
+
+    /// The node's write time of a line of this shape, read from its prefix.
+    fn local_time_unix_nanos(self, line: &str) -> Option<i64> {
+        match self {
+            Self::Object => line_local_time_unix_nanos(line),
+            Self::Array => array_line_local_time_unix_nanos(line),
+        }
     }
 }
 
@@ -150,6 +175,7 @@ impl FileLayout {
             Self::ReplicaSessions => leaf.parse::<u64>().is_ok(),
         }
     }
+
 }
 
 /// The child directory with the greatest name.
@@ -201,9 +227,9 @@ struct FileReader {
     // boundary, which must not fail the whole read.
     partial_line: Vec<u8>,
     base_dir: PathBuf, // Base streaming directory to scan for new files
-    // Set when buffered data had to be discarded (oversized partial line);
-    // drained by take_desynced so the watcher can notify the listener.
-    desynced: bool,
+    // Data had to be discarded (an oversized partial line, a malformed line, a file lost); drained by take_desynced
+    // so the watcher can notify the listener.
+    losses: Losses,
     // Failed opens and reads share an episode: reopening a bad reader is not recovery.
     io_failures: FileIoFailures,
     // (dev, ino) of the file that file_position refers to. Catches same-path
@@ -214,6 +240,42 @@ struct FileReader {
     // Cap on one un-terminated line (MAX_PARTIAL_LINE_BYTES for the book streams).
     max_line_bytes: usize,
     layout: FileLayout,
+    shape: LineShape,
+}
+
+/// A stream's loss counts, for a consumer that must know of a loss before the lines after it (the pending book's
+/// mempool, review 000609 r1-r7): `found` the moment a loss is known - the reader finding one, the notice gate an
+/// overflow - and `flagged` as the watcher flags it for its next `desync`, which reports every loss flagged before it
+/// and no other (a loss found but not yet flagged, an overflow still queued, stays unreported).
+#[derive(Clone, Default)]
+pub(crate) struct LossCounts {
+    pub(crate) found: Arc<AtomicU64>,
+    pub(crate) flagged: Arc<AtomicU64>,
+}
+
+/// The reader's losses: one waiting to be reported, and the stream's counts of them where it keeps them.
+#[derive(Default)]
+struct Losses {
+    desynced: bool,
+    counts: Option<LossCounts>,
+}
+
+impl Losses {
+    /// A loss the reader found: found and flagged at once, its desync out after this read's lines.
+    fn flag(&mut self) {
+        if let Some(counts) = &self.counts {
+            counts.found.fetch_add(1, AtomicOrdering::Release);
+        }
+        self.flag_found();
+    }
+
+    /// A loss found before (an overflow, counted found by the notice gate) flagged now: its desync goes out next.
+    fn flag_found(&mut self) {
+        self.desynced = true;
+        if let Some(counts) = &self.counts {
+            counts.flagged.fetch_add(1, AtomicOrdering::Release);
+        }
+    }
 }
 
 /// File I/O retry diagnostics belong to the reader; failures never change its cursor or validity rules.
@@ -255,17 +317,30 @@ impl FileReader {
             startup_boundary: StartupBoundary::Aligned,
             partial_line: Vec::new(),
             base_dir,
-            desynced: false,
+            losses: Losses::default(),
             io_failures: FileIoFailures::default(),
             open_file_id: None,
             max_line_bytes,
             layout,
+            shape: LineShape::Object,
         }
+    }
+
+    /// The reader of a stream whose lines hold `shape`.
+    const fn with_shape(mut self, shape: LineShape) -> Self {
+        self.shape = shape;
+        self
+    }
+
+    /// The reader counting its losses in `counts`.
+    fn with_loss_counts(mut self, counts: Option<LossCounts>) -> Self {
+        self.losses.counts = counts;
+        self
     }
 
     /// True once if data was discarded since the last call.
     fn take_desynced(&mut self) -> bool {
-        std::mem::take(&mut self.desynced)
+        std::mem::take(&mut self.losses.desynced)
     }
 
     /// Find the latest file in the streaming directory tree (see `FileLayout`).
@@ -346,7 +421,7 @@ impl FileReader {
                 current.display(),
                 latest.display()
             );
-            self.desynced = true;
+            self.losses.flag();
             return Some(latest);
         };
         // Only switch when the new file has data (modification time is newer).
@@ -358,11 +433,7 @@ impl FileReader {
     /// Filter inotify hints before they can replace a live cursor. Missing paths that do name a data file still
     /// reach the normal open/drain error handling, so a genuine lost file is not silently treated as harmless.
     fn notified_file<'a>(&self, event: &'a Event) -> Option<&'a PathBuf> {
-        if !(event.kind.is_create() || event.kind.is_modify())
-            || matches!(event.kind, notify::EventKind::Create(notify::event::CreateKind::Folder))
-        { return None; }
-        let path = event.paths.first()?;
-        (self.layout.contains_file(&self.base_dir, path) && !path.is_dir()).then_some(path)
+        stream_file(self.layout, &self.base_dir, event)
     }
 
     /// Process file modification - read new data and return lines
@@ -397,7 +468,7 @@ impl FileReader {
                                     "{} was recreated in place; reading from start and flagging desync",
                                     path.display()
                                 );
-                                self.desynced = true;
+                                self.losses.flag();
                                 self.file_position = 0;
                                 self.partial_line.clear();
                                 self.startup_boundary = StartupBoundary::Aligned;
@@ -478,21 +549,21 @@ impl FileReader {
                             "discarding non-UTF-8 terminated line; flagging desync path={} inode={:?} bytes={} offsets={}..{}",
                             path.display(), self.open_file_id, segment.len(), start_offset, segment_offset
                         );
-                        self.desynced = true;
+                        self.losses.flag();
                         continue;
                     };
                     let line = text.trim_end();
                     if line.is_empty() {
                         continue;
                     }
-                    if line.starts_with('{') && line.ends_with('}') {
+                    if self.shape.holds(line) {
                         lines.push(line.to_string());
                     } else {
                         error!(
                             "discarding malformed terminated line; flagging desync path={} inode={:?} bytes={} offsets={}..{}",
                             path.display(), self.open_file_id, segment.len(), start_offset, segment_offset
                         );
-                        self.desynced = true;
+                        self.losses.flag();
                     }
                 } else {
                     // Unterminated tail - buffer until the newline arrives.
@@ -511,7 +582,7 @@ impl FileReader {
                     self.file_position - self.partial_line.len() as u64, self.file_position
                 );
                 self.partial_line.clear();
-                self.desynced = true;
+                self.losses.flag();
             }
 
             // Log result
@@ -560,7 +631,7 @@ impl FileReader {
                 self.current_path.as_ref().expect("checked above").display(),
                 path.display()
             );
-            self.desynced = true;
+            self.losses.flag();
         }
 
         // Drain the old file until it goes quiet: a single read raced the
@@ -584,7 +655,7 @@ impl FileReader {
                     ReadStatus::AtEnd => break,
                     ReadStatus::NotRead => {
                         warn!("Could not drain {}; switching to {} and flagging desync", old.display(), path.display());
-                        self.desynced = true;
+                        self.losses.flag();
                         break;
                     }
                 }
@@ -594,7 +665,7 @@ impl FileReader {
                     "{} has no complete record boundary (buffered={} startup_pending={}); switching to {} and flagging desync",
                     old.display(), self.partial_line.len(), self.startup_boundary != StartupBoundary::Aligned, path.display()
                 );
-                self.desynced = true;
+                self.losses.flag();
             }
         }
 
@@ -626,7 +697,7 @@ impl FileReader {
         }
         match self.read_lines() {
             (lines, ReadStatus::Read) => ReadThrough::Lines(lines),
-            (_, ReadStatus::AtEnd) if self.partial_line.is_empty() && !self.desynced
+            (_, ReadStatus::AtEnd) if self.partial_line.is_empty() && !self.losses.desynced
                 && self.startup_boundary == StartupBoundary::Aligned => ReadThrough::Proven(at),
             (_, ReadStatus::AtEnd | ReadStatus::NotRead) => ReadThrough::Unproven,
         }
@@ -697,6 +768,8 @@ pub(super) fn spawn_file_watcher(
         max_line_bytes: MAX_PARTIAL_LINE_BYTES,
         start_skip_is_loss: false,
         layout: FileLayout::Hourly,
+        shape: LineShape::Object,
+        loss_counts: None,
     };
     spawn_line_watcher(stream, tx, Some(last_event), move |line| file_event(source, line), move |_| FileEvent::Desync(source), None)
 }
@@ -732,6 +805,102 @@ pub(crate) struct LineStream {
     pub(crate) start_skip_is_loss: bool,
     /// Which file below `dir` is the newest one.
     pub(crate) layout: FileLayout,
+    /// What each line holds.
+    pub(crate) shape: LineShape,
+    /// The stream's loss counts (the pending book's mempool; `None` for the other streams).
+    pub(crate) loss_counts: Option<LossCounts>,
+}
+
+/// The file a create or modify notice names in a stream laid out as `layout` below `base`; `None` for any other notice
+/// (accesses, removals, folders, other paths), which the watcher does nothing with.
+fn stream_file<'a>(layout: FileLayout, base: &Path, event: &'a Event) -> Option<&'a PathBuf> {
+    if !(event.kind.is_create() || event.kind.is_modify())
+        || matches!(event.kind, notify::EventKind::Create(notify::event::CreateKind::Folder))
+    { return None; }
+    let path = event.paths.first()?;
+    (layout.contains_file(base, path) && !path.is_dir()).then_some(path)
+}
+
+/// Which notices go into the watcher's queue (review 000609 r1-r2 P2-2: while a consumer held the watcher back, it grew
+/// by one per write, accesses included): only those the watcher acts on. A modify and an error wait one at a time: a
+/// modify only wakes the watcher to read on, and the read takes everything appended; an error is logged with the count
+/// of those dropped behind it. Every create goes in, as before: one per file the stream opens. The kernel's overflow
+/// (`Rescan`, notices lost) waits one at a time too; it is counted in the stream's loss count the moment it comes, the
+/// watcher may be held back behind lines read after it (review 000609 r6), and taken, reported as a loss.
+#[derive(Clone)]
+struct NoticeGate {
+    layout: FileLayout,
+    base: PathBuf,
+    /// The stream's count of losses found, an overflow raising it as it comes.
+    losses_found: Option<Arc<AtomicU64>>,
+    modify_waiting: Arc<AtomicBool>,
+    rescan_waiting: Arc<AtomicBool>,
+    error_waiting: Arc<AtomicBool>,
+    errors_dropped: Arc<AtomicU64>,
+}
+
+impl NoticeGate {
+    fn new(layout: FileLayout, base: PathBuf, losses_found: Option<Arc<AtomicU64>>) -> Self {
+        Self {
+            layout,
+            base,
+            losses_found,
+            modify_waiting: Arc::default(),
+            rescan_waiting: Arc::default(),
+            error_waiting: Arc::default(),
+            errors_dropped: Arc::default(),
+        }
+    }
+
+    fn admits(&self, notice: &notify::Result<Event>) -> bool {
+        match notice {
+            Err(_) => {
+                let first = !self.error_waiting.swap(true, AtomicOrdering::AcqRel);
+                if !first {
+                    self.errors_dropped.fetch_add(1, AtomicOrdering::Relaxed);
+                }
+                first
+            }
+            Ok(event) if event.need_rescan() => {
+                let first = !self.rescan_waiting.swap(true, AtomicOrdering::AcqRel);
+                if let Some(count) = self.losses_found.as_ref().filter(|_| first) {
+                    count.fetch_add(1, AtomicOrdering::Release);
+                }
+                first
+            }
+            Ok(event) if stream_file(self.layout, &self.base, event).is_none() => false,
+            Ok(event) if event.kind.is_modify() => !self.modify_waiting.swap(true, AtomicOrdering::AcqRel),
+            Ok(_) => true,
+        }
+    }
+
+    /// The waiting overflow taken: a later one is noticed anew.
+    fn rescan_taken(&self) {
+        self.rescan_waiting.store(false, AtomicOrdering::Release);
+    }
+
+    /// The waiting modify notice taken, before the read it wakes: a write after that is noticed anew.
+    fn modify_taken(&self) {
+        self.modify_waiting.store(false, AtomicOrdering::Release);
+    }
+
+    /// The waiting error taken: how many were dropped behind it.
+    fn error_taken(&self) -> u64 {
+        self.error_waiting.store(false, AtomicOrdering::Release);
+        self.errors_dropped.swap(0, AtomicOrdering::AcqRel)
+    }
+}
+
+/// The inotify callback: the notices `gate` admits go into `notices`.
+fn notice_sender(
+    notices: std::sync::mpsc::Sender<notify::Result<Event>>,
+    gate: NoticeGate,
+) -> impl Fn(notify::Result<Event>) + Send + 'static {
+    move |notice| {
+        if gate.admits(&notice) {
+            drop(notices.send(notice));
+        }
+    }
 }
 
 /// One read-through attempt: lines it read go out through `send`, a proven instant goes out as `mark(at)` after them.
@@ -769,14 +938,14 @@ where
     F: Fn(String) -> E + Send + 'static,
     D: Fn(WatchLoss) -> E + Send + 'static,
 {
-    let LineStream { name, lag_label, dir, max_line_bytes, start_skip_is_loss, layout } = stream;
+    let LineStream { name, lag_label, dir, max_line_bytes, start_skip_is_loss, layout, shape, loss_counts } = stream;
     thread::spawn(move || {
         info!("{} watcher thread started for {:?}", name, dir);
 
-        let mut reader = FileReader::new(dir.clone(), max_line_bytes, layout);
+        let mut reader = FileReader::new(dir.clone(), max_line_bytes, layout).with_shape(shape).with_loss_counts(loss_counts.clone());
         // Every read's lines go out here, in order, blocking while the channel is full; false once the consumer is gone.
         let send = |lines: Vec<String>| {
-            observe_read_lag(lag_label, &lines);
+            observe_read_lag(lag_label, shape, &lines);
             for line in lines {
                 if tx.blocking_send(wrap(line)).is_err() {
                     info!("{name} consumer closed, exiting");
@@ -799,9 +968,8 @@ where
 
         // Create watcher with callback
         let (event_tx, event_rx) = std::sync::mpsc::channel();
-        let mut watcher = match recommended_watcher(move |res: Result<Event, _>| {
-            drop(event_tx.send(res));
-        }) {
+        let gate = NoticeGate::new(layout, dir.clone(), loss_counts.map(|counts| counts.found));
+        let mut watcher = match recommended_watcher(notice_sender(event_tx, gate.clone())) {
             Ok(w) => w,
             Err(err) => {
                 error!("{} watcher failed to create: {}", name, err);
@@ -831,7 +999,17 @@ where
 
             // Wait for inotify events (with fallback timeout)
             match event_rx.recv_timeout(poll_interval) {
+                Ok(Ok(event)) if event.need_rescan() => {
+                    gate.rescan_taken();
+                    // Notices were lost, a create among them maybe: the newest-file check could then pass over a
+                    // file (review 000609 r3), so the loss is reported, never assumed away.
+                    warn!("{name} watcher: inotify overflow, notices lost; reporting a loss");
+                    reader.losses.flag_found();
+                }
                 Ok(Ok(event)) => {
+                    if event.kind.is_modify() {
+                        gate.modify_taken();
+                    }
                     if let Some(path) = reader.notified_file(&event) {
                         if event.kind.is_create() {
                             info!("{} new file: {:?}", name, path.file_name());
@@ -850,7 +1028,8 @@ where
                     }
                 }
                 Ok(Err(err)) => {
-                    error!("{} watcher error: {}", name, err);
+                    let dropped = gate.error_taken();
+                    error!("{name} watcher error: {err} ({dropped} more dropped behind it)");
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Fallback polling - safety net for missed events
@@ -1017,7 +1196,16 @@ mod tests {
 
     fn test_stream(dir: PathBuf, start_skip_is_loss: bool) -> LineStream {
         let max_line_bytes = MAX_PARTIAL_LINE_BYTES;
-        LineStream { name: "Test", lag_label: "test", dir, max_line_bytes, start_skip_is_loss, layout: FileLayout::Hourly }
+        LineStream {
+            name: "Test",
+            lag_label: "test",
+            dir,
+            max_line_bytes,
+            start_skip_is_loss,
+            layout: FileLayout::Hourly,
+            shape: LineShape::Object,
+            loss_counts: None,
+        }
     }
 
     /// `on_create` with a consumer that takes every delivery.
@@ -1732,6 +1920,84 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(handle.is_finished(), "the watcher exits once the consumer is gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review 000609 r1-r2 P2-2: only the notices the watcher acts on queue; a modify, an overflow and an error one at a
+    /// time, every create of a stream file.
+    #[test]
+    fn test_notices_queue_bounded() {
+        let (notices, queue) = std::sync::mpsc::channel();
+        let losses = Arc::new(AtomicU64::new(0));
+        let gate = NoticeGate::new(FileLayout::Hourly, PathBuf::from("/d"), Some(Arc::clone(&losses)));
+        let send = notice_sender(notices, gate.clone());
+        let at = |kind, path: &str| Ok(Event::new(kind).add_path(PathBuf::from(path)));
+        let modify = || at(notify::EventKind::Modify(notify::event::ModifyKind::Any), "/d/hourly/20261031/9");
+        let create = |hour: &str| at(notify::EventKind::Create(notify::event::CreateKind::File), &format!("/d/hourly/20261031/{hour}"));
+        let overflow = || Ok(Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan));
+        for _ in 0..100 {
+            send(at(notify::EventKind::Access(notify::event::AccessKind::Open(notify::event::AccessMode::Any)), "/d/hourly/20261031/9"));
+            send(modify());
+            send(at(notify::EventKind::Access(notify::event::AccessKind::Close(notify::event::AccessMode::Write)), "/d/hourly/20261031/9"));
+        }
+        send(at(notify::EventKind::Modify(notify::event::ModifyKind::Any), "/d/elsewhere/9"));
+        send(at(notify::EventKind::Create(notify::event::CreateKind::Folder), "/d/hourly/20261101"));
+        send(create("10"));
+        send(create("11"));
+        send(overflow());
+        send(overflow());
+        for _ in 0..3 {
+            send(Err(notify::Error::generic("test")));
+        }
+        let kinds: Vec<String> = queue.try_iter().map(|notice| notice.map_or_else(|_| "error".into(), |event| format!("{:?}", event.kind))).collect();
+        assert_eq!(kinds, ["Modify(Any)", "Create(File)", "Create(File)", "Other", "error"]);
+        assert_eq!(losses.load(AtomicOrdering::Acquire), 1, "the overflow counted as it came, once for the two merged");
+        gate.modify_taken();
+        gate.rescan_taken();
+        send(modify());
+        send(modify());
+        send(overflow());
+        assert_eq!(gate.error_taken(), 2, "the errors dropped behind the waiting one");
+        send(Err(notify::Error::generic("test")));
+        let kinds: Vec<String> = queue.try_iter().map(|notice| notice.map_or_else(|_| "error".into(), |event| format!("{:?}", event.kind))).collect();
+        assert_eq!(kinds, ["Modify(Any)", "Other", "error"], "the next of each once the waiting one is taken");
+        assert_eq!(losses.load(AtomicOrdering::Acquire), 2);
+    }
+
+    /// Review 000609 r7: a loss the reader finds is found and flagged together; an overflow, found by the gate, is
+    /// flagged alone when the watcher takes it.
+    #[test]
+    fn test_losses_count_found_and_flagged() {
+        let counts = LossCounts::default();
+        let mut losses = Losses { desynced: false, counts: Some(counts.clone()) };
+        let read = |counts: &LossCounts| (counts.found.load(AtomicOrdering::Acquire), counts.flagged.load(AtomicOrdering::Acquire));
+        losses.flag();
+        assert_eq!(read(&counts), (1, 1));
+        counts.found.fetch_add(1, AtomicOrdering::Release);
+        assert_eq!(read(&counts), (2, 1), "an overflow found, not yet flagged");
+        losses.flag_found();
+        assert_eq!(read(&counts), (2, 2));
+        assert!(losses.desynced);
+    }
+
+    /// The same on real inotify: 100 open-append-close cycles on a stream file and a new hour's file, nothing taken,
+    /// leave one modify and one create queued.
+    #[test]
+    fn test_notices_of_real_appends_queue_bounded() {
+        let dir = test_dir("notice_gate");
+        let path = hourly_file(&dir, "20261031", "9");
+        append(&path, "");
+        let (notices, queue) = std::sync::mpsc::channel();
+        let mut watcher = recommended_watcher(notice_sender(notices, NoticeGate::new(FileLayout::Hourly, dir.clone(), None))).unwrap();
+        watcher.watch(&dir, RecursiveMode::Recursive).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        for n in 0..100 {
+            append(&path, &format!("{{\"n\":{n}}}\n"));
+        }
+        append(&hourly_file(&dir, "20261031", "10"), "{\"n\":100}\n");
+        thread::sleep(Duration::from_millis(300));
+        let kinds: Vec<bool> = queue.try_iter().map(|notice| notice.unwrap().kind.is_create()).collect();
+        assert_eq!(kinds, [false, true], "one modify, then the new file's create");
         std::fs::remove_dir_all(&dir).ok();
     }
 

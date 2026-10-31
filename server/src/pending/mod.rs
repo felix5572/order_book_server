@@ -1,14 +1,18 @@
 //! The pending book (--pending-book, hyperliquid-trade design 000604): the listener's book as the actions in the
-//! node's mempool will leave it. Batch 1 is the replica of the listener's book alone, on its own thread, serving
-//! nothing yet; the mempool, the overlay and the `extPendingBbo` / `extPendingTrades` channels come with batch 2.
+//! node's mempool will leave it. Batch 1 is the replica of the listener's book, on its own thread; batch 2a reads the
+//! mempool (`mempool`) and counts it, serving nothing yet; the overlay and the `extPendingBbo` / `extPendingTrades`
+//! channels come with batches 2b and 2c.
+
+pub(crate) mod mempool;
 
 use std::{io, sync::Arc, time::Duration};
 
 use log::{error, info};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{sync::{mpsc, watch}, task::JoinHandle};
 
+use self::mempool::{MempoolFeed, MempoolIngest};
 use crate::{
-    accounts::owner_thread::spawn_owner,
+    accounts::{book::ActionCoins, owner_thread::spawn_owner},
     listeners::order_book::replica::{BookReplica, ReplicaBatch, ReplicaControl, ReplicaFork, ReplicaInputs},
     metrics::{
         PENDING_BOOK_ALIGNMENT_BLOCKS, PENDING_BOOK_BACKLOG_EVENTS, PENDING_BOOK_BREAKS_TOTAL, PENDING_BOOK_CONFIRMED_HEIGHT,
@@ -19,31 +23,48 @@ use crate::{
 /// How often the thread looks for a generation the listener ended and exports its gauges.
 const TICK: Duration = Duration::from_millis(100);
 
-/// The pending thread, owner of the replica (`pending-book`, on its own OS thread like the account owner's).
-pub(crate) fn spawn_pending_book(inputs: ReplicaInputs, backlog_events: usize) -> io::Result<JoinHandle<()>> {
-    spawn_owner("pending-book", run(inputs, backlog_events))
+/// The mempool's feed, and the account view's asset table to name its coins by.
+pub(crate) struct MempoolInputs {
+    pub(crate) feed: MempoolFeed,
+    pub(crate) action_coins: watch::Receiver<Option<Arc<ActionCoins>>>,
 }
 
-async fn run(inputs: ReplicaInputs, backlog_events: usize) {
+/// The pending thread, owner of the replica and of the mempool's reading (`pending-book`, on its own OS thread like
+/// the account owner's).
+pub(crate) fn spawn_pending_book(
+    inputs: ReplicaInputs,
+    mempool: MempoolInputs,
+    backlog_events: usize,
+) -> io::Result<JoinHandle<()>> {
+    spawn_owner("pending-book", run(inputs, mempool, backlog_events))
+}
+
+async fn run(inputs: ReplicaInputs, mempool: MempoolInputs, backlog_events: usize) {
     let ReplicaInputs { control, forks, batches } = inputs;
     let mut feeds = Feeds { forks, batches };
     let mut book = PendingBook::new(control, backlog_events);
+    let MempoolInputs { feed: MempoolFeed { mut events, losses }, action_coins } = mempool;
+    let mut ingest = MempoolIngest::new(action_coins, losses);
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
+    let closed = loop {
         tokio::select! {
             fork = feeds.forks.recv() => match fork {
                 Some(fork) => book.on_fork(fork),
-                None => break,
+                None => break "the listener's feed",
             },
             batch = feeds.batches.recv() => match batch {
                 Some(batch) => book.on_batch(batch, &mut feeds.forks),
-                None => break,
+                None => break "the listener's feed",
+            },
+            event = events.recv() => match event {
+                Some(event) => ingest.on_event(event),
+                None => break "the mempool watcher",
             },
             _ = tick.tick() => book.on_tick(),
         }
-    }
-    error!("pending book: the listener's feed closed; the pending thread ends");
+    };
+    error!("pending book: {closed} closed; the pending thread ends");
 }
 
 /// The listener's two queues to the pending thread.

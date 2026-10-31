@@ -10,7 +10,10 @@ use alloy::primitives::Address;
 use serde::Deserialize;
 
 use super::{decimal::ExactDecimal, orders::OrderKey, pairing::IocPairingMismatch};
-use crate::accounts::{checkpoint::node_time_ns, replica::{PairedAction, ReplicaLine}};
+use crate::accounts::{
+    checkpoint::node_time_ns,
+    replica::{OrderRef, PairedAction, ReplicaLine, WireCancel, WireCancelByCloid, WireModify, WireOrder},
+};
 
 /// (bundle, category, position): actions run in this order.
 pub(crate) type Rank = (usize, u8, usize);
@@ -465,56 +468,13 @@ impl WireStatus {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct WireOrder {
-    /// The asset id.
-    pub(super) a: u32,
-    /// Is buy.
-    pub(super) b: bool,
-    /// The limit price.
-    pub(super) p: String,
-    pub(super) s: String,
-    pub(super) r: bool,
-    pub(super) c: Option<String>,
-    pub(super) t: WireOrderType,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct WireOrderType {
-    pub(super) limit: Option<WireLimit>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct WireLimit {
-    pub(super) tif: String,
-}
-
 impl WireOrder {
-    /// An ALO limit order; a trigger order is not.
-    pub(super) fn is_alo(&self) -> bool {
-        self.t.limit.as_ref().is_some_and(|limit| limit.tif == "Alo")
-    }
-
     /// An order that may trade on entry: a limit order but ALO.
     fn taker(&self) -> Option<Result<Taker, String>> {
         self.t.limit.as_ref().filter(|limit| limit.tif != "Alo")?;
         let limit_px = ExactDecimal::parse(&self.p).map_err(|err| format!("order price {err}"));
         Some(limit_px.map(|limit_px| Taker { asset: self.a, is_buy: self.b, limit_px }))
     }
-}
-
-#[derive(Deserialize)]
-struct WireModify {
-    oid: OrderRef,
-    order: WireOrder,
-}
-
-/// A modify names the old order by oid or by cloid.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
-pub(crate) enum OrderRef {
-    Oid(u64),
-    Cloid(String),
 }
 
 impl OrderRef {
@@ -524,16 +484,6 @@ impl OrderRef {
             Self::Cloid(cloid) => anchors.cancelled_cloids.push(cloid.clone()),
         }
     }
-}
-
-#[derive(Deserialize)]
-struct WireCancel {
-    o: u64,
-}
-
-#[derive(Deserialize)]
-struct WireCancelByCloid {
-    cloid: String,
 }
 
 #[cfg(test)]

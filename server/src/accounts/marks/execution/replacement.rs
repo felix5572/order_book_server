@@ -4,7 +4,8 @@
 //! request/pair match. Oids already claimed by an ordinary receipt or `CoreWriter` remain with that owner.
 //! A missing/ambiguous pair contributes no anchor, without turning a normal default receipt into an error.
 
-use super::super::{actions::{MarkAction, MarkActions, OrderRef, Rank, ReplacementRequest}, orders::OrderKey};
+use super::super::{actions::{MarkAction, MarkActions, Rank, ReplacementRequest}, orders::OrderKey};
+use crate::accounts::replica::OrderRef;
 use crate::types::node_data::NodeDataOrderStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

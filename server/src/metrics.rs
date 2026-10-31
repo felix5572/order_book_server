@@ -205,7 +205,8 @@ lazy_static! {
 
     /// Seconds from the node writing a line (its `local_time`, same host clock) to
     /// a stage here: `read` = the watcher read it (newest line of each read),
-    /// `apply` = the batch was applied to the book (once per book batch),
+    /// `apply` = the batch was applied to the book (once per book batch; of
+    /// `mempool`, the pending book took the line),
     /// `publish` = an l2 publish was built and handed to the broadcast channel
     /// (newest applied book line; not socket delivery). Each stage samples a
     /// different set, so these are cumulative lags to compare side by side -
@@ -752,6 +753,42 @@ lazy_static! {
         "Pending book replica levels whose queue order is unproven"
     ).expect("metric can be created");
 
+    /// Mempool lines the pending book took, by `outcome`: `read`; `read_after_unreported_loss`, read while the watcher
+    /// had found a loss it had not yet reported, so possibly after it in the file (review 000609 r1 P2-1); or
+    /// `unreadable` (its actions lost; design 000604).
+    pub static ref PENDING_BOOK_MEMPOOL_LINES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_mempool_lines_total", "Pending book mempool lines"),
+        &["outcome"]
+    ).expect("metric can be created");
+
+    /// Mempool lines the watcher lost, by `cause`: `positioning` (the skip at its start) or `discard` (a cut,
+    /// overlong or not `[...]` line).
+    pub static ref PENDING_BOOK_MEMPOOL_LOSSES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_mempool_losses_total", "Pending book mempool line losses"),
+        &["cause"]
+    ).expect("metric can be created");
+
+    /// Signed actions of the mempool lines read, by `kind`: `order`, `cancel`, `cancel_by_cloid`, `modify` (a modify
+    /// or a batchModify), `other`.
+    pub static ref PENDING_BOOK_MEMPOOL_ACTIONS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_mempool_actions_total", "Pending book mempool signed actions"),
+        &["kind"]
+    ).expect("metric can be created");
+
+    /// Orders of the mempool lines read (an order action's, a modify's new one), by `tif`: `alo`, `gtc`, `ioc`,
+    /// `frontend_market`, `trigger`.
+    pub static ref PENDING_BOOK_MEMPOOL_ORDERS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_mempool_orders_total", "Pending book mempool orders"),
+        &["tif"]
+    ).expect("metric can be created");
+
+    /// Orders, cancels and modifies of the mempool naming an asset the account view's anchor does not, by `reason`:
+    /// `not_in_anchor`, or `no_anchor` (before the first).
+    pub static ref PENDING_BOOK_MEMPOOL_UNNAMED_ASSETS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_mempool_unnamed_assets_total", "Pending book mempool unnamed assets"),
+        &["reason"]
+    ).expect("metric can be created");
+
     /// Entries the forced flow walked (each alone over its side's levels).
     pub static ref FORCED_FLOW_WALKED_ENTRIES_TOTAL: IntCounter = IntCounter::new(
         "orderbook_forced_flow_walked_entries_total",
@@ -915,6 +952,11 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(PENDING_BOOK_ALIGNMENT_BLOCKS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_BACKLOG_EVENTS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_UNPROVEN_LEVELS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_MEMPOOL_LINES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_MEMPOOL_LOSSES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_MEMPOOL_ACTIONS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_MEMPOOL_ORDERS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_MEMPOOL_UNNAMED_ASSETS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL.clone())).ok();

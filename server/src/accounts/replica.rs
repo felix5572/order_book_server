@@ -1,5 +1,6 @@
 //! A `replica_cmds` line, parsed once for the account view's kept actions (`actions`) and the node marks' actions
-//! (`marks::actions`).
+//! (`marks::actions`); its signed action's `Action` and the book actions' payloads are the mempool's too (the pending
+//! book, `pending::mempool`).
 //!
 //! `{"abci_block": {"time", "signed_action_bundles": [[hash, {"signed_actions": [{"action": {"type", ...}, ...}], ...}]],
 //! ...}, "resps": {"Full": [[hash, [{"user", "res": {"status", "response"}}]]]}, "height"}`. A response belongs to the
@@ -100,6 +101,20 @@ pub(crate) struct Action<'a> {
     /// The signed payload's own nonce (its ledger event's), not the signed action's outer one.
     #[serde(borrow)]
     pub(crate) nonce: Option<LazyValue<'a>>,
+    /// A `modify` / `batchModify`'s `always_place` (omitted when false; inside an order, `a` is its asset); a `null`
+    /// is kept, to fail as the flag it is not (review 000609 r2 P3).
+    #[serde(borrow, rename = "a", default, deserialize_with = "present")]
+    pub(crate) always_place: Option<LazyValue<'a>>,
+    /// A `cancel` / `cancelByCloid`'s `fast` (omitted when false, a `null` kept as for `always_place`): the cancel goes
+    /// first in the mempool, in effect on 2026-10-31 (the user; the API doc still calls it a future upgrade's), and a
+    /// fast cancel of a trigger order is rejected.
+    #[serde(borrow, rename = "f", default, deserialize_with = "present")]
+    pub(crate) fast: Option<LazyValue<'a>>,
+}
+
+/// A field that is there, whatever it holds, `null` included (`Option`'s own reading takes a `null` for absent).
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<LazyValue<'de>>, D::Error> {
+    LazyValue::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -125,6 +140,70 @@ impl Action<'_> {
         let raw = raw.ok_or_else(|| format!("{} without {name}", self.action_type))?;
         sonic_rs::from_str(raw.as_raw_str()).map_err(|err| format!("{} {name} {}: {err}", self.action_type, raw.as_raw_str()))
     }
+}
+
+/// An order in an `order` action's `orders`, or a modify's new order.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WireOrder {
+    /// The asset id.
+    pub(crate) a: u32,
+    /// Is buy.
+    pub(crate) b: bool,
+    /// The limit price.
+    pub(crate) p: String,
+    pub(crate) s: String,
+    pub(crate) r: bool,
+    pub(crate) c: Option<String>,
+    pub(crate) t: WireOrderType,
+}
+
+/// `{"limit": {"tif"}}`, or a trigger order's `{"trigger": ...}`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WireOrderType {
+    pub(crate) limit: Option<WireLimit>,
+    pub(crate) trigger: Option<serde::de::IgnoredAny>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WireLimit {
+    pub(crate) tif: String,
+}
+
+impl WireOrder {
+    /// An ALO limit order; a trigger order is not.
+    pub(crate) fn is_alo(&self) -> bool {
+        self.t.limit.as_ref().is_some_and(|limit| limit.tif == "Alo")
+    }
+}
+
+/// One of a `batchModify`'s `modifies` (a `modify` carries the same two fields in its action).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WireModify {
+    pub(crate) oid: OrderRef,
+    pub(crate) order: WireOrder,
+}
+
+/// A modify names the old order by oid or by cloid.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum OrderRef {
+    Oid(u64),
+    Cloid(String),
+}
+
+/// One of a `cancel`'s `cancels`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct WireCancel {
+    /// The asset id.
+    pub(crate) a: u32,
+    pub(crate) o: u64,
+}
+
+/// One of a `cancelByCloid`'s `cancels`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct WireCancelByCloid {
+    pub(crate) asset: u32,
+    pub(crate) cloid: String,
 }
 
 #[derive(Deserialize)]

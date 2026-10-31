@@ -28,7 +28,7 @@ use crate::{
         WS_CONNECTIONS_TOTAL, WS_SEND_ERRORS_TOTAL,
     },
     order_book::{Coin, PxBand, Snapshot},
-    pending::spawn_pending_book,
+    pending::{MempoolInputs, mempool::watch_mempool, spawn_pending_book},
     prelude::*,
     types::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
@@ -134,7 +134,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
 
     // Resolve data directory
     // Central task: listen to messages and forward them for distribution
-    let listener = {
+    let (listener, pending_replica) = {
         let internal_message_tx = internal_message_tx.clone();
         let mut listener =
             OrderBookListener::new(Some(internal_message_tx), ignore_spot, active_l2_params.clone(), market_filter);
@@ -142,8 +142,8 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         // BBO-only deployments are sized for a lightweight envelope and have no
         // consumers for /untriggeredOrders - skip maintaining the side table.
         listener.set_track_untriggered(!config.bbo_only);
-        start_pending_book(&config, &mut listener)?;
-        listener
+        let pending_replica = attach_pending_book(&config, &mut listener)?;
+        (listener, pending_replica)
     };
     // Lock-free trust mirror for the send paths below (design 000249 B).
     let book_trust = listener.book_trust();
@@ -153,6 +153,9 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         &config,
         BookSource { trust: book_trust.clone(), listener: listener.clone(), revision: book_revision, fires: trigger_fires },
     )?;
+    if let Some(replica) = pending_replica {
+        start_pending_book(&config, replica, accounts.as_ref())?;
+    }
     let local_marks = start_local_marks(&config, accounts.as_ref(), &listener)?;
     // the forced flow's local calibre (design 000451 r4 revision 8)
     if let (Some(accounts), Some(marks)) = (&accounts, &local_marks) {
@@ -342,9 +345,11 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
 /// Starts the local marks when `--local-marks` is set (design 000454): the venue feeds and the owner, which reads the
 /// node replica of the account view and the listener's book.
 /// The pending book's thread and the listener's feed of it (--pending-book, hyperliquid-trade design 000604).
-fn start_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) -> Result<()> {
+/// The pending book's replica feed attached to the listener, when `--pending-book` is set; its thread starts once the
+/// account view does (`start_pending_book`).
+fn attach_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) -> Result<Option<replica::ReplicaInputs>> {
     if !config.pending_book {
-        return Ok(());
+        return Ok(None);
     }
     if config.no_resync {
         return Err("--pending-book cannot run with --no-resync: its block alignment needs each book stream's heights to only go up".into());
@@ -354,7 +359,20 @@ fn start_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) -
     }
     let (feed, inputs) = replica::link(replica::REPLICA_QUEUE_BATCHES);
     listener.attach_replica_feed(feed);
-    let thread = spawn_pending_book(inputs, config.pending_backlog_events)?;
+    Ok(Some(inputs))
+}
+
+/// The pending thread, reading the mempool below the node's data directory.
+fn start_pending_book(
+    config: &ServerConfig,
+    replica: replica::ReplicaInputs,
+    accounts: Option<&AccountsHandle>,
+) -> Result<()> {
+    let accounts =
+        accounts.ok_or("--pending-book needs --accounts: the mempool's asset ids are named by the account view's anchor")?;
+    let (feed, _watcher) = watch_mempool(&config.resolved_data_dir()?);
+    let mempool = MempoolInputs { feed, action_coins: accounts.action_coins() };
+    let thread = spawn_pending_book(replica, mempool, config.pending_backlog_events)?;
     // the shadow's end is no reason to stop the book: logged, and the feed stops on its closed queue
     tokio::spawn(async move {
         match thread.await {

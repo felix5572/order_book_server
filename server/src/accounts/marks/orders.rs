@@ -2,7 +2,8 @@
 //! Asset IDs belong to requests; a status supplies a coin which the seeded book maps to that ID.
 
 use alloy::primitives::Address;
-use super::{actions::WireOrder, decimal::ExactDecimal};
+use super::decimal::ExactDecimal;
+use crate::accounts::replica::WireOrder;
 use crate::{order_book::Side, types::node_data::NodeDataOrderStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

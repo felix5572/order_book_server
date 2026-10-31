@@ -28,6 +28,7 @@ use std::{
     cmp::Ordering,
     collections::{VecDeque, hash_map::Entry},
     fmt,
+    sync::Arc,
 };
 
 use alloy::primitives::Address;
@@ -113,6 +114,14 @@ pub(crate) struct Available {
     pub(crate) fills_height: u64,
     pub(crate) misc_events_height: u64,
     pub(crate) block_actions_height: u64,
+}
+
+/// An anchor's exchange action asset ids and the coins the node's streams name them by: the pending book reads the
+/// mempool's orders through it (hyperliquid-trade design 000604).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActionCoins {
+    pub(crate) anchor_height: u64,
+    pub(crate) coins: FxHashMap<u32, String>,
 }
 
 /// Why the view may not be served.
@@ -794,6 +803,8 @@ pub(crate) struct AccountBook {
     /// Whether the event log dropped events since the anchor (the replay of the interval is then incomplete).
     events_dropped: bool,
     replay: Option<Replay>,
+    /// The anchor's action asset ids and their coins, built once as it installs (review 000609 r1 P2-3).
+    action_coins: Option<Arc<ActionCoins>>,
     /// Blocks after the anchor whose every route was withdrawn (`withdraw_routing`), ascending: the first one above a
     /// new anchor withdraws the routes it rebuilds there (`rebuild_replay`).
     routing_withdrawals: Vec<u64>,
@@ -821,6 +832,7 @@ impl AccountBook {
             events: VecDeque::new(),
             events_dropped: false,
             replay: None,
+            action_coins: None,
             routing_withdrawals: Vec::new(),
             holdings: Holdings::default(),
             fills: StreamProgress::starting(started_ms),
@@ -1184,6 +1196,7 @@ impl AccountBook {
         self.fills.lost_block = lost_block;
         self.coins.extend(anchor_coins.into_iter().map(|(name, coin)| (name, CoinBook::anchored(height, coin, 0))));
         self.rebuild_marks(height);
+        self.action_coins = Some(Arc::new(ActionCoins { anchor_height: height, coins: margins.action_coins() }));
         self.rebuild_replay(margins, height);
         for (user, mode) in account_modes {
             self.accounts.entry(user).or_default().mode = Some(mode);
@@ -1476,6 +1489,12 @@ impl AccountBook {
             replayed: self.replayed_row(user, coin, record, marks),
             replay_stop: self.replay.as_ref().and_then(|replay| replay.current.stop(&user)).cloned(),
         }
+    }
+
+    /// The anchor's exchange action asset ids and their coins (`MarginStates::action_coins`), with its height; `None`
+    /// before the first anchor.
+    pub(crate) const fn action_coins(&self) -> Option<&Arc<ActionCoins>> {
+        self.action_coins.as_ref()
     }
 
     /// The anchor the replayed rows replay from, the applied height they are of and its block time; `None` until every

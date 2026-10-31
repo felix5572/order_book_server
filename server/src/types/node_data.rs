@@ -206,8 +206,21 @@ impl<E> Batch<E> {
 /// parse later validates the whole line. `None` when the line does not start
 /// with the `--stream-with-block-info` schema.
 pub(crate) fn line_local_time_unix_nanos(line: &str) -> Option<i64> {
-    let rest = line.strip_prefix("{\"local_time\":\"")?;
-    let text = &rest[..rest.find('"')?];
+    leading_time_unix_nanos(line.strip_prefix("{\"local_time\":\"")?)
+}
+
+/// The same of a mempool line (`["<local_time>", tx]`).
+pub(crate) fn array_line_local_time_unix_nanos(line: &str) -> Option<i64> {
+    leading_time_unix_nanos(line.strip_prefix("[\"")?)
+}
+
+/// The node time a text starts with, up to its closing quote.
+fn leading_time_unix_nanos(rest: &str) -> Option<i64> {
+    node_time_unix_nanos(&rest[..rest.find('"')?])
+}
+
+/// A node time (`2026-10-31T09:14:38.693300829`, UTC) in unix ns.
+pub(crate) fn node_time_unix_nanos(text: &str) -> Option<i64> {
     NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").ok()?.and_utc().timestamp_nanos_opt()
 }
 
@@ -350,6 +363,16 @@ mod tests {
         assert_eq!(line_local_time_unix_nanos(json), batch.local_time_unix_nanos());
         assert_eq!(line_local_time_unix_nanos(json).map(|ns| ns % 1_000_000_000), Some(355_393_675));
         assert_eq!(line_local_time_unix_nanos(r#"{"block_time":"2026-07-04T15:05:30.1"}"#), None);
+    }
+
+    /// A mempool line's prefix read; an object line is None, as an array line is to the object read.
+    #[test]
+    fn test_array_line_local_time_reads_the_first_element() {
+        let line = r#"["2026-10-31T09:14:38.693300829",{"tx_hash":"0x49ed","signed_actions":[]}]"#;
+        assert_eq!(array_line_local_time_unix_nanos(line), node_time_unix_nanos("2026-10-31T09:14:38.693300829"));
+        assert_eq!(array_line_local_time_unix_nanos(line).map(|ns| ns % 1_000_000_000), Some(693_300_829));
+        assert_eq!(array_line_local_time_unix_nanos(r#"{"local_time":"2026-10-31T09:14:38.6"}"#), None);
+        assert_eq!(line_local_time_unix_nanos(line), None);
     }
 
     // ==================== NodeDataOrderDiff Tests ====================

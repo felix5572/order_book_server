@@ -30,8 +30,8 @@ use super::{
     owner_thread::spawn_owner,
     blocks::{Assembly, BlockAssembler, CompletedBlock, LineKey},
     book::{
-        AccountBook, BlockActionsReport, BlockReport, BookStatus, CoinPositions, FillsReport, InstallReport, MiscReport,
-        QueryError, ReplayCheck, RowCheck, Stream, Touched, Unavailable,
+        AccountBook, ActionCoins, BlockActionsReport, BlockReport, BookStatus, CoinPositions, FillsReport, InstallReport,
+        MiscReport, QueryError, ReplayCheck, RowCheck, Stream, Touched, Unavailable,
     },
     checkpoint::parse_checkpoint_file,
     marks::{
@@ -56,7 +56,7 @@ use crate::{
     mailbox::Mailbox,
     listeners::order_book::{
         BookTrust, OrderBookListener,
-        parallel::{FileLayout, LineStream, WatchLoss, spawn_line_watcher},
+        parallel::{FileLayout, LineShape, LineStream, WatchLoss, spawn_line_watcher},
         utils::{checkpoint_grid, list_checkpoints},
     },
     metrics::{
@@ -161,12 +161,19 @@ pub(crate) struct AccountsHandle {
     flow_demand: FlowDemand,
     /// The forced flow's own thread (hyperliquid-trade review 000563).
     flow_queries: mpsc::Sender<FlowQuery>,
+    /// The anchor's action asset ids and coins (the pending book, design 000604).
+    action_coins: watch::Receiver<Option<Arc<ActionCoins>>>,
 }
 
 impl AccountsHandle {
     /// Every frame the owner broadcasts from now on; `None` once the owner is gone.
     pub(crate) fn frames(&self) -> Option<broadcast::Receiver<Arc<AccountsFrame>>> {
         self.frames.upgrade().map(|frames| frames.subscribe())
+    }
+
+    /// The anchor's exchange action asset ids and the coins they name, at each new anchor; `None` before the first.
+    pub(crate) fn action_coins(&self) -> watch::Receiver<Option<Arc<ActionCoins>>> {
+        self.action_coins.clone()
     }
 
     /// The main-dex node prices after every applied block (design 000454 r2 revision 1).
@@ -306,6 +313,8 @@ pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Resul
         max_line_bytes: BLOCK_ACTIONS_MAX_LINE_BYTES,
         start_skip_is_loss: true,
         layout: FileLayout::ReplicaSessions,
+        shape: LineShape::Object,
+        loss_counts: None,
     };
     let threads = vec![
         proving_watcher("fills watcher", fills, Stream::Fills, fills_input, input_tx.clone()),
@@ -343,6 +352,7 @@ pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Resul
         node_prices: publisher.subscribe_prices(),
         flow_demand,
         flow_queries,
+        action_coins: publisher.subscribe_action_coins(),
     };
     let started_ms = now_ms();
     let marks = NodeMarks::new(CheckpointGrid { anchor, interval }, started_ms);
@@ -368,7 +378,16 @@ fn start_forced_flow(
 
 /// An hourly stream whose start skip is a loss.
 const fn hourly(name: &'static str, lag_label: &'static str, dir: PathBuf, max_line_bytes: usize) -> LineStream {
-    LineStream { name, lag_label, dir, max_line_bytes, start_skip_is_loss: true, layout: FileLayout::Hourly }
+    LineStream {
+        name,
+        lag_label,
+        dir,
+        max_line_bytes,
+        start_skip_is_loss: true,
+        layout: FileLayout::Hourly,
+        shape: LineShape::Object,
+        loss_counts: None,
+    }
 }
 
 /// The watcher of a stream whose read-throughs join the block assembly (every stream but `replica_cmds`).
@@ -1189,7 +1208,10 @@ impl TestOwner {
         let mut publisher = Publisher::new(subscriptions.clone(), frames);
         let flow_demand = FlowDemand::default();
         let flow_queries = start_forced_flow(None, flow_demand.clone(), &mut publisher, flow_frames).unwrap();
-        let handle = AccountsHandle { queries, subscriptions, frames: frames_handle, node_prices: publisher.subscribe_prices(), flow_demand, flow_queries };
+        let handle = AccountsHandle {
+            queries, subscriptions, frames: frames_handle, node_prices: publisher.subscribe_prices(), flow_demand, flow_queries,
+            action_coins: publisher.subscribe_action_coins(),
+        };
         let marks = NodeMarks::new(tests::TEST_GRID, 0);
         let owner = spawn_owner("accounts-owner", run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None))).unwrap();
         Self { handle, inputs, anchors, owner }
@@ -1327,6 +1349,8 @@ mod tests {
             max_line_bytes: 1 << 20,
             start_skip_is_loss: true,
             layout: FileLayout::Hourly,
+            shape: LineShape::Object,
+            loss_counts: None,
         };
         let _watcher = spawn_line_watcher(stream, tx, None, misc_input, |cause| Input::Loss(Stream::MiscEvents, cause), None);
         // let the watcher register its inotify watch before the first append

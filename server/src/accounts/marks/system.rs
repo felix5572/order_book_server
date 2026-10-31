@@ -12,7 +12,8 @@ use alloy::primitives::{Address, B256};
 use rustc_hash::FxHashSet;
 use serde::Deserialize;
 
-use super::{actions::{BookAnchors, MarkAction, MarkActions, WireOrder}, orders::OrderKey, execution::BlockStatuses};
+use super::{actions::{BookAnchors, MarkAction, MarkActions}, orders::OrderKey, execution::BlockStatuses};
+use crate::accounts::replica::WireOrder;
 use crate::{accounts::misc::SpotToMainSend, types::node_data::NodeDataOrderStatus};
 
 #[derive(Debug, Clone, Deserialize)]

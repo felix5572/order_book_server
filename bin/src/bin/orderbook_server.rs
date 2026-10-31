@@ -128,8 +128,9 @@ struct Args {
     hip3_sip_marks: bool,
 
     /// The pending book (hyperliquid-trade design 000604): a replica of the book on its own thread, block-aligned,
-    /// fed by the listener (a fork of its book, then a copy of each book batch it applies). Not with --no-resync or
-    /// --bbo-only.
+    /// fed by the listener (a fork of its book, then a copy of each book batch it applies), and the node's mempool
+    /// (`<data-dir>/mempool_txs`) read on the same thread, its asset ids named by the account view's anchor. Needs
+    /// --accounts; not with --no-resync or --bbo-only.
     #[arg(long, default_value = "false")]
     pending_book: bool,
 
@@ -240,7 +241,7 @@ async fn main() -> Result<()> {
         println!("  Re-sync: DISABLED (--no-resync) — drift tolerated, book will NOT self-heal");
     }
     if config.pending_book {
-        println!("  Pending book: ON (book replica, backlog budget {} events)", config.pending_backlog_events);
+        println!("  Pending book: ON (book replica, backlog budget {} events; mempool)", config.pending_backlog_events);
     }
     println!();
 

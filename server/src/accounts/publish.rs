@@ -13,7 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{broadcast, watch};
 
 use super::{
-    book::{AccountBook, QueryError, Touched, Unavailable},
+    book::{AccountBook, ActionCoins, QueryError, Touched, Unavailable},
     candidates::{CandidateChanges, Candidates, Refresh},
     flow_accounts::FlowAccountsFeed,
     forced_flow_owner::{FlowFrame, FlowOutput},
@@ -94,6 +94,8 @@ pub(crate) struct Publisher {
     subscriptions: CoinSubscriptions,
     frames: broadcast::Sender<Arc<AccountsFrame>>,
     prices: watch::Sender<NodePrices>,
+    /// The anchor's action asset ids and coins, sent at each new anchor (the pending book, design 000604).
+    action_coins: watch::Sender<Option<Arc<ActionCoins>>>,
     /// Whether the view was available after the previous step.
     available: bool,
     /// Whether the node marks were.
@@ -105,7 +107,8 @@ pub(crate) struct Publisher {
 impl Publisher {
     pub(crate) fn new(subscriptions: CoinSubscriptions, frames: broadcast::Sender<Arc<AccountsFrame>>) -> Self {
         let (prices, _) = watch::channel(Err(marks_unavailable(&Unavailable::Initializing)));
-        Self { subscriptions, frames, prices, available: false, marks_available: false, flow: None }
+        let (action_coins, _) = watch::channel(None);
+        Self { subscriptions, frames, prices, action_coins, available: false, marks_available: false, flow: None }
     }
 
     /// The forced flow thread's copy of the view, fed from now on.
@@ -138,8 +141,14 @@ impl Publisher {
         self.prices.subscribe()
     }
 
+    /// The anchor's action asset ids and coins from now on; `None` before the first anchor.
+    pub(crate) fn subscribe_action_coins(&self) -> watch::Receiver<Option<Arc<ActionCoins>>> {
+        self.action_coins.subscribe()
+    }
+
     /// Withdraws every subscription when the view stops being available; returns whether it is available now.
     pub(crate) fn track(&mut self, book: &AccountBook) -> bool {
+        self.publish_action_coins(book);
         let availability = book.availability();
         if self.available
             && let Err(reason) = &availability
@@ -148,6 +157,19 @@ impl Publisher {
         }
         self.available = availability.is_ok();
         self.available
+    }
+
+    /// A new anchor's action asset ids and coins (called after every step that may install one): the book's own table,
+    /// sent once per anchor.
+    fn publish_action_coins(&self, book: &AccountBook) {
+        let Some(coins) = book.action_coins() else { return };
+        self.action_coins.send_if_modified(|sent| {
+            let new = sent.as_ref().is_none_or(|sent| sent.anchor_height != coins.anchor_height);
+            if new {
+                *sent = Some(Arc::clone(coins));
+            }
+            new
+        });
     }
 
     /// A snapshot of every subscribed coin when the node marks become unavailable or available again while the view is
@@ -290,6 +312,7 @@ mod tests {
     use crate::accounts::{
         book::Stream,
         marks::{CheckpointGrid, MarkInputs, tests::trusted_marks},
+        replay::tests::per_dex_with_main_cash,
         test_support::{PUMP, SEED_TIME_MS, anchor, marks_seed, trusted_book, user},
     };
 
@@ -426,6 +449,36 @@ mod tests {
         assert!(!publisher.track(&book));
         let view_lost = step(&mut publisher, &mut book, &marks).unwrap().unwrap_err();
         assert!(view_lost.starts_with("the account view is unavailable: "), "{view_lost}");
+    }
+
+    /// The pending book's asset table (design 000604): nothing before the first anchor, then once per anchor.
+    #[test]
+    fn the_action_coins_go_out_once_per_anchor() {
+        let (frames, _received) = broadcast::channel(16);
+        let mut publisher = Publisher::new(CoinSubscriptions::default(), frames);
+        let mut coins = publisher.subscribe_action_coins();
+        let mut book = AccountBook::new(0);
+        publisher.track(&book);
+        assert!(!coins.has_changed().unwrap(), "nothing before the first anchor");
+        let install = |book: &mut AccountBook, height| {
+            let mut anchored = anchor(height, &[(PUMP, 0, &[])]);
+            anchored.margins = per_dex_with_main_cash(0);
+            book.install_anchor(anchored);
+        };
+        install(&mut book, 1_000);
+        publisher.track(&book);
+        let first = coins.borrow_and_update().clone().unwrap();
+        assert_eq!((first.anchor_height, first.coins.get(&110_000).map(String::as_str)), (1_000, Some("xyz:TSLA")));
+        // review 000609 r1 P2-3: the table is the book's, built as the anchor installed, not at each step
+        for _ in 0..128 {
+            publisher.track(&book);
+            assert!(Arc::ptr_eq(book.action_coins().unwrap(), &first));
+        }
+        assert!(!coins.has_changed().unwrap(), "the same anchor once");
+        install(&mut book, 1_100);
+        publisher.track(&book);
+        assert!(coins.has_changed().unwrap(), "a new anchor");
+        assert_eq!(coins.borrow_and_update().as_ref().unwrap().anchor_height, 1_100);
     }
 
     #[test]

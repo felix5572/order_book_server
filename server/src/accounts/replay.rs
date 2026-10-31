@@ -37,7 +37,7 @@ use super::{
     marks::fill_prices::{CollateralPrices, FillMarkRange},
     checkpoint::{
         Account, AccountMode, AssetMarginMode, CheckpointAccounts, MAX_PERP_DECIMALS, MAX_SPOT_DECIMALS,
-        PositionMargin, SpotPair, spot_pair_of_coin,
+        PositionMargin, SPOT_ORDER_ASSET_OFFSET, SpotPair, spot_pair_coin, spot_pair_of_coin,
     },
     misc::{Balance, LedgerDelta, USDC_NAME},
     portfolio::USDC,
@@ -551,6 +551,14 @@ impl MarginStates {
     /// Resolve a successful action with the same checkpoint universe used by cash replay.
     pub(crate) fn action_coin(&self, asset: u32) -> Option<&str> {
         self.markets.action_assets.get(&asset).map(String::as_str)
+    }
+
+    /// Every exchange action asset id of the anchor's universe and the coin the node's streams name it by: each dex's
+    /// perps (`action_coin`'s) and the spot pairs (`SPOT_ORDER_ASSET_OFFSET` plus the pair, `spot_pair_coin`).
+    pub(crate) fn action_coins(&self) -> FxHashMap<u32, String> {
+        let spot = (0..self.markets.spot_pairs.len())
+            .filter_map(|pair| Some((SPOT_ORDER_ASSET_OFFSET.checked_add(u32::try_from(pair).ok()?)?, spot_pair_coin(pair))));
+        self.markets.action_assets.clone().into_iter().chain(spot).collect()
     }
 
     pub(crate) fn routing_coin(&self, user: &Address) -> Option<&str> {
@@ -1188,6 +1196,19 @@ pub(crate) mod tests {
     /// The fixture with HOLDER a default account: main dex cash -12000, xyz 30.2697 (flx settles in USDH).
     fn per_dex() -> MarginStates {
         per_dex_with_main_cash(-12_000_000_000)
+    }
+
+    /// The pending book's asset table: each dex's perps by their action ids (HIP-3's 100000 + 10000 × its index), and
+    /// the spot pairs at 10000 + the pair, named as the node's streams name them.
+    #[test]
+    fn the_action_coins_name_every_perp_and_spot_pair_of_the_anchor() {
+        let mut coins: Vec<(u32, String)> = per_dex().action_coins().into_iter().collect();
+        coins.sort();
+        let expected = [
+            (0, "BTC"), (1, "PUMP"), (10_000, "PURR/USDC"), (10_001, "@1"), (10_002, "@2"), (110_000, "xyz:TSLA"),
+            (120_000, "flx:GOLD"),
+        ];
+        assert_eq!(coins, expected.map(|(asset, coin)| (asset, coin.to_string())));
     }
 
     /// `per_dex` with HOLDER's main dex cash at `micro`.

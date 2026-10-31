@@ -1104,7 +1104,7 @@ impl OrderBookListener {
 
 /// A throttled log line ("State progress", lost New diffs) is due: the first
 /// time, then at most once per interval (the work beside it keeps its cadence).
-fn throttled_log_due(last: &mut Option<Instant>, now: Instant) -> bool {
+pub(crate) fn throttled_log_due(last: &mut Option<Instant>, now: Instant) -> bool {
     const THROTTLED_LOG_INTERVAL: Duration = Duration::from_secs(10);
     if last.is_some_and(|at| now.duration_since(at) < THROTTLED_LOG_INTERVAL) {
         return false;

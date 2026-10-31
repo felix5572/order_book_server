@@ -83,8 +83,9 @@ pub struct ServerConfig {
     /// feeds, their key from the environment.
     pub hip3_sip_marks: bool,
     /// Run the pending book (hyperliquid-trade design 000604): a replica of the book on its own thread, fed by the
-    /// listener. Refused with `no_resync` (its block alignment needs every stream's heights to only go up) and with
-    /// `bbo_only` (it copies the whole book).
+    /// listener, and the node's mempool read on the same thread (needs `accounts`, whose anchor names its asset ids).
+    /// Refused with `no_resync` (its block alignment needs every stream's heights to only go up) and with `bbo_only`
+    /// (it copies the whole book).
     pub pending_book: bool,
     /// The pending book replica's budget, in events, for the batches waiting on the slower book stream: past it the
     /// replica stops until both streams are near each other again.
