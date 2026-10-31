@@ -704,6 +704,31 @@ pub(crate) mod tests {
         assert_eq!((btc(&quiet), quiet.unproven_levels()), ([vec![], vec![3]], 0));
     }
 
+    /// Review 000607 r1: the 101 ask level is unproven (2's anchor missing); a crossing bid takes the whole level with
+    /// no removal diff; a new ask 3 rests at 101, neither anchored nor overtaken: the level's old mark is not 3's.
+    #[test]
+    fn a_level_emptied_and_rested_again_drops_its_old_mark() {
+        let mut state = empty_state();
+        let missing_anchor = serde_json::json!({"new": {"sz": "1.0", "insertBefore": 9}});
+        for batch in [
+            BookBatch::Statuses(statuses(10, &[(1, "A", "101.0", "open")])),
+            BookBatch::Diffs(diffs(10, &[(1, "A", "101.0", new_order())])),
+            BookBatch::Statuses(statuses(11, &[(2, "A", "101.0", "open")])),
+            BookBatch::Diffs(diffs(11, &[(2, "A", "101.0", missing_anchor)])),
+        ] {
+            apply(&mut state, batch);
+        }
+        assert!(ask_101_unproven(&state));
+        apply(&mut state, BookBatch::Statuses(statuses(12, &[(5, "B", "101.0", "open")])));
+        apply(&mut state, BookBatch::Diffs(diffs(12, &[(5, "B", "101.0", serde_json::json!({"new": {"sz": "2.0"}}))])));
+        assert_eq!(btc(&state), [Vec::<u64>::new(), vec![]], "the bid took both asks, no removal diff");
+        assert!(ask_101_unproven(&state), "nothing looked at the emptied level yet");
+        apply(&mut state, BookBatch::Statuses(statuses(13, &[(3, "A", "101.0", "open")])));
+        apply(&mut state, BookBatch::Diffs(diffs(13, &[(3, "A", "101.0", new_order())])));
+        assert_eq!(btc(&state), [vec![], vec![3]]);
+        assert!(!ask_101_unproven(&state), "3 rested on an empty level");
+    }
+
     fn copy(batch: &BookBatch) -> BookBatch {
         match batch {
             BookBatch::Statuses(batch) => BookBatch::Statuses(batch.clone()),

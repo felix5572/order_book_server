@@ -57,7 +57,9 @@ type LevelKey = (Coin, crate::order_book::Side, Px);
 #[derive(Clone, Default)]
 struct UnprovenLevels {
     tracking: bool,
-    levels: rustc_hash::FxHashSet<LevelKey>,
+    /// Each coin's unproven levels: a removal looks at its coin's alone (bm 2026-10-31: a pass over every level on
+    /// each diff batch took most of the listener's diff time, in the book's coin and price searches).
+    levels: rustc_hash::FxHashMap<Coin, Vec<(crate::order_book::Side, Px)>>,
     /// Resting adds so far, and each level's latest: kept while a New diff that came before it still waits.
     adds: u64,
     last_add: rustc_hash::FxHashMap<LevelKey, u64>,
@@ -77,11 +79,50 @@ impl UnprovenLevels {
         self.last_add.insert(level, self.adds);
     }
 
-    /// The levels emptied leave: their next orders' order is the node's again.
-    fn forget_emptied(&mut self, book: &OrderBooks<InnerL4Order>) {
-        if !self.levels.is_empty() {
-            self.levels.retain(|(coin, side, px)| book.has_level(coin, *side, *px));
+    fn mark(&mut self, (coin, side, px): LevelKey) {
+        let levels = self.levels.entry(coin).or_default();
+        if !levels.contains(&(side, px)) {
+            levels.push((side, px));
         }
+    }
+
+    fn count(&self) -> usize {
+        self.levels.values().map(Vec::len).sum()
+    }
+
+    /// Before an order rests at `level`: a mark of a level emptied meanwhile - a crossing order's match leaves no
+    /// removal to look at it, and the cleanup may not have come - is the old orders', not this one's (review 000607 r1).
+    fn forget_if_emptied(&mut self, book: &OrderBooks<InnerL4Order>, (coin, side, px): &LevelKey) {
+        if self.levels.is_empty() {
+            return;
+        }
+        let Some(levels) = self.levels.get_mut(coin) else { return };
+        if levels.contains(&(*side, *px)) && !book.has_level(coin, *side, *px) {
+            levels.retain(|level| *level != (*side, *px));
+            if levels.is_empty() {
+                self.levels.remove(coin);
+            }
+        }
+    }
+
+    /// After a removal in `coin`: its levels emptied leave, their next orders' order the node's again.
+    fn forget_emptied_in(&mut self, book: &OrderBooks<InnerL4Order>, coin: &Coin) {
+        if self.levels.is_empty() {
+            return;
+        }
+        let Some(levels) = self.levels.get_mut(coin) else { return };
+        levels.retain(|(side, px)| book.has_level(coin, *side, *px));
+        if levels.is_empty() {
+            self.levels.remove(coin);
+        }
+    }
+
+    /// Every coin's, at the cleanup's cadence: a level emptied by a crossing order's match too.
+    fn forget_emptied(&mut self, book: &OrderBooks<InnerL4Order>) {
+        self.levels.retain(|coin, levels| {
+            levels.retain(|(side, px)| book.has_level(coin, *side, *px));
+            !levels.is_empty()
+        });
     }
 
     /// The adds no waiting New diff came before: none can overtake it any more.
@@ -274,6 +315,9 @@ impl OrderBookState {
     fn rest(&mut self, order: InnerL4Order, insert_before: Option<Oid>, waited_since: Option<u64>) {
         let (oid, coin, px) = (order.oid(), order.coin.clone(), order.limit_px());
         let level = self.unproven.level_of(&order);
+        if let Some(level) = &level {
+            self.unproven.forget_if_emptied(&self.order_book, level);
+        }
         let overtaken = waited_since.zip(level.as_ref()).is_some_and(|(since, level)| self.unproven.added_since(level, since));
         let anchor = insert_before.clone();
         let fell_back = self.order_book.add_order_before(order, insert_before);
@@ -284,7 +328,7 @@ impl OrderBookState {
         }
         let Some(level) = level else { return };
         if fell_back || overtaken {
-            self.unproven.levels.insert(level.clone());
+            self.unproven.mark(level.clone());
         }
         self.unproven.note_add(level);
     }
@@ -301,12 +345,12 @@ impl OrderBookState {
 
     /// Levels whose queue order is not proven: their orders' places may not be the node's.
     pub(super) fn unproven_levels(&self) -> usize {
-        self.unproven.levels.len()
+        self.unproven.count()
     }
 
     #[cfg(test)]
     pub(super) fn level_unproven(&self, coin: &str, side: crate::order_book::Side, px: Px) -> bool {
-        self.unproven.levels.contains(&(Coin::new(coin), side, px))
+        self.unproven.levels.get(&Coin::new(coin)).is_some_and(|levels| levels.contains(&(side, px)))
     }
 
     pub(super) const fn ignore_spot(&self) -> bool {
@@ -501,6 +545,7 @@ impl OrderBookState {
         if self.unproven.tracking {
             let oldest_waiting = self.pending_new_diffs.values().map(|pending| pending.adds_before).min();
             self.unproven.forget_adds(oldest_waiting);
+            self.unproven.forget_emptied(&self.order_book);
         }
 
         let statuses_applied = self.statuses.height;
@@ -750,6 +795,7 @@ impl OrderBookState {
                     } else if self.order_book.modify_sz(oid.clone(), coin.clone(), new_sz) {
                         if new_sz.is_zero() {
                             self.zeroed_awaiting_remove.insert(oid, Instant::now());
+                            self.unproven.forget_emptied_in(&self.order_book, &coin);
                         }
                     } else {
                         self.missing_diff_targets += 1;
@@ -769,11 +815,11 @@ impl OrderBookState {
                             note_diff_target_missing("remove", &oid, &coin);
                         }
                     }
+                    self.unproven.forget_emptied_in(&self.order_book, &coin);
                     changed_coins.insert(coin);
                 }
             }
         }
-        self.unproven.forget_emptied(&self.order_book);
         Ok(changed_coins)
     }
 }
@@ -832,6 +878,18 @@ mod tests {
         levels.note_add(level(3));
         levels.forget_adds(None);
         assert!(levels.last_add.is_empty(), "none waits");
+    }
+
+    /// A level no longer on the book - emptied by a crossing order's match, no removal of its coin seen - leaves at the
+    /// cleanup's pass over every coin.
+    #[test]
+    fn the_cleanup_forgets_unproven_levels_no_longer_on_the_book() {
+        let mut state = empty_state();
+        state.track_unproven_levels();
+        state.unproven.mark((Coin::new("BTC"), crate::order_book::Side::Ask, Px::new(101)));
+        assert_eq!(state.unproven_levels(), 1);
+        assert!(!state.cleanup_stale_pending(), "nothing live cleared");
+        assert_eq!(state.unproven_levels(), 0);
     }
 
     fn empty_state() -> OrderBookState {
