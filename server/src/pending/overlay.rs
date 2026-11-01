@@ -22,7 +22,8 @@
 //!   is rejected whole, its target left (an inference: no case seen).
 //! - A new order that may take, of a taker HL lately refused for margin on its coin and side, is rejected (batch 2g,
 //!   `TakerRefusals`) when the minimum value does not reject it first; a modify is not judged by it.
-//! - Self-trades, reduce-only, price bands and margin otherwise are not modelled (design 000604's non-goals).
+//! - Self-trades, reduce-only, price bands above the reference and margin otherwise are not modelled (design 000604's
+//!   non-goals).
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -42,6 +43,11 @@ use crate::{
 
 /// HL's minimum order value, 10 of the quote, in a price's units times a size's (1e-8 each).
 const MIN_NOTIONAL: u128 = 10 * 100_000_000 * 100_000_000;
+
+/// HL refuses an order whose limit is under the reference price divided by this - "more than 95% away" (research
+/// `mempool_pending_book_20261031`, bm 11-01 13:30-14:20, 4.2M orders against the coin's last trade: refused at 0.03 of
+/// it or less, 229 buys and 2 sells; taken from 0.105 for buys, 0.4999 for sells, up to 2.62 above).
+const PRICE_BAND_DIVISOR: u128 = 20;
 
 /// HL's ALO priority window T: a level's tail of orders placed within it is sorted by priority (HL docs "Priority
 /// fees"; research `mempool_pending_book_20261031`, bm 10-31 20:15-20:20: of the node's 17,187 `insertBefore` diffs,
@@ -591,6 +597,19 @@ fn at_least_as_good(side: Side, px: Px, other: Px) -> bool {
     }
 }
 
+/// Whether HL refuses an order of `limit_px` for its price: under `PRICE_BAND_DIVISOR`th of the reference, taken as the
+/// confirmed book's midpoint - compared undivided (review 000637 r1 P2-2) -, or its one side (batch 2k); with no level
+/// at all, not judged.
+pub(crate) fn below_price_band(base: CoinBase<'_>, limit_px: Px) -> bool {
+    let best = |side| base.levels_from_best(side).next().map(|(px, _)| u128::from(px.value()));
+    let limit = u128::from(limit_px.value()) * PRICE_BAND_DIVISOR;
+    match (best(Side::Bid), best(Side::Ask)) {
+        (Some(bid), Some(ask)) => 2 * limit < bid + ask,
+        (Some(one), None) | (None, Some(one)) => limit < one,
+        (None, None) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloy::primitives::B256;
@@ -691,6 +710,26 @@ mod tests {
 
     fn confirmed(user: Address, oid: u64, cloid: Option<&str>) -> Maker {
         Maker::Confirmed { user, oid: Oid::new(oid), cloid: cloid.map(str::to_string) }
+    }
+
+    /// Batch 2k: the price band against the confirmed book - its midpoint 100 (99 / 101): 4.99 under it, 5 not; the
+    /// midpoint undivided (review 000637 r1 P2-2): 0.00002000 / 0.00002001, a limit of 0.00000100 under it (x 20 is
+    /// 0.00002000 < 0.000020005); one side alone its own; no level, not judged.
+    #[test]
+    fn the_price_band_is_judged_against_the_confirmed_book() {
+        let (book, cloids) = book();
+        let base = CoinBase::new(Some(&book), &[], Some(&cloids));
+        assert_eq!(["4.99", "5"].map(|limit| below_price_band(base, px(limit))), [true, false]);
+        let mut thin = OrderBook::new();
+        thin.add_order(resting(1, ALICE, Side::Bid, "0.00002", "1", None));
+        thin.add_order(resting(2, BOB, Side::Ask, "0.00002001", "1", None));
+        let thin_base = CoinBase::new(Some(&thin), &[], None);
+        assert!(below_price_band(thin_base, px("0.000001")));
+        let mut one_side = OrderBook::new();
+        one_side.add_order(resting(3, BOB, Side::Ask, "101", "1", None));
+        let one_base = CoinBase::new(Some(&one_side), &[], None);
+        assert_eq!(["5.04", "5.05"].map(|limit| below_price_band(one_base, px(limit))), [true, false]);
+        assert!(!below_price_band(CoinBase::new(None, &[], None), px("0.000001")));
     }
 
     /// Batch 2h: a TWAP suborder takes up to 3% past the best opposite level, and no further than its parent's limit.

@@ -32,10 +32,10 @@ use alloy::primitives::{Address, B256};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
-    actions::{ActionId, BookActions, PendingAction, Placement, book_actions},
+    actions::{ActionId, BookActions, PendingAction, Placement, band_orders, book_actions},
     blocks::LoggedBlock,
     mempool::MempoolTx,
-    overlay::{Basis, BestLevel, CoinBase, Effect, Fill, Maker, Overlay, PRIORITY_WINDOW_MS},
+    overlay::{Basis, BestLevel, CoinBase, Effect, Fill, Maker, Overlay, PRIORITY_WINDOW_MS, below_price_band},
     publish::{BestLevels, CoinPending},
     record::{BlockRecord, MAX_LEAD_BLOCKS},
     refusals::{TakerKey, TakerRefusals},
@@ -327,6 +327,12 @@ pub(crate) struct Shadow {
     due_of: Option<(u64, u64)>,
     emitted: FxHashMap<(u64, u64), u64>,
     window_height: Option<u64>,
+    /// The signed actions held with no replica aligned to judge their price band by, each with the lowest limit of its
+    /// orders the band judges on each coin: judged once one is, before any overlay applies them (batch 2k, review 000637
+    /// r2, r3); entered once held, dropped with the set; their (coin, limit) slots, counted against its cap with the
+    /// actions held (r4).
+    band_unjudged: FxHashMap<(B256, usize), Vec<(Coin, Px)>>,
+    band_unjudged_slots: usize,
     gaps: Gaps,
     held: usize,
     newest_seen_ns: Option<i64>,
@@ -358,6 +364,8 @@ impl Shadow {
             due_of: None,
             emitted: FxHashMap::default(),
             window_height: None,
+            band_unjudged: FxHashMap::default(),
+            band_unjudged_slots: 0,
             gaps: Gaps {
                 mempool: Some("start"),
                 block_log: Some("block_log_start"),
@@ -387,7 +395,8 @@ impl Shadow {
         self.mempool_gaps(tx.seen_ns, after_loss, coins.is_some(), aligned);
         self.newest_seen_ns = Some(self.newest_seen_ns.map_or(tx.seen_ns, |newest| newest.max(tx.seen_ns)));
         let Some(coins) = coins else { return step };
-        let BookActions { held: actions, refused } = book_actions(tx, coins, self.spot);
+        let below_band = |coin: &str, limit_px: Px| aligned.is_some_and(|(replica, _, _)| below_price_band(replica.coin(&Coin::new(coin)), limit_px));
+        let BookActions { held: actions, refused } = book_actions(tx, coins, self.spot, &below_band);
         for labels in refused {
             PENDING_BOOK_ACTIONS_TOTAL.with_label_values(&labels).inc();
         }
@@ -400,11 +409,16 @@ impl Shadow {
         if actions.is_empty() {
             return step;
         }
+        // with no replica to judge them by, the price band's slots of its held signed actions wait with them (r4)
+        let unjudged = if aligned.is_none() { unjudged_bands(tx, &actions, coins) } else { Vec::new() };
+        let slots: usize = unjudged.iter().map(|(_, lowest)| lowest.len()).sum();
         // the cap judged before any of it applies: nothing of a line dropping the set trades (review 000611 r1)
-        if self.held + actions.len() > self.params.max_actions {
+        if self.held + self.band_unjudged_slots + actions.len() + slots > self.params.max_actions {
             self.drop_over_cap(actions.len());
             return step;
         }
+        self.band_unjudged_slots += slots;
+        self.band_unjudged.extend(unjudged.into_iter().map(|(action, lowest)| ((tx.tx_hash, action), lowest)));
         let emit = self.availability(replica).is_ok();
         let unknown = self.gaps.unknown_at(tx.seen_ns);
         // the line's actions by coin, each with its place in the line: held a coin at a time (review 000634 r1 P2-1)
@@ -742,6 +756,7 @@ impl Shadow {
             self.settles += 1;
         }
         let new_generation = std::mem::replace(&mut self.gaps.replica, false);
+        self.judge_bands(replica, &mut changed);
         if self.newest_seen_ns.is_none_or(|seen_ns| confirmed_ns - seen_ns > self.params.silence_ns) {
             self.open_mempool_gap("silence");
         }
@@ -772,6 +787,34 @@ impl Shadow {
         let mut trades = Vec::new();
         self.replay_coins(replica, &changed, emit, &mut trades);
         Step { trades, changed }
+    }
+
+    /// The signed actions held with no replica aligned, their price band judged against `replica` before any overlay
+    /// applies them: one an order of which is under it leaves whole, its coins replayed (batch 2k, review 000637 r2).
+    fn judge_bands(&mut self, replica: &BookReplica, changed: &mut HashSet<Coin>) {
+        if self.band_unjudged.is_empty() {
+            return;
+        }
+        self.band_unjudged_slots = 0;
+        let banded: FxHashSet<(B256, usize)> = std::mem::take(&mut self.band_unjudged)
+            .into_iter()
+            .filter(|(_, orders)| orders.iter().any(|(coin, limit_px)| below_price_band(replica.coin(coin), *limit_px)))
+            .map(|(key, _)| key)
+            .collect();
+        for (coin, actions) in &mut self.coins {
+            let before = actions.actions.len();
+            actions.actions.retain(|action| {
+                let out = banded.contains(&(action.id.tx_hash, action.id.action));
+                if out {
+                    count_action(action, "price_band");
+                }
+                !out
+            });
+            if actions.actions.len() < before {
+                self.held -= before - actions.actions.len();
+                changed.insert(coin.clone());
+            }
+        }
     }
 
     /// Whether the block record reaches the confirmed `height`: every confirmed order's ALO priority known.
@@ -852,6 +895,8 @@ impl Shadow {
         PENDING_BOOK_ACTIONS_TOTAL.with_label_values(&["any", "over_cap"]).inc_by((self.held + arriving) as u64);
         self.coins.clear();
         self.lines.clear();
+        self.band_unjudged.clear();
+        self.band_unjudged_slots = 0;
         self.held = 0;
         self.refresh_all = true;
         if let Some(newest_seen_ns) = self.newest_seen_ns {
@@ -886,6 +931,26 @@ impl PendingTrade {
             Taker::Twap { user, .. } => Some(*user),
         }
     }
+}
+
+/// Each signed action of `tx` an action of which is held, with the lowest limit of its orders the price band judges on
+/// each coin - all it reads of them (batch 2k, review 000637 r4).
+fn unjudged_bands(tx: &MempoolTx, held: &[(Coin, PendingAction)], coins: &ActionCoins) -> Vec<(usize, Vec<(Coin, Px)>)> {
+    let mut actions: Vec<usize> = held.iter().map(|(_, action)| action.id.action).collect();
+    actions.dedup();
+    actions
+        .into_iter()
+        .map(|action| {
+            let mut lowest: Vec<(&str, Px)> = Vec::new();
+            for (coin, limit_px) in band_orders(&tx.actions[action].kind, coins) {
+                match lowest.iter_mut().find(|(held, _)| *held == coin) {
+                    Some((_, low)) => *low = (*low).min(limit_px),
+                    None => lowest.push((coin, limit_px)),
+                }
+            }
+            (action, lowest.into_iter().map(|(coin, limit_px)| (Coin::new(coin), limit_px)).collect())
+        })
+        .collect()
 }
 
 /// The next second's start after the confirmed block time `basis_ms` less `SLICE_CUT_MS`, unix ns: the actions of the
@@ -1730,6 +1795,108 @@ pub(crate) mod tests {
         let coins: Vec<_> = step.trades.iter().map(|trade| (trade.coin.value(), matches!(trade.taker, Taker::Twap { .. }))).collect();
         let expected = [("BTC", false), ("ETH", false), ("BTC", false)].map(|(coin, twap)| (coin.to_string(), twap));
         assert_eq!(coins, expected);
+    }
+
+    /// Review 000637 r2 P2: the book 99 / 101; a line taken while no replica is aligned is not judged then - it is once
+    /// one is, before any overlay applies it: its signed action selling at 4 never rests, another of the line does, and
+    /// an IOC buying at 101 after takes the ask 101.
+    #[test]
+    fn a_line_held_with_no_replica_is_judged_once_one_is_aligned() {
+        let mut harness = Harness::ready_from(1_000);
+        let at = block_time_ms(harness.height + 1);
+        harness.block(
+            &[],
+            vec![btc_status(21, "B", "99.0", "1.0", "open", None, "Alo", at), btc_status(11, "A", "101.0", "1.0", "open", None, "Alo", at)],
+            vec![btc_diff(21, "B", "99.0", new_diff("1.0")), btc_diff(11, "A", "101.0", new_diff("1.0"))],
+        );
+        harness.shadow.on_replica_gone();
+        let signed = |kind| SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind };
+        let banded = ActionKind::Order(vec![requested(0, false, "4", RequestedTif::Gtc, Some("0x0a")), requested(0, false, "103", RequestedTif::Alo, Some("0x0c"))]);
+        let tx = MempoolTx { seen_ns: 3_150 * NS_PER_MS, tx_hash: hash(1), actions: vec![signed(banded), signed(alo_ask("102", "0x0b"))] };
+        drop(harness.shadow.on_tx(&tx, false, Some(&coins()), None));
+        assert_eq!(harness.shadow.held(BTC).len(), 3, "held, not judged");
+        drop(harness.block(&[], vec![], vec![]));
+        assert_eq!(harness.shadow.held(BTC), [(1, false)], "the action selling at 4 judged out whole, its ALO at 103 too; the ALO at 102 kept");
+        assert_eq!((harness.shadow.band_unjudged.len(), harness.shadow.band_unjudged_slots), (0, 0));
+        assert_eq!(harness.bbo(), (Some(level("99", "1", 1)), Some(level("101", "1", 1))));
+        assert_eq!(harness.available(), Ok(()));
+        let step = harness.line(3_250, 2, vec![ioc("0x02")]);
+        assert_eq!(step.trades.iter().map(|trade| trade.px.to_str()).collect::<Vec<_>>(), ["101"]);
+    }
+
+    /// Review 000637 r3 P2-1: the ask 101 alone - a signed action selling 100,000,000 at 4 (under the band, and too large:
+    /// refused one by one before the book) with an IOC buying at 101 leaves the book as it was, taken with a replica
+    /// aligned or judged after one held with none.
+    #[test]
+    fn an_action_too_large_and_under_the_band_is_judged_whole_either_way() {
+        let large = || crate::pending::mempool::RequestedOrder {
+            sz: Sz::parse_from_str("100000000").unwrap(),
+            sz_shape: crate::pending::mempool::DecimalShape::of("100000000"),
+            ..requested(0, false, "4", RequestedTif::Gtc, Some("0x0a"))
+        };
+        let tx = |hash_byte: u8| MempoolTx {
+            seen_ns: 3_150 * NS_PER_MS,
+            tx_hash: hash(hash_byte),
+            actions: vec![SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![large(), requested(0, true, "101", RequestedTif::Ioc, Some("0x0b"))]) }],
+        };
+        for aligned in [true, false] {
+            let mut harness = Harness::ready_from(1_000);
+            harness.rest_ask(11);
+            if aligned {
+                drop(harness.shadow.on_tx(&tx(1), false, Some(&coins()), Some(&harness.replica)));
+            } else {
+                harness.shadow.on_replica_gone();
+                drop(harness.shadow.on_tx(&tx(1), false, Some(&coins()), None));
+                drop(harness.block(&[], vec![], vec![]));
+            }
+            assert_eq!((harness.shadow.held(BTC), harness.bbo().1), (Vec::new(), Some(level("101", "1", 1))), "aligned {aligned}");
+        }
+    }
+
+    /// Review 000637 r3 P2-2, r4: what waits unjudged with no replica stays within the set's cap - 3 here -, its slots
+    /// counted with the actions held: lines of an action of 100 sells too large (each refused by itself, all read by the
+    /// band) on BTC and ETH and an ALO kept, the set dropped over and over, the slots each coin's lowest limit alone.
+    #[test]
+    fn unjudged_actions_stay_within_the_cap() {
+        let mut harness = Harness::ready_with(PendingParams::from_ms(1_000, 1_000, 10_000, 3, 60_000, 300_000, 1_000).unwrap(), 1_000);
+        harness.shadow.on_replica_gone();
+        let large = |asset: u32, px: &str| crate::pending::mempool::RequestedOrder {
+            sz: Sz::parse_from_str("100000000").unwrap(),
+            sz_shape: crate::pending::mempool::DecimalShape::of("100000000"),
+            ..requested(asset, false, px, RequestedTif::Gtc, None)
+        };
+        for byte in 1..=30 {
+            let mut orders: Vec<_> = (0..50).flat_map(|_| [large(0, "4"), large(1, "40")]).collect();
+            orders.push(requested(0, false, "102", RequestedTif::Alo, Some("0x0a")));
+            let kind = ActionKind::Order(orders);
+            let tx = MempoolTx { seen_ns: 3_150 * NS_PER_MS, tx_hash: hash(byte), actions: vec![SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind }] };
+            drop(harness.shadow.on_tx(&tx, false, Some(&coins()), None));
+            let slots: usize = harness.shadow.band_unjudged.values().map(Vec::len).sum();
+            assert_eq!(slots, harness.shadow.band_unjudged_slots, "line {byte}");
+            assert!(harness.shadow.held + slots <= 3, "line {byte}");
+            assert!(harness.shadow.band_unjudged.values().all(|lowest| lowest.len() <= 2), "a coin's lowest alone");
+            if byte == 1 {
+                assert_eq!((harness.shadow.held, slots), (1, 2), "the first line kept: its ALO, BTC's lowest and ETH's");
+            }
+        }
+    }
+
+    /// Review 000637 r1 P2-1: the ask 101 alone - a signed action buying at 4 (under 5.05, the band of its one side)
+    /// and at 101 is refused whole, the book left; another signed action of the line takes the ask.
+    #[test]
+    fn an_action_under_the_price_band_trades_nothing() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        let banded = || ActionKind::Order(vec![requested(0, true, "4", RequestedTif::Ioc, Some("0x0a")), requested(0, true, "101", RequestedTif::Ioc, Some("0x0b"))]);
+        let step = harness.line(3_150, 1, vec![banded()]);
+        assert_eq!((step.trades.len(), harness.bbo().1), (0, Some(level("101", "1", 1))));
+        let step = harness.line(3_160, 2, vec![banded(), ioc("0x02")]);
+        let cloids: Vec<_> = step.trades.iter().map(|trade| match &trade.taker {
+            Taker::Pending { cloid, .. } => cloid.clone(),
+            Taker::Twap { .. } => None,
+        }).collect();
+        assert_eq!(cloids, [Some("0x02".to_string())]);
+        assert_eq!(harness.bbo().1, None);
     }
 
     /// Review 000634 r3 P2-1: with no suborder due, a replay keeps the actions as they came - an ask seen at 3,981 ms,

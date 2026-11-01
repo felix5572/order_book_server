@@ -131,7 +131,7 @@ impl PendingAction {
 
 /// A line's book actions: those held, in execution order, and those HL refuses by rule before any book - each one's
 /// [op label, why] (`expires_after`; `off_grid`, or `off_grid_batch` for one on the grid refused with its action;
-/// `too_large`).
+/// `price_band` for every order of an action one of whose orders is under the price band; `too_large`).
 #[derive(Debug, Default)]
 pub(crate) struct BookActions {
     pub(crate) held: Vec<(Coin, PendingAction)>,
@@ -139,8 +139,11 @@ pub(crate) struct BookActions {
 }
 
 /// `tx`'s book actions on the coins `coins` names, in execution order; spot left out when `spot` is not kept (the
-/// replica's book has none then). An asset the table does not name is the mempool reading's count.
-pub(crate) fn book_actions(tx: &MempoolTx, coins: &ActionCoins, spot: bool) -> BookActions {
+/// replica's book has none then). An asset the table does not name is the mempool reading's count. `below_band(coin,
+/// limit)`: whether an order's limit is under its coin's price band (batch 2k) - HL refuses its whole signed action
+/// before any of it, one status for all (review 000637 r1 P2-1; bm 11-01 13:20-14:30, 479 actions of several orders
+/// answered with the one error, none a status per order).
+pub(crate) fn book_actions(tx: &MempoolTx, coins: &ActionCoins, spot: bool, below_band: &dyn Fn(&str, Px) -> bool) -> BookActions {
     let mut ranked: Vec<(u8, usize)> = tx.actions.iter().enumerate().filter_map(|(index, action)| Some((category(&action.kind)?, index))).collect();
     ranked.sort_unstable();
     let named = |asset: u32| coins.coins.get(&asset).filter(|named| spot || !Coin::str_is_spot(&named.coin));
@@ -150,12 +153,20 @@ pub(crate) fn book_actions(tx: &MempoolTx, coins: &ActionCoins, spot: bool) -> B
     for (_, index) in ranked {
         let signed = &tx.actions[index];
         let expired = signed.expires_after_ms.is_some_and(|expires_ms| i64::try_from(expires_ms).is_ok_and(|expires_ms| expires_ms < seen_ms));
-        // an order off the grid fails the whole signed action, trigger orders' prices too
+        // an order off the grid fails the whole signed action, trigger orders' prices too; one under the price band too,
+        // trigger orders not judged (no sample of theirs)
         let batch_off_grid = signed.kind.orders().any(off_grid);
+        let banded = band_orders(&signed.kind, coins).any(|(coin, limit_px)| below_band(coin, limit_px));
         for (item, asset, op, order) in book_ops(&signed.kind, signed.priority) {
             let Some(named) = named(asset) else { continue };
-            if expired || batch_off_grid {
-                let why = if expired { "expires_after" } else if order.is_some_and(off_grid) { "off_grid" } else { "off_grid_batch" };
+            if expired || batch_off_grid || banded {
+                let why = if expired {
+                    "expires_after"
+                } else if batch_off_grid {
+                    if order.is_some_and(off_grid) { "off_grid" } else { "off_grid_batch" }
+                } else {
+                    "price_band"
+                };
                 actions.refused.push([op.label(), why]);
                 continue;
             }
@@ -169,6 +180,14 @@ pub(crate) fn book_actions(tx: &MempoolTx, coins: &ActionCoins, spot: bool) -> B
         }
     }
     actions
+}
+
+/// The (coin, limit) of each order of a signed action the price band judges (batch 2k): every one but a trigger order,
+/// on a coin the table names - those `book_actions` refuses one by one included (review 000637 r3 P2-1).
+pub(crate) fn band_orders<'a>(kind: &'a ActionKind, coins: &'a ActionCoins) -> impl Iterator<Item = (&'a str, Px)> + 'a {
+    kind.orders()
+        .filter(|order| order.tif != RequestedTif::Trigger)
+        .filter_map(|order| coins.coins.get(&order.asset).map(|named| (named.coin.as_str(), order.limit_px)))
 }
 
 /// Whether an order is on its coin's grid: a size of at most `szDecimals` decimals; a price of at most `max_decimals -
@@ -277,6 +296,21 @@ pub(crate) mod tests {
     /// Batch 2d: what HL refuses by rule before any book, the set refuses - every op of a signed action past its
     /// `expiresAfter` when its line came (1,000 ms), not one expiring then; an order off its coin's grid, BTC's
     /// (szDecimals 5): a price of 6 significant figures, or of 2 decimals, a size of 6 decimals - an integer price of
+    /// Review 000637 r1 P2-1: an action one of whose orders is under the price band is refused whole, every order of
+    /// it `price_band`; another action of the line is held; a trigger order is not judged.
+    #[test]
+    fn an_action_under_the_price_band_is_refused_whole() {
+        let below = |_: &str, px: Px| px < Px::parse_from_str("5").unwrap();
+        let banded = ActionKind::Order(vec![requested(0, true, "4", RequestedTif::Ioc, None), requested(0, true, "101", RequestedTif::Ioc, None)]);
+        let other = ActionKind::Order(vec![requested(0, true, "101", RequestedTif::Ioc, None)]);
+        let actions = book_actions(&tx(vec![banded, other]), &coins(), false, &below);
+        assert_eq!(actions.refused, [["place_ioc", "price_band"]; 2]);
+        assert_eq!(actions.held.iter().map(|(_, action)| action.id.action).collect::<Vec<_>>(), [1]);
+        let trigger = ActionKind::Order(vec![requested(0, true, "4", RequestedTif::Trigger, None), requested(0, true, "101", RequestedTif::Ioc, None)]);
+        let actions = book_actions(&tx(vec![trigger]), &coins(), false, &below);
+        assert_eq!((actions.held.len(), actions.refused.len()), (1, 0), "the trigger order's price not judged");
+    }
+
     /// any length is on it, trailing zeros count for nothing.
     #[test]
     fn orders_off_the_grid_and_actions_expired_are_refused() {
@@ -286,15 +320,15 @@ pub(crate) mod tests {
             ..requested(0, true, px, RequestedTif::Alo, None)
         };
         let mut line = tx(vec![ActionKind::Order(vec![order("123456", "0.001"), order("77655", "0.00100")])]);
-        assert_eq!(book_actions(&line, &coins(), false).held.len(), 2);
+        assert_eq!(book_actions(&line, &coins(), false, &|_, _| false).held.len(), 2);
         line.actions[0].expires_after_ms = Some(999);
-        let actions = book_actions(&line, &coins(), false);
+        let actions = book_actions(&line, &coins(), false, &|_, _| false);
         assert_eq!((actions.held.len(), actions.refused), (0, vec![["place_alo", "expires_after"]; 2]));
         line.actions[0].expires_after_ms = Some(1_000);
-        assert_eq!(book_actions(&line, &coins(), false).held.len(), 2);
+        assert_eq!(book_actions(&line, &coins(), false, &|_, _| false).held.len(), 2);
         for off in [order("77655.5", "0.001"), order("7765.55", "0.001"), order("77655", "0.000001")] {
             let line = tx(vec![ActionKind::Order(vec![off.clone()])]);
-            assert_eq!(book_actions(&line, &coins(), false).refused, [["place_alo", "off_grid"]], "{off:?}");
+            assert_eq!(book_actions(&line, &coins(), false, &|_, _| false).refused, [["place_alo", "off_grid"]], "{off:?}");
         }
     }
 
@@ -306,7 +340,7 @@ pub(crate) mod tests {
     fn an_order_off_the_grid_refuses_its_signed_action_whole() {
         let line = format!(r#"["2026-10-31T18:04:08.825404321",{{"tx_hash":"0x71469c86420999a72184eec1f563d9330d974568da21b0d26ca676fe99b70a3d","signed_actions":[{MIXED_TICK_ACTION},{ON_GRID_ACTION}]}}]"#);
         let tx = crate::pending::mempool::parse_line(&line).unwrap();
-        let actions = book_actions(&tx, &coins(), false);
+        let actions = book_actions(&tx, &coins(), false, &|_, _| false);
         let mut refused = vec![["place_alo", "off_grid"]; 10];
         refused[4] = ["place_alo", "off_grid_batch"];
         assert_eq!(actions.refused, refused);
@@ -324,7 +358,7 @@ pub(crate) mod tests {
             ..requested(1, true, px, tif, None)
         };
         let orders = vec![order("2000", "255", FrontendMarket), order("2000", "227", FrontendMarket), order("2000", "255", Ioc), order("2000", "2501", Ioc)];
-        let actions = book_actions(&tx(vec![ActionKind::Order(orders)]), &coins(), false);
+        let actions = book_actions(&tx(vec![ActionKind::Order(orders)]), &coins(), false, &|_, _| false);
         assert_eq!(actions.held.iter().map(|(_, action)| action.id.item).collect::<Vec<_>>(), [1, 2]);
         assert_eq!(actions.refused, [["place_ioc", "too_large"]; 2]);
     }
@@ -341,7 +375,7 @@ pub(crate) mod tests {
     }
 
     fn ops(tx: &MempoolTx, spot: bool) -> Vec<(String, usize, usize, &'static str)> {
-        book_actions(tx, &coins(), spot).held.into_iter().map(|(coin, action)| (coin.value(), action.id.action, action.id.item, action.op.label())).collect()
+        book_actions(tx, &coins(), spot, &|_, _| false).held.into_iter().map(|(coin, action)| (coin.value(), action.id.action, action.id.item, action.op.label())).collect()
     }
 
     /// A bundle as `0xc9ba...` lists it - cancels, then ALOs, then takers - runs ALOs, then cancels, then the rest,
