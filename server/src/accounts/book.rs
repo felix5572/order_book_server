@@ -44,6 +44,7 @@ use super::{
     marks::MarksAt,
     replay::{AccountEvent, FillEvent, HeldPosition, MarginStates, ReplayedRow, SelfCheck, Stop},
     size::parse_size_raw,
+    twap_tracker::CheckpointTwap,
 };
 use crate::{
     order_book::Side,
@@ -120,8 +121,18 @@ pub(crate) struct Available {
 /// mempool's orders through it (hyperliquid-trade design 000604).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActionCoins {
-    pub(crate) anchor_height: u64,
     pub(crate) coins: FxHashMap<u32, ActionAsset>,
+}
+
+/// What the pending book takes of an anchor (design 000624 r4 section 1): its asset table and its running TWAPs, at its
+/// height.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingAnchor {
+    pub(crate) height: u64,
+    pub(crate) coins: ActionCoins,
+    pub(crate) twaps: Vec<CheckpointTwap>,
+    /// The ids of the TWAPs waiting for their trigger.
+    pub(crate) waiting_twaps: Vec<u64>,
 }
 
 /// An action asset id's coin and its order grid (HL API docs "Tick and lot size").
@@ -816,8 +827,9 @@ pub(crate) struct AccountBook {
     /// Whether the event log dropped events since the anchor (the replay of the interval is then incomplete).
     events_dropped: bool,
     replay: Option<Replay>,
-    /// The anchor's action asset ids and their coins, built once as it installs (review 000609 r1 P2-3).
-    action_coins: Option<Arc<ActionCoins>>,
+    /// The anchor's action asset ids and their coins, and its running TWAPs, built once as it installs (review 000609
+    /// r1 P2-3).
+    pending_anchor: Option<Arc<PendingAnchor>>,
     /// Blocks after the anchor whose every route was withdrawn (`withdraw_routing`), ascending: the first one above a
     /// new anchor withdraws the routes it rebuilds there (`rebuild_replay`).
     routing_withdrawals: Vec<u64>,
@@ -845,7 +857,7 @@ impl AccountBook {
             events: VecDeque::new(),
             events_dropped: false,
             replay: None,
-            action_coins: None,
+            pending_anchor: None,
             routing_withdrawals: Vec::new(),
             holdings: Holdings::default(),
             fills: StreamProgress::starting(started_ms),
@@ -1173,7 +1185,7 @@ impl AccountBook {
 
     /// Installs a newer anchor. Heights only increase: the poller sends each checkpoint once, newest first.
     pub(crate) fn install_anchor(&mut self, anchor: Anchor) -> InstallReport {
-        let Anchor { height, time_ms, coins: mut anchor_coins, account_modes, margins } = anchor;
+        let Anchor { height, time_ms, coins: mut anchor_coins, account_modes, margins, twaps, waiting_twaps } = anchor;
         assert!(
             self.anchor.is_none_or(|current| current.height < height),
             "anchor {height} is not newer than the installed {:?}",
@@ -1209,7 +1221,7 @@ impl AccountBook {
         self.fills.lost_block = lost_block;
         self.coins.extend(anchor_coins.into_iter().map(|(name, coin)| (name, CoinBook::anchored(height, coin, 0))));
         self.rebuild_marks(height);
-        self.action_coins = Some(Arc::new(ActionCoins { anchor_height: height, coins: margins.action_coins() }));
+        self.pending_anchor = Some(Arc::new(PendingAnchor { height, coins: ActionCoins { coins: margins.action_coins() }, twaps, waiting_twaps }));
         self.rebuild_replay(margins, height);
         for (user, mode) in account_modes {
             self.accounts.entry(user).or_default().mode = Some(mode);
@@ -1504,10 +1516,10 @@ impl AccountBook {
         }
     }
 
-    /// The anchor's exchange action asset ids and their coins (`MarginStates::action_coins`), with its height; `None`
-    /// before the first anchor.
-    pub(crate) const fn action_coins(&self) -> Option<&Arc<ActionCoins>> {
-        self.action_coins.as_ref()
+    /// The anchor's exchange action asset ids and their coins (`MarginStates::action_coins`) and its running TWAPs,
+    /// with its height; `None` before the first anchor.
+    pub(crate) const fn pending_anchor(&self) -> Option<&Arc<PendingAnchor>> {
+        self.pending_anchor.as_ref()
     }
 
     /// The anchor the replayed rows replay from, the applied height they are of and its block time; `None` until every

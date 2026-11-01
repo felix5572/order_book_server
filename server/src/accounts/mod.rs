@@ -40,6 +40,7 @@ mod replay;
 pub(crate) mod replica;
 pub(crate) mod runtime;
 mod size;
+pub(crate) mod twap_tracker;
 mod usdc;
 pub(crate) mod walk;
 #[cfg(test)]

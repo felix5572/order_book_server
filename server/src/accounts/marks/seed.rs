@@ -17,7 +17,10 @@ use serde::{
 
 use super::decimal::ExactDecimal;
 use crate::{
-    accounts::checkpoint::{CheckpointAccounts, DexMeta, MAX_PERP_DECIMALS, SpotPair, node_time_ns, spot_pair_coin},
+    accounts::{
+        checkpoint::{CheckpointAccounts, DexMeta, MAX_PERP_DECIMALS, SpotPair, node_time_ns, spot_pair_coin},
+        twap_tracker::WireTwapTracker,
+    },
     order_book::Side,
 };
 
@@ -172,6 +175,8 @@ struct WireMember {
 #[derive(Debug)]
 pub(crate) struct WireNativeBooks {
     pub(crate) native: Vec<WireBook>,
+    /// Each dex's `twap_tracker`, in `perp_dexs` order (the pending book's TWAPs, `accounts::twap_tracker`).
+    pub(crate) twap_trackers: Vec<WireTwapTracker>,
     /// HIP-3 books' `last_trade_px` (integer price units) by book asset `PDI_ASSET_STRIDE * pdi + index` (bm
     /// 1199490000: dex 1's 139 books are assets 10000..10138, dex 2's 16 are 20000..20015).
     pub(crate) hip3_last_trades: FxHashMap<u32, u64>,
@@ -180,11 +185,13 @@ pub(crate) struct WireNativeBooks {
 #[derive(Debug, Deserialize)]
 struct WireNativePerpDex {
     books: Vec<WireBook>,
+    twap_tracker: WireTwapTracker,
 }
 
 #[derive(Debug, Deserialize)]
 struct WireHip3PerpDex {
     books: Vec<WireHip3Book>,
+    twap_tracker: WireTwapTracker,
 }
 
 /// A HIP-3 book: its orders are not read.
@@ -213,14 +220,16 @@ impl<'de> Visitor<'de> for NativeBooksVisitor {
         use serde::de::Error as _;
         let native = seq.next_element::<WireNativePerpDex>()?.ok_or_else(|| A::Error::custom("perp_dexs is empty"))?;
         let mut hip3_last_trades = FxHashMap::default();
+        let mut twap_trackers = vec![native.twap_tracker];
         while let Some(dex) = seq.next_element::<WireHip3PerpDex>()? {
             for book in dex.books {
                 if hip3_last_trades.insert(book.asset, book.last_trade_px).is_some() {
                     return Err(A::Error::custom(format!("perp_dexs lists HIP-3 book asset {} twice", book.asset)));
                 }
             }
+            twap_trackers.push(dex.twap_tracker);
         }
-        Ok(WireNativeBooks { native: native.books, hip3_last_trades })
+        Ok(WireNativeBooks { native: native.books, twap_trackers, hip3_last_trades })
     }
 }
 

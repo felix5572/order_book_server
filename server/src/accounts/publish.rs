@@ -13,7 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{broadcast, watch};
 
 use super::{
-    book::{AccountBook, ActionCoins, QueryError, Touched, Unavailable},
+    book::{AccountBook, PendingAnchor, QueryError, Touched, Unavailable},
     candidates::{CandidateChanges, Candidates, Refresh},
     flow_accounts::FlowAccountsFeed,
     forced_flow_owner::{FlowFrame, FlowOutput},
@@ -95,7 +95,7 @@ pub(crate) struct Publisher {
     frames: broadcast::Sender<Arc<AccountsFrame>>,
     prices: watch::Sender<NodePrices>,
     /// The anchor's action asset ids and coins, sent at each new anchor (the pending book, design 000604).
-    action_coins: watch::Sender<Option<Arc<ActionCoins>>>,
+    pending_anchor: watch::Sender<Option<Arc<PendingAnchor>>>,
     /// Whether the view was available after the previous step.
     available: bool,
     /// Whether the node marks were.
@@ -107,8 +107,8 @@ pub(crate) struct Publisher {
 impl Publisher {
     pub(crate) fn new(subscriptions: CoinSubscriptions, frames: broadcast::Sender<Arc<AccountsFrame>>) -> Self {
         let (prices, _) = watch::channel(Err(marks_unavailable(&Unavailable::Initializing)));
-        let (action_coins, _) = watch::channel(None);
-        Self { subscriptions, frames, prices, action_coins, available: false, marks_available: false, flow: None }
+        let (pending_anchor, _) = watch::channel(None);
+        Self { subscriptions, frames, prices, pending_anchor, available: false, marks_available: false, flow: None }
     }
 
     /// The forced flow thread's copy of the view, fed from now on.
@@ -141,14 +141,14 @@ impl Publisher {
         self.prices.subscribe()
     }
 
-    /// The anchor's action asset ids and coins from now on; `None` before the first anchor.
-    pub(crate) fn subscribe_action_coins(&self) -> watch::Receiver<Option<Arc<ActionCoins>>> {
-        self.action_coins.subscribe()
+    /// The anchor's action asset ids and coins and its running TWAPs from now on; `None` before the first anchor.
+    pub(crate) fn subscribe_pending_anchor(&self) -> watch::Receiver<Option<Arc<PendingAnchor>>> {
+        self.pending_anchor.subscribe()
     }
 
     /// Withdraws every subscription when the view stops being available; returns whether it is available now.
     pub(crate) fn track(&mut self, book: &AccountBook) -> bool {
-        self.publish_action_coins(book);
+        self.publish_pending_anchor(book);
         let availability = book.availability();
         if self.available
             && let Err(reason) = &availability
@@ -159,14 +159,14 @@ impl Publisher {
         self.available
     }
 
-    /// A new anchor's action asset ids and coins (called after every step that may install one): the book's own table,
-    /// sent once per anchor.
-    fn publish_action_coins(&self, book: &AccountBook) {
-        let Some(coins) = book.action_coins() else { return };
-        self.action_coins.send_if_modified(|sent| {
-            let new = sent.as_ref().is_none_or(|sent| sent.anchor_height != coins.anchor_height);
+    /// A new anchor's action asset ids and coins and running TWAPs (called after every step that may install one): the
+    /// book's own, sent once per anchor.
+    fn publish_pending_anchor(&self, book: &AccountBook) {
+        let Some(anchor) = book.pending_anchor() else { return };
+        self.pending_anchor.send_if_modified(|sent| {
+            let new = sent.as_ref().is_none_or(|sent| sent.height != anchor.height);
             if new {
-                *sent = Some(Arc::clone(coins));
+                *sent = Some(Arc::clone(anchor));
             }
             new
         });
@@ -451,12 +451,13 @@ mod tests {
         assert!(view_lost.starts_with("the account view is unavailable: "), "{view_lost}");
     }
 
-    /// The pending book's asset table (design 000604): nothing before the first anchor, then once per anchor.
+    /// The pending book's asset table and TWAPs (design 000604, batch 2h): nothing before the first anchor, then once
+    /// per anchor.
     #[test]
-    fn the_action_coins_go_out_once_per_anchor() {
+    fn the_pending_anchor_goes_out_once_per_anchor() {
         let (frames, _received) = broadcast::channel(16);
         let mut publisher = Publisher::new(CoinSubscriptions::default(), frames);
-        let mut coins = publisher.subscribe_action_coins();
+        let mut coins = publisher.subscribe_pending_anchor();
         let mut book = AccountBook::new(0);
         publisher.track(&book);
         assert!(!coins.has_changed().unwrap(), "nothing before the first anchor");
@@ -468,17 +469,17 @@ mod tests {
         install(&mut book, 1_000);
         publisher.track(&book);
         let first = coins.borrow_and_update().clone().unwrap();
-        assert_eq!((first.anchor_height, first.coins.get(&110_000).map(|asset| asset.coin.as_str())), (1_000, Some("xyz:TSLA")));
+        assert_eq!((first.height, first.coins.coins.get(&110_000).map(|asset| asset.coin.as_str())), (1_000, Some("xyz:TSLA")));
         // review 000609 r1 P2-3: the table is the book's, built as the anchor installed, not at each step
         for _ in 0..128 {
             publisher.track(&book);
-            assert!(Arc::ptr_eq(book.action_coins().unwrap(), &first));
+            assert!(Arc::ptr_eq(book.pending_anchor().unwrap(), &first));
         }
         assert!(!coins.has_changed().unwrap(), "the same anchor once");
         install(&mut book, 1_100);
         publisher.track(&book);
         assert!(coins.has_changed().unwrap(), "a new anchor");
-        assert_eq!(coins.borrow_and_update().as_ref().unwrap().anchor_height, 1_100);
+        assert_eq!(coins.borrow_and_update().as_ref().unwrap().height, 1_100);
     }
 
     #[test]

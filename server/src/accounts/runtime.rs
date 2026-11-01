@@ -30,7 +30,7 @@ use super::{
     owner_thread::spawn_owner,
     blocks::{Assembly, BlockAssembler, CompletedBlock, LineKey},
     book::{
-        AccountBook, ActionCoins, BlockActionsReport, BlockReport, BookStatus, CoinPositions, FillsReport, InstallReport,
+        AccountBook, BlockActionsReport, PendingAnchor, BlockReport, BookStatus, CoinPositions, FillsReport, InstallReport,
         MiscReport, QueryError, ReplayCheck, RowCheck, Stream, Touched, Unavailable,
     },
     checkpoint::parse_checkpoint_file,
@@ -161,8 +161,8 @@ pub(crate) struct AccountsHandle {
     flow_demand: FlowDemand,
     /// The forced flow's own thread (hyperliquid-trade review 000563).
     flow_queries: mpsc::Sender<FlowQuery>,
-    /// The anchor's action asset ids and coins (the pending book, design 000604).
-    action_coins: watch::Receiver<Option<Arc<ActionCoins>>>,
+    /// The anchor's action asset ids and coins and its running TWAPs (the pending book, design 000604, batch 2h).
+    pending_anchor: watch::Receiver<Option<Arc<PendingAnchor>>>,
 }
 
 impl AccountsHandle {
@@ -171,9 +171,10 @@ impl AccountsHandle {
         self.frames.upgrade().map(|frames| frames.subscribe())
     }
 
-    /// The anchor's exchange action asset ids and the coins they name, at each new anchor; `None` before the first.
-    pub(crate) fn action_coins(&self) -> watch::Receiver<Option<Arc<ActionCoins>>> {
-        self.action_coins.clone()
+    /// The anchor's exchange action asset ids and the coins they name, and its running TWAPs, at each new anchor;
+    /// `None` before the first.
+    pub(crate) fn pending_anchor(&self) -> watch::Receiver<Option<Arc<PendingAnchor>>> {
+        self.pending_anchor.clone()
     }
 
     /// The main-dex node prices after every applied block (design 000454 r2 revision 1).
@@ -352,7 +353,7 @@ pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Resul
         node_prices: publisher.subscribe_prices(),
         flow_demand,
         flow_queries,
-        action_coins: publisher.subscribe_action_coins(),
+        pending_anchor: publisher.subscribe_pending_anchor(),
     };
     let started_ms = now_ms();
     let marks = NodeMarks::new(CheckpointGrid { anchor, interval }, started_ms);
@@ -1210,7 +1211,7 @@ impl TestOwner {
         let flow_queries = start_forced_flow(None, flow_demand.clone(), &mut publisher, flow_frames).unwrap();
         let handle = AccountsHandle {
             queries, subscriptions, frames: frames_handle, node_prices: publisher.subscribe_prices(), flow_demand, flow_queries,
-            action_coins: publisher.subscribe_action_coins(),
+            pending_anchor: publisher.subscribe_pending_anchor(),
         };
         let marks = NodeMarks::new(tests::TEST_GRID, 0);
         let owner = spawn_owner("accounts-owner", run_owner(book, marks, publisher, input_rx, anchor_rx, query_rx, Vec::new(), CandidateFeed::start(None))).unwrap();
@@ -1308,7 +1309,7 @@ mod tests {
     fn empty_anchor(height: u64, time_ms: u64) -> Anchor {
         let coin = AnchorCoin { size_decimals: 0, table_id: 52, mark_raw: None, positions: FxHashMap::default() };
         let coins = std::iter::once(("PUMP".to_string(), coin)).collect();
-        Anchor { height, time_ms, coins, account_modes: FxHashMap::default(), margins: MarginStates::default() }
+        Anchor { height, time_ms, coins, account_modes: FxHashMap::default(), margins: MarginStates::default(), twaps: Vec::new(), waiting_twaps: Vec::new() }
     }
 
     /// The `replica_cmds` lines of `blocks`, then a read-through of the other readers after them: the blocks before

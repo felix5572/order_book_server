@@ -8,7 +8,7 @@
 //! pending thread's own watcher, which parses each line - the account view parses each on its own, later - from the end
 //! of the current file.
 
-use std::{path::Path, thread};
+use std::{path::Path, thread, time::Instant as ReadInstant};
 
 use alloy::primitives::B256;
 use log::error;
@@ -54,6 +54,10 @@ pub(crate) struct LoggedBlock {
     pub(crate) priorities: Vec<(u64, u64)>,
     /// Its taker orders' outcomes, in execution order (batch 2g).
     pub(crate) taker_outcomes: Vec<TakerOutcome>,
+    /// The TWAPs its successful `twapCancel`s ended (batch 2h).
+    pub(crate) twap_cancels: Vec<u64>,
+    /// When the watcher read its line: the TWAP book's completeness proof (design 000624 r3 P1).
+    pub(crate) read_at: ReadInstant,
 }
 
 /// Starts the pending thread's watcher of `<data_dir>/replica_cmds`.
@@ -71,8 +75,9 @@ pub(crate) fn watch_blocks(data_dir: &Path) -> (Feed<LoggedBlock>, thread::JoinH
     feed::watch(stream, QUEUE_BLOCKS, parse_block)
 }
 
-/// One block log line; an `Err` says what does not read.
+/// One block log line, as its watcher reads it; an `Err` says what does not read.
 pub(crate) fn parse_block(line: &str) -> Result<LoggedBlock, String> {
+    let read_at = ReadInstant::now();
     let block = ReplicaLine::parse(line).map_err(|err| format!("block log line: {err}"))?;
     let height = block.height;
     let time = block.time().ok_or_else(|| format!("block {height} without its time"))?;
@@ -85,7 +90,46 @@ pub(crate) fn parse_block(line: &str) -> Result<LoggedBlock, String> {
     let paired = block.paired().map_err(|err| format!("block {height}: {err}"))?;
     let priorities = placed_priorities(&paired).map_err(|err| format!("block {height}: {err}"))?;
     let taker_outcomes = taker_outcomes(line, &block, &paired).map_err(|err| format!("block {height}: {err}"))?;
-    Ok(LoggedBlock { height, time_ms, hashes, priorities, taker_outcomes })
+    let twap_cancels = twap_cancels(&paired).map_err(|err| format!("block {height}: {err}"))?;
+    Ok(LoggedBlock { height, time_ms, hashes, priorities, taker_outcomes, twap_cancels, read_at })
+}
+
+/// The TWAPs the block's successful `twapCancel`s ended (`{"type": "twapCancel", "data": {"status": "success"}}`; an
+/// error status ends none - HL API docs "Cancel a TWAP order").
+fn twap_cancels(paired_actions: &[PairedAction<'_, '_>]) -> Result<Vec<u64>, String> {
+    let mut canceled = Vec::new();
+    for paired in paired_actions {
+        if paired.action.action_type != "twapCancel" || !ran(paired)? {
+            continue;
+        }
+        let at = |err: String| format!("bundle {} action {}: {err}", paired.bundle_hash, paired.position);
+        let raw = paired.response.res.response.as_ref().ok_or_else(|| at("an ok twapCancel without a body".to_string()))?;
+        let body: WireTwapCancelResponse = sonic_rs::from_str(raw.as_raw_str()).map_err(|err| at(format!("twapCancel response {}: {err}", raw.as_raw_str())))?;
+        if matches!(body.data.status, WireTwapCancelStatus::Text(ref text) if text == "success") {
+            canceled.push(paired.action.field(paired.action.t.as_ref(), "t").map_err(at)?);
+        }
+    }
+    Ok(canceled)
+}
+
+#[derive(serde::Deserialize)]
+struct WireTwapCancelResponse {
+    data: WireTwapCancelData,
+}
+
+#[derive(serde::Deserialize)]
+struct WireTwapCancelData {
+    status: WireTwapCancelStatus,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum WireTwapCancelStatus {
+    Text(String),
+    Error {
+        #[expect(dead_code, reason = "an error cancels nothing")]
+        error: String,
+    },
 }
 
 /// Whether an action ran: its status `ok`; one refused whole (`err`) placed nothing, and a status neither is not
@@ -481,6 +525,20 @@ pub(crate) mod tests {
             assert_eq!(parse_block(&block_of(&[&action], &[default])).unwrap().taker_outcomes, [], "{action}");
         }
         assert!(parse_block(&block_of(&[&action(&[IOC, ALO])], &[default])).is_err());
+    }
+
+    /// Batch 2h: a successful `twapCancel` ends its TWAP; one refused, or answered with an error status, ends none.
+    #[test]
+    fn a_line_reads_its_twap_cancels() {
+        let cancel = |twap: u64| format!(r#"{{"signature":{{"r":"0x1","s":"0x2","v":27}},"action":{{"type":"twapCancel","a":159,"t":{twap}}},"nonce":1}}"#);
+        let answer = |status: &str| format!(r#"{{"user":"0xbff945932b5ff40699e9f12fa40927c5667df619","res":{{"status":"ok","response":{{"type":"twapCancel","data":{{"status":{status}}}}}}}}}"#);
+        let refused = r#"{"user":"0xbff945932b5ff40699e9f12fa40927c5667df619","res":{"status":"err","response":"Invalid nonce"}}"#;
+        let line = block_of(
+            &[&cancel(2_470_033), &cancel(2_470_034), &cancel(2_470_035)],
+            &[&answer(r#""success""#), &answer(r#"{"error":"TWAP was never placed, already canceled, or filled."}"#), refused],
+        );
+        assert_eq!(parse_block(&line).unwrap().twap_cancels, [2_470_033]);
+        assert!(parse_block(&block_of(&[&cancel(1)], &[r#"{"user":null,"res":{"status":"ok","response":{"type":"default"}}}"#])).is_err());
     }
 
     /// A taker's status neither placed nor refused, or statuses not pairing with the orders, do not read; a `multiSig`'s

@@ -2,7 +2,8 @@
 //! `extPendingBbo { coin }` - the coin's frame at once, then each frame whose `bbo` or `basisBbo` moved - and
 //! `extPendingTrades { coin?, user? }` - the predicted trades its filter admits, `user` the maker or the taker's vault.
 //! Each subscription is told whenever the book turns unavailable (`{"status": "unavailable", "reason"}`) or available
-//! again (an `extPendingBbo` coin's current frame; `{"status": "ready"}` for trades). The connection listens to the
+//! again (an `extPendingBbo` coin's current frame; `{"status": "ready", "twapsKnown"}` for trades), and whenever the
+//! book's TWAPs turn known or unknown (batch 2h: the same, `twapsKnown` in each). The connection listens to the
 //! pending book's broadcast only while it holds one of them; a broadcast gap withdraws them.
 //!
 //! A subscription starts at the store's snapshot - its state, skipping every event at or below its sequence number -
@@ -28,7 +29,7 @@ use crate::{
         actions::ActionId,
         overlay::Maker,
         publish::Snapshot,
-        shadow::Unavailable,
+        shadow::{Taker, Unavailable},
     },
     types::{
         Level,
@@ -39,16 +40,18 @@ use crate::{
     },
 };
 
-/// What a subscription was told last: through which sequence number, and whether the book was served.
+/// What a subscription was told last: through which sequence number, whether the book was served and whether its
+/// TWAPs were known.
 #[derive(Debug, Clone, Copy)]
 struct Told {
     seq: u64,
     availability: Result<(), Unavailable>,
+    twaps_known: bool,
 }
 
 impl Told {
     fn of(state: &Snapshot) -> Self {
-        Self { seq: state.seq, availability: state.availability() }
+        Self { seq: state.seq, availability: state.availability(), twaps_known: state.twaps_known() }
     }
 
     /// Whether an event at `seq` is news to it.
@@ -72,7 +75,7 @@ impl TradesFilter {
     fn admits(&self, trade: &PendingTrade) -> bool {
         let coin = self.coin.as_deref().is_none_or(|coin| coin == trade.coin.value());
         let user = self.user.is_none_or(|user| {
-            matches!(&trade.maker, Maker::Confirmed { user: maker, .. } if *maker == user) || trade.vault == Some(user)
+            matches!(&trade.maker, Maker::Confirmed { user: maker, .. } if *maker == user) || trade.taker_account() == Some(user)
         });
         coin && user
     }
@@ -191,7 +194,7 @@ impl PendingBookSession {
                 let state = self.handle.snapshot();
                 let channel = self.trades.get_or_insert_with(|| TradesChannel { told: Told::of(&state), filters: HashMap::new() });
                 channel.filters.insert(params, (filter, state.seq));
-                outbound.send_frame(trades_state_wire(channel.told.availability)).await
+                outbound.send_frame(trades_state_wire(channel.told)).await
             }
             (other, _) => unreachable!("the pending book's session takes its own subscriptions alone, not {other:?}"),
         }
@@ -210,7 +213,7 @@ impl PendingBookSession {
         }
         let Some(channel) = self.trades.as_mut().filter(|channel| channel.told.passes(state.seq)) else { return true };
         channel.told = Told::of(state);
-        outbound.send_frame(trades_state_wire(channel.told.availability)).await
+        outbound.send_frame(trades_state_wire(channel.told)).await
     }
 
     /// A step's trades the channel takes: those any filter admits, once.
@@ -286,6 +289,7 @@ struct BboData {
     basis_height: u64,
     basis_time_ms: u64,
     pending: PendingData,
+    twaps_known: bool,
     published_ms: u64,
 }
 
@@ -305,6 +309,9 @@ struct StatusData {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
+    /// The ready book's: whether its TWAPs are known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    twaps_known: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -313,6 +320,7 @@ struct TradesData {
     status: &'static str,
     basis_height: u64,
     basis_time_ms: u64,
+    twaps_known: bool,
     trades: Vec<TradeData>,
 }
 
@@ -324,7 +332,8 @@ struct TradeData {
     side: Side,
     px: String,
     sz: String,
-    seen_ms: u64,
+    /// The taker's mempool line; none for a TWAP suborder.
+    seen_ms: Option<u64>,
     maker: MakerData,
     taker: TakerData,
 }
@@ -348,14 +357,21 @@ struct ActionData {
     cloid: Option<String>,
 }
 
+/// A mempool order's action; or a TWAP's suborder (batch 2h).
+#[derive(Serialize)]
+#[serde(untagged)]
+enum TakerData {
+    #[serde(rename_all = "camelCase")]
+    Pending { tx_hash: B256, action: usize, item: usize, cloid: Option<String>, vault: Option<String> },
+    Twap { twap: TwapData },
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TakerData {
-    tx_hash: B256,
-    action: usize,
-    item: usize,
-    cloid: Option<String>,
-    vault: Option<String>,
+struct TwapData {
+    twap_id: u64,
+    user: String,
+    slot: u64,
 }
 
 fn levels(best: BestLevels) -> [Option<Level>; 2] {
@@ -375,12 +391,13 @@ fn bbo_wire(frame: &BboFrame) -> bytes::Bytes {
             oldest_seen_ms: frame.pending.oldest_seen_ms,
             newest_seen_ms: frame.pending.newest_seen_ms,
         },
+        twaps_known: frame.twaps_known,
         published_ms: frame.published_ms,
     })
 }
 
 fn unavailable_wire(channel: &'static str, coin: Option<&Coin>, reason: &'static str) -> bytes::Bytes {
-    wire(channel, StatusData { coin: coin.map(Coin::value), status: "unavailable", reason: Some(reason) })
+    wire(channel, StatusData { coin: coin.map(Coin::value), status: "unavailable", reason: Some(reason), twaps_known: None })
 }
 
 /// A coin's frame in `state`, or why the book is not served.
@@ -391,16 +408,22 @@ fn bbo_state_wire(coin: &Coin, state: &Snapshot) -> bytes::Bytes {
     }
 }
 
-fn trades_state_wire(availability: Result<(), Unavailable>) -> bytes::Bytes {
-    match availability {
-        Ok(()) => wire(EXT_PENDING_TRADES, StatusData { coin: None, status: "ready", reason: None }),
+fn trades_state_wire(told: Told) -> bytes::Bytes {
+    match told.availability {
+        Ok(()) => wire(EXT_PENDING_TRADES, StatusData { coin: None, status: "ready", reason: None, twaps_known: Some(told.twaps_known) }),
         Err(reason) => unavailable_wire(EXT_PENDING_TRADES, None, reason.label()),
     }
 }
 
 fn trades_wire(frame: &TradesFrame, trades: &[&PendingTrade]) -> bytes::Bytes {
     let trades = trades.iter().map(|trade| trade_data(trade)).collect();
-    wire(EXT_PENDING_TRADES, TradesData { status: "ready", basis_height: frame.basis.height, basis_time_ms: frame.basis.time_ms, trades })
+    wire(EXT_PENDING_TRADES, TradesData {
+        status: "ready",
+        basis_height: frame.basis.height,
+        basis_time_ms: frame.basis.time_ms,
+        twaps_known: frame.twaps_known,
+        trades,
+    })
 }
 
 fn trade_data(trade: &PendingTrade) -> TradeData {
@@ -417,12 +440,15 @@ fn trade_data(trade: &PendingTrade) -> TradeData {
         sz: trade.sz.to_str(),
         seen_ms: trade.seen_ms(),
         maker,
-        taker: TakerData {
-            tx_hash: trade.taker.tx_hash,
-            action: trade.taker.action,
-            item: trade.taker.item,
-            cloid: trade.taker_cloid.clone(),
-            vault: trade.vault.map(user_text),
+        taker: match &trade.taker {
+            Taker::Pending { id, cloid, vault, .. } => TakerData::Pending {
+                tx_hash: id.tx_hash,
+                action: id.action,
+                item: id.item,
+                cloid: cloid.clone(),
+                vault: vault.map(user_text),
+            },
+            Taker::Twap { twap_id, user, slot } => TakerData::Twap { twap: TwapData { twap_id: *twap_id, user: user_text(*user), slot: *slot } },
         },
     }
 }
@@ -436,7 +462,10 @@ mod tests {
     use super::*;
     use crate::{
         order_book::{Oid, Px, Sz},
-        pending::publish::{Basis, CoinPending, FrameSet},
+        pending::{
+            publish::{Basis, CoinPending, FrameSet},
+            shadow::Taker,
+        },
     };
 
     const BASIS: Basis = Basis { height: 30, time_ms: 3_000 };
@@ -463,7 +492,16 @@ mod tests {
 
     fn frame(seq: u64, coin: &str, ask: &str) -> BboFrame {
         let level = Some((Px::parse_from_str(ask).unwrap(), Sz::parse_from_str("1").unwrap(), 1));
-        BboFrame { seq, coin: Coin::new(coin), bbo: (None, level), basis_bbo: (None, None), basis: BASIS, pending: CoinPending::default(), published_ms: 9 }
+        BboFrame {
+            seq,
+            coin: Coin::new(coin),
+            bbo: (None, level),
+            basis_bbo: (None, None),
+            basis: BASIS,
+            pending: CoinPending::default(),
+            twaps_known: true,
+            published_ms: 9,
+        }
     }
 
     fn bbos(frames: Vec<BboFrame>) -> PendingEvent {
@@ -480,7 +518,7 @@ mod tests {
     }
 
     fn trades_event(seq: u64, coin: &str) -> PendingEvent {
-        PendingEvent::Trades(Arc::new(TradesFrame { seq, basis: BASIS, trades: vec![trade(coin, Maker::Unattributed, None)] }))
+        PendingEvent::Trades(Arc::new(TradesFrame { seq, basis: BASIS, twaps_known: true, trades: vec![trade(coin, Maker::Unattributed, None)] }))
     }
 
     struct Connection {
@@ -556,7 +594,7 @@ mod tests {
         handle.store_for_test(2, Ok(()), vec![frame(2, "BTC", "101")], BASIS);
         let mut connection = Connection::new(&handle);
         connection.subscribe(bbo("BTC")).await;
-        assert_eq!(connection.subscribe(trades(None, None)).await, serde_json::json!({"status": "ready"}));
+        assert_eq!(connection.subscribe(trades(None, None)).await, serde_json::json!({"status": "ready", "twapsKnown": true}));
         connection.deliver(failure(3, Unavailable::BlockLogBehind)).await;
         assert_eq!(connection.next()["data"], serde_json::json!({"coin": "BTC", "status": "unavailable", "reason": "block_log_behind"}));
         assert_eq!(connection.next()["data"], serde_json::json!({"status": "unavailable", "reason": "block_log_behind"}));
@@ -564,7 +602,7 @@ mod tests {
         assert!(connection.quiet(), "told already");
         connection.deliver(recovery(5, vec![frame(4, "BTC", "103")])).await;
         assert_eq!(connection.next()["data"]["bbo"][1]["px"], "103");
-        assert_eq!(connection.next()["data"], serde_json::json!({"status": "ready"}));
+        assert_eq!(connection.next()["data"], serde_json::json!({"status": "ready", "twapsKnown": true}));
         connection.deliver(bbos(vec![frame(4, "BTC", "103")])).await;
         assert!(connection.quiet(), "in the recovery's book");
     }
@@ -610,7 +648,7 @@ mod tests {
             serde_json::json!({"coin": "BTC", "status": "unavailable", "reason": "block_log_behind"}),
             serde_json::json!({"status": "unavailable", "reason": "block_log_behind"}),
             bbo_ready.clone(),
-            serde_json::json!({"status": "ready"}),
+            serde_json::json!({"status": "ready", "twapsKnown": true}),
             serde_json::json!({"coin": "BTC", "status": "unavailable", "reason": "span"}),
             serde_json::json!({"status": "unavailable", "reason": "span"}),
         ]);
@@ -632,7 +670,7 @@ mod tests {
         handle.store_for_test(8, Ok(()), vec![frame(7, "BTC", "102")], BASIS);
         connection.take_queued().await;
         assert_eq!(connection.next()["data"]["bbo"][1]["px"], "101");
-        assert_eq!(connection.next()["data"], serde_json::json!({"status": "ready"}));
+        assert_eq!(connection.next()["data"], serde_json::json!({"status": "ready", "twapsKnown": true}));
         assert_eq!(connection.next()["data"]["bbo"][1]["px"], "102");
         assert_eq!(connection.next()["data"]["trades"].as_array().unwrap().len(), 3);
         assert!(connection.quiet());
@@ -649,7 +687,7 @@ mod tests {
         handle.send_for_test(trades_event(2, "BTC"));
         handle.store_for_test(3, Err(Unavailable::BlockLogBehind), vec![], BASIS);
         handle.send_for_test(failure(3, Unavailable::BlockLogBehind));
-        assert_eq!(connection.subscribe(trades(Some("BTC"), None)).await, serde_json::json!({"status": "ready"}));
+        assert_eq!(connection.subscribe(trades(Some("BTC"), None)).await, serde_json::json!({"status": "ready", "twapsKnown": true}));
         connection.take_queued().await;
         assert_eq!(connection.next()["data"], serde_json::json!({"status": "unavailable", "reason": "block_log_behind"}));
         assert!(connection.quiet());
@@ -668,7 +706,7 @@ mod tests {
         handle.send_for_test(trades_event(2, "BTC"));
         handle.store_for_test(3, Err(Unavailable::BlockLogBehind), vec![], BASIS);
         handle.send_for_test(failure(3, Unavailable::BlockLogBehind));
-        assert_eq!(connection.subscribe(trades(Some("BTC"), None)).await, serde_json::json!({"status": "ready"}));
+        assert_eq!(connection.subscribe(trades(Some("BTC"), None)).await, serde_json::json!({"status": "ready", "twapsKnown": true}));
         connection.take_queued().await;
         assert_eq!(connection.next()["data"]["trades"][0]["coin"], "BTC");
         assert_eq!(connection.next()["data"], serde_json::json!({"status": "unavailable", "reason": "block_log_behind"}));
@@ -704,11 +742,13 @@ mod tests {
             side: Side::Bid,
             px: Px::parse_from_str("101").unwrap(),
             sz: Sz::parse_from_str("0.5").unwrap(),
-            seen_ns: 3_050_000_000,
             maker,
-            taker: ActionId { tx_hash: B256::repeat_byte(1), action: 2, item: 0 },
-            taker_cloid: Some("0x01".to_string()),
-            vault,
+            taker: Taker::Pending {
+                id: ActionId { tx_hash: B256::repeat_byte(1), action: 2, item: 0 },
+                seen_ns: 3_050_000_000,
+                cloid: Some("0x01".to_string()),
+                vault,
+            },
         }
     }
 
@@ -716,7 +756,7 @@ mod tests {
         let pending = Maker::Pending { id: ActionId { tx_hash: B256::repeat_byte(2), action: 0, item: 1 }, cloid: None };
         let alice = Maker::Confirmed { user: ALICE, oid: Oid::new(11), cloid: Some("0x0b".to_string()) };
         let trades = vec![trade("BTC", alice, None), trade("BTC", pending, Some(VAULT)), trade("ETH", Maker::Unattributed, None)];
-        PendingEvent::Trades(Arc::new(TradesFrame { seq, basis: BASIS, trades }))
+        PendingEvent::Trades(Arc::new(TradesFrame { seq, basis: BASIS, twaps_known: true, trades }))
     }
 
     /// Each trades subscription takes what its filters admit: a coin, a user as the maker or the taker's vault.
@@ -755,16 +795,19 @@ mod tests {
         assert!(connection.quiet());
     }
 
-    /// The wire shapes of a trade: a replica maker, a pending one, none named.
+    /// The wire shapes of a trade: a replica maker, a pending one, none named; a TWAP suborder's taker (batch 2h).
     #[test]
     fn a_trade_on_the_wire() {
+        let twap = PendingTrade { taker: Taker::Twap { twap_id: 2_470_033, user: VAULT, slot: 12 }, ..trade("BTC", Maker::Unattributed, None) };
         let frame = TradesFrame {
             seq: 1,
             basis: BASIS,
+            twaps_known: false,
             trades: vec![
                 trade("BTC", Maker::Confirmed { user: ALICE, oid: Oid::new(11), cloid: None }, Some(VAULT)),
                 trade("BTC", Maker::Pending { id: ActionId { tx_hash: B256::repeat_byte(2), action: 0, item: 1 }, cloid: Some("0x0c".to_string()) }, None),
                 trade("BTC", Maker::Unattributed, None),
+                twap,
             ],
         };
         let wire = json(&trades_wire(&frame, &frame.trades.iter().collect::<Vec<_>>()));
@@ -777,6 +820,9 @@ mod tests {
         assert_eq!(first["taker"], serde_json::json!({"txHash": B256::repeat_byte(1).to_string(), "action": 2, "item": 0, "cloid": "0x01", "vault": user_text(VAULT)}));
         assert_eq!(data["trades"][1]["maker"], serde_json::json!({"pending": {"txHash": B256::repeat_byte(2).to_string(), "action": 0, "item": 1, "cloid": "0x0c"}}));
         assert_eq!(data["trades"][2]["maker"], serde_json::json!({"unattributed": true}));
+        assert_eq!(data["twapsKnown"], false);
+        let twap = &data["trades"][3];
+        assert_eq!((&twap["seenMs"], &twap["taker"]), (&serde_json::Value::Null, &serde_json::json!({"twap": {"twapId": 2_470_033, "user": user_text(VAULT), "slot": 12}})));
     }
 
     /// A broadcast gap withdraws every subscription; the pending thread's end tells each it stopped.

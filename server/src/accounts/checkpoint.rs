@@ -20,6 +20,7 @@ use serde::{
 use super::{
     margin::MarginTable,
     marks::{seed::{WireBook, WireNativeBooks, WireNativePrices, WireOracle, WirePx}, system::{WirePriority, WireDelayer}},
+    twap_tracker::{CheckpointTwap, TrackerOf, WireTwapTracker},
 };
 use crate::prelude::Result;
 
@@ -74,6 +75,10 @@ pub(crate) struct CheckpointAccounts {
     pub(crate) native_prices: WireNativePrices,
     /// HIP-3 books' last trade prices by book asset (`WireNativeBooks::hip3_last_trades`), for the same.
     pub(crate) hip3_last_trades: FxHashMap<u32, u64>,
+    /// Every running TWAP, perp dexes' and spot's (the pending book, batch 2h), and the ids of those waiting for their
+    /// trigger.
+    pub(crate) twaps: Vec<CheckpointTwap>,
+    pub(crate) waiting_twaps: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,6 +323,7 @@ struct WireExchange {
     perp_dexs: WireNativeBooks,
     /// Every spot pair's book (1,121 books, 131,402 orders on 1190920000); the marks keep those `oracle.psro` names.
     spot_books: Vec<WireBook>,
+    spot_twap_tracker: WireTwapTracker,
 }
 
 #[derive(Deserialize)]
@@ -750,8 +756,9 @@ pub(crate) fn parse_checkpoint_bytes(bytes: &[u8]) -> Result<CheckpointAccounts>
 }
 
 fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, String> {
-    let WireExchange { locus, perp_dexs, spot_books, pt, action_delayer, msc, begin_block_logic_guard, post_only_until_time, post_only_until_height } = exchange;
-    let WireNativeBooks { native: native_books, hip3_last_trades } = perp_dexs;
+    let WireExchange { locus, perp_dexs, spot_books, spot_twap_tracker, pt, action_delayer, msc, begin_block_logic_guard, post_only_until_time, post_only_until_height } = exchange;
+    let WireNativeBooks { native: native_books, twap_trackers, hip3_last_trades } = perp_dexs;
+    let (twaps, waiting_twaps) = checkpoint_twaps(twap_trackers, spot_twap_tracker)?;
     let time_ms = node_time_ns(&locus.ctx.time).map_err(|err| format!("ctx.time: {err}"))? / 1_000_000;
     let mut dexes = Vec::with_capacity(locus.cls.len());
     let mut dex_users = Vec::with_capacity(locus.cls.len());
@@ -809,7 +816,18 @@ fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, Stri
     let spot_pairs = spot_pairs(&locus.spot.pairs, &locus.spot.tokens)?;
     // Routing is only consumed for the same position holders retained above.
     for users in order_trackers.iter_mut().flatten() { users.retain(|user, _| accounts.contains_key(user)); }
-    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral, reserves, accounts, spot_pairs, native_prices, hip3_last_trades, order_trackers, spot_usdc_holds: locus.spot.usdc_holds })
+    Ok(CheckpointAccounts { height: locus.ctx.height, time_ms, dexes, collateral, reserves, accounts, spot_pairs, native_prices, hip3_last_trades, twaps, waiting_twaps, order_trackers, spot_usdc_holds: locus.spot.usdc_holds })
+}
+
+/// Every running TWAP of the perp dexes' trackers, in `perp_dexs` order, and of the spot one; the ids of the TWAPs
+/// waiting for their trigger.
+fn checkpoint_twaps(perp: Vec<WireTwapTracker>, spot: WireTwapTracker) -> std::result::Result<(Vec<CheckpointTwap>, Vec<u64>), String> {
+    let (mut twaps, mut waiting) = (Vec::new(), Vec::new());
+    for (of, tracker) in perp.into_iter().enumerate().map(|(dex, tracker)| (TrackerOf::PerpDex(dex), tracker)).chain([(TrackerOf::Spot, spot)]) {
+        waiting.extend(tracker.waiting_ids());
+        twaps.extend(tracker.twaps(of)?);
+    }
+    Ok((twaps, waiting))
 }
 
 /// A node time (`2026-10-19T22:09:38.119428098`, UTC, up to nanoseconds) in unix ns.
@@ -1163,7 +1181,8 @@ pub(crate) mod tests {
                     "ust": [[HOLDER, {"a": "u", "C": 1, "s": "v"}], [CASH_ONLY, {"s": "v"}], [ISOLATED, {"P": 1}], [PORTFOLIO, {"a": "p"}]]
                 },
                 "perp_dexs": books_fixture(),
-                "spot_books": []
+                "spot_books": [],
+                "spot_twap_tracker": crate::accounts::twap_tracker::tests::empty_tracker_json()
             }
         });
         let mut checkpoint = checkpoint;
@@ -1242,8 +1261,9 @@ pub(crate) mod tests {
                     {"o": {"n": 1, "o": 9, "r": 5, "u": HOLDER, "t": null, "c": {"t": 2, "S": 6, "s": "A", "l": 828_700}}}
                 ], "l": 2, "n": 3}},
                 {"asset": 1, "last_trade_px": 4477, "bod": {"e": [], "l": 0, "n": 0}}
-            ], "funding_tracker": {}, "twap_tracker": {}},
-            {"books": [{"asset": 10_000, "last_trade_px": 358_300, "bod": {"e": [{"x": 1}]}}]}
+            ], "funding_tracker": {}, "twap_tracker": crate::accounts::twap_tracker::tests::tracker_json()},
+            {"books": [{"asset": 10_000, "last_trade_px": 358_300, "bod": {"e": [{"x": 1}]}}],
+             "twap_tracker": crate::accounts::twap_tracker::tests::empty_tracker_json()}
         ])
     }
 

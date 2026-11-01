@@ -32,6 +32,7 @@ use rustc_hash::FxHashMap;
 use super::{
     actions::{ActionId, BookOp, PendingAction, Placement, Tif},
     refusals::{TakerKey, TakerRefusals},
+    twaps::TwapSlice,
 };
 use crate::{
     accounts::replica::OrderRef,
@@ -234,6 +235,22 @@ impl Overlay {
             BookOp::CancelByCloid(cloid) => self.cancel(self.cloid_target(base, cloid)),
             BookOp::Modify { target, always_place, order } => self.modify(base, placing, target, *always_place, order),
         }
+    }
+
+    /// A TWAP suborder (batch 2h): a taker through the merged opposite side from its best, at most 3% past it (HL docs
+    /// "TWAP details": a suborder's max slippage 3%, its reference unstated - the best taken, an approximation) and never
+    /// past its parent's limit. Its fills.
+    pub(crate) fn take_slice(&mut self, base: CoinBase<'_>, slice: &TwapSlice) -> Vec<Fill> {
+        let side = if slice.is_buy { Side::Bid } else { Side::Ask };
+        let Some(best) = self.best(base, side.opposite()) else { return Vec::new() };
+        let slipped = u128::from(best.value()) * if slice.is_buy { 103 } else { 97 } / 100;
+        let slipped = Px::new(u64::try_from(slipped).unwrap_or(u64::MAX));
+        let limit = match (side, slice.limit_px) {
+            (Side::Bid, Some(parent)) => slipped.min(parent),
+            (Side::Ask, Some(parent)) => slipped.max(parent),
+            (_, None) => slipped,
+        };
+        self.take(base, side, limit, slice.sz.value()).0
     }
 
     /// The merged book's best levels, (bid, ask).
@@ -674,6 +691,24 @@ mod tests {
 
     fn confirmed(user: Address, oid: u64, cloid: Option<&str>) -> Maker {
         Maker::Confirmed { user, oid: Oid::new(oid), cloid: cloid.map(str::to_string) }
+    }
+
+    /// Batch 2h: a TWAP suborder takes up to 3% past the best opposite level, and no further than its parent's limit.
+    #[test]
+    fn a_twap_suborder_takes_to_its_slippage_and_its_parents_limit() {
+        let (book, cloids) = book();
+        let base = CoinBase::new(Some(&book), &[], Some(&cloids));
+        let slice = |is_buy: bool, limit: Option<&str>| TwapSlice { twap_id: 7, user: ALICE, slot: 0, is_buy, sz: sz("5"), limit_px: limit.map(px), due_ms: 0 };
+        let taken = |slice: TwapSlice| {
+            let mut overlay = Overlay::default();
+            drop(overlay.apply(base, no_priorities(), &place(0, Side::Ask, "105", "1", Tif::Alo, None)));
+            overlay.take_slice(base, &slice).into_iter().map(|fill| (fill.px, fill.sz)).collect::<Vec<_>>()
+        };
+        let one = sz("1");
+        assert_eq!(taken(slice(true, None)), [(px("101"), one), (px("101"), one), (px("102"), one)], "105 past 101 x 1.03");
+        assert_eq!(taken(slice(true, Some("101.5"))), [(px("101"), one), (px("101"), one)]);
+        assert_eq!(taken(slice(false, None)), [(px("99"), one), (px("98"), sz("2"))]);
+        assert_eq!(taken(slice(false, Some("98.5"))), [(px("99"), one)]);
     }
 
     #[test]

@@ -90,7 +90,7 @@ mod tests {
 
     fn block(height: u64, hashes: &[u8]) -> LoggedBlock {
         let hashes = hashes.iter().map(|byte| hash(*byte)).collect();
-        LoggedBlock { height, time_ms: height * 100, hashes, priorities: Vec::new(), taker_outcomes: Vec::new() }
+        LoggedBlock { height, time_ms: height * 100, hashes, priorities: Vec::new(), taker_outcomes: Vec::new(), twap_cancels: Vec::new(), read_at: std::time::Instant::now() }
     }
 
     #[test]

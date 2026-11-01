@@ -78,6 +78,9 @@ pub(crate) struct Action<'a> {
     /// Read by `userSetAbstraction` only; unrelated actions may use a different payload type.
     #[serde(borrow)]
     pub(crate) user: Option<LazyValue<'a>>,
+    /// A `twapCancel`'s TWAP id (the pending book, batch 2h).
+    #[serde(borrow)]
+    pub(crate) t: Option<LazyValue<'a>>,
     #[serde(borrow)]
     pub(crate) asset: Option<LazyValue<'a>>,
     #[serde(borrow)]

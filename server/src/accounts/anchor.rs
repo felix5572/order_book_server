@@ -7,6 +7,7 @@ use rustc_hash::FxHashMap;
 
 use super::{
     checkpoint::{AccountMode, CheckpointAccounts},
+    twap_tracker::CheckpointTwap,
     liquidation::{AccountLiquidations, LiquidationPx, RowMark, account_liquidations},
     portfolio::PortfolioMargin,
     replay::MarginStates,
@@ -22,6 +23,9 @@ pub(crate) struct Anchor {
     pub(crate) account_modes: FxHashMap<Address, AccountMode>,
     /// The margin state of every position holder, where the cash replay starts (design 000433).
     pub(crate) margins: MarginStates,
+    /// Every running TWAP, and the ids of those waiting for their trigger, for the pending book (batch 2h).
+    pub(crate) twaps: Vec<CheckpointTwap>,
+    pub(crate) waiting_twaps: Vec<u64>,
 }
 
 #[derive(Debug)]
@@ -95,7 +99,7 @@ impl Anchor {
             account_modes.insert(*user, account.mode.clone());
         }
         let margins = MarginStates::from_checkpoint(checkpoint).map_err(|err| format!("checkpoint {}: {err}", checkpoint.height))?;
-        Ok(Self { height: checkpoint.height, time_ms: checkpoint.time_ms, coins, account_modes, margins })
+        Ok(Self { height: checkpoint.height, time_ms: checkpoint.time_ms, coins, account_modes, margins, twaps: checkpoint.twaps.clone(), waiting_twaps: checkpoint.waiting_twaps.clone() })
     }
 }
 

@@ -232,7 +232,7 @@ pub(crate) fn anchor(height: u64, coins: &[CoinSpec<'_>]) -> Anchor {
             ((*name).to_string(), AnchorCoin { size_decimals: *size_decimals, table_id: CURRENT_TABLE, mark_raw: None, positions })
         })
         .collect();
-    Anchor { height, time_ms: height * 1_000, coins, account_modes, margins: MarginStates::default() }
+    Anchor { height, time_ms: height * 1_000, coins, account_modes, margins: MarginStates::default(), twaps: Vec::new(), waiting_twaps: Vec::new() }
 }
 
 /// Watchers started at unix ms 0, fills and misc events read block 100 and the block actions block 1000 (they run on

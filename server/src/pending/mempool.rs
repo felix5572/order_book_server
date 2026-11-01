@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     accounts::{
-        book::ActionCoins,
+        book::{ActionCoins, PendingAnchor},
         replica::{Action, OrderRef, SignedAction as WireSignedAction, WireCancel, WireCancelByCloid, WireModify, WireOrder, alo_priority},
     },
     listeners::order_book::{
@@ -330,14 +330,14 @@ pub(crate) enum MempoolInput {
 /// The pending thread's reading of the mempool: the anchor's asset table, the losses reported so far, and the events
 /// counted (batch 2a).
 pub(crate) struct MempoolIngest {
-    action_coins: watch::Receiver<Option<Arc<ActionCoins>>>,
+    anchor: watch::Receiver<Option<Arc<PendingAnchor>>>,
     reports: FeedReports,
     last_unreadable_log: Option<Instant>,
 }
 
 impl MempoolIngest {
-    pub(crate) const fn new(action_coins: watch::Receiver<Option<Arc<ActionCoins>>>, losses: FeedLosses) -> Self {
-        Self { action_coins, reports: FeedReports::new(losses), last_unreadable_log: None }
+    pub(crate) const fn new(anchor: watch::Receiver<Option<Arc<PendingAnchor>>>, losses: FeedLosses) -> Self {
+        Self { anchor, reports: FeedReports::new(losses), last_unreadable_log: None }
     }
 
     /// Whether the watcher found a loss no event taken yet reports: what was taken since may follow it in the file.
@@ -345,9 +345,9 @@ impl MempoolIngest {
         self.reports.loss_unreported()
     }
 
-    /// The anchor's asset table; `None` before the first anchor.
-    pub(crate) fn action_coins(&self) -> Option<Arc<ActionCoins>> {
-        self.action_coins.borrow().clone()
+    /// The anchor - its asset table -; `None` before the first anchor.
+    pub(crate) fn anchor(&self) -> Option<Arc<PendingAnchor>> {
+        self.anchor.borrow().clone()
     }
 
     pub(crate) fn on_event(&mut self, event: FeedEvent<MempoolTx>) -> MempoolInput {
@@ -377,13 +377,14 @@ impl MempoolIngest {
         let after_loss = self.loss_unreported();
         let outcome = if after_loss { "read_after_unreported_loss" } else { "read" };
         PENDING_BOOK_MEMPOOL_LINES_TOTAL.with_label_values(&[outcome]).inc();
-        let coins = self.action_coins();
+        let anchor = self.anchor();
+        let coins = anchor.as_deref().map(|anchor| &anchor.coins);
         for action in &tx.actions {
             PENDING_BOOK_MEMPOOL_ACTIONS_TOTAL.with_label_values(&[action.kind.label()]).inc();
             for order in action.kind.orders() {
                 PENDING_BOOK_MEMPOOL_ORDERS_TOTAL.with_label_values(&[order.tif.label()]).inc();
             }
-            let unnamed = unnamed_assets(coins.as_deref(), &action.kind.assets());
+            let unnamed = unnamed_assets(coins, &action.kind.assets());
             if unnamed > 0 {
                 let reason = if coins.is_some() { "not_in_anchor" } else { "no_anchor" };
                 PENDING_BOOK_MEMPOOL_UNNAMED_ASSETS_TOTAL.with_label_values(&[reason]).inc_by(unnamed);
@@ -618,7 +619,7 @@ mod tests {
         let assets: Vec<Vec<u32>> = tx.actions.iter().map(|action| action.kind.assets()).collect();
         assert_eq!(assets, vec![vec![0, 0], vec![159], vec![26], vec![110_060], vec![]]);
         let asset = |coin: &str| ActionAsset { coin: coin.to_string(), size_decimals: 2, max_decimals: 6, max_market_value: None };
-        let mut coins = ActionCoins { anchor_height: 1, coins: [(0, asset("BTC")), (26, asset("AVAX"))].into_iter().collect() };
+        let mut coins = ActionCoins { coins: [(0, asset("BTC")), (26, asset("AVAX"))].into_iter().collect() };
         assert_eq!(unnamed_assets(Some(&coins), &[0, 0, 159, 26]), 1);
         assert_eq!(unnamed_assets(None, &[0, 26]), 2, "no anchor names none");
         coins.coins.insert(159, asset("xyz:TSLA"));

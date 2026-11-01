@@ -925,6 +925,15 @@ lazy_static! {
         &["source", "outcome"]
     ).expect("metric can be created");
 
+    /// The pending book's TWAP book (batch 2h) by `event`: `anchor_installed`, `anchor_not_linked`, `loss`,
+    /// `late_line`, `block_log_hole`, `incomplete_too_long`, `fill_repeated`, `fill_unknown_twap`, `suborder_refused`,
+    /// `catch_up_unknown`, `activation_unknown_coin`, `activation_bad_limit`, `seed_unknown_asset`, `seed_bad_limit`,
+    /// `seed_bad_size`, `seed_bad_due`, `seed_bad_slot_count`, `waiting_for_trigger`.
+    pub static ref PENDING_BOOK_TWAP_EVENTS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_twap_events_total", "Pending book TWAP book events"),
+        &["event"]
+    ).expect("metric can be created");
+
     /// Taker orders' outcomes the pending book took from the block log for its margin refusals (batch 2g), by
     /// `outcome`: `refused` (margin), `cleared` (filled, resting, an IOC missing every level), `no_identity` (its signer
     /// unknown).
@@ -1091,6 +1100,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LINES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_SIGNERS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_TAKER_OUTCOMES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_TWAP_EVENTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LOSSES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LEAD_BLOCKS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_UNAVAILABLE_SECONDS_TOTAL.clone())).ok();

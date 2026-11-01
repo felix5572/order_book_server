@@ -9,11 +9,12 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     thread,
+    time::Instant,
 };
 
 use tokio::sync::mpsc;
 
-use crate::listeners::order_book::parallel::{LineStream, LossCounts, WatchLoss, spawn_line_watcher};
+use crate::listeners::order_book::parallel::{LineStream, LossCounts, ReadThroughMark, WatchLoss, spawn_line_watcher};
 
 /// What a feed's watcher sends, in the file's order.
 #[derive(Debug)]
@@ -79,6 +80,32 @@ pub(crate) fn watch<T: Send + 'static>(
     let wrap = move |line: String| parsing.event(parse(&line));
     let lost = move |loss| reporting.lost(loss);
     let watcher = spawn_line_watcher(stream, tx, None, wrap, lost, None);
+    (Feed { events, losses }, watcher)
+}
+
+/// A line of a feed that also proves its read-throughs (design 000624 r3 P1, as the account view's streams: design
+/// 000433 r3).
+#[derive(Debug)]
+pub(crate) enum Proven<T> {
+    Line(T),
+    /// Every line written to the stream before this instant went out before it.
+    ReadThrough(Instant),
+}
+
+/// As `watch`, the watcher also proving read-throughs, each sent in the file's order as `Proven::ReadThrough`.
+pub(crate) fn watch_proven<T: Send + 'static>(
+    stream: LineStream,
+    queue: usize,
+    parse: fn(&str) -> Result<T, String>,
+) -> (Feed<Proven<T>>, thread::JoinHandle<()>) {
+    let (tx, events) = mpsc::channel(queue);
+    let losses = FeedLosses::default();
+    let stream = LineStream { loss_counts: Some(losses.reader.clone()), ..stream };
+    let (parsing, reporting) = (losses.clone(), losses.clone());
+    let wrap = move |line: String| parsing.event(parse(&line).map(Proven::Line));
+    let lost = move |loss| reporting.lost(loss);
+    let mark: ReadThroughMark<FeedEvent<Proven<T>>> = Box::new(|at| FeedEvent::Line(Proven::ReadThrough(at)));
+    let watcher = spawn_line_watcher(stream, tx, None, wrap, lost, Some(mark));
     (Feed { events, losses }, watcher)
 }
 

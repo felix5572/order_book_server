@@ -39,6 +39,8 @@ use super::{
     publish::{BestLevels, CoinPending},
     record::{BlockRecord, MAX_LEAD_BLOCKS},
     refusals::{TakerKey, TakerRefusals},
+    twap_streams::{TwapEvent, TwapFill},
+    twaps::{DueSlices, TwapBook, TwapSlice, TwapStream},
 };
 use crate::{
     accounts::book::ActionCoins,
@@ -158,12 +160,17 @@ pub(crate) struct PendingTrade {
     pub(crate) side: Side,
     pub(crate) px: Px,
     pub(crate) sz: Sz,
-    /// The taker's line's `local_time`, unix ns.
-    pub(crate) seen_ns: i64,
     pub(crate) maker: Maker,
-    pub(crate) taker: ActionId,
-    pub(crate) taker_cloid: Option<String>,
-    pub(crate) vault: Option<Address>,
+    pub(crate) taker: Taker,
+}
+
+/// Who a predicted fill's taker is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Taker {
+    /// A mempool order: its action, its line's `local_time` (unix ns), its cloid, the vault it acts for.
+    Pending { id: ActionId, seen_ns: i64, cloid: Option<String>, vault: Option<Address> },
+    /// A TWAP's suborder of `slot` (batch 2h), `user` the TWAP's.
+    Twap { twap_id: u64, user: Address, slot: u64 },
 }
 
 /// What a step changed: the trades predicted, and the coins whose merged book may have moved. A change of every coin -
@@ -172,6 +179,14 @@ pub(crate) struct PendingTrade {
 pub(crate) struct Step {
     pub(crate) trades: Vec<PendingTrade>,
     pub(crate) changed: HashSet<Coin>,
+}
+
+impl Step {
+    /// `later`'s changes taken in after this step's: its trades after these, its coins with these.
+    pub(crate) fn absorb(&mut self, later: Self) {
+        self.trades.extend(later.trades);
+        self.changed.extend(later.changed);
+    }
 }
 
 /// One coin as the pending book serves it: the merged book's best levels, the replica's, and what the set holds.
@@ -190,11 +205,15 @@ struct CoinActions {
 }
 
 impl CoinActions {
-    fn replay(&mut self, base: CoinBase<'_>, basis: Basis<'_>) {
+    /// The overlay anew: the TWAP suborders the next first-of-second block runs first - at its start, before any user
+    /// action (batch 2h) -, then the known actions. Each suborder's fills.
+    fn replay(&mut self, base: CoinBase<'_>, basis: Basis<'_>, slices: &[TwapSlice]) -> Vec<Vec<Fill>> {
         self.overlay = Overlay::default();
+        let fills = slices.iter().map(|slice| self.overlay.take_slice(base, slice)).collect();
         for action in self.actions.iter().filter(|action| !action.unknown) {
             self.overlay.apply(base, basis, action);
         }
+        fills
     }
 
     /// Whether it holds a taker order of `keys` (batch 2g: their margin refusals changed).
@@ -255,6 +274,13 @@ pub(crate) struct Shadow {
     record: BlockRecord,
     /// The takers' margin refusals by the block log's trusted blocks (batch 2g).
     refusals: TakerRefusals,
+    /// The running TWAPs (batch 2h); the suborders overlaid, as of the book's version and the confirmed block time's
+    /// second - `None` while their state is not known at the confirmed height, none overlaid -; the (twap, slot) whose
+    /// trades went out, with the slot's due time: kept until the slot is past, unknown spells between.
+    twaps: TwapBook,
+    due: DueSlices,
+    due_of: Option<(u64, u64)>,
+    emitted: FxHashMap<(u64, u64), u64>,
     gaps: Gaps,
     held: usize,
     newest_seen_ns: Option<i64>,
@@ -271,8 +297,9 @@ pub(crate) struct Shadow {
 }
 
 impl Shadow {
-    /// Every input in a gap until each has begun.
-    pub(crate) fn new(params: PendingParams, spot: bool) -> Self {
+    /// Every input in a gap until each has begun; lines of the TWAP streams written before `started_ms` (unix ms) not
+    /// read.
+    pub(crate) fn new(params: PendingParams, spot: bool, started_ms: u64) -> Self {
         Self {
             params,
             spot,
@@ -280,6 +307,10 @@ impl Shadow {
             lines: FxHashMap::default(),
             record: BlockRecord::default(),
             refusals: TakerRefusals::new(params.margin_refusal_ms),
+            twaps: TwapBook::new(started_ms),
+            due: DueSlices::default(),
+            due_of: None,
+            emitted: FxHashMap::default(),
             gaps: Gaps {
                 mempool: Some("start"),
                 block_log: Some("block_log_start"),
@@ -355,6 +386,7 @@ impl Shadow {
         if self.gaps.block_log.is_none() {
             self.refusals.stage(block.height, block.time_ms, std::mem::take(&mut block.taker_outcomes));
         }
+        self.twaps.on_block(block.height, block.read_at, block.time_ms, &block.twap_cancels);
         self.record.add(block);
         self.settle(replica, HashSet::new())
     }
@@ -364,14 +396,107 @@ impl Shadow {
         self.settle(Some(replica), changed)
     }
 
+    /// A TWAP statuses line (batch 2h).
+    pub(crate) fn on_twap_statuses(&mut self, height: u64, events: Vec<TwapEvent>, replica: Option<&BookReplica>) -> Step {
+        self.twaps.on_statuses(height, events);
+        self.twap_step(replica)
+    }
+
+    /// A fills line's TWAP fills.
+    pub(crate) fn on_twap_fills(&mut self, height: u64, fills: Vec<TwapFill>, replica: Option<&BookReplica>) -> Step {
+        self.twaps.on_fills(height, fills);
+        self.twap_step(replica)
+    }
+
+    /// A TWAP stream proved a read-through at `at`.
+    pub(crate) fn on_twap_read_through(&mut self, stream: TwapStream, at: std::time::Instant, replica: Option<&BookReplica>) -> Step {
+        self.twaps.on_read_through(stream, at);
+        self.twap_step(replica)
+    }
+
+    /// A TWAP stream lost lines, detected at wall time `detected_ms`.
+    pub(crate) fn on_twap_loss(&mut self, detected_ms: u64, replica: Option<&BookReplica>) -> Step {
+        self.twaps.on_loss(detected_ms);
+        self.twap_step(replica)
+    }
+
+    /// The account view's new anchor: its running TWAPs.
+    pub(crate) fn on_anchor(&mut self, anchor: std::sync::Arc<crate::accounts::book::PendingAnchor>, replica: Option<&BookReplica>) -> Step {
+        self.twaps.on_anchor(anchor);
+        self.twap_step(replica)
+    }
+
+    /// Whether the TWAPs are known at the confirmed height: their suborders overlaid (design 000624 r4 section 5).
+    pub(crate) const fn twaps_known(&self) -> bool {
+        self.due_of.is_some()
+    }
+
+    /// A TWAP input's step: the TWAP book settled at the confirmed height, the coins whose suborders changed replayed.
+    fn twap_step(&mut self, replica: Option<&BookReplica>) -> Step {
+        let mut step = Step::default();
+        let Some((replica, height, confirmed_ns)) = aligned(replica).filter(|_| !self.gaps.replica) else { return step };
+        step.changed = self.settle_twaps(height, unix_ms(confirmed_ns));
+        let emit = self.availability(Some(replica)).is_ok();
+        self.replay_coins(replica, &step.changed, emit, &mut step.trades);
+        step
+    }
+
+    /// The TWAP book settled at `height`; when what it serves changed - its state, the confirmed block time's second,
+    /// whether known -, the suborders due anew (none while not known). The coins whose suborders changed, each holding
+    /// an entry while it has any (design 000624 r4: no other coin replays for it).
+    fn settle_twaps(&mut self, height: u64, basis_ms: u64) -> HashSet<Coin> {
+        let known = self.twaps.settle(height).is_ok();
+        let due_of = known.then(|| (self.twaps.version(), basis_ms / 1_000));
+        if due_of == self.due_of {
+            return HashSet::new();
+        }
+        let due = if known { self.twaps.due(basis_ms) } else { DueSlices::default() };
+        let mut affected: HashSet<Coin> = due.iter().filter(|(coin, slices)| self.due.get(*coin) != Some(slices)).map(|(coin, _)| coin.clone()).collect();
+        affected.extend(self.due.keys().filter(|coin| !due.contains_key(*coin)).cloned());
+        for coin in due.keys() {
+            self.coins.entry(coin.clone()).or_default();
+        }
+        self.coins.retain(|coin, actions| !actions.actions.is_empty() || due.contains_key(coin));
+        if let Some(first_of_second_ms) = self.twaps.first_of_second_ms().filter(|_| known) {
+            self.emitted.retain(|_, due_ms| *due_ms >= first_of_second_ms);
+        }
+        self.due = due;
+        self.due_of = due_of;
+        affected
+    }
+
+    /// `coins` replayed over the replica, each one's TWAP suborders first; a suborder's fills go out once, the first time
+    /// it fills while `emit`.
+    fn replay_coins(&mut self, replica: &BookReplica, coins: &HashSet<Coin>, emit: bool, trades: &mut Vec<PendingTrade>) {
+        let Self { coins: held, due, emitted, record, refusals, basis_ms, .. } = self;
+        let basis = Basis::new(record.priorities(), refusals, *basis_ms);
+        for coin in coins {
+            let Some(actions) = held.get_mut(coin) else { continue };
+            let slices = due.get(coin).map_or(&[][..], Vec::as_slice);
+            let filled = actions.replay(replica.coin(coin), basis, slices);
+            for (slice, fills) in slices.iter().zip(filled) {
+                if !emit || fills.is_empty() || emitted.insert((slice.twap_id, slice.slot), slice.due_ms).is_some() {
+                    continue;
+                }
+                for fill in &fills {
+                    PENDING_BOOK_PREDICTED_FILLS_TOTAL.with_label_values(&[fill.maker.label()]).inc();
+                }
+                trades.extend(fills.into_iter().map(|fill| twap_trade(coin, slice, fill)));
+            }
+        }
+    }
+
     /// The mempool lost lines.
     pub(crate) fn on_mempool_loss(&mut self) {
         self.open_mempool_gap("loss");
     }
 
-    /// The block log lost lines.
-    pub(crate) fn on_block_log_loss(&mut self) {
+    /// The block log lost lines: its `twapCancel`s too, the TWAPs settled unknown - their coins replayed without
+    /// their suborders.
+    pub(crate) fn on_block_log_loss(&mut self, replica: Option<&BookReplica>) -> Step {
         self.open_block_log_gap("block_log_loss");
+        self.twaps.on_loss(wall_ms());
+        self.twap_step(replica)
     }
 
     /// The replica went; another generation follows. The overlays wait for it.
@@ -545,14 +670,12 @@ impl Shadow {
             changed.extend(self.coins.iter().filter(|(_, actions)| actions.holds_priority()).map(|(coin, _)| coin.clone()));
             self.basis_ms = basis_ms;
         }
-        let basis = Basis::new(self.record.priorities(), &self.refusals, basis_ms);
-        for coin in &changed {
-            if let Some(actions) = self.coins.get_mut(coin) {
-                actions.replay(replica.coin(coin), basis);
-                self.priorities_behind |= !covered;
-            }
-        }
-        Step { trades: Vec::new(), changed }
+        changed.extend(self.settle_twaps(height, basis_ms));
+        self.priorities_behind |= !covered && changed.iter().any(|coin| self.coins.contains_key(coin));
+        let emit = self.availability(Some(replica)).is_ok();
+        let mut trades = Vec::new();
+        self.replay_coins(replica, &changed, emit, &mut trades);
+        Step { trades, changed }
     }
 
     /// Whether the block record reaches the confirmed `height`: every confirmed order's ALO priority known.
@@ -562,7 +685,7 @@ impl Shadow {
 
     /// The lines a block at or below `height` holds, and those expired, out of the set; their coins into `changed`.
     fn remove_settled(&mut self, height: u64, confirmed_ns: i64, changed: &mut HashSet<Coin>) {
-        let Self { lines, record, params, coins, held, .. } = self;
+        let Self { lines, record, params, coins, held, due, .. } = self;
         let mut gone: FxHashMap<B256, &'static str> = FxHashMap::default();
         lines.retain(|hash, line| {
             let outcome = if record.height_of(hash).is_some_and(|block| block <= height) {
@@ -589,7 +712,7 @@ impl Shadow {
                 *held -= 1;
                 false
             });
-            !actions.actions.is_empty()
+            !actions.actions.is_empty() || due.contains_key(coin)
         });
     }
 
@@ -652,9 +775,20 @@ impl Shadow {
 }
 
 impl PendingTrade {
-    /// The taker's line's `local_time`, unix ms.
-    pub(crate) fn seen_ms(&self) -> u64 {
-        unix_ms(self.seen_ns)
+    /// The taker's line's `local_time`, unix ms; a TWAP suborder has none.
+    pub(crate) fn seen_ms(&self) -> Option<u64> {
+        match &self.taker {
+            Taker::Pending { seen_ns, .. } => Some(unix_ms(*seen_ns)),
+            Taker::Twap { .. } => None,
+        }
+    }
+
+    /// The account the taker acts for, as known: a pending order's vault, a TWAP's user.
+    pub(crate) const fn taker_account(&self) -> Option<Address> {
+        match &self.taker {
+            Taker::Pending { vault, .. } => *vault,
+            Taker::Twap { user, .. } => Some(*user),
+        }
     }
 }
 
@@ -664,12 +798,27 @@ fn predicted(coin: &Coin, action: &PendingAction, order: &Placement, fill: Fill)
         side: order.side,
         px: fill.px,
         sz: fill.sz,
-        seen_ns: action.seen_ns,
         maker: fill.maker,
-        taker: action.id,
-        taker_cloid: order.cloid.clone(),
-        vault: action.vault,
+        taker: Taker::Pending { id: action.id, seen_ns: action.seen_ns, cloid: order.cloid.clone(), vault: action.vault },
     }
+}
+
+fn twap_trade(coin: &Coin, slice: &TwapSlice, fill: Fill) -> PendingTrade {
+    PendingTrade {
+        coin: coin.clone(),
+        side: if slice.is_buy { Side::Bid } else { Side::Ask },
+        px: fill.px,
+        sz: fill.sz,
+        maker: fill.maker,
+        taker: Taker::Twap { twap_id: slice.twap_id, user: slice.user, slot: slice.slot },
+    }
+}
+
+/// The wall clock, unix ms: when a loss of unknown lines was detected.
+#[expect(clippy::expect_used, reason = "a host clock before 1970 or past u64 ms is broken")]
+pub(crate) fn wall_ms() -> u64 {
+    let since_epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("the host clock is after 1970");
+    u64::try_from(since_epoch.as_millis()).expect("unix ms fit u64")
 }
 
 fn count_action(action: &PendingAction, outcome: &str) {
@@ -729,7 +878,8 @@ pub(crate) mod tests {
 
     type Events = Vec<serde_json::Value>;
 
-    /// The replica (blocks at height x 100 ms), the block log and the pending set over them.
+    /// The replica (blocks at height x 100 ms), the block log and the pending set over them; one clock for the log's
+    /// reads and the TWAP streams' read-throughs.
     struct Harness {
         replica: BookReplica,
         shadow: Shadow,
@@ -737,11 +887,32 @@ pub(crate) mod tests {
         height: u64,
         /// The last height the log showed.
         logged: u64,
+        clock: std::time::Instant,
     }
 
     impl Harness {
         fn new(params: PendingParams) -> Self {
-            Self { replica: replica_of_empty_book(), shadow: Shadow::new(params, true), height: 0, logged: 0 }
+            Self { replica: replica_of_empty_book(), shadow: Shadow::new(params, true, 0), height: 0, logged: 0, clock: std::time::Instant::now() }
+        }
+
+        fn tick(&mut self) -> std::time::Instant {
+            self.clock += std::time::Duration::from_micros(1);
+            self.clock
+        }
+
+        /// Both TWAP streams read through now.
+        fn prove_twaps(&mut self) -> Step {
+            let at = self.tick();
+            drop(self.shadow.on_twap_read_through(TwapStream::Statuses, at, Some(&self.replica)));
+            self.shadow.on_twap_read_through(TwapStream::Fills, at, Some(&self.replica))
+        }
+
+        /// The TWAPs known at the confirmed height: the log's next block read, both streams read through after it.
+        fn twaps_known_now(&mut self) -> Step {
+            if self.logged == self.height {
+                self.log(&[]);
+            }
+            self.prove_twaps()
         }
 
         /// The log's next block, holding the lines of `hashes`.
@@ -753,14 +924,16 @@ pub(crate) mod tests {
         fn log_placing(&mut self, hashes: &[u8], priorities: Vec<(u64, u64)>) -> Step {
             self.logged += 1;
             let hashes = hashes.iter().map(|byte| hash(*byte)).collect();
-            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes, priorities, taker_outcomes: Vec::new() };
+            let read_at = self.tick();
+            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes, priorities, taker_outcomes: Vec::new(), twap_cancels: Vec::new(), read_at };
             self.shadow.on_block(block, false, Some(&self.replica))
         }
 
         /// The log's next block, with its takers' `outcomes`; `after_loss` as the watcher tells it.
         fn log_outcomes(&mut self, outcomes: Vec<TakerOutcome>, after_loss: bool) -> Step {
             self.logged += 1;
-            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: outcomes };
+            let read_at = self.tick();
+            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: outcomes, twap_cancels: Vec::new(), read_at };
             self.shadow.on_block(block, after_loss, Some(&self.replica))
         }
 
@@ -887,7 +1060,8 @@ pub(crate) mod tests {
         assert_eq!(harness.bbo().1, Some(level("101", "1", 1)));
         let step = harness.line(3_150, 1, vec![ioc("0x01")]);
         let [trade] = step.trades.as_slice() else { panic!("{step:?}") };
-        assert_eq!((trade.side, trade.sz, trade.taker_cloid.as_deref()), (Side::Bid, Sz::parse_from_str("1").unwrap(), Some("0x01")));
+        assert!(matches!(&trade.taker, Taker::Pending { cloid, .. } if cloid.as_deref() == Some("0x01")));
+        assert_eq!((trade.side, trade.sz), (Side::Bid, Sz::parse_from_str("1").unwrap()));
         assert!(matches!(&trade.maker, Maker::Confirmed { oid, .. } if *oid == Oid::new(11)));
         assert_eq!(harness.bbo().1, None);
         assert_eq!(harness.block(&[], vec![], vec![]).trades, NO_TRADES);
@@ -991,7 +1165,7 @@ pub(crate) mod tests {
     fn a_block_log_gap_warms_up_past_the_newest_line() {
         let mut harness = Harness::ready_with(params_late(5_000), 1_000);
         harness.idle_until(9_900);
-        harness.shadow.on_block_log_loss();
+        drop(harness.shadow.on_block_log_loss(Some(&harness.replica)));
         assert_eq!(harness.available(), Err(Unavailable::BlockLog("block_log_loss")));
         while block_time_ms(harness.height) < 15_800 {
             harness.confirm(vec![], vec![]);
@@ -1054,7 +1228,7 @@ pub(crate) mod tests {
     /// Review 000611 r3 P2-1: with spot left out of the book, the set leaves it out too - a replica there or not.
     #[test]
     fn spot_is_left_out_with_no_replica_there() {
-        let mut shadow = Shadow::new(params(), false);
+        let mut shadow = Shadow::new(params(), false, 0);
         let tx = MempoolTx {
             seen_ns: 1_000 * NS_PER_MS,
             tx_hash: hash(1),
@@ -1309,13 +1483,13 @@ pub(crate) mod tests {
             let mut harness = Harness::ready_from(1_000);
             harness.rest_ask(11);
             if loss == Loss::ReportedBeforeTheRefusal {
-                harness.shadow.on_block_log_loss();
+                drop(harness.shadow.on_block_log_loss(Some(&harness.replica)));
             }
             harness.log_outcomes(vec![taker_outcome(true)], loss == Loss::ReportedBeforeTheRefusal);
             harness.confirm(vec![], vec![]);
             if loss != Loss::None {
                 if loss == Loss::AfterTheRefusal {
-                    harness.shadow.on_block_log_loss();
+                    drop(harness.shadow.on_block_log_loss(Some(&harness.replica)));
                 }
                 // the next block's, a fill of the taker clearing it, lost
                 harness.logged += 1;
@@ -1329,6 +1503,127 @@ pub(crate) mod tests {
         }
     }
 
+    /// A TWAP buying 1.1 BTC over 5 minutes from 2.5 s: slot 0 due at 3.5 s, 0.1 BTC.
+    pub(crate) fn twap_anchor(height: u64) -> std::sync::Arc<crate::accounts::book::PendingAnchor> {
+        let twap = crate::accounts::twap_tracker::CheckpointTwap {
+            id: 7,
+            user: TAKER,
+            asset: 0,
+            is_buy: true,
+            total: 110_000,
+            executed: 0,
+            duration_s: 300,
+            start_ms: 2_500,
+            next_due_ms: 3_500,
+            slot_count: 1,
+            randomize: false,
+            reduce_only: false,
+            limit_px_raw: None,
+        };
+        std::sync::Arc::new(crate::accounts::book::PendingAnchor { height, coins: coins(), twaps: vec![twap], waiting_twaps: Vec::new() })
+    }
+
+    fn twap_trades(step: &Step) -> Vec<(u64, u64, Sz, Px)> {
+        step.trades
+            .iter()
+            .filter_map(|trade| match trade.taker {
+                Taker::Twap { twap_id, slot, .. } => Some((twap_id, slot, trade.sz, trade.px)),
+                Taker::Pending { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Batch 2h: a TWAP suborder due in the next first-of-second block takes before the pending takers - at its block's
+    /// start -, its fill out once when it first fills; an unknown spell between (the next block's log not yet read)
+    /// withdraws it, and its return sends nothing again.
+    #[test]
+    fn a_twap_suborder_takes_first_and_trades_once() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+        assert!(!harness.shadow.twaps_known(), "the anchor's height not proven complete");
+        let step = harness.twaps_known_now();
+        assert!(harness.shadow.twaps_known());
+        let tenth = Sz::parse_from_str("0.1").unwrap();
+        assert_eq!(twap_trades(&step), [(7, 0, tenth, Px::parse_from_str("101").unwrap())]);
+        assert_eq!(harness.bbo().1, Some(level("101", "0.9", 1)));
+        let step = harness.line(3_150, 1, vec![ioc("0x01")]);
+        assert_eq!(step.trades.iter().map(|trade| trade.sz).collect::<Vec<_>>(), [Sz::parse_from_str("0.9").unwrap()], "behind the suborder");
+        // the replica's next block: unknown until the log's next one is read and proven through
+        let step = harness.confirm(vec![], vec![]);
+        assert!(!harness.shadow.twaps_known());
+        assert_eq!(twap_trades(&step), []);
+        let step = harness.twaps_known_now();
+        assert!(harness.shadow.twaps_known());
+        assert_eq!(twap_trades(&step), [], "slot 0 went out already");
+    }
+
+    /// Batch 2h: the TWAPs turning known replay the coin with the suborder before the takers held.
+    #[test]
+    fn a_suborder_replays_before_the_takers_held() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+        let step = harness.line(3_150, 1, vec![ioc("0x01")]);
+        assert_eq!(step.trades.iter().map(|trade| trade.sz).collect::<Vec<_>>(), [Sz::parse_from_str("1").unwrap()]);
+        let step = harness.twaps_known_now();
+        assert_eq!(twap_trades(&step), [(7, 0, Sz::parse_from_str("0.1").unwrap(), Px::parse_from_str("101").unwrap())]);
+    }
+
+    /// Batch 2h: an unknown spell withdraws the suborder - its coin replayed without it -, known again it returns; a
+    /// block log loss (its `twapCancel`s lost too) leaves the TWAPs unknown.
+    #[test]
+    fn an_unknown_spell_withdraws_the_suborder() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+        drop(harness.twaps_known_now());
+        assert_eq!(harness.bbo().1, Some(level("101", "0.9", 1)));
+        let step = harness.confirm(vec![], vec![]);
+        assert!(step.changed.contains(&Coin::new(BTC)));
+        assert_eq!(harness.bbo().1, Some(level("101", "1", 1)));
+        drop(harness.twaps_known_now());
+        assert_eq!(harness.bbo().1, Some(level("101", "0.9", 1)));
+        drop(harness.shadow.on_block_log_loss(Some(&harness.replica)));
+        assert!(!harness.shadow.twaps_known());
+    }
+
+    /// Design 000624 r4 section 5: with no suborder due, the TWAPs turning unknown and known again replays no coin.
+    #[test]
+    fn the_twaps_turning_known_replays_no_coin_without_a_suborder() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        let mut anchor = twap_anchor(harness.height);
+        std::sync::Arc::make_mut(&mut anchor).twaps.clear();
+        drop(harness.shadow.on_anchor(anchor, Some(&harness.replica)));
+        assert!(harness.twaps_known_now().changed.is_empty());
+        assert!(harness.shadow.twaps_known());
+        // published: the state change alone goes out, no frame, the store's snapshot telling it
+        let handle = crate::pending::publish::PendingBookHandle::new();
+        let mut events = handle.subscribe();
+        let mut publisher = crate::pending::publish::Publisher::new(handle.clone());
+        publisher.publish(&Step::default(), true, &harness.shadow, Some(&harness.replica));
+        while events.try_recv().is_ok() {}
+        let confirmed = harness.confirm(vec![], vec![]);
+        assert!(!harness.shadow.twaps_known());
+        assert!(confirmed.changed.is_empty());
+        publisher.publish(&confirmed, false, &harness.shadow, Some(&harness.replica));
+        let told = |event: Result<crate::pending::publish::PendingEvent, tokio::sync::broadcast::error::TryRecvError>| match event {
+            Ok(crate::pending::publish::PendingEvent::Availability(state)) => (state.availability(), state.twaps_known()),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(told(events.try_recv()), (Ok(()), false));
+        assert!(events.try_recv().is_err(), "no frame");
+        assert!(!handle.snapshot().twaps_known());
+        let known = harness.twaps_known_now();
+        assert!(known.changed.is_empty());
+        assert!(harness.shadow.twaps_known());
+        publisher.publish(&known, false, &harness.shadow, Some(&harness.replica));
+        assert_eq!(told(events.try_recv()), (Ok(()), true));
+        assert!(events.try_recv().is_err());
+        assert!(handle.snapshot().twaps_known());
+    }
+
     /// Review 000620 r1 P2-2: H under the ALO priority window is refused at start.
     #[test]
     fn a_max_late_under_the_priority_window_is_refused() {
@@ -1340,10 +1635,10 @@ pub(crate) mod tests {
     /// blocks are not taken.
     #[test]
     fn the_block_log_lead_is_capped() {
-        let mut shadow = Shadow::new(params(), true);
+        let mut shadow = Shadow::new(params(), true, 0);
         for height in 1..=MAX_LEAD_BLOCKS {
             assert!(shadow.takes_blocks(None));
-            shadow.on_block(LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new() }, false, None);
+            shadow.on_block(LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), twap_cancels: Vec::new(), read_at: std::time::Instant::now() }, false, None);
         }
         assert!(!shadow.takes_blocks(None));
     }

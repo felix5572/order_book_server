@@ -43,6 +43,8 @@ pub(crate) struct BboFrame {
     pub(crate) basis_bbo: BestLevels,
     pub(crate) basis: Basis,
     pub(crate) pending: CoinPending,
+    /// Whether the TWAPs' suborders are known and overlaid (batch 2h): the book's, not the coin's.
+    pub(crate) twaps_known: bool,
     /// The publisher's wall clock, unix ms.
     pub(crate) published_ms: u64,
 }
@@ -68,6 +70,7 @@ pub(crate) struct CoinPending {
 #[derive(Debug, Clone)]
 pub(crate) struct FrameSet {
     basis: Basis,
+    twaps_known: bool,
     /// The publisher's clock when it was committed, unix ms.
     published_ms: u64,
     frames: Arc<FxHashMap<Coin, Arc<BboFrame>>>,
@@ -79,12 +82,26 @@ impl FrameSet {
     /// coin without one has no level on either side and nothing pending (the publisher frames every coin of the
     /// replica's book and of the set): its frame is the empty one.
     pub(crate) fn frame(&self, coin: &Coin) -> Arc<BboFrame> {
-        let (basis, published_ms) = (self.basis, self.published_ms);
+        let (basis, twaps_known, published_ms) = (self.basis, self.twaps_known, self.published_ms);
         let frame = self.frames.get(coin).map_or_else(
-            || BboFrame { seq: 0, coin: coin.clone(), bbo: (None, None), basis_bbo: (None, None), basis, pending: CoinPending::default(), published_ms },
-            |frame| BboFrame { basis, ..BboFrame::clone(frame) },
+            || BboFrame {
+                seq: 0,
+                coin: coin.clone(),
+                bbo: (None, None),
+                basis_bbo: (None, None),
+                basis,
+                pending: CoinPending::default(),
+                twaps_known,
+                published_ms,
+            },
+            |frame| BboFrame { basis, twaps_known, ..BboFrame::clone(frame) },
         );
         Arc::new(frame)
+    }
+
+    /// Whether the TWAPs were known at its commit.
+    pub(crate) const fn twaps_known(&self) -> bool {
+        self.twaps_known
     }
 }
 
@@ -93,13 +110,14 @@ impl FrameSet {
 pub(crate) struct TradesFrame {
     pub(crate) seq: u64,
     pub(crate) basis: Basis,
+    pub(crate) twaps_known: bool,
     pub(crate) trades: Vec<PendingTrade>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum PendingEvent {
-    /// The book's state at the change: a subscription told it a recovery shows the book of it, never one of a failure
-    /// after (review 000614 r2 P1-1).
+    /// The book's state at the change - of its availability, or of whether the TWAPs are known (batch 2h) -: a
+    /// subscription told it a recovery shows the book of it, never one of a failure after (review 000614 r2 P1-1).
     Availability(Arc<Snapshot>),
     /// The frames of the coins whose `bbo` or `basisBbo` moved, in sequence.
     Bbos(Arc<Vec<Arc<BboFrame>>>),
@@ -132,6 +150,11 @@ impl Snapshot {
     /// `coin`'s frame (`FrameSet::frame`) when served.
     pub(crate) fn frame(&self, coin: &Coin) -> Result<Arc<BboFrame>, Unavailable> {
         self.served.as_ref().map(|frames| frames.frame(coin)).map_err(|reason| *reason)
+    }
+
+    /// Whether the TWAPs are known, the book served.
+    pub(crate) fn twaps_known(&self) -> bool {
+        self.served.as_ref().is_ok_and(FrameSet::twaps_known)
     }
 }
 
@@ -211,13 +234,14 @@ pub(crate) struct Publisher {
     handle: PendingBookHandle,
     seq: u64,
     availability: Result<(), Unavailable>,
+    twaps_known: bool,
     /// Each coin's (`bbo`, `basisBbo`) as last framed.
     framed: FxHashMap<Coin, (BestLevels, BestLevels)>,
 }
 
 impl Publisher {
     pub(crate) fn new(handle: PendingBookHandle) -> Self {
-        Self { handle, seq: 0, availability: Err(Unavailable::Replica), framed: FxHashMap::default() }
+        Self { handle, seq: 0, availability: Err(Unavailable::Replica), twaps_known: false, framed: FxHashMap::default() }
     }
 
     /// What `step` changed, published: the frames of its coins (every coin with `refresh_all`), built first, then
@@ -226,15 +250,19 @@ impl Publisher {
     pub(crate) fn publish(&mut self, step: &Step, refresh_all: bool, shadow: &Shadow, replica: Option<&BookReplica>) {
         let aligned = replica.and_then(|replica| Some((replica, basis_of(replica)?)));
         let published_ms = now_ms();
-        let (framed, moved) =
-            aligned.map_or_else(Default::default, |(replica, basis)| self.frames(step, refresh_all, shadow, replica, basis, published_ms));
+        let twaps_known = shadow.twaps_known();
+        let (framed, moved) = aligned.map_or_else(Default::default, |(replica, basis)| {
+            self.frames(step, refresh_all, shadow, replica, basis, twaps_known, published_ms)
+        });
         let availability = shadow.availability(replica);
-        let changed = (availability != self.availability).then(|| self.next_seq());
+        // whether the TWAPs are known is the book's state too: told as its availability is (design 000624 r4 section 5)
+        let changed = (availability != self.availability || twaps_known != self.twaps_known).then(|| self.next_seq());
         let trades = aligned
             .filter(|_| !step.trades.is_empty())
-            .map(|(_, basis)| Arc::new(TradesFrame { seq: self.next_seq(), basis, trades: step.trades.clone() }));
+            .map(|(_, basis)| Arc::new(TradesFrame { seq: self.next_seq(), basis, twaps_known, trades: step.trades.clone() }));
         self.availability = availability;
-        let committed = self.commit(aligned.map(|(_, basis)| (basis, published_ms)), framed, availability);
+        self.twaps_known = twaps_known;
+        let committed = self.commit(aligned.map(|(_, basis)| (basis, published_ms)), framed, availability, twaps_known);
         if let Some(seq) = changed {
             PENDING_BOOK_FRAMES_TOTAL.with_label_values(&["availability"]).inc();
             let state = Snapshot { seq, served: served(availability, committed.as_ref()) };
@@ -252,6 +280,7 @@ impl Publisher {
 
     /// The frames of the coins `step` changed - every coin with `refresh_all` -, and of them those whose best levels
     /// moved.
+    #[expect(clippy::too_many_arguments, reason = "one step's frames: its parts and the publisher's clock")]
     fn frames(
         &mut self,
         step: &Step,
@@ -259,6 +288,7 @@ impl Publisher {
         shadow: &Shadow,
         replica: &BookReplica,
         basis: Basis,
+        twaps_known: bool,
         published_ms: u64,
     ) -> (Vec<Arc<BboFrame>>, Vec<Arc<BboFrame>>) {
         let coins: HashSet<Coin> = if refresh_all {
@@ -277,6 +307,7 @@ impl Publisher {
                 basis_bbo: view.basis_bbo,
                 basis,
                 pending: view.pending,
+                twaps_known,
                 published_ms,
             });
             if self.framed.insert(coin, (view.bbo, view.basis_bbo)) != Some((view.bbo, view.basis_bbo)) {
@@ -289,11 +320,12 @@ impl Publisher {
 
     /// The step into the store in one write, through the last sequence number it took: a reader sees the step whole
     /// or not at all. The frames as committed.
-    fn commit(&self, basis: Option<(Basis, u64)>, framed: Vec<Arc<BboFrame>>, availability: Result<(), Unavailable>) -> Option<FrameSet> {
+    fn commit(&self, basis: Option<(Basis, u64)>, framed: Vec<Arc<BboFrame>>, availability: Result<(), Unavailable>, twaps_known: bool) -> Option<FrameSet> {
         let mut latest = self.handle.write();
         if let Some((basis, published_ms)) = basis {
-            let set = latest.frames.get_or_insert_with(|| FrameSet { basis, published_ms, frames: Arc::default() });
+            let set = latest.frames.get_or_insert_with(|| FrameSet { basis, twaps_known, published_ms, frames: Arc::default() });
             set.basis = basis;
+            set.twaps_known = twaps_known;
             set.published_ms = published_ms;
             // a snapshot held elsewhere costs a copy only when a frame changes (review 000614 r3)
             if !framed.is_empty() {
@@ -323,7 +355,7 @@ impl Publisher {
 impl FrameSet {
     pub(crate) fn for_test(frames: Vec<BboFrame>, basis: Basis) -> Self {
         let frames = frames.into_iter().map(|frame| (frame.coin.clone(), Arc::new(frame))).collect();
-        Self { basis, published_ms: 0, frames: Arc::new(frames) }
+        Self { basis, twaps_known: true, published_ms: 0, frames: Arc::new(frames) }
     }
 }
 

@@ -257,7 +257,7 @@ pub(crate) mod tests {
                 (asset, ActionAsset { coin: coin.to_string(), size_decimals, max_decimals, max_market_value })
             })
             .collect();
-        ActionCoins { anchor_height: 1, coins }
+        ActionCoins { coins }
     }
 
     pub(crate) fn requested(asset: u32, is_buy: bool, px: &str, tif: RequestedTif, cloid: Option<&str>) -> RequestedOrder {

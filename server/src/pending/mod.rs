@@ -13,6 +13,8 @@ pub(crate) mod publish;
 mod record;
 mod refusals;
 mod signer;
+mod twap_streams;
+mod twaps;
 pub(crate) mod shadow;
 
 use std::{
@@ -26,18 +28,24 @@ use tokio::{sync::{mpsc, watch}, task::JoinHandle};
 
 pub(crate) use self::{
     blocks::watch_blocks,
+    twap_streams::{watch_twap_fills, watch_twap_statuses},
     publish::{BboFrame, BestLevels, PendingBookHandle, PendingEvent, TradesFrame},
     shadow::{PendingParams, PendingTrade},
 };
 use self::{
     blocks::{LoggedBlock, BlockIngest, BlockInput},
-    feed::Feed,
+    feed::{Feed, FeedEvent, FeedReports, Proven},
     mempool::{MempoolIngest, MempoolInput, MempoolTx},
+    twap_streams::{TwapFillLine, TwapStatusLine},
+    twaps::TwapStream,
     publish::Publisher,
-    shadow::{Shadow, Step},
+    shadow::{Shadow, Step, wall_ms},
 };
 use crate::{
-    accounts::{book::ActionCoins, owner_thread::spawn_owner},
+    accounts::{
+        book::{ActionCoins, PendingAnchor},
+        owner_thread::spawn_owner,
+    },
     listeners::order_book::replica::{BookReplica, ReplicaBatch, ReplicaControl, ReplicaFork, ReplicaInputs},
     metrics::{
         PENDING_BOOK_ALIGNMENT_BLOCKS, PENDING_BOOK_BACKLOG_EVENTS, PENDING_BOOK_BREAKS_TOTAL, PENDING_BOOK_CLOID_INDEX_ORDERS,
@@ -54,7 +62,11 @@ const TICK: Duration = Duration::from_millis(100);
 pub(crate) struct PendingFeeds {
     pub(crate) mempool: Feed<MempoolTx>,
     pub(crate) block_log: Feed<LoggedBlock>,
-    pub(crate) action_coins: watch::Receiver<Option<Arc<ActionCoins>>>,
+    /// The TWAP streams (batch 2h), each proving its read-throughs.
+    pub(crate) twap_statuses: Feed<Proven<TwapStatusLine>>,
+    pub(crate) twap_fills: Feed<Proven<TwapFillLine>>,
+    /// The account view's anchor: its asset table and running TWAPs.
+    pub(crate) anchor: watch::Receiver<Option<Arc<PendingAnchor>>>,
 }
 
 /// The pending thread, owner of the replica, the feeds' reading and the pending set (`pending-book`, on its own OS
@@ -68,7 +80,7 @@ pub(crate) fn spawn_pending_book(
     spot: bool,
     handle: PendingBookHandle,
 ) -> io::Result<JoinHandle<()>> {
-    let shadow = Shadow::new(params, spot);
+    let shadow = Shadow::new(params, spot, wall_ms());
     spawn_owner("pending-book", run(inputs, feeds, backlog_events, shadow, Publisher::new(handle)))
 }
 
@@ -76,9 +88,22 @@ async fn run(inputs: ReplicaInputs, feeds: PendingFeeds, backlog_events: usize, 
     let ReplicaInputs { control, forks, batches } = inputs;
     let mut listener = Feeds { forks, batches };
     let mut book = PendingBook::new(control, backlog_events, shadow, publisher);
-    let PendingFeeds { mempool: Feed { events: mut mempool, losses: mempool_losses }, block_log, action_coins } = feeds;
+    let PendingFeeds { mempool: Feed { events: mut mempool, losses: mempool_losses }, block_log, twap_statuses, twap_fills, anchor } = feeds;
     let Feed { events: mut blocks, losses: block_losses } = block_log;
-    let mut readings = Readings { mempool: MempoolIngest::new(action_coins, mempool_losses), block_log: BlockIngest::new(block_losses) };
+    let Feed { events: mut statuses, losses: statuses_losses } = twap_statuses;
+    let Feed { events: mut fills, losses: fills_losses } = twap_fills;
+    let mut anchors = anchor.clone();
+    let mut anchors_open = true;
+    let mut readings = Readings {
+        mempool: MempoolIngest::new(anchor, mempool_losses),
+        block_log: BlockIngest::new(block_losses),
+        twap_statuses: FeedReports::new(statuses_losses),
+        twap_fills: FeedReports::new(fills_losses),
+    };
+    let current = anchors.borrow_and_update().clone();
+    if let Some(current) = current {
+        book.on_anchor(current, readings.unreported());
+    }
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let closed = loop {
@@ -94,7 +119,8 @@ async fn run(inputs: ReplicaInputs, feeds: PendingFeeds, backlog_events: usize, 
             event = mempool.recv() => match event {
                 Some(event) => {
                     let input = readings.mempool.on_event(event);
-                    let _published = book.on_mempool(input, readings.mempool.action_coins().as_deref(), readings.unreported());
+                    let anchor = readings.mempool.anchor();
+                    let _published = book.on_mempool(input, anchor.as_deref().map(|anchor| &anchor.coins), readings.unreported());
                 }
                 None => break "the mempool watcher",
             },
@@ -106,22 +132,96 @@ async fn run(inputs: ReplicaInputs, feeds: PendingFeeds, backlog_events: usize, 
                 }
                 None => break "the block log watcher",
             },
+            event = statuses.recv() => match event {
+                Some(event) => {
+                    let input = readings.twap_input(TwapStream::Statuses, event);
+                    book.on_twap(input, readings.unreported());
+                }
+                None => break "the TWAP statuses watcher",
+            },
+            event = fills.recv() => match event {
+                Some(event) => {
+                    let input = readings.twap_input(TwapStream::Fills, event);
+                    book.on_twap(input, readings.unreported());
+                }
+                None => break "the TWAP fills watcher",
+            },
+            changed = anchors.changed(), if anchors_open => {
+                if changed.is_err() {
+                    error!("pending book: the account view's anchors closed; the TWAPs wait for none");
+                    anchors_open = false;
+                    continue;
+                }
+                let anchor = anchors.borrow_and_update().clone();
+                if let Some(anchor) = anchor {
+                    book.on_anchor(anchor, readings.unreported());
+                }
+            }
             _ = tick.tick() => book.on_tick(readings.unreported()),
         }
     };
     error!("pending book: {closed} closed; the pending thread ends");
 }
 
-/// The pending thread's readings of its two node feeds.
+/// The pending thread's readings of its node feeds.
 struct Readings {
     mempool: MempoolIngest,
     block_log: BlockIngest,
+    twap_statuses: FeedReports,
+    twap_fills: FeedReports,
 }
 
 impl Readings {
     fn unreported(&self) -> Unreported {
-        Unreported { mempool: self.mempool.loss_unreported(), block_log: self.block_log.loss_unreported() }
+        Unreported {
+            mempool: self.mempool.loss_unreported(),
+            block_log: self.block_log.loss_unreported(),
+            twaps: self.twap_statuses.loss_unreported() || self.twap_fills.loss_unreported(),
+        }
     }
+
+    /// A TWAP stream's event as an input, its losses reported.
+    fn twap_input<T: Into<TwapLine>>(&mut self, stream: TwapStream, event: FeedEvent<Proven<T>>) -> TwapInput {
+        let reports = match stream {
+            TwapStream::Statuses => &mut self.twap_statuses,
+            TwapStream::Fills => &mut self.twap_fills,
+        };
+        reports.take(&event);
+        match event {
+            FeedEvent::Line(Proven::Line(line)) => TwapInput::Line(line.into()),
+            FeedEvent::Line(Proven::ReadThrough(at)) => TwapInput::ReadThrough(stream, at),
+            FeedEvent::Unreadable { error, .. } => {
+                error!("pending book: a {stream:?} TWAP line does not read, lost: {error}");
+                TwapInput::Loss
+            }
+            FeedEvent::Lost { .. } => TwapInput::Loss,
+        }
+    }
+}
+
+/// A TWAP stream's line.
+enum TwapLine {
+    Statuses(TwapStatusLine),
+    Fills(TwapFillLine),
+}
+
+impl From<TwapStatusLine> for TwapLine {
+    fn from(line: TwapStatusLine) -> Self {
+        Self::Statuses(line)
+    }
+}
+
+impl From<TwapFillLine> for TwapLine {
+    fn from(line: TwapFillLine) -> Self {
+        Self::Fills(line)
+    }
+}
+
+/// What a TWAP stream's event brings.
+enum TwapInput {
+    Line(TwapLine),
+    ReadThrough(TwapStream, Instant),
+    Loss,
 }
 
 /// The losses each feed's watcher found and has not reported yet.
@@ -129,6 +229,8 @@ impl Readings {
 struct Unreported {
     mempool: bool,
     block_log: bool,
+    /// Either TWAP stream's.
+    twaps: bool,
 }
 
 /// The listener's two queues to the pending thread.
@@ -168,8 +270,8 @@ impl PendingBook {
     /// A batch of the wanted generation: its fork, queued before it, is taken first if it was not yet (review 000606
     /// r1 P2-2: the two queues keep no order between them).
     fn on_batch(&mut self, batch: ReplicaBatch, forks: &mut mpsc::Receiver<ReplicaFork>, unreported: Unreported) {
-        self.sync(unreported);
-        let step = self.apply_batch(batch, forks);
+        let mut step = self.sync(unreported);
+        step.absorb(self.apply_batch(batch, forks));
         self.publish(&step);
     }
 
@@ -207,8 +309,8 @@ impl PendingBook {
 
     /// The mempool's next input, its asset ids named by `coins`: the predicted trades and the coins moved.
     fn on_mempool(&mut self, input: MempoolInput, coins: Option<&ActionCoins>, unreported: Unreported) -> Step {
-        self.sync(unreported);
-        let step = match input {
+        let mut step = self.sync(unreported);
+        step.absorb(match input {
             MempoolInput::Tx { tx, after_loss } => {
                 let started = Instant::now();
                 // a loss found since the line was taken is not before it in the file, so the line ends no gap
@@ -220,15 +322,15 @@ impl PendingBook {
                 self.shadow.on_mempool_loss();
                 Step::default()
             }
-        };
+        });
         self.publish(&step);
         step
     }
 
     /// The block log's next input: the coins moved by the settling it brings.
     fn on_block(&mut self, input: BlockInput, unreported: Unreported) -> Step {
-        self.sync(unreported);
-        let step = match input {
+        let mut step = self.sync(unreported);
+        step.absorb(match input {
             BlockInput::Block { block, after_loss } => {
                 let started = Instant::now();
                 // a loss found since the block was taken is not before it in the file, so the block ends no gap
@@ -236,13 +338,30 @@ impl PendingBook {
                 PENDING_BOOK_STEP_SECONDS.with_label_values(&["block_log"]).observe(started.elapsed().as_secs_f64());
                 step
             }
-            BlockInput::Loss => {
-                self.shadow.on_block_log_loss();
-                Step::default()
-            }
-        };
+            BlockInput::Loss => self.shadow.on_block_log_loss(self.replica.as_ref()),
+        });
         self.publish(&step);
         step
+    }
+
+    /// A TWAP stream's input (batch 2h).
+    fn on_twap(&mut self, input: TwapInput, unreported: Unreported) {
+        let mut step = self.sync(unreported);
+        let replica = self.replica.as_ref();
+        step.absorb(match input {
+            TwapInput::Line(TwapLine::Statuses(line)) => self.shadow.on_twap_statuses(line.height, line.events, replica),
+            TwapInput::Line(TwapLine::Fills(line)) => self.shadow.on_twap_fills(line.height, line.fills, replica),
+            TwapInput::ReadThrough(stream, at) => self.shadow.on_twap_read_through(stream, at, replica),
+            TwapInput::Loss => self.shadow.on_twap_loss(wall_ms(), replica),
+        });
+        self.publish(&step);
+    }
+
+    /// The account view's new anchor: its running TWAPs.
+    fn on_anchor(&mut self, anchor: Arc<PendingAnchor>, unreported: Unreported) {
+        let mut step = self.sync(unreported);
+        step.absorb(self.shadow.on_anchor(anchor, self.replica.as_ref()));
+        self.publish(&step);
     }
 
     fn takes_blocks(&self) -> bool {
@@ -250,7 +369,7 @@ impl PendingBook {
     }
 
     fn on_tick(&mut self, unreported: Unreported) {
-        self.sync(unreported);
+        let step = self.sync(unreported);
         let replica = self.replica.as_ref();
         let confirmed = replica.and_then(BookReplica::confirmed).unwrap_or(0);
         PENDING_BOOK_CONFIRMED_HEIGHT.set(i64::try_from(confirmed).unwrap_or(i64::MAX));
@@ -263,7 +382,7 @@ impl PendingBook {
             PENDING_BOOK_UNAVAILABLE_SECONDS_TOTAL.with_label_values(&[unavailable.label()]).inc_by(TICK.as_secs_f64());
         }
         // what `sync` changed - a generation ended, a loss found - goes out though nothing else came
-        self.publish(&Step::default());
+        self.publish(&step);
     }
 
     /// `step`'s frames, the availability with them; every coin's when the overlays were dropped or rebuilt whole and a
@@ -276,15 +395,21 @@ impl PendingBook {
 
     /// What the listener and the feeds' watchers already flagged, taken before an input is handled (review 000611 r1
     /// P1-2): a generation the listener ended takes the replica with it, and a loss a watcher found - its report still
-    /// queued behind the lines it may precede - is a gap at once.
-    fn sync(&mut self, unreported: Unreported) {
+    /// queued behind the lines it may precede - is a gap at once. What it changed, published with the input's step
+    /// (review 000624 r5 P1: the suborders a loss withdrew, in the commit telling the TWAPs unknown).
+    fn sync(&mut self, unreported: Unreported) -> Step {
         self.end_if_ended();
+        let mut step = Step::default();
         if unreported.mempool {
             self.shadow.on_mempool_loss();
         }
         if unreported.block_log {
-            self.shadow.on_block_log_loss();
+            step.absorb(self.shadow.on_block_log_loss(self.replica.as_ref()));
         }
+        if unreported.twaps {
+            step.absorb(self.shadow.on_twap_loss(wall_ms(), self.replica.as_ref()));
+        }
+        step
     }
 
     /// The listener ended the generation it fed (a full queue, its book untrusted): the replica goes.
@@ -331,12 +456,12 @@ mod tests {
         },
     };
 
-    const NONE_UNREPORTED: Unreported = Unreported { mempool: false, block_log: false };
+    const NONE_UNREPORTED: Unreported = Unreported { mempool: false, block_log: false, twaps: false };
 
     /// Block `height`: its hashes (none) through the block log first, as it leads, then its lines through the
     /// listener's feed, each taken by the pending book.
     fn push_block(book: &mut PendingBook, feed: &mut ReplicaFeed, feeds: &mut Feeds, height: u64, statuses: Vec<serde_json::Value>, diffs: Vec<serde_json::Value>) {
-        let block = LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new() };
+        let block = LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), twap_cancels: Vec::new(), read_at: Instant::now() };
         drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
         for batch in block_lines(height, statuses, diffs) {
             listener_applied(feed, batch);
@@ -366,7 +491,7 @@ mod tests {
     fn served_book_with(params: PendingParams) -> (PendingBook, ReplicaFeed, Feeds) {
         let (feed, inputs) = link(1_024);
         let publisher = Publisher::new(PendingBookHandle::new());
-        let mut book = PendingBook::new(Arc::clone(&inputs.control), 1_000_000, Shadow::new(params, true), publisher);
+        let mut book = PendingBook::new(Arc::clone(&inputs.control), 1_000_000, Shadow::new(params, true, 0), publisher);
         let (mut feed, mut feeds) = (feed, Feeds { forks: inputs.forks, batches: inputs.batches });
         empty_book_batch(&mut feed);
         for height in 1..=31 {
@@ -531,7 +656,7 @@ mod tests {
     fn a_batch_that_only_queues_settles_nothing() {
         let (mut book, mut feed, mut feeds) = served_book();
         let settles = book.shadow.settles();
-        let block = LoggedBlock { height: 32, time_ms: 3_200, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new() };
+        let block = LoggedBlock { height: 32, time_ms: 3_200, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), twap_cancels: Vec::new(), read_at: Instant::now() };
         drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
         assert_eq!(book.shadow.settles(), settles + 1, "a block of the log settles");
         let [statuses, diffs] = block_lines(32, vec![], vec![]);
@@ -558,7 +683,7 @@ mod tests {
     /// line or a tick; the mempool's or the block log's.
     #[test]
     fn a_loss_found_before_its_report_is_a_gap_at_once() {
-        let mempool_lost = Unreported { mempool: true, block_log: false };
+        let mempool_lost = Unreported { mempool: true, block_log: false, twaps: false };
         let (mut book, _feed, _feeds) = served_book();
         assert_eq!(book.on_mempool(ioc(), Some(&coins()), mempool_lost).trades, shadow::tests::NO_TRADES);
         assert_eq!(book.shadow.availability(book.replica.as_ref()), Err(Unavailable::Mempool("loss")));
@@ -566,15 +691,58 @@ mod tests {
         book.on_tick(mempool_lost);
         assert_eq!(book.shadow.availability(book.replica.as_ref()), Err(Unavailable::Mempool("loss")));
         let (mut book, _feed, _feeds) = served_book();
-        let block_log_lost = Unreported { mempool: false, block_log: true };
+        let block_log_lost = Unreported { mempool: false, block_log: true, twaps: false };
         assert_eq!(book.on_mempool(ioc(), Some(&coins()), block_log_lost).trades, shadow::tests::NO_TRADES);
         assert_eq!(book.shadow.availability(book.replica.as_ref()), Err(Unavailable::BlockLog("block_log_loss")));
+    }
+
+    const TWAPS_LOST: Unreported = Unreported { mempool: false, block_log: false, twaps: true };
+
+    /// The served book with the TWAPs known: a TWAP's suborder due next taking 0.1 of BTC's ask at 101.
+    fn served_book_with_a_twap() -> (PendingBook, ReplicaFeed, Feeds) {
+        let (mut book, feed, feeds) = served_book();
+        book.on_anchor(shadow::tests::twap_anchor(29), NONE_UNREPORTED);
+        let at = Instant::now() + Duration::from_millis(1);
+        book.on_twap(TwapInput::ReadThrough(TwapStream::Statuses, at), NONE_UNREPORTED);
+        book.on_twap(TwapInput::ReadThrough(TwapStream::Fills, at), NONE_UNREPORTED);
+        let handle = book.publisher.handle();
+        let tenth_taken = (ask_101().0, crate::order_book::Sz::parse_from_str("0.9").unwrap(), 1);
+        assert!(handle.snapshot().twaps_known());
+        assert_eq!(btc_frame(handle).bbo.1, Some(tenth_taken));
+        (book, feed, feeds)
+    }
+
+    /// Review 000624 r5 P1: a TWAP loss the watcher found, its report still queued, is taken at the next input - a
+    /// tick -: the suborder it withdrew goes out in the commit telling the TWAPs unknown, BTC's ask back at 101 x 1.
+    #[test]
+    fn a_twap_loss_found_withdraws_the_suborder_in_its_commit() {
+        let (mut book, _feed, _feeds) = served_book_with_a_twap();
+        let handle = book.publisher.handle().clone();
+        let mut events = handle.subscribe();
+        book.on_tick(TWAPS_LOST);
+        let told = std::iter::from_fn(|| events.try_recv().ok())
+            .find_map(|event| match event {
+                PendingEvent::Availability(state) => Some(state),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!told.twaps_known());
+        assert_eq!(told.frame(&Coin::new("BTC")).unwrap().bbo.1, Some(ask_101()));
+    }
+
+    /// Review 000624 r5 P1: a new anchor finds the loss the watcher found first - not one taken after it.
+    #[test]
+    fn an_anchor_takes_a_loss_found_first() {
+        let (mut book, _feed, _feeds) = served_book_with_a_twap();
+        book.on_anchor(shadow::tests::twap_anchor(30), TWAPS_LOST);
+        assert!(!book.shadow.twaps_known());
+        assert_eq!(btc_frame(book.publisher.handle()).bbo.1, Some(ask_101()));
     }
 
     fn book_and_feed(queue_batches: usize, backlog_events: usize) -> (PendingBook, ReplicaFeed, Feeds) {
         let (feed, inputs) = link(queue_batches);
         let publisher = Publisher::new(PendingBookHandle::new());
-        let book = PendingBook::new(Arc::clone(&inputs.control), backlog_events, Shadow::new(shadow::tests::params(), true), publisher);
+        let book = PendingBook::new(Arc::clone(&inputs.control), backlog_events, Shadow::new(shadow::tests::params(), true, 0), publisher);
         (book, feed, Feeds { forks: inputs.forks, batches: inputs.batches })
     }
 
