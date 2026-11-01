@@ -35,7 +35,7 @@ use super::{
     actions::{ActionId, BookActions, PendingAction, Placement, book_actions},
     blocks::LoggedBlock,
     mempool::MempoolTx,
-    overlay::{Basis, BestLevel, CoinBase, Fill, Maker, Overlay, PRIORITY_WINDOW_MS},
+    overlay::{Basis, BestLevel, CoinBase, Effect, Fill, Maker, Overlay, PRIORITY_WINDOW_MS},
     publish::{BestLevels, CoinPending},
     record::{BlockRecord, MAX_LEAD_BLOCKS},
     refusals::{TakerKey, TakerRefusals},
@@ -53,6 +53,11 @@ use crate::{
 };
 
 const NS_PER_MS: i64 = 1_000_000;
+
+/// A second's first block runs its TWAP suborders after the actions of the mempool lines seen before the second's start
+/// minus this (batch 2j, design 000634 r2; research `mempool_pending_book_20261031`, bm 11-01 12:10-12:20: of the lines
+/// seen 0-19 ms before a second 29.9% ran before its first block, 20-39 ms 60.0%, 60-79 ms 86.1%, 80 ms or more 98.9-100%).
+const SLICE_CUT_MS: u64 = 20;
 
 /// The pending set's times and limits (design 000604 r1, revisions 7, 13; r6 revision 17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,16 +216,47 @@ struct CoinActions {
     overlay: Overlay,
 }
 
+/// A line's trades as its coins are held: its actions', each with its place in the line, and the TWAP suborders' their
+/// replays sent.
+#[derive(Default)]
+struct LineTrades {
+    actions: Vec<(usize, PendingTrade)>,
+    suborders: Vec<PendingTrade>,
+}
+
+/// A replay's results: each TWAP suborder's fills, and the effects of the actions asked for, by their index.
+struct Replayed {
+    slices: Vec<Vec<Fill>>,
+    reported: Vec<(usize, Effect)>,
+}
+
 impl CoinActions {
-    /// The overlay anew: the TWAP suborders the next first-of-second block runs first - at its start, before any user
-    /// action (batch 2h) -, then the known actions. Each suborder's fills.
-    fn replay(&mut self, base: CoinBase<'_>, basis: Basis<'_>, slices: &[TwapSlice]) -> Vec<Vec<Fill>> {
-        self.overlay = Overlay::default();
-        let fills = slices.iter().map(|slice| self.overlay.take_slice(base, slice)).collect();
-        for action in self.actions.iter().filter(|action| !action.unknown) {
-            self.overlay.apply(base, basis, action);
+    /// The overlay anew in a block's order: the known actions as they came - with TWAP suborders due, those of the lines
+    /// seen before `cut_ns` first, then the suborders the next first-of-second block runs at its start, then the others
+    /// (batch 2j; 2h ran the suborders first; with none, no action moves: review 000634 r3 P2-1). Each suborder's fills,
+    /// and the effects of the actions from `report_from` on.
+    fn replay(&mut self, base: CoinBase<'_>, basis: Basis<'_>, slices: &[TwapSlice], cut_ns: i64, report_from: usize) -> Replayed {
+        let mut overlay = Overlay::default();
+        let mut reported = Vec::new();
+        let mut apply = |overlay: &mut Overlay, takes: &dyn Fn(&PendingAction) -> bool| {
+            for (index, action) in self.actions.iter().enumerate().filter(|(_, action)| !action.unknown && takes(action)) {
+                let effect = overlay.apply(base, basis, action);
+                if index >= report_from {
+                    reported.push((index, effect));
+                }
+            }
+        };
+        if slices.is_empty() {
+            apply(&mut overlay, &|_| true);
+            self.overlay = overlay;
+            return Replayed { slices: Vec::new(), reported };
         }
-        fills
+        apply(&mut overlay, &|action| action.seen_ns < cut_ns);
+        let slices = slices.iter().map(|slice| overlay.take_slice(base, slice)).collect();
+        apply(&mut overlay, &|action| action.seen_ns >= cut_ns);
+        self.overlay = overlay;
+        reported.sort_unstable_by_key(|(index, _)| *index);
+        Replayed { slices, reported }
     }
 
     /// Whether it holds a taker order of `keys` (batch 2g: their margin refusals changed).
@@ -371,14 +407,26 @@ impl Shadow {
         }
         let emit = self.availability(replica).is_ok();
         let unknown = self.gaps.unknown_at(tx.seen_ns);
-        let mut line = HeldLine { seen_ns: tx.seen_ns, coins: Vec::new() };
-        for (coin, mut action) in actions {
+        // the line's actions by coin, each with its place in the line: held a coin at a time (review 000634 r1 P2-1)
+        let mut by_coin: Vec<(Coin, Vec<(usize, PendingAction)>)> = Vec::new();
+        for (order, (coin, mut action)) in actions.into_iter().enumerate() {
             action.unknown = unknown;
-            if !line.coins.contains(&coin) {
-                line.coins.push(coin.clone());
+            match by_coin.iter_mut().find(|(held, _)| *held == coin) {
+                Some((_, coin_actions)) => coin_actions.push((order, action)),
+                None => by_coin.push((coin, vec![(order, action)])),
             }
-            self.hold(coin, action, aligned, emit, &mut step);
         }
+        let line = HeldLine { seen_ns: tx.seen_ns, coins: by_coin.iter().map(|(coin, _)| coin.clone()).collect() };
+        let mut trades = LineTrades::default();
+        for (coin, coin_actions) in by_coin {
+            // its frame's pending counts change even when its book does not
+            step.changed.insert(coin.clone());
+            self.hold(coin, coin_actions, tx.seen_ns, aligned, emit, &mut trades);
+        }
+        // the line's trades in its order, then the suborders' its replays sent (review 000634 r2)
+        trades.actions.sort_by_key(|(order, _)| *order);
+        step.trades.extend(trades.actions.into_iter().map(|(_, trade)| trade));
+        step.trades.extend(trades.suborders);
         self.lines.insert(tx.tx_hash, line);
         step
     }
@@ -517,21 +565,14 @@ impl Shadow {
     /// it fills while `emit` in the trade window.
     fn replay_coins(&mut self, replica: &BookReplica, coins: &HashSet<Coin>, emit: bool, trades: &mut Vec<PendingTrade>) {
         let emit_twaps = emit && self.in_trade_window(self.basis_ms);
+        let cut_ns = slice_cut_ns(self.basis_ms);
         let Self { coins: held, due, emitted, record, refusals, basis_ms, .. } = self;
         let basis = Basis::new(record.priorities(), refusals, *basis_ms);
         for coin in coins {
             let Some(actions) = held.get_mut(coin) else { continue };
             let slices = due.get(coin).map_or(&[][..], Vec::as_slice);
-            let filled = actions.replay(replica.coin(coin), basis, slices);
-            for (slice, fills) in slices.iter().zip(filled) {
-                if !emit_twaps || fills.is_empty() || emitted.insert((slice.twap_id, slice.slot), slice.due_ms).is_some() {
-                    continue;
-                }
-                for fill in &fills {
-                    PENDING_BOOK_PREDICTED_FILLS_TOTAL.with_label_values(&[fill.maker.label()]).inc();
-                }
-                trades.extend(fills.into_iter().map(|fill| twap_trade(coin, slice, fill)));
-            }
+            let replayed = actions.replay(replica.coin(coin), basis, slices, cut_ns, actions.actions.len());
+            slice_trades(coin, slices, replayed.slices, emit_twaps, emitted, trades);
         }
     }
 
@@ -659,29 +700,35 @@ impl Shadow {
         self.record.height_of(&tx.tx_hash).is_some_and(|block| block <= height).then_some("late")
     }
 
-    fn hold(&mut self, coin: Coin, action: PendingAction, aligned: Option<Aligned<'_>>, emit: bool, step: &mut Step) {
-        self.held += 1;
+    /// A line's actions on `coin`, seen at `seen_ns`, each with its place in the line: applied on the overlay as they
+    /// come - or, the coin holding TWAP suborders the line comes before, the coin replayed with them, the suborders after
+    /// it (batch 2j) -, their trades into `trades` while `emit`.
+    fn hold(&mut self, coin: Coin, line_actions: Vec<(usize, PendingAction)>, seen_ns: i64, aligned: Option<Aligned<'_>>, emit: bool, trades: &mut LineTrades) {
+        self.held += line_actions.len();
         let behind = aligned.is_some_and(|(_, height, _)| !self.record_covers(height));
-        let (record, refusals) = (&self.record, &self.refusals);
+        let emit_twaps = emit && self.in_trade_window(self.basis_ms);
+        let Self { coins, due, emitted, record, refusals, gaps, priorities_behind, .. } = self;
         let base = aligned
-            .filter(|_| !self.gaps.replica)
-            .map(|(replica, _, confirmed_ns)| (replica.coin(&coin), Basis::new(record.priorities(), refusals, unix_ms(confirmed_ns))));
-        let actions = self.coins.entry(coin.clone()).or_default();
-        if let (false, Some((base, basis))) = (action.unknown, base) {
-            self.priorities_behind |= behind;
-            let effect = actions.overlay.apply(base, basis, &action);
-            PENDING_BOOK_OVERLAY_TOTAL.with_label_values(&[action.op.label(), effect.outcome]).inc();
-            // only an action placing an order fills
-            if let (true, Some(order)) = (emit, action.op.placement()) {
-                for fill in &effect.fills {
-                    PENDING_BOOK_PREDICTED_FILLS_TOTAL.with_label_values(&[fill.maker.label()]).inc();
-                }
-                step.trades.extend(effect.fills.into_iter().map(|fill| predicted(&coin, &action, order, fill)));
-            }
-        }
-        actions.actions.push(action);
-        // its frame's pending counts change even when its book does not
-        step.changed.insert(coin);
+            .filter(|_| !gaps.replica)
+            .map(|(replica, _, confirmed_ns)| (replica.coin(&coin), Basis::new(record.priorities(), refusals, unix_ms(confirmed_ns)), unix_ms(confirmed_ns)));
+        let actions = coins.entry(coin.clone()).or_default();
+        let first = actions.actions.len();
+        let (orders, line_actions): (Vec<usize>, Vec<PendingAction>) = line_actions.into_iter().unzip();
+        actions.actions.extend(line_actions);
+        let Some((base, basis, basis_ms)) = base else { return };
+        let slices = due.get(&coin).map_or(&[][..], Vec::as_slice);
+        let cut_ns = slice_cut_ns(basis_ms);
+        let effects = if !slices.is_empty() && seen_ns < cut_ns {
+            let replayed = actions.replay(base, basis, slices, cut_ns, first);
+            slice_trades(&coin, slices, replayed.slices, emit_twaps, emitted, &mut trades.suborders);
+            replayed.reported
+        } else {
+            let CoinActions { actions: held, overlay } = &mut *actions;
+            (first..held.len()).filter(|index| !held[*index].unknown).map(|index| (index, overlay.apply(base, basis, &held[index]))).collect()
+        };
+        *priorities_behind |= behind && !effects.is_empty();
+        let in_line = effects.into_iter().map(|(index, effect)| (orders[index - first], &actions.actions[index], effect));
+        trades_of(&coin, in_line, emit, &mut trades.actions);
     }
 
     /// The one settling step (r7 revision 18): the lines a block at or below the confirmed height holds, and those
@@ -838,6 +885,40 @@ impl PendingTrade {
             Taker::Pending { vault, .. } => *vault,
             Taker::Twap { user, .. } => Some(*user),
         }
+    }
+}
+
+/// The next second's start after the confirmed block time `basis_ms` less `SLICE_CUT_MS`, unix ns: the actions of the
+/// lines seen before it run before that second's TWAP suborders.
+fn slice_cut_ns(basis_ms: u64) -> i64 {
+    unix_ns((basis_ms / 1_000 + 1) * 1_000 - SLICE_CUT_MS)
+}
+
+/// A line's actions' first applications - (place in the line, action, effect) -, counted; the fills of those placing an
+/// order, the predicted trades by their place, while `emit`.
+fn trades_of<'a>(coin: &Coin, applied: impl Iterator<Item = (usize, &'a PendingAction, Effect)>, emit: bool, trades: &mut Vec<(usize, PendingTrade)>) {
+    for (order_in_line, action, effect) in applied {
+        PENDING_BOOK_OVERLAY_TOTAL.with_label_values(&[action.op.label(), effect.outcome]).inc();
+        // only an action placing an order fills
+        let (true, Some(order)) = (emit, action.op.placement()) else { continue };
+        for fill in &effect.fills {
+            PENDING_BOOK_PREDICTED_FILLS_TOTAL.with_label_values(&[fill.maker.label()]).inc();
+        }
+        trades.extend(effect.fills.into_iter().map(|fill| (order_in_line, predicted(coin, action, order, fill))));
+    }
+}
+
+/// The TWAP suborders' fills of a replay as trades, each (twap, slot) once, the first time it fills while `emit_twaps`
+/// (in the trade window, batch 2i).
+fn slice_trades(coin: &Coin, slices: &[TwapSlice], filled: Vec<Vec<Fill>>, emit_twaps: bool, emitted: &mut FxHashMap<(u64, u64), u64>, trades: &mut Vec<PendingTrade>) {
+    for (slice, fills) in slices.iter().zip(filled) {
+        if !emit_twaps || fills.is_empty() || emitted.insert((slice.twap_id, slice.slot), slice.due_ms).is_some() {
+            continue;
+        }
+        for fill in &fills {
+            PENDING_BOOK_PREDICTED_FILLS_TOTAL.with_label_values(&[fill.maker.label()]).inc();
+        }
+        trades.extend(fills.into_iter().map(|fill| twap_trade(coin, slice, fill)));
     }
 }
 
@@ -1582,11 +1663,11 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// Batch 2h: a TWAP suborder due in the next first-of-second block takes before the pending takers - at its block's
-    /// start -, its fill out once when it first fills; a block of its second whose next is not proven yet keeps it
-    /// (batch 2i), and its being proven sends nothing again.
+    /// Batch 2h: a TWAP suborder due in the next first-of-second block takes from the book, its fill out once when it
+    /// first fills; a block of its second whose next is not proven yet keeps it (batch 2i), and its being proven sends
+    /// nothing again. An IOC whose line comes before the second's start - 20 ms runs before it (batch 2j).
     #[test]
-    fn a_twap_suborder_takes_first_and_trades_once() {
+    fn a_twap_suborder_trades_once() {
         let mut harness = Harness::ready_from(1_000);
         harness.rest_ask(11);
         drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
@@ -1597,7 +1678,8 @@ pub(crate) mod tests {
         assert_eq!(twap_trades(&step), [(7, 0, tenth, Px::parse_from_str("101").unwrap())]);
         assert_eq!(harness.bbo().1, Some(level("101", "0.9", 1)));
         let step = harness.line(3_150, 1, vec![ioc("0x01")]);
-        assert_eq!(step.trades.iter().map(|trade| trade.sz).collect::<Vec<_>>(), [Sz::parse_from_str("0.9").unwrap()], "behind the suborder");
+        assert_eq!(step.trades.iter().map(|trade| trade.sz).collect::<Vec<_>>(), [Sz::parse_from_str("1").unwrap()], "ahead of the suborder");
+        assert_eq!(harness.bbo().1, None);
         let step = harness.confirm(vec![], vec![]);
         assert!(harness.shadow.twaps_known(), "kept through its second");
         assert_eq!(twap_trades(&step), []);
@@ -1606,16 +1688,92 @@ pub(crate) mod tests {
         assert_eq!(twap_trades(&step), [], "slot 0 went out already");
     }
 
-    /// Batch 2h: the TWAPs turning known replay the coin with the suborder before the takers held.
+    /// Batch 2j: a taker held, its line before the second's start - 20 ms (3,980 ms), runs before the suborder - the
+    /// suborder takes nothing -; one seen at the cut, or after, runs after it.
     #[test]
-    fn a_suborder_replays_before_the_takers_held() {
+    fn a_taker_seen_before_the_cut_runs_ahead_of_the_suborder() {
+        for (seen_ms, suborder) in [(3_150, None), (3_979, None), (3_980, Some("0.1"))] {
+            let mut harness = Harness::ready_from(1_000);
+            harness.rest_ask(11);
+            drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+            let step = harness.line(seen_ms, 1, vec![ioc("0x01")]);
+            assert_eq!(step.trades.iter().map(|trade| trade.sz).collect::<Vec<_>>(), [Sz::parse_from_str("1").unwrap()], "seen at {seen_ms}");
+            let step = harness.twaps_known_now();
+            let expected: Vec<_> = suborder.map(|sz| (7, 0, Sz::parse_from_str(sz).unwrap(), Px::parse_from_str("101").unwrap())).into_iter().collect();
+            assert_eq!(twap_trades(&step), expected, "seen at {seen_ms}");
+        }
+    }
+
+    /// Review 000634 r2: a line taking on BTC, ETH, then BTC again - BTC holding a suborder, its line before the cut -
+    /// sends its trades in that order, though its coins are held a coin at a time.
+    #[test]
+    fn a_lines_trades_keep_its_order_across_coins() {
         let mut harness = Harness::ready_from(1_000);
-        harness.rest_ask(11);
+        let at = block_time_ms(harness.height + 1);
+        let eth = |mut event: serde_json::Value, path: &[&str]| {
+            let mut at = &mut event;
+            for key in path {
+                at = &mut at[*key];
+            }
+            *at = serde_json::json!("ETH");
+            event
+        };
+        harness.block(
+            &[],
+            vec![btc_status(11, "A", "101.0", "1.0", "open", None, "Alo", at), btc_status(13, "A", "101.0", "1.0", "open", None, "Alo", at), eth(btc_status(12, "A", "3000.0", "1.0", "open", None, "Alo", at), &["order", "coin"])],
+            vec![btc_diff(11, "A", "101.0", new_diff("1.0")), btc_diff(13, "A", "101.0", new_diff("1.0")), eth(btc_diff(12, "A", "3000.0", new_diff("1.0")), &["coin"])],
+        );
         drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
-        let step = harness.line(3_150, 1, vec![ioc("0x01")]);
-        assert_eq!(step.trades.iter().map(|trade| trade.sz).collect::<Vec<_>>(), [Sz::parse_from_str("1").unwrap()]);
-        let step = harness.twaps_known_now();
-        assert_eq!(twap_trades(&step), [(7, 0, Sz::parse_from_str("0.1").unwrap(), Px::parse_from_str("101").unwrap())]);
+        drop(harness.twaps_known_now());
+        let eth_ioc = ActionKind::Order(vec![requested(1, true, "3000", RequestedTif::Ioc, Some("0x0e"))]);
+        let step = harness.line(3_150, 1, vec![ioc("0x01"), eth_ioc, ioc("0x02")]);
+        let coins: Vec<_> = step.trades.iter().map(|trade| (trade.coin.value(), matches!(trade.taker, Taker::Twap { .. }))).collect();
+        let expected = [("BTC", false), ("ETH", false), ("BTC", false)].map(|(coin, twap)| (coin.to_string(), twap));
+        assert_eq!(coins, expected);
+    }
+
+    /// Review 000634 r3 P2-1: with no suborder due, a replay keeps the actions as they came - an ask seen at 3,981 ms,
+    /// then an IOC seen at 3,979 ms taking it: the next block's replay leaves the ask taken.
+    #[test]
+    fn with_no_suborder_a_replay_keeps_the_actions_as_they_came() {
+        let mut harness = Harness::ready_from(1_000);
+        drop(harness.line(3_981, 1, vec![alo_ask("100", "0x0a")]));
+        let step = harness.line(3_979, 2, vec![ioc("0x01")]);
+        assert_eq!(step.trades.iter().map(|trade| (trade.px.to_str(), trade.sz.to_str())).collect::<Vec<_>>(), [("100".to_string(), "1".to_string())]);
+        assert_eq!(harness.bbo().1, None);
+        let at = block_time_ms(harness.height + 1);
+        drop(harness.block(&[], vec![btc_status(21, "B", "90.0", "1.0", "open", None, "Alo", at)], vec![btc_diff(21, "B", "90.0", new_diff("1.0"))]));
+        assert_eq!(harness.bbo(), (Some(level("90", "1", 1)), None), "the ask stays taken");
+    }
+
+    /// Batch 2j: a line before the cut on a coin holding a suborder sends its own trades, then the suborder's; a later
+    /// line replaying the coin sends its own alone, none held before it again.
+    #[test]
+    fn a_replayed_line_sends_its_own_trades_then_the_suborders() {
+        let mut harness = Harness::ready_from(1_000);
+        drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+        drop(harness.twaps_known_now());
+        let taker = |trade: &PendingTrade| (matches!(trade.taker, Taker::Twap { .. }), trade.px.to_str(), trade.sz.to_str());
+        let step = harness.line(3_150, 1, vec![alo_ask("100", "0x0a"), alo_ask("101", "0x0b"), ioc("0x01")]);
+        let expected = [(false, "100", "1"), (true, "101", "0.1")].map(|(twap, px, sz)| (twap, px.to_string(), sz.to_string()));
+        assert_eq!(step.trades.iter().map(taker).collect::<Vec<_>>(), expected);
+        let step = harness.line(3_160, 2, vec![ioc("0x02")]);
+        assert_eq!(step.trades.iter().map(taker).collect::<Vec<_>>(), [(false, "101".to_string(), "1".to_string())]);
+    }
+
+    /// Review 000634 r1 P2-1: the window open, a buy suborder not out, no ask; one line before the cut rests asks at 101
+    /// then 100, each enough - the suborder's trade goes out once, at 100, as the book shows it, and no replay after
+    /// sends it again.
+    #[test]
+    fn a_line_before_the_cut_is_held_whole_before_the_suborder_trades() {
+        let mut harness = Harness::ready_from(1_000);
+        drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+        assert_eq!(twap_trades(&harness.twaps_known_now()), [], "no ask to take");
+        let step = harness.line(3_150, 1, vec![alo_ask("101", "0x0a"), alo_ask("100", "0x0b")]);
+        assert_eq!(twap_trades(&step), [(7, 0, Sz::parse_from_str("0.1").unwrap(), Px::parse_from_str("100").unwrap())]);
+        assert_eq!(harness.bbo().1, Some(level("100", "0.9", 1)));
+        let replays: Vec<_> = [harness.confirm(vec![], vec![]), harness.twaps_known_now()].iter().flat_map(twap_trades).collect();
+        assert_eq!(replays, []);
     }
 
     /// Batch 2i (design 000631 r2): the next height not proven yet, the suborders of the second stand - no replay, the
