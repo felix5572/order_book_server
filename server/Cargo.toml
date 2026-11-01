@@ -18,6 +18,9 @@ rayon = "1.10"
 # Only alloy::primitives::Address is used; "full" pulled in sol-macro (and proc-macro-error2,
 # flagged future-incompatible by rustc 1.99) plus the provider/contract stack for nothing.
 alloy = { version = "1.0.22", default-features = false, features = ["std", "serde"] }
+# For its k256 feature: the pending book recovers a signed action's signer (batch 2g). alloy's own k256 feature would
+# also bring its optional network crates into the lock.
+alloy-primitives = { version = "1.5", default-features = false, features = ["k256"] }
 strum_macros = "0.27.2"
 yawc = { version = "0.3.2", features = ["axum"] }
 flate2 = "1"
@@ -32,6 +35,8 @@ rustc-hash = "2"
 bytes = "1"
 # Streaming decode of the node's MessagePack checkpoints (accounts module).
 rmp-serde = "1.3"
+# The pending book encodes a signed action as HL hashes it to recover its signer (batch 2g).
+rmp = "0.8"
 # Local marks' venue feeds (design 000454): WS through yawc; the two REST calls (MEXC spot, Kucoin token) over the
 # HTTP and TLS crates yawc already brings in.
 url = "2"

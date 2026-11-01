@@ -161,6 +161,12 @@ struct Args {
     /// The pending set's S: no mempool line for this long before the confirmed block time is an input gap.
     #[arg(long, default_value = "2000")]
     pending_mempool_silence_ms: u64,
+
+    /// The pending set's M (batch 2g): a taker HL refused for margin on a coin and side is taken to be refused again
+    /// there for its orders whose lines come this long after the refusal's block (bm 10-31 19:41-20:11 replayed: 94.5%
+    /// of the trades predicted for such takers, 9 independent fills suppressed).
+    #[arg(long, default_value = "300000")]
+    pending_margin_refusal_ms: u64,
 }
 
 /// Start the Prometheus metrics HTTP server
@@ -236,6 +242,7 @@ async fn main() -> Result<()> {
         pending_max_span_ms: args.pending_max_span_ms,
         pending_max_actions: args.pending_max_actions,
         pending_mempool_silence_ms: args.pending_mempool_silence_ms,
+        pending_margin_refusal_ms: args.pending_margin_refusal_ms,
     };
 
     println!("Orderbook Server v{}", env!("CARGO_PKG_VERSION"));
@@ -270,13 +277,14 @@ async fn main() -> Result<()> {
     }
     if config.pending_book {
         println!(
-            "  Pending book: ON (book replica, backlog budget {} events; mempool, expiry {} ms, max late {} ms, max span {} ms, max {} actions, silence {} ms)",
+            "  Pending book: ON (book replica, backlog budget {} events; mempool, expiry {} ms, max late {} ms, max span {} ms, max {} actions, silence {} ms, margin refusal {} ms)",
             config.pending_backlog_events,
             config.pending_expiry_ms,
             config.pending_max_late_ms,
             config.pending_max_span_ms,
             config.pending_max_actions,
-            config.pending_mempool_silence_ms
+            config.pending_mempool_silence_ms,
+            config.pending_margin_refusal_ms
         );
     }
     println!();

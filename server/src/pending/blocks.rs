@@ -4,8 +4,9 @@
 //! (`ReplicaLine`). Of each: its height, time and its bundles' hashes - a bundle's hash is the mempool line's `tx_hash`
 //! it ran (research `mempool_pending_book_20261031`, 10-31 after the node upgrade: 18,939 of 18,939 bundles) -, and the
 //! oids its order actions with an ALO priority placed, with the priority (batch 2f: a confirmed order's place in its
-//! level's queue). Read by the pending thread's own watcher, which parses each line - the account view parses each on
-//! its own, later - from the end of the current file.
+//! level's queue), and its taker orders' outcomes for the takers' margin refusals (batch 2g, `refusals`). Read by the
+//! pending thread's own watcher, which parses each line - the account view parses each on its own, later - from the end
+//! of the current file.
 
 use std::{path::Path, thread};
 
@@ -13,16 +14,28 @@ use alloy::primitives::B256;
 use log::error;
 use tokio::time::Instant;
 
-use super::feed::{self, Feed, FeedEvent, FeedLosses, FeedReports};
+use super::{
+    feed::{self, Feed, FeedEvent, FeedLosses, FeedReports},
+    mempool::order_tif,
+    refusals::{TakerKey, TakerOutcome},
+    signer::{self, ActingIdentity},
+};
 use crate::{
-    accounts::replica::{ReplicaLine, WireOrder, WireStatus, WireStatusObject, alo_priority, response_statuses},
+    accounts::replica::{PairedAction, ReplicaLine, WireOrder, WireStatus, WireStatusObject, alo_priority, response_statuses},
     listeners::order_book::{
         parallel::{FileLayout, LineShape, LineStream},
         throttled_log_due,
     },
-    metrics::{PENDING_BOOK_BLOCK_LOG_LINES_TOTAL, PENDING_BOOK_BLOCK_LOG_LOSSES_TOTAL},
+    metrics::{PENDING_BOOK_BLOCK_LOG_LINES_TOTAL, PENDING_BOOK_BLOCK_LOG_LOSSES_TOTAL, PENDING_BOOK_SIGNERS_TOTAL, PENDING_BOOK_TAKER_OUTCOMES_TOTAL},
     types::node_data::node_time_unix_nanos,
 };
+
+/// The error of an order HL could not margin (bm 10-31: "Insufficient margin to place order. asset=159").
+const MARGIN_REFUSED: &str = "Insufficient margin to place order";
+
+/// The error of an IOC that met no level to take ("Order could not immediately match against any resting orders.
+/// asset=46").
+const IOC_MISSED: &str = "Order could not immediately match against any resting orders";
 
 /// Cap on one unterminated line, as the account view's reading of the same log.
 const MAX_LINE_BYTES: usize = 64 << 20;
@@ -39,6 +52,8 @@ pub(crate) struct LoggedBlock {
     pub(crate) hashes: Vec<B256>,
     /// (oid, priority) of each order an order action with an ALO priority placed, resting or filled in part on entry.
     pub(crate) priorities: Vec<(u64, u64)>,
+    /// Its taker orders' outcomes, in execution order (batch 2g).
+    pub(crate) taker_outcomes: Vec<TakerOutcome>,
 }
 
 /// Starts the pending thread's watcher of `<data_dir>/replica_cmds`.
@@ -67,20 +82,29 @@ pub(crate) fn parse_block(line: &str) -> Result<LoggedBlock, String> {
         .bundle_hashes()
         .map(|hash| hash.parse::<B256>().map_err(|err| format!("block {height} bundle hash {hash:?}: {err}")))
         .collect::<Result<_, _>>()?;
-    let priorities = placed_priorities(&block).map_err(|err| format!("block {height}: {err}"))?;
-    Ok(LoggedBlock { height, time_ms, hashes, priorities })
+    let paired = block.paired().map_err(|err| format!("block {height}: {err}"))?;
+    let priorities = placed_priorities(&paired).map_err(|err| format!("block {height}: {err}"))?;
+    let taker_outcomes = taker_outcomes(line, &block, &paired).map_err(|err| format!("block {height}: {err}"))?;
+    Ok(LoggedBlock { height, time_ms, hashes, priorities, taker_outcomes })
+}
+
+/// Whether an action ran: its status `ok`; one refused whole (`err`) placed nothing, and a status neither is not
+/// taken as either (review 000620 r4 P2).
+fn ran(paired: &PairedAction<'_, '_>) -> Result<bool, String> {
+    match paired.response.res.status {
+        "ok" => Ok(true),
+        "err" => Ok(false),
+        status => Err(format!("bundle {} action {}: status {status:?}", paired.bundle_hash, paired.position)),
+    }
 }
 
 /// (oid, priority) of each order the block's order actions with an ALO priority placed, by their responses - one a
 /// `multiSig` executed too, under its response (review 000620 r2: a priority not read is not none; none seen on bm).
-fn placed_priorities(block: &ReplicaLine<'_>) -> Result<Vec<(u64, u64)>, String> {
+fn placed_priorities(paired_actions: &[PairedAction<'_, '_>]) -> Result<Vec<(u64, u64)>, String> {
     let mut placed = Vec::new();
-    for paired in block.paired()? {
-        // an action refused whole placed nothing; a status neither is not taken as either (review 000620 r4 P2)
-        match paired.response.res.status {
-            "ok" => {}
-            "err" => continue,
-            status => return Err(format!("bundle {} action {}: status {status:?}", paired.bundle_hash, paired.position)),
+    for paired in paired_actions {
+        if !ran(paired)? {
+            continue;
         }
         let inner;
         let action = if paired.action.action_type == "multiSig" {
@@ -101,7 +125,7 @@ fn placed_priorities(block: &ReplicaLine<'_>) -> Result<Vec<(u64, u64)>, String>
         if priority == 0 {
             continue;
         }
-        let statuses = response_statuses(&paired)?;
+        let statuses = response_statuses(paired)?;
         // one error for them all: a refused batch
         if statuses.len() != orders.len() && matches!(statuses.as_slice(), [status] if refused(status)) {
             continue;
@@ -120,6 +144,124 @@ fn placed_priorities(block: &ReplicaLine<'_>) -> Result<Vec<(u64, u64)>, String>
         }
     }
     Ok(placed)
+}
+
+/// Each taker order's outcome (design 000621 r3), in execution order - the block's, each action's orders in theirs; a
+/// taker's are all in its bundle's last category, which keeps the proposal order: the orders that may take
+/// (`RequestedTif::may_take`) of the `order` actions that ran, by their statuses. Refused for margin, or cleared -
+/// placed (filled, resting), or an IOC missing every level -; any other error says nothing, nor does a batch refused
+/// whole but for margin. Its identity is the vault the action names, else its signer; a `multiSig`'s orders, whose
+/// signer is not their account's, are left out (the pending set never holds them).
+fn taker_outcomes(line: &str, block: &ReplicaLine<'_>, paired_actions: &[PairedAction<'_, '_>]) -> Result<Vec<TakerOutcome>, String> {
+    let mut takers = Vec::new();
+    for paired in paired_actions {
+        if !ran(paired)? || paired.action.action_type != "order" {
+            continue;
+        }
+        let orders: Vec<WireOrder> = paired.action.field(paired.action.orders.as_ref(), "orders")?;
+        let at = |err: String| format!("bundle {} action {}: {err}", paired.bundle_hash, paired.position);
+        // an action without an order that may take has no response the batch reads (review 000621 r4 P2-2)
+        let taking = taking_items(&orders).map_err(at)?;
+        if taking.is_empty() {
+            continue;
+        }
+        let outcomes = order_outcomes(&orders, &taking, &response_statuses(paired)?).map_err(at)?;
+        if outcomes.is_empty() {
+            continue;
+        }
+        let signed = block.signed_action(paired.bundle, paired.position).ok_or_else(|| at("not in its bundle".to_string()))?;
+        takers.push((paired, signed, signed.vault().map_err(at)?, outcomes));
+    }
+    let signed_by = takers.iter().filter(|(_, _, vault, _)| vault.is_none()).map(|(paired, ..)| *paired).collect::<Vec<_>>();
+    let mut written = if signed_by.is_empty() {
+        Vec::new().into_iter()
+    } else {
+        let paths = signed_by.iter().map(|paired| {
+            sonic_rs::pointer!["abci_block", "signed_action_bundles", paired.bundle, 1, "signed_actions", paired.position, "action"]
+        });
+        signer::actions_written(line, paths)?.into_iter()
+    };
+    let mut taken = Vec::new();
+    for (paired, signed, vault, outcomes) in takers {
+        let signer = if vault.is_some() {
+            None
+        } else {
+            let action = written.next().ok_or("fewer actions written than wanted")?;
+            let signer = signer::signer(signed, action.as_raw_str())
+                .map_err(|err| format!("bundle {} action {}: {err}", paired.bundle_hash, paired.position))?;
+            PENDING_BOOK_SIGNERS_TOTAL.with_label_values(&["block_log", if signer.is_some() { "recovered" } else { "unknown" }]).inc();
+            signer
+        };
+        let Some(identity) = ActingIdentity::of(vault, signer) else {
+            PENDING_BOOK_TAKER_OUTCOMES_TOTAL.with_label_values(&["no_identity"]).inc_by(u64::try_from(outcomes.len()).unwrap_or(u64::MAX));
+            continue;
+        };
+        for (asset, is_buy, refused) in outcomes {
+            PENDING_BOOK_TAKER_OUTCOMES_TOTAL.with_label_values(&[if refused { "refused" } else { "cleared" }]).inc();
+            taken.push(TakerOutcome { key: TakerKey { identity, asset, is_buy }, refused });
+        }
+    }
+    Ok(taken)
+}
+
+/// The places of `orders` that may take (`RequestedTif::may_take`).
+fn taking_items(orders: &[WireOrder]) -> Result<Vec<usize>, String> {
+    let mut taking = Vec::new();
+    for (item, order) in orders.iter().enumerate() {
+        if order_tif(order).map_err(|err| format!("item {item}: {err}"))?.may_take() {
+            taking.push(item);
+        }
+    }
+    Ok(taking)
+}
+
+/// (asset, is buy, refused for margin) of each order of `orders` at `taking` whose status tells either. The statuses
+/// are one per order, or one error for them all - a refused batch, which only a margin error tells of: each taker
+/// refused; any other, an IOC's miss among them, says nothing of any one (design 000621 r3; review 000621 r4 P2-1).
+fn order_outcomes(orders: &[WireOrder], taking: &[usize], statuses: &[WireStatus]) -> Result<Vec<(u32, bool, bool)>, String> {
+    if statuses.len() != orders.len() {
+        let [status] = statuses else { return Err(format!("{} orders with {} statuses", orders.len(), statuses.len())) };
+        if !refused(status) {
+            return Err(format!("{} orders with one status not an error", orders.len()));
+        }
+        let margin = matches!(taker_status(status), Some(TakerStatus::Refused));
+        return Ok(if margin { taking.iter().map(|item| (orders[*item].a, orders[*item].b, true)).collect() } else { Vec::new() });
+    }
+    let mut outcomes = Vec::new();
+    for item in taking {
+        let order = &orders[*item];
+        match taker_status(&statuses[*item]).ok_or_else(|| format!("item {item}: a status neither placed nor refused"))? {
+            TakerStatus::Refused => outcomes.push((order.a, order.b, true)),
+            TakerStatus::Cleared => outcomes.push((order.a, order.b, false)),
+            TakerStatus::Silent => {}
+        }
+    }
+    Ok(outcomes)
+}
+
+/// What a taker order's status says of its taker's margin.
+enum TakerStatus {
+    /// Refused for margin.
+    Refused,
+    /// Placed (filled, resting), or an IOC that missed every level.
+    Cleared,
+    /// Any other error.
+    Silent,
+}
+
+/// `None` for a status neither placed nor an error alone.
+fn taker_status(status: &WireStatus) -> Option<TakerStatus> {
+    if placed_oid(status).is_some() {
+        return Some(TakerStatus::Cleared);
+    }
+    let WireStatus::Object(WireStatusObject { error: Some(error), resting: None, filled: None }) = status else { return None };
+    Some(if error.contains(MARGIN_REFUSED) {
+        TakerStatus::Refused
+    } else if error.contains(IOC_MISSED) {
+        TakerStatus::Cleared
+    } else {
+        TakerStatus::Silent
+    })
 }
 
 /// A status refusing its order: an error alone.
@@ -201,7 +343,7 @@ pub(crate) mod tests {
     const PRIORITY_IOC_RESPONSE: &str = r#"{"user":"0x8e555c7f07eebea796dec9b9273e8c1b88a1abdc","res":{"status":"ok","response":{"type":"order","data":{"statuses":[{"error":"Order could not immediately match against any resting orders. asset=46"}]}}}}"#;
 
     /// A block of one bundle holding `actions`, answered by `responses`.
-    fn block_of(actions: &[&str], responses: &[&str]) -> String {
+    pub(crate) fn block_of(actions: &[&str], responses: &[&str]) -> String {
         let hash = "0x969bc4d41af39390282ad4f9445295b0b5a8032ce88fd7dbd95798e9802f70ea";
         format!(
             r#"{{"abci_block":{{"time":"2026-10-31T21:28:32.681320216","signed_action_bundles":[["{hash}",{{"signed_actions":[{}]}}]]}},"resps":{{"Full":[["{hash}",[{}]]]}},"height":1204388049}}"#,
@@ -278,6 +420,84 @@ pub(crate) mod tests {
             r#"{{"signature":{{"r":"0x1","s":"0x2","v":27}},"action":{{"type":"multiSig","signatureChainId":"0x66eee","signatures":[],"payload":{{"multiSigUser":"0x09f15dacf13c0fcb64594452506b52393fb13c39","outerSigner":"0x1","action":{inner}}}}},"nonce":1}}"#
         );
         assert_eq!(parse_block(&block_of(&[&multisig], &[PRIORITY_ALOS_RESPONSE])).unwrap().priorities, [(591_588_446_177, 3), (591_588_446_178, 3)]);
+    }
+
+    /// A vault's order action of an IOC (asset 1, buy), an ALO (2), a GTC (3, sell), a `FrontendMarket` (4) and a
+    /// trigger order (5).
+    const VAULT_TAKERS: &str = r#"{"signature":{"r":"0x1","s":"0x2","v":27},"vaultAddress":"0xbff945932b5ff40699e9f12fa40927c5667df619","action":{"type":"order","orders":[{"a":1,"b":true,"p":"10","s":"1","r":false,"t":{"limit":{"tif":"Ioc"}}},{"a":2,"b":true,"p":"10","s":"1","r":false,"t":{"limit":{"tif":"Alo"}}},{"a":3,"b":false,"p":"10","s":"1","r":false,"t":{"limit":{"tif":"Gtc"}}},{"a":4,"b":true,"p":"10","s":"1","r":false,"t":{"limit":{"tif":"FrontendMarket"}}},{"a":5,"b":true,"p":"10","s":"1","r":false,"t":{"trigger":{"isMarket":true,"triggerPx":"9","tpsl":"sl"}}}],"grouping":"na"},"nonce":1}"#;
+
+    fn vault_response(statuses: &str) -> String {
+        format!(r#"{{"user":"0xbff945932b5ff40699e9f12fa40927c5667df619","res":{{"status":"ok","response":{{"type":"order","data":{{"statuses":[{statuses}]}}}}}}}}"#)
+    }
+
+    /// (asset, is buy, refused) of the block's taker outcomes, all of the one vault.
+    fn vault_outcomes(action: &str, response: &str) -> Result<Vec<(u32, bool, bool)>, String> {
+        let vault = ActingIdentity::Vault("0xbff945932b5ff40699e9f12fa40927c5667df619".parse().unwrap());
+        let block = parse_block(&block_of(&[action], &[response]))?;
+        assert!(block.taker_outcomes.iter().all(|outcome| outcome.key.identity == vault));
+        Ok(block.taker_outcomes.iter().map(|outcome| (outcome.key.asset, outcome.key.is_buy, outcome.refused)).collect())
+    }
+
+    /// Batch 2g: the orders that may take, by their statuses - a margin error refuses, a fill, a resting order or an IOC
+    /// missing every level clears, another error says nothing; an ALO's and a trigger order's statuses are not read.
+    #[test]
+    fn a_line_reads_its_taker_orders_outcomes() {
+        const MARGIN: &str = r#"{"error":"Insufficient margin to place order. asset=1"}"#;
+        const RESTING: &str = r#"{"resting":{"oid":11}}"#;
+        const FILLED: &str = r#"{"filled":{"totalSz":"1","avgPx":"10","oid":12}}"#;
+        const MISSED: &str = r#"{"error":"Order could not immediately match against any resting orders. asset=1"}"#;
+        const OTHER: &str = r#"{"error":"Order price cannot be more than 95% away from the reference price"}"#;
+        let statuses = |taker: [&str; 3]| vault_response(&format!(r#"{},{RESTING},{},{},"waitingForTrigger""#, taker[0], taker[1], taker[2]));
+        assert_eq!(vault_outcomes(VAULT_TAKERS, &statuses([MARGIN, RESTING, FILLED])), Ok(vec![(1, true, true), (3, false, false), (4, true, false)]));
+        assert_eq!(vault_outcomes(VAULT_TAKERS, &statuses([MISSED, MARGIN, OTHER])), Ok(vec![(1, true, false), (3, false, true)]));
+        // one error for the batch: a margin one refuses each taker, another says nothing
+        assert_eq!(vault_outcomes(VAULT_TAKERS, &vault_response(MARGIN)), Ok(vec![(1, true, true), (3, false, true), (4, true, true)]));
+        assert_eq!(vault_outcomes(VAULT_TAKERS, &vault_response(OTHER)), Ok(vec![]));
+        // review 000621 r4 P2-1: one IOC's miss for the batch says nothing of each order, unlike one order's own
+        assert_eq!(vault_outcomes(VAULT_TAKERS, &vault_response(MISSED)), Ok(vec![]));
+        // refused whole: nothing
+        let refused_whole = r#"{"user":"0xbff945932b5ff40699e9f12fa40927c5667df619","res":{"status":"err","response":"Insufficient margin to place order. asset=1"}}"#;
+        assert_eq!(vault_outcomes(VAULT_TAKERS, refused_whole), Ok(vec![]));
+    }
+
+    /// Review 000621 r4 P2-2: an action without an order that may take - ALOs without a priority, trigger orders -
+    /// reads whatever its response, as before batch 2g; one with such an order and a response telling nothing of it does
+    /// not.
+    #[test]
+    fn a_response_without_a_taker_is_not_read_for_takers() {
+        const IOC: &str = r#"{"a":1,"b":true,"p":"10","s":"1","r":false,"t":{"limit":{"tif":"Ioc"}}}"#;
+        const ALO: &str = r#"{"a":2,"b":true,"p":"10","s":"1","r":false,"t":{"limit":{"tif":"Alo"}}}"#;
+        const TRIGGER: &str = r#"{"a":5,"b":true,"p":"10","s":"1","r":false,"t":{"trigger":{"isMarket":true,"triggerPx":"9","tpsl":"sl"}}}"#;
+        assert!(VAULT_TAKERS.contains(IOC) && VAULT_TAKERS.contains(ALO) && VAULT_TAKERS.contains(TRIGGER));
+        let action = |orders: &[&str]| {
+            format!(
+                r#"{{"signature":{{"r":"0x1","s":"0x2","v":27}},"vaultAddress":"0xbff945932b5ff40699e9f12fa40927c5667df619","action":{{"type":"order","orders":[{}],"grouping":"na"}},"nonce":1}}"#,
+                orders.join(",")
+            )
+        };
+        let default = r#"{"user":"0xbff945932b5ff40699e9f12fa40927c5667df619","res":{"status":"ok","response":{"type":"default"}}}"#;
+        for orders in [&[ALO][..], &[TRIGGER], &[ALO, TRIGGER]] {
+            let action = action(orders);
+            assert_eq!(parse_block(&block_of(&[&action], &[default])).unwrap().taker_outcomes, [], "{action}");
+        }
+        assert!(parse_block(&block_of(&[&action(&[IOC, ALO])], &[default])).is_err());
+    }
+
+    /// A taker's status neither placed nor refused, or statuses not pairing with the orders, do not read; a `multiSig`'s
+    /// orders give no outcome.
+    #[test]
+    fn a_line_whose_taker_outcomes_do_not_read_does_not_read() {
+        for status in [r#"{"unknown":1}"#, r#""success""#, r#"{"error":"Insufficient margin to place order. asset=1","resting":{"oid":11}}"#] {
+            let response = vault_response(&format!(r#"{status},{{"resting":{{"oid":11}}}},{{"resting":{{"oid":13}}}},{{"resting":{{"oid":14}}}},"waitingForTrigger""#));
+            assert!(vault_outcomes(VAULT_TAKERS, &response).is_err(), "{status}");
+        }
+        assert!(vault_outcomes(VAULT_TAKERS, &vault_response(r#"{"resting":{"oid":11}},{"resting":{"oid":12}}"#)).is_err());
+        let action_start = VAULT_TAKERS.find(r#""action":"#).unwrap() + r#""action":"#.len();
+        let inner = &VAULT_TAKERS[action_start..VAULT_TAKERS.find(r#","nonce""#).unwrap()];
+        let multisig = format!(
+            r#"{{"signature":{{"r":"0x1","s":"0x2","v":27}},"action":{{"type":"multiSig","signatureChainId":"0x66eee","signatures":[],"payload":{{"multiSigUser":"0x09f15dacf13c0fcb64594452506b52393fb13c39","outerSigner":"0x1","action":{inner}}}}},"nonce":1}}"#
+        );
+        assert_eq!(parse_block(&block_of(&[&multisig], &[&vault_response(r#"{"error":"Insufficient margin to place order. asset=1"}"#)])).unwrap().taker_outcomes, []);
     }
 
     #[test]

@@ -917,6 +917,22 @@ lazy_static! {
         &["cause"]
     ).expect("metric can be created");
 
+    /// Signed actions whose signer the pending book recovered (batch 2g: the order actions that may take, without a
+    /// vault), by `source` (`mempool`, `block_log`) and `outcome`: `recovered`, or `unknown` - a number not a 64-bit
+    /// integer in the action, or a signature no key signed.
+    pub static ref PENDING_BOOK_SIGNERS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_signers_total", "Pending book signed actions whose signer was recovered"),
+        &["source", "outcome"]
+    ).expect("metric can be created");
+
+    /// Taker orders' outcomes the pending book took from the block log for its margin refusals (batch 2g), by
+    /// `outcome`: `refused` (margin), `cleared` (filled, resting, an IOC missing every level), `no_identity` (its signer
+    /// unknown).
+    pub static ref PENDING_BOOK_TAKER_OUTCOMES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_taker_outcomes_total", "Pending book taker order outcomes from the block log"),
+        &["outcome"]
+    ).expect("metric can be created");
+
     /// Blocks the pending book's block record holds above the replica's confirmed height (capped, design 000604 r7).
     pub static ref PENDING_BOOK_BLOCK_LOG_LEAD_BLOCKS: IntGauge = IntGauge::new(
         "orderbook_pending_book_block_log_lead_blocks",
@@ -1073,6 +1089,8 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(PENDING_BOOK_MOVED_COINS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LINES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_SIGNERS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_TAKER_OUTCOMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LOSSES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LEAD_BLOCKS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_UNAVAILABLE_SECONDS_TOTAL.clone())).ok();

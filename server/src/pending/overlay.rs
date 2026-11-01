@@ -20,14 +20,19 @@
 //! - An order worth less than HL's minimum, 10 of the quote at the price it would first trade at - its limit, or the
 //!   merged opposite best when that is better -, is rejected (the node's `minTradeNtlRejected`); a modify placing one
 //!   is rejected whole, its target left (an inference: no case seen).
-//! - Self-trades, margin, reduce-only and price bands are not modelled (design 000604's non-goals).
+//! - A new order that may take, of a taker HL lately refused for margin on its coin and side, is rejected (batch 2g,
+//!   `TakerRefusals`) when the minimum value does not reject it first; a modify is not judged by it.
+//! - Self-trades, reduce-only, price bands and margin otherwise are not modelled (design 000604's non-goals).
 
 use std::collections::{BTreeMap, VecDeque};
 
 use alloy::primitives::Address;
 use rustc_hash::FxHashMap;
 
-use super::actions::{ActionId, BookOp, PendingAction, Placement, Tif};
+use super::{
+    actions::{ActionId, BookOp, PendingAction, Placement, Tif},
+    refusals::{TakerKey, TakerRefusals},
+};
 use crate::{
     accounts::replica::OrderRef,
     order_book::{Oid, OrderBook, PriceLevel, Px, Side, Sz},
@@ -92,25 +97,28 @@ impl<'a> CoinBase<'a> {
     }
 }
 
-/// What placing a pending order in its level's queue needs of the confirmed state (batch 2f).
+/// What the overlay reads of the confirmed state besides the book: for a pending order's place in its level's queue
+/// (batch 2f), and its taker's margin refusals (batch 2g).
 #[derive(Clone, Copy)]
-pub(crate) struct Queueing<'a> {
+pub(crate) struct Basis<'a> {
     /// The confirmed orders' ALO priorities by oid; one not here has none.
     priorities: &'a FxHashMap<u64, u64>,
+    /// The takers' margin refusals as of the confirmed height.
+    refusals: &'a TakerRefusals,
     /// The confirmed block time, unix ms: no pending order is placed before it.
-    basis_ms: u64,
+    time_ms: u64,
 }
 
-impl<'a> Queueing<'a> {
-    pub(crate) const fn new(priorities: &'a FxHashMap<u64, u64>, basis_ms: u64) -> Self {
-        Self { priorities, basis_ms }
+impl<'a> Basis<'a> {
+    pub(crate) const fn new(priorities: &'a FxHashMap<u64, u64>, refusals: &'a TakerRefusals, time_ms: u64) -> Self {
+        Self { priorities, refusals, time_ms }
     }
 
     /// When an order whose line came at `seen_ms` is taken to be placed, unix ms: its block's time is past both its
     /// arrival and the confirmed block's (review 000620 r1 P2-1). Judged at each comparison against the confirmed block
     /// then, a pending order resting since an earlier one too (review 000620 r3 P2).
     const fn placed_ms(self, seen_ms: u64) -> u64 {
-        if seen_ms > self.basis_ms { seen_ms } else { self.basis_ms }
+        if seen_ms > self.time_ms { seen_ms } else { self.time_ms }
     }
 
     fn priority(self, oid: u64) -> u64 {
@@ -200,7 +208,7 @@ struct RestingOrder {
     sz: u64,
     /// The replica order it queues in front of; `None` behind them all.
     ahead_of: Option<Oid>,
-    /// Its line's arrival, unix ms (`Queueing::placed_ms`).
+    /// Its line's arrival, unix ms (`Basis::placed_ms`).
     seen_ms: u64,
     priority: u64,
 }
@@ -218,10 +226,10 @@ pub(crate) struct Overlay {
 }
 
 impl Overlay {
-    pub(crate) fn apply(&mut self, base: CoinBase<'_>, queueing: Queueing<'_>, action: &PendingAction) -> Effect {
-        let placing = Placing { queueing, id: action.id, seen_ms: u64::try_from(action.seen_ns / 1_000_000).unwrap_or(0) };
+    pub(crate) fn apply(&mut self, base: CoinBase<'_>, basis: Basis<'_>, action: &PendingAction) -> Effect {
+        let placing = Placing { basis, id: action.id, seen_ms: u64::try_from(action.seen_ns / 1_000_000).unwrap_or(0) };
         match &action.op {
-            BookOp::Place(order) => self.place(base, placing, order),
+            BookOp::Place(order) => self.place_new(base, placing, action.taker_key(), order),
             BookOp::Cancel(oid) => self.cancel(self.confirmed_target(base, oid)),
             BookOp::CancelByCloid(cloid) => self.cancel(self.cloid_target(base, cloid)),
             BookOp::Modify { target, always_place, order } => self.modify(base, placing, target, *always_place, order),
@@ -236,6 +244,16 @@ impl Overlay {
             Some((px, Sz::new(sz), u32::try_from(orders).unwrap_or(u32::MAX)))
         };
         (best(Side::Bid), best(Side::Ask))
+    }
+
+    /// A new order: one its taker's recent margin refusal takes to be refused too goes (batch 2g), when HL's minimum
+    /// value does not refuse it first (design 000621 r3).
+    fn place_new(&mut self, base: CoinBase<'_>, placing: Placing<'_>, taker: Option<TakerKey>, order: &Placement) -> Effect {
+        let refused = taker.is_some_and(|taker| placing.basis.refusals.refused(&taker, placing.seen_ms));
+        if refused && !self.below_min_notional(base, order, &Target::Missing) {
+            return Effect::of("margin_refused_recently");
+        }
+        self.place(base, placing, order)
     }
 
     fn place(&mut self, base: CoinBase<'_>, placing: Placing<'_>, order: &Placement) -> Effect {
@@ -463,14 +481,14 @@ impl Overlay {
         if order.priority == 0 || base.unproven(order.side, order.limit_px) {
             return (index, None);
         }
-        let queueing = placing.queueing;
-        let placed_ms = queueing.placed_ms(placing.seen_ms);
+        let basis = placing.basis;
+        let placed_ms = basis.placed_ms(placing.seen_ms);
         let passes = |other_ms: u64, priority: u64| placed_ms.saturating_sub(other_ms) < PRIORITY_WINDOW_MS && priority < order.priority;
         let mut ahead_of = None;
         let mut confirmed = base.level(order.side, order.limit_px).into_iter().flat_map(PriceLevel::orders_rev);
         loop {
             while let Some(before) = index.checked_sub(1).map(|before| &pending[before]).filter(|before| before.ahead_of == ahead_of) {
-                if !passes(queueing.placed_ms(before.seen_ms), before.priority) {
+                if !passes(basis.placed_ms(before.seen_ms), before.priority) {
                     return (index, ahead_of);
                 }
                 index -= 1;
@@ -478,7 +496,7 @@ impl Overlay {
             let Some(before) = confirmed.next() else { return (index, ahead_of) };
             let oid = Oid::new(before.oid);
             let live = self.left.get(&oid).is_none_or(|left| *left > 0);
-            if live && !passes(before.timestamp, queueing.priority(before.oid)) {
+            if live && !passes(before.timestamp, basis.priority(before.oid)) {
                 return (index, ahead_of);
             }
             ahead_of = Some(oid);
@@ -525,10 +543,10 @@ impl Overlay {
     }
 }
 
-/// An action placing an order: its queueing, its id and its line's arrival, unix ms.
+/// An action placing an order: the confirmed state it is placed on, its id and its line's arrival, unix ms.
 #[derive(Clone, Copy)]
 struct Placing<'a> {
-    queueing: Queueing<'a>,
+    basis: Basis<'a>,
     id: ActionId,
     seen_ms: u64,
 }
@@ -615,7 +633,7 @@ mod tests {
     }
 
     fn action(index: usize, op: BookOp) -> PendingAction {
-        PendingAction { id: id(index), seen_ns: 0, vault: None, op, unknown: false }
+        PendingAction { id: id(index), seen_ns: 0, vault: None, signer: None, asset: 0, op, unknown: false }
     }
 
     fn order(side: Side, at: &str, quantity: &str, tif: Tif, cloid: Option<&str>) -> Placement {
@@ -630,9 +648,15 @@ mod tests {
         (px(at), sz(size), orders)
     }
 
-    fn no_priorities() -> Queueing<'static> {
+    fn no_priorities() -> Basis<'static> {
         static NONE: std::sync::LazyLock<FxHashMap<u64, u64>> = std::sync::LazyLock::new(FxHashMap::default);
-        Queueing::new(&NONE, 0)
+        Basis::new(&NONE, no_refusals(), 0)
+    }
+
+    /// No taker refused for margin.
+    fn no_refusals() -> &'static TakerRefusals {
+        static NONE: std::sync::LazyLock<TakerRefusals> = std::sync::LazyLock::new(|| TakerRefusals::new(300_000));
+        &NONE
     }
 
     /// Applies `actions` in order: their outcomes, then the merged book's best levels.
@@ -925,19 +949,19 @@ mod tests {
     /// `priorities`, at the confirmed block time `basis_ms`; `unproven`, the level's queue order not proven.
     fn takes(book: &OrderBook<InnerL4Order>, priorities: &[(u64, u64)], basis_ms: u64, unproven: bool, actions: &[PendingAction], takers: &[&str]) -> Vec<Vec<(Sz, Maker)>> {
         let priorities = priorities.iter().copied().collect();
-        let queueing = Queueing::new(&priorities, basis_ms);
+        let basis = Basis::new(&priorities, no_refusals(), basis_ms);
         let levels = [(Side::Ask, px("105"))];
         let base = CoinBase::new(Some(book), if unproven { &levels } else { &[] }, None);
         let mut overlay = Overlay::default();
         for action in actions {
-            overlay.apply(base, queueing, action);
+            overlay.apply(base, basis, action);
         }
         takers
             .iter()
             .enumerate()
             .map(|(index, size)| {
                 let ioc = action(100 + index, BookOp::Place(order(Side::Bid, "105", size, Tif::Ioc, None)));
-                overlay.apply(base, queueing, &ioc).fills.into_iter().map(|fill| (fill.sz, fill.maker)).collect()
+                overlay.apply(base, basis, &ioc).fills.into_iter().map(|fill| (fill.sz, fill.maker)).collect()
             })
             .collect()
     }
@@ -1010,16 +1034,58 @@ mod tests {
     #[test]
     fn the_queue_decides_what_a_cancel_leaves() {
         let book = asks_at_105(&[(10, 1_200)]);
-        let queueing = no_priorities();
+        let basis = no_priorities();
         let base = CoinBase::new(Some(&book), &[], None);
         for (priority, expected) in [(5, [vec![pending(1)], vec![]]), (0, [vec![mine(10)], vec![pending(1)]])] {
             let mut overlay = Overlay::default();
-            overlay.apply(base, queueing, &alo_at_105(1, priority, 1_300));
-            let first = overlay.apply(base, queueing, &action(2, BookOp::Place(order(Side::Bid, "105", "1", Tif::Ioc, None))));
-            overlay.apply(base, queueing, &action(3, BookOp::Cancel(Oid::new(10))));
-            let second = overlay.apply(base, queueing, &action(4, BookOp::Place(order(Side::Bid, "105", "1", Tif::Ioc, None))));
+            overlay.apply(base, basis, &alo_at_105(1, priority, 1_300));
+            let first = overlay.apply(base, basis, &action(2, BookOp::Place(order(Side::Bid, "105", "1", Tif::Ioc, None))));
+            overlay.apply(base, basis, &action(3, BookOp::Cancel(Oid::new(10))));
+            let second = overlay.apply(base, basis, &action(4, BookOp::Place(order(Side::Bid, "105", "1", Tif::Ioc, None))));
             let makers = [first, second].map(|effect| effect.fills.into_iter().map(|fill| fill.maker).collect::<Vec<_>>());
             assert_eq!(makers, expected, "priority {priority}");
         }
+    }
+
+    /// Batch 2g: a new order that may take, of a taker refused for margin on its coin and side at block time 1,000 ms,
+    /// its line coming within [1,000, 1,000 + M]: rejected, after the minimum value's rule; an ALO, a modify, another
+    /// identity, side or asset, an earlier or a later line, or no identity, as before.
+    #[test]
+    fn a_taker_lately_refused_for_margin_is_refused_again() {
+        use crate::pending::{
+            refusals::{TakerKey, TakerOutcome},
+            signer::ActingIdentity,
+        };
+        const M: u64 = 300_000;
+        let taker = ActingIdentity::Signer(ALICE);
+        let mut refusals = TakerRefusals::new(M);
+        refusals.stage(7, 1_000, vec![TakerOutcome { key: TakerKey { identity: taker, asset: 0, is_buy: true }, refused: true }]);
+        refusals.apply_through(7);
+        let priorities = FxHashMap::default();
+        let basis = Basis::new(&priorities, &refusals, 1_000);
+        let (book, cloids) = book();
+        let base = CoinBase::new(Some(&book), &[], Some(&cloids));
+        let by = |op: BookOp, vault: Option<Address>, signer: Option<Address>, asset: u32, seen_ms: i64| {
+            let action = PendingAction { seen_ns: seen_ms * 1_000_000, vault, signer, asset, ..action(0, op) };
+            Overlay::default().apply(base, basis, &action).outcome
+        };
+        let ioc = |side, at: &str| BookOp::Place(order(side, at, "1", Tif::Ioc, None));
+        let signed = |op: BookOp, seen_ms: i64| by(op, None, Some(ALICE), 0, seen_ms);
+        let refused = "margin_refused_recently";
+        assert_eq!(signed(ioc(Side::Bid, "102"), 1_000), refused);
+        assert_eq!(signed(ioc(Side::Bid, "102"), 1_000 + 300_000), refused);
+        assert_eq!(signed(BookOp::Place(order(Side::Bid, "102", "1", Tif::FrontendMarket, None)), 2_000), refused);
+        assert_eq!(signed(BookOp::Place(order(Side::Bid, "100", "1", Tif::Gtc, None)), 2_000), refused, "a GTC not crossing too");
+        assert_eq!(signed(ioc(Side::Bid, "101"), 999), "took", "a line before the refusal's block");
+        assert_eq!(signed(ioc(Side::Bid, "101"), 1_001 + 300_000), "took");
+        assert_eq!(signed(ioc(Side::Ask, "99"), 2_000), "took", "the other side");
+        assert_eq!(signed(BookOp::Place(order(Side::Bid, "100", "1", Tif::Alo, None)), 2_000), "rested");
+        assert_eq!(signed(BookOp::Place(order(Side::Bid, "101", "0.01", Tif::Ioc, None)), 2_000), "min_notional", "the minimum value first");
+        let modify = BookOp::Modify { target: OrderRef::Oid(1), always_place: true, order: order(Side::Bid, "102", "1", Tif::Ioc, None) };
+        assert_eq!(signed(modify, 2_000), "took", "a modify is not judged by it");
+        assert_eq!(by(ioc(Side::Bid, "101"), None, Some(ALICE), 1, 2_000), "took", "another asset");
+        assert_eq!(by(ioc(Side::Bid, "101"), None, Some(BOB), 0, 2_000), "took", "another signer");
+        assert_eq!(by(ioc(Side::Bid, "101"), Some(ALICE), None, 0, 2_000), "took", "a vault of the same address");
+        assert_eq!(by(ioc(Side::Bid, "101"), None, None, 0, 2_000), "took", "a signer unknown");
     }
 }

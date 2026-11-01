@@ -29,15 +29,16 @@
 use std::collections::HashSet;
 
 use alloy::primitives::{Address, B256};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
     actions::{ActionId, BookActions, PendingAction, Placement, book_actions},
     blocks::LoggedBlock,
     mempool::MempoolTx,
-    overlay::{BestLevel, CoinBase, Fill, Maker, Overlay, PRIORITY_WINDOW_MS, Queueing},
+    overlay::{Basis, BestLevel, CoinBase, Fill, Maker, Overlay, PRIORITY_WINDOW_MS},
     publish::{BestLevels, CoinPending},
     record::{BlockRecord, MAX_LEAD_BLOCKS},
+    refusals::{TakerKey, TakerRefusals},
 };
 use crate::{
     accounts::book::ActionCoins,
@@ -65,11 +66,20 @@ pub(crate) struct PendingParams {
     pub(crate) max_actions: usize,
     /// S: no line for this long before the confirmed block time is a gap.
     pub(crate) silence_ns: i64,
+    /// M: a taker's margin refusal stands for its orders whose lines come this long after its block, ms (batch 2g).
+    pub(crate) margin_refusal_ms: u64,
 }
 
 impl PendingParams {
     /// From milliseconds, each positive.
-    pub(crate) fn from_ms(expiry_ms: u64, max_late_ms: u64, max_span_ms: u64, max_actions: usize, silence_ms: u64) -> Result<Self, String> {
+    pub(crate) fn from_ms(
+        expiry_ms: u64,
+        max_late_ms: u64,
+        max_span_ms: u64,
+        max_actions: usize,
+        silence_ms: u64,
+        margin_refusal_ms: u64,
+    ) -> Result<Self, String> {
         let ns = |name: &str, ms: u64| -> Result<i64, String> {
             if ms == 0 {
                 return Err(format!("--pending-{name}-ms must be positive"));
@@ -78,6 +88,9 @@ impl PendingParams {
         };
         if max_actions == 0 {
             return Err("--pending-max-actions must be positive".to_string());
+        }
+        if margin_refusal_ms == 0 {
+            return Err("--pending-margin-refusal-ms must be positive".to_string());
         }
         // a confirmed order's ALO priority must outlive the window it is compared in, the record's retention R = H + E
         // and the warm-up after a block log gap H both (review 000620 r1 P2-2)
@@ -90,6 +103,7 @@ impl PendingParams {
             max_span_ns: ns("max-span", max_span_ms)?,
             max_actions,
             silence_ns: ns("mempool-silence", silence_ms)?,
+            margin_refusal_ms,
         })
     }
 
@@ -176,17 +190,22 @@ struct CoinActions {
 }
 
 impl CoinActions {
-    fn replay(&mut self, base: CoinBase<'_>, queueing: Queueing<'_>) {
+    fn replay(&mut self, base: CoinBase<'_>, basis: Basis<'_>) {
         self.overlay = Overlay::default();
         for action in self.actions.iter().filter(|action| !action.unknown) {
-            self.overlay.apply(base, queueing, action);
+            self.overlay.apply(base, basis, action);
         }
+    }
+
+    /// Whether it holds a taker order of `keys` (batch 2g: their margin refusals changed).
+    fn holds_taker_of(&self, keys: &FxHashSet<TakerKey>) -> bool {
+        self.actions.iter().any(|action| action.taker_key().is_some_and(|key| keys.contains(&key)))
     }
 
     /// Whether it holds an order with an ALO priority: its place in its queue moves with the confirmed block time, every
     /// pending order being taken to be placed no earlier (review 000620 r2, r4 - an older order of none, compared at the
     /// new time, may fall within its window). An order without one never moves; it is compared at the confirmed block of
-    /// each comparison (`Queueing::placed_ms`).
+    /// each comparison (`Basis::placed_ms`).
     fn holds_priority(&self) -> bool {
         self.actions.iter().any(|action| action.op.placement().is_some_and(|order| order.priority > 0))
     }
@@ -234,6 +253,8 @@ pub(crate) struct Shadow {
     coins: FxHashMap<Coin, CoinActions>,
     lines: FxHashMap<B256, HeldLine>,
     record: BlockRecord,
+    /// The takers' margin refusals by the block log's trusted blocks (batch 2g).
+    refusals: TakerRefusals,
     gaps: Gaps,
     held: usize,
     newest_seen_ns: Option<i64>,
@@ -258,6 +279,7 @@ impl Shadow {
             coins: FxHashMap::default(),
             lines: FxHashMap::default(),
             record: BlockRecord::default(),
+            refusals: TakerRefusals::new(params.margin_refusal_ms),
             gaps: Gaps {
                 mempool: Some("start"),
                 block_log: Some("block_log_start"),
@@ -319,8 +341,9 @@ impl Shadow {
         step
     }
 
-    /// A block of the log; `after_loss` when the watcher had found a loss not yet reported.
-    pub(crate) fn on_block(&mut self, block: LoggedBlock, after_loss: bool, replica: Option<&BookReplica>) -> Step {
+    /// A block of the log; `after_loss` when the watcher had found a loss not yet reported. Its taker outcomes are kept
+    /// for its height's confirmation when no block log gap is open after it - one it ends included (design 000621 r3).
+    pub(crate) fn on_block(&mut self, mut block: LoggedBlock, after_loss: bool, replica: Option<&BookReplica>) -> Step {
         if !self.record.follows(&block) {
             self.open_block_log_gap("block_log_hole");
         }
@@ -328,6 +351,9 @@ impl Shadow {
             self.open_block_log_gap("block_log_after_loss");
         } else {
             self.end_block_log_gap(unix_ns(block.time_ms));
+        }
+        if self.gaps.block_log.is_none() {
+            self.refusals.stage(block.height, block.time_ms, std::mem::take(&mut block.taker_outcomes));
         }
         self.record.add(block);
         self.settle(replica, HashSet::new())
@@ -462,14 +488,14 @@ impl Shadow {
     fn hold(&mut self, coin: Coin, action: PendingAction, aligned: Option<Aligned<'_>>, emit: bool, step: &mut Step) {
         self.held += 1;
         let behind = aligned.is_some_and(|(_, height, _)| !self.record_covers(height));
-        let record = &self.record;
+        let (record, refusals) = (&self.record, &self.refusals);
         let base = aligned
             .filter(|_| !self.gaps.replica)
-            .map(|(replica, _, confirmed_ns)| (replica.coin(&coin), Queueing::new(record.priorities(), unix_ms(confirmed_ns))));
+            .map(|(replica, _, confirmed_ns)| (replica.coin(&coin), Basis::new(record.priorities(), refusals, unix_ms(confirmed_ns))));
         let actions = self.coins.entry(coin.clone()).or_default();
-        if let (false, Some((base, queueing))) = (action.unknown, base) {
+        if let (false, Some((base, basis))) = (action.unknown, base) {
             self.priorities_behind |= behind;
-            let effect = actions.overlay.apply(base, queueing, &action);
+            let effect = actions.overlay.apply(base, basis, &action);
             PENDING_BOOK_OVERLAY_TOTAL.with_label_values(&[action.op.label(), effect.outcome]).inc();
             // only an action placing an order fills
             if let (true, Some(order)) = (emit, action.op.placement()) {
@@ -485,8 +511,9 @@ impl Shadow {
     }
 
     /// The one settling step (r7 revision 18): the lines a block at or below the confirmed height holds, and those
-    /// expired, leave; the coins they were on, those in `changed` and - on a new generation - every coin held are
-    /// replayed.
+    /// expired, leave; the takers' outcomes of the blocks up to it apply (batch 2g, whichever input moved); the coins
+    /// they were on, those holding a taker whose refusal changed, those in `changed` and - on a new generation - every
+    /// coin held are replayed.
     fn settle(&mut self, replica: Option<&BookReplica>, mut changed: HashSet<Coin>) -> Step {
         let Some((replica, height, confirmed_ns)) = aligned(replica) else { return Step { trades: Vec::new(), changed } };
         #[cfg(test)]
@@ -499,6 +526,12 @@ impl Shadow {
         }
         self.remove_settled(height, confirmed_ns, &mut changed);
         self.record.evict(height, unix_ms(confirmed_ns - self.params.retention_ns()));
+        let refusals_changed = self.refusals.apply_through(height);
+        if !refusals_changed.is_empty() {
+            changed.extend(self.coins.iter().filter(|(_, actions)| actions.holds_taker_of(&refusals_changed)).map(|(coin, _)| coin.clone()));
+        }
+        // an action held came no earlier than E before the confirmed block time: a refusal out of its reach goes unreplayed
+        self.refusals.evict(unix_ms(confirmed_ns - self.params.expiry_ns));
         if new_generation {
             changed.extend(self.coins.keys().cloned());
             self.refresh_all = true;
@@ -512,10 +545,10 @@ impl Shadow {
             changed.extend(self.coins.iter().filter(|(_, actions)| actions.holds_priority()).map(|(coin, _)| coin.clone()));
             self.basis_ms = basis_ms;
         }
-        let queueing = Queueing::new(self.record.priorities(), basis_ms);
+        let basis = Basis::new(self.record.priorities(), &self.refusals, basis_ms);
         for coin in &changed {
             if let Some(actions) = self.coins.get_mut(coin) {
-                actions.replay(replica.coin(coin), queueing);
+                actions.replay(replica.coin(coin), basis);
                 self.priorities_behind |= !covered;
             }
         }
@@ -568,13 +601,15 @@ impl Shadow {
         self.gaps.mempool = Some(cause);
     }
 
-    /// A block log gap: every action held unknown, every overlay empty.
+    /// A block log gap: every action held unknown, every overlay empty, the takers' refusals forgotten (their outcomes
+    /// in the gap unknown).
     fn open_block_log_gap(&mut self, cause: &'static str) {
         if self.gaps.block_log.is_some() {
             return;
         }
         PENDING_BOOK_GAPS_TOTAL.with_label_values(&[cause]).inc();
         self.gaps.block_log = Some(cause);
+        self.refusals.clear();
         for actions in self.coins.values_mut() {
             actions.actions.iter_mut().for_each(|action| action.unknown = true);
             actions.overlay = Overlay::default();
@@ -673,17 +708,19 @@ pub(crate) mod tests {
             actions::tests::{coins, requested},
             blocks::tests::hash,
             mempool::{ActionKind, RequestedTif, SignedAction},
+            refusals::TakerOutcome,
+            signer::ActingIdentity,
         },
     };
 
     /// E 1 s, H 1 s, the span 10 s, 1,000 actions; silence 60 s, out of the way unless a test sets it.
     pub(crate) fn params() -> PendingParams {
-        PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 60_000).unwrap()
+        PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 60_000, 300_000).unwrap()
     }
 
     /// As `params`, H as r6 revision 17's default.
     fn params_late(max_late_ms: u64) -> PendingParams {
-        PendingParams::from_ms(1_000, max_late_ms, 10_000, 1_000, 60_000).unwrap()
+        PendingParams::from_ms(1_000, max_late_ms, 10_000, 1_000, 60_000, 300_000).unwrap()
     }
 
     const BTC: &str = "BTC";
@@ -716,8 +753,15 @@ pub(crate) mod tests {
         fn log_placing(&mut self, hashes: &[u8], priorities: Vec<(u64, u64)>) -> Step {
             self.logged += 1;
             let hashes = hashes.iter().map(|byte| hash(*byte)).collect();
-            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes, priorities };
+            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes, priorities, taker_outcomes: Vec::new() };
             self.shadow.on_block(block, false, Some(&self.replica))
+        }
+
+        /// The log's next block, with its takers' `outcomes`; `after_loss` as the watcher tells it.
+        fn log_outcomes(&mut self, outcomes: Vec<TakerOutcome>, after_loss: bool) -> Step {
+            self.logged += 1;
+            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: outcomes };
+            self.shadow.on_block(block, after_loss, Some(&self.replica))
         }
 
         /// The replica confirms its next block, with `statuses` and `diffs` (the next height's lines come along, empty).
@@ -750,10 +794,15 @@ pub(crate) mod tests {
 
         /// A line as `line`'s, its actions with the ALO priority `priority`.
         fn priority_line(&mut self, seen_ms: i64, byte: u8, priority: u64, actions: Vec<ActionKind>) -> Step {
+            self.signed_line(seen_ms, byte, priority, None, actions)
+        }
+
+        /// A line as `line`'s, its actions signed by `signer`, recovered.
+        fn signed_line(&mut self, seen_ms: i64, byte: u8, priority: u64, signer: Option<Address>, actions: Vec<ActionKind>) -> Step {
             let tx = MempoolTx {
                 seen_ns: seen_ms * NS_PER_MS,
                 tx_hash: hash(byte),
-                actions: actions.into_iter().map(|kind| SignedAction { vault: None, expires_after_ms: None, priority, kind }).collect(),
+                actions: actions.into_iter().map(|kind| SignedAction { vault: None, signer, expires_after_ms: None, priority, kind }).collect(),
             };
             self.shadow.on_tx(&tx, false, Some(&coins()), Some(&self.replica))
         }
@@ -1009,7 +1058,7 @@ pub(crate) mod tests {
         let tx = MempoolTx {
             seen_ns: 1_000 * NS_PER_MS,
             tx_hash: hash(1),
-            actions: vec![SignedAction { vault: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![requested(10_107, true, "100", RequestedTif::Alo, Some("0x0a"))]) }],
+            actions: vec![SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![requested(10_107, true, "100", RequestedTif::Alo, Some("0x0a"))]) }],
         };
         shadow.on_tx(&tx, false, Some(&coins()), None);
         assert_eq!(shadow.held("@107"), NONE_HELD);
@@ -1034,7 +1083,7 @@ pub(crate) mod tests {
     /// fresh one does, served E after it.
     #[test]
     fn a_stale_line_ends_no_silence() {
-        let mut harness = Harness::new(PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 500).unwrap());
+        let mut harness = Harness::new(PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 500, 300_000).unwrap());
         harness.height = 9;
         harness.logged = 9;
         harness.replica = replica_at(9);
@@ -1054,7 +1103,7 @@ pub(crate) mod tests {
     /// Review 000611 r1 P1-2: a line that would take the set past its cap drops it before any of it applies.
     #[test]
     fn a_line_past_the_cap_trades_nothing() {
-        let mut harness = Harness::ready_with(PendingParams::from_ms(1_000, 1_000, 10_000, 1, 60_000).unwrap(), 1_000);
+        let mut harness = Harness::ready_with(PendingParams::from_ms(1_000, 1_000, 10_000, 1, 60_000, 300_000).unwrap(), 1_000);
         harness.rest_ask(11);
         harness.line(3_150, 1, vec![alo_bid("99", "0x0a")]);
         assert_eq!(harness.line(3_160, 2, vec![ioc("0x01")]).trades, NO_TRADES);
@@ -1157,11 +1206,134 @@ pub(crate) mod tests {
         }
     }
 
+    /// The taker of the margin tests, and its outcome on BTC's bid side.
+    const TAKER: Address = Address::repeat_byte(0x5a);
+
+    fn taker_outcome(refused: bool) -> TakerOutcome {
+        TakerOutcome { key: TakerKey { identity: ActingIdentity::Signer(TAKER), asset: 0, is_buy: true }, refused }
+    }
+
+    fn gtc_bid(px: &str, cloid: &str) -> ActionKind {
+        ActionKind::Order(vec![requested(0, true, px, RequestedTif::Gtc, Some(cloid))])
+    }
+
+    /// Batch 2g (design 000621 r3): a block's refusal applies once the replica confirms its height, by whichever input
+    /// comes last - the log first, or the replica first and the log catching up -: at the confirmed height before it
+    /// the taker's IOC takes alike, after it neither does.
+    #[test]
+    fn a_refusal_applies_at_its_confirmed_height_by_either_input() {
+        for replica_first in [false, true] {
+            let mut harness = Harness::ready_from(1_000);
+            harness.rest_ask(11);
+            let refusal_ms = block_time_ms(harness.height + 1);
+            let seen_ms = i64::try_from(refusal_ms).unwrap() + 50;
+            if replica_first {
+                harness.confirm(vec![], vec![]);
+                let step = harness.signed_line(seen_ms, 1, 0, Some(TAKER), vec![ioc("0x01")]);
+                assert_eq!((harness.available(), step.trades.len()), (Err(Unavailable::BlockLogBehind), 0));
+                assert_eq!(harness.bbo().1, None, "replica first: taken as at the height before");
+                harness.log_outcomes(vec![taker_outcome(true)], false);
+            } else {
+                harness.log_outcomes(vec![taker_outcome(true)], false);
+                let step = harness.signed_line(seen_ms, 1, 0, Some(TAKER), vec![ioc("0x01")]);
+                assert_eq!(step.trades.len(), 1, "log first: the refusal waits for its height");
+                harness.confirm(vec![], vec![]);
+            }
+            assert_eq!(harness.available(), Ok(()));
+            assert_eq!(harness.bbo().1, Some(level("101", "1", 1)), "replica first {replica_first}: refused once confirmed");
+            let step = harness.signed_line(seen_ms + 10, 2, 0, Some(TAKER), vec![ioc("0x02")]);
+            assert_eq!(step.trades, NO_TRADES, "replica first {replica_first}");
+            assert_eq!(harness.signed_line(seen_ms + 20, 3, 0, None, vec![ioc("0x03")]).trades.len(), 1, "an unknown signer takes");
+        }
+    }
+
+    /// A GTC not yet in a block, its book unchanged, goes with a refusal of its taker at or before its line, comes back
+    /// with a clear and goes again with a later refusal still at or before its line; a refusal after its line does not
+    /// reach it, nor a line before the refusal's block.
+    #[test]
+    fn a_held_order_follows_its_takers_refusals() {
+        let mut harness = Harness::ready_from(1_000);
+        let first_ms = block_time_ms(harness.height + 1);
+        let seen_ms = i64::try_from(first_ms).unwrap() + 350;
+        harness.signed_line(seen_ms, 1, 0, Some(TAKER), vec![gtc_bid("100", "0x01")]);
+        let bid = Some(level("100", "1", 1));
+        assert_eq!(harness.bbo().0, bid);
+        let changed = |step: Step| step.changed.contains(&Coin::new(BTC));
+        harness.log_outcomes(vec![taker_outcome(true)], false);
+        assert!(changed(harness.confirm(vec![], vec![])));
+        assert_eq!(harness.bbo().0, None, "refused at its line's block time minus 350 ms");
+        harness.log_outcomes(vec![taker_outcome(false)], false);
+        assert!(changed(harness.confirm(vec![], vec![])));
+        assert_eq!(harness.bbo().0, bid, "cleared");
+        harness.log_outcomes(vec![taker_outcome(true)], false);
+        harness.confirm(vec![], vec![]);
+        assert_eq!(harness.bbo().0, None, "refused again, 150 ms before its line");
+        harness.block(&[], vec![], vec![]);
+        harness.log_outcomes(vec![taker_outcome(false), taker_outcome(true)], false);
+        harness.confirm(vec![], vec![]);
+        assert_eq!(harness.bbo().0, bid, "a refusal 50 ms after its line does not reach it");
+        harness.signed_line(seen_ms - 10, 2, 0, Some(TAKER), vec![gtc_bid("99", "0x02")]);
+        assert_eq!(harness.bbo().0, bid, "a line before the refusal's block is not refused either");
+        assert_eq!(harness.shadow.held(BTC).len(), 2);
+    }
+
+    /// Review 000621 r2: a refusal is kept while a held order may fall within it - its line no more than E before the
+    /// confirmed block time -, past `t_r + M` too: the IOC seen 50 ms before the end of M, replayed as the book changes
+    /// after M, is still refused.
+    #[test]
+    fn a_refusal_stays_while_an_order_it_reaches_is_held() {
+        let mut harness = Harness::ready_with(PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 60_000, 1_000).unwrap(), 1_000);
+        harness.rest_ask(11);
+        harness.log_outcomes(vec![taker_outcome(true)], false);
+        harness.confirm(vec![], vec![]);
+        let refused_ms = block_time_ms(harness.height);
+        harness.signed_line(i64::try_from(refused_ms).unwrap() + 950, 1, 0, Some(TAKER), vec![ioc("0x01")]);
+        harness.idle_until(refused_ms + 1_100);
+        harness.rest_ask(12);
+        assert_eq!(harness.shadow.held(BTC).len(), 1);
+        assert_eq!(harness.bbo().1, Some(level("101", "2", 2)));
+    }
+
+    /// Review 000621 r2: a block log gap ends the refusals - one applied before it, and one a block queued before the
+    /// loss's report brings (`after_loss`) -, the block of the taker's next fill lost: the taker's first new order once
+    /// served is not refused. Without the gap the refusal stands.
+    #[test]
+    fn a_refusal_before_a_block_log_gap_does_not_survive_it() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Loss {
+            None,
+            ReportedBeforeTheRefusal,
+            AfterTheRefusal,
+        }
+        for loss in [Loss::None, Loss::ReportedBeforeTheRefusal, Loss::AfterTheRefusal] {
+            let mut harness = Harness::ready_from(1_000);
+            harness.rest_ask(11);
+            if loss == Loss::ReportedBeforeTheRefusal {
+                harness.shadow.on_block_log_loss();
+            }
+            harness.log_outcomes(vec![taker_outcome(true)], loss == Loss::ReportedBeforeTheRefusal);
+            harness.confirm(vec![], vec![]);
+            if loss != Loss::None {
+                if loss == Loss::AfterTheRefusal {
+                    harness.shadow.on_block_log_loss();
+                }
+                // the next block's, a fill of the taker clearing it, lost
+                harness.logged += 1;
+                harness.confirm(vec![], vec![]);
+            }
+            let served_ms = block_time_ms(harness.height) + 3_000;
+            harness.idle_until(served_ms);
+            assert_eq!(harness.available(), Ok(()));
+            let step = harness.signed_line(i64::try_from(served_ms).unwrap() + 10, 1, 0, Some(TAKER), vec![ioc("0x01")]);
+            assert_eq!(step.trades.len(), usize::from(loss != Loss::None), "{loss:?}");
+        }
+    }
+
     /// Review 000620 r1 P2-2: H under the ALO priority window is refused at start.
     #[test]
     fn a_max_late_under_the_priority_window_is_refused() {
-        assert!(PendingParams::from_ms(1_000, 399, 10_000, 1_000, 60_000).is_err());
-        assert!(PendingParams::from_ms(1_000, 400, 10_000, 1_000, 60_000).is_ok());
+        assert!(PendingParams::from_ms(1_000, 399, 10_000, 1_000, 60_000, 300_000).is_err());
+        assert!(PendingParams::from_ms(1_000, 400, 10_000, 1_000, 60_000, 300_000).is_ok());
     }
 
     /// R7 revision 20: past `MAX_LEAD_BLOCKS` above the confirmed height (all of them without a replica) the log's
@@ -1171,7 +1343,7 @@ pub(crate) mod tests {
         let mut shadow = Shadow::new(params(), true);
         for height in 1..=MAX_LEAD_BLOCKS {
             assert!(shadow.takes_blocks(None));
-            shadow.on_block(LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new() }, false, None);
+            shadow.on_block(LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new() }, false, None);
         }
         assert!(!shadow.takes_blocks(None));
     }

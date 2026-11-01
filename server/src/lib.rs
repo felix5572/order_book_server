@@ -102,6 +102,8 @@ pub struct ServerConfig {
     pub pending_max_actions: usize,
     /// The pending set's S: no mempool line for this long before the confirmed block time is a gap.
     pub pending_mempool_silence_ms: u64,
+    /// The pending set's M: a taker's margin refusal stands for its orders whose lines come this long after its block.
+    pub pending_margin_refusal_ms: u64,
 }
 
 impl ServerConfig {

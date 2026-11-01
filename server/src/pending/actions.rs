@@ -9,7 +9,11 @@
 
 use alloy::primitives::{Address, B256};
 
-use super::mempool::{ActionKind, MempoolTx, RequestedOrder, RequestedTif};
+use super::{
+    mempool::{ActionKind, MempoolTx, RequestedOrder, RequestedTif},
+    refusals::TakerKey,
+    signer::ActingIdentity,
+};
 use crate::{
     accounts::{
         book::{ActionAsset, ActionCoins},
@@ -50,7 +54,7 @@ pub(crate) enum Tif {
 }
 
 impl Tif {
-    const fn of_requested(tif: RequestedTif) -> Option<Self> {
+    pub(crate) const fn of_requested(tif: RequestedTif) -> Option<Self> {
         match tif {
             RequestedTif::Alo => Some(Self::Alo),
             RequestedTif::Gtc => Some(Self::Gtc),
@@ -58,6 +62,12 @@ impl Tif {
             RequestedTif::FrontendMarket => Some(Self::FrontendMarket),
             RequestedTif::Trigger => None,
         }
+    }
+
+    /// Whether it may take on placing: an IOC, a `FrontendMarket` or a GTC, not an ALO - the orders HL refuses for a
+    /// taker's margin as the pending set takes them (batch 2g, design 000621 r3).
+    pub(crate) const fn may_take(self) -> bool {
+        !matches!(self, Self::Alo)
     }
 }
 
@@ -100,10 +110,23 @@ pub(crate) struct PendingAction {
     pub(crate) seen_ns: i64,
     /// The vault or subaccount it acts for, when the line names one.
     pub(crate) vault: Option<Address>,
+    /// Its signer, when recovered (`SignedAction::signer`).
+    pub(crate) signer: Option<Address>,
+    /// The asset id it names.
+    pub(crate) asset: u32,
     pub(crate) op: BookOp,
     /// Never overlaid: seen in a gap or its warm-up (revisions 7, 11), or not told apart from a confirmed one
     /// (revision 2).
     pub(crate) unknown: bool,
+}
+
+impl PendingAction {
+    /// The key of its taker's margin refusals (batch 2g): a new order that may take, of a known identity.
+    pub(crate) fn taker_key(&self) -> Option<TakerKey> {
+        let BookOp::Place(order) = &self.op else { return None };
+        let identity = ActingIdentity::of(self.vault, self.signer).filter(|_| order.tif.may_take())?;
+        Some(TakerKey { identity, asset: self.asset, is_buy: order.side == Side::Bid })
+    }
 }
 
 /// A line's book actions: those held, in execution order, and those HL refuses by rule before any book - each one's
@@ -141,7 +164,8 @@ pub(crate) fn book_actions(tx: &MempoolTx, coins: &ActionCoins, spot: bool) -> B
                 continue;
             }
             let id = ActionId { tx_hash: tx.tx_hash, action: index, item };
-            actions.held.push((Coin::new(&named.coin), PendingAction { id, seen_ns: tx.seen_ns, vault: signed.vault, op, unknown: false }));
+            let action = PendingAction { id, seen_ns: tx.seen_ns, vault: signed.vault, signer: signed.signer, asset, op, unknown: false };
+            actions.held.push((Coin::new(&named.coin), action));
         }
     }
     actions
@@ -312,7 +336,7 @@ pub(crate) mod tests {
         MempoolTx {
             seen_ns: 1_000_000_000,
             tx_hash: B256::repeat_byte(7),
-            actions: actions.into_iter().map(|kind| SignedAction { vault: None, expires_after_ms: None, priority: 0, kind }).collect(),
+            actions: actions.into_iter().map(|kind| SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind }).collect(),
         }
     }
 

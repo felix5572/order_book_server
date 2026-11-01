@@ -13,11 +13,15 @@ use serde::Deserialize;
 use sonic_rs::LazyValue;
 use tokio::{sync::watch, time::Instant};
 
-use super::feed::{self, Feed, FeedEvent, FeedLosses, FeedReports};
+use super::{
+    actions::Tif,
+    feed::{self, Feed, FeedEvent, FeedLosses, FeedReports},
+    signer,
+};
 use crate::{
     accounts::{
         book::ActionCoins,
-        replica::{Action, OrderRef, WireCancel, WireCancelByCloid, WireModify, WireOrder, alo_priority},
+        replica::{Action, OrderRef, SignedAction as WireSignedAction, WireCancel, WireCancelByCloid, WireModify, WireOrder, alo_priority},
     },
     listeners::order_book::{
         parallel::{FileLayout, LineShape, LineStream, seconds_since_node_write},
@@ -26,6 +30,7 @@ use crate::{
     metrics::{
         NODE_LINE_LAG, PENDING_BOOK_MEMPOOL_ACTIONS_TOTAL, PENDING_BOOK_MEMPOOL_LINES_TOTAL,
         PENDING_BOOK_MEMPOOL_LOSSES_TOTAL, PENDING_BOOK_MEMPOOL_ORDERS_TOTAL, PENDING_BOOK_MEMPOOL_UNNAMED_ASSETS_TOTAL,
+        PENDING_BOOK_SIGNERS_TOTAL,
     },
     order_book::types::{Px, Sz},
     types::node_data::node_time_unix_nanos,
@@ -50,8 +55,11 @@ pub(crate) struct MempoolTx {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SignedAction {
-    /// The vault or subaccount it acts for; otherwise the signer acts, whom the line does not name.
+    /// The vault or subaccount it acts for; otherwise the signer acts.
     pub(crate) vault: Option<Address>,
+    /// Its signer, recovered for an order action that may take without a vault alone (batch 2g, `signer`); `None` for
+    /// any other, or when it cannot be told.
+    pub(crate) signer: Option<Address>,
     /// Its `expiresAfter`, unix ms: HL refuses it past then.
     pub(crate) expires_after_ms: Option<u64>,
     /// An `order` action's ALO priority (`Action::alo_priority`, batch 2f); 0 for any other.
@@ -131,16 +139,6 @@ struct WireTx<'a> {
     signed_actions: Vec<WireSignedAction<'a>>,
 }
 
-#[derive(Deserialize)]
-struct WireSignedAction<'a> {
-    #[serde(borrow)]
-    action: Action<'a>,
-    #[serde(rename = "vaultAddress")]
-    vault_address: Option<Address>,
-    #[serde(rename = "expiresAfter")]
-    expires_after: Option<u64>,
-}
-
 /// Starts the watcher of `<data_dir>/mempool_txs`; its events come in order on the feed, which closes when the
 /// watcher ends (its inotify watch not set up).
 pub(crate) fn watch_mempool(data_dir: &Path) -> (Feed<MempoolTx>, thread::JoinHandle<()>) {
@@ -161,13 +159,32 @@ pub(crate) fn watch_mempool(data_dir: &Path) -> (Feed<MempoolTx>, thread::JoinHa
 pub(crate) fn parse_line(line: &str) -> Result<MempoolTx, String> {
     let (local_time, tx): (&str, WireTx<'_>) = sonic_rs::from_str(line).map_err(|err| format!("mempool line: {err}"))?;
     let seen_ns = node_time_unix_nanos(local_time).ok_or_else(|| format!("mempool line local_time {local_time:?}"))?;
-    let actions = tx
+    let in_tx = |err: String| format!("tx {} {err}", tx.tx_hash);
+    let mut actions = tx
         .signed_actions
         .iter()
         .enumerate()
-        .map(|(index, signed)| signed_action(signed).map_err(|err| format!("tx {} action {index}: {err}", tx.tx_hash)))
-        .collect::<Result<_, _>>()?;
+        .map(|(index, signed)| signed_action(signed).map_err(|err| format!("action {index}: {err}")))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(in_tx)?;
+    recover_signers(line, &tx.signed_actions, &mut actions).map_err(in_tx)?;
     Ok(MempoolTx { seen_ns, tx_hash: tx.tx_hash, actions })
+}
+
+/// The signer of each order action that may take without a vault (batch 2g: what its taker's margin refusals go by),
+/// the actions as written read from `line` in one pass.
+fn recover_signers(line: &str, wire_actions: &[WireSignedAction<'_>], actions: &mut [SignedAction]) -> Result<(), String> {
+    let wanted: Vec<usize> = actions.iter().enumerate().filter(|(_, action)| action.vault.is_none() && action.kind.may_take()).map(|(index, _)| index).collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let written = signer::actions_written(line, wanted.iter().map(|index| sonic_rs::pointer![1, "signed_actions", *index, "action"]))?;
+    for (index, action) in wanted.into_iter().zip(written) {
+        let signer = signer::signer(&wire_actions[index], action.as_raw_str()).map_err(|err| format!("action {index}: {err}"))?;
+        PENDING_BOOK_SIGNERS_TOTAL.with_label_values(&["mempool", if signer.is_some() { "recovered" } else { "unknown" }]).inc();
+        actions[index].signer = signer;
+    }
+    Ok(())
 }
 
 fn signed_action(signed: &WireSignedAction<'_>) -> Result<SignedAction, String> {
@@ -203,7 +220,7 @@ fn signed_action(signed: &WireSignedAction<'_>) -> Result<SignedAction, String> 
         }
         _ => ActionKind::Other,
     };
-    Ok(SignedAction { vault: signed.vault_address, expires_after_ms: signed.expires_after, priority, kind })
+    Ok(SignedAction { vault: signed.vault()?, signer: None, expires_after_ms: signed.expires_after_ms()?, priority, kind })
 }
 
 /// An action's flag that is omitted when false (a modify's `a`, a cancel's `f`).
@@ -212,11 +229,7 @@ fn flag(action: &Action<'_>, raw: Option<&LazyValue<'_>>, name: &str) -> Result<
 }
 
 fn requested(order: &WireOrder) -> Result<RequestedOrder, String> {
-    let tif = match (&order.t.limit, &order.t.trigger) {
-        (Some(limit), None) => limit_tif(&limit.tif)?,
-        (None, Some(_)) => RequestedTif::Trigger,
-        _ => return Err("order type neither limit nor trigger".to_string()),
-    };
+    let tif = order_tif(order)?;
     Ok(RequestedOrder {
         asset: order.a,
         is_buy: order.b,
@@ -230,6 +243,15 @@ fn requested(order: &WireOrder) -> Result<RequestedOrder, String> {
     })
 }
 
+/// An order's time in force, or its being a trigger order.
+pub(crate) fn order_tif(order: &WireOrder) -> Result<RequestedTif, String> {
+    match (&order.t.limit, &order.t.trigger) {
+        (Some(limit), None) => limit_tif(&limit.tif),
+        (None, Some(_)) => Ok(RequestedTif::Trigger),
+        _ => Err("order type neither limit nor trigger".to_string()),
+    }
+}
+
 fn limit_tif(tif: &str) -> Result<RequestedTif, String> {
     match tif {
         "Alo" => Ok(RequestedTif::Alo),
@@ -241,6 +263,11 @@ fn limit_tif(tif: &str) -> Result<RequestedTif, String> {
 }
 
 impl RequestedTif {
+    /// Whether it may take on placing (`Tif::may_take`); a trigger order does not then.
+    pub(crate) fn may_take(self) -> bool {
+        Tif::of_requested(self).is_some_and(Tif::may_take)
+    }
+
     const fn label(self) -> &'static str {
         match self {
             Self::Alo => "alo",
@@ -272,6 +299,12 @@ impl ActionKind {
             Self::Modify { modifies, .. } => modifies.iter().map(|modify| modify.order.asset).collect(),
             Self::Other => Vec::new(),
         }
+    }
+
+    /// Whether it is an `order` action with an order that may take (`RequestedTif::may_take`): its signer is what
+    /// tells its taker's recent margin refusals (batch 2g).
+    fn may_take(&self) -> bool {
+        matches!(self, Self::Order(orders) if orders.iter().any(|order| order.tif.may_take()))
     }
 
     /// The orders it places: an `order`'s, a modify's new ones; trigger orders among them.
@@ -437,6 +470,7 @@ mod tests {
         let expected = vec![
             SignedAction {
                 vault: Some(address("0xfcf104006bfff47695c1dc21dad3e9de1e72098e")),
+                signer: None,
                 expires_after_ms: None,
                 priority: 0,
                 kind: ActionKind::Order(vec![
@@ -446,21 +480,24 @@ mod tests {
             },
             SignedAction {
                 vault: None,
+                signer: None,
                 expires_after_ms: Some(1_793_438_084_016),
                 priority: 0,
                 kind: ActionKind::Order(vec![order(207, true, "0.00001", "1", false, Some("0x000000000000000018de99016980e8f8"), Ioc)]),
             },
-            SignedAction { vault: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![order(159, false, "80.47", "0.12", false, None, FrontendMarket)]) },
-            SignedAction { vault: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![order(15, true, "0.046304", "13490", true, None, Trigger)]) },
-            SignedAction { vault: None, expires_after_ms: None, priority: 0, kind: ActionKind::Cancel { fast: false, cancels: vec![WireCancel { a: 151, o: 591_362_660_114 }] } },
+            SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![order(159, false, "80.47", "0.12", false, None, FrontendMarket)]) },
+            SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![order(15, true, "0.046304", "13490", true, None, Trigger)]) },
+            SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Cancel { fast: false, cancels: vec![WireCancel { a: 151, o: 591_362_660_114 }] } },
             SignedAction {
                 vault: Some(address("0x80196a7475464e06de641df6c66e6e278cd364d5")),
+                signer: None,
                 expires_after_ms: None,
                 priority: 0,
                 kind: ActionKind::Cancel { fast: true, cancels: vec![WireCancel { a: 159, o: 591_362_624_677 }] },
             },
             SignedAction {
                 vault: Some(address("0x7a9d45682babd8a2d79181623c75a7f615990b27")),
+                signer: None,
                 expires_after_ms: Some(1_793_438_083_555),
                 priority: 0,
                 kind: ActionKind::CancelByCloid {
@@ -470,6 +507,7 @@ mod tests {
             },
             SignedAction {
                 vault: None,
+                signer: None,
                 expires_after_ms: None,
                 priority: 0,
                 kind: ActionKind::Modify {
@@ -482,6 +520,7 @@ mod tests {
             },
             SignedAction {
                 vault: None,
+                signer: None,
                 expires_after_ms: Some(1_793_438_093_687),
                 priority: 0,
                 kind: ActionKind::Modify {
@@ -491,6 +530,7 @@ mod tests {
             },
             SignedAction {
                 vault: None,
+                signer: None,
                 expires_after_ms: None,
                 priority: 0,
                 kind: ActionKind::Modify {
@@ -503,6 +543,7 @@ mod tests {
             },
             SignedAction {
                 vault: None,
+                signer: None,
                 expires_after_ms: None,
                 priority: 0,
                 kind: ActionKind::Modify {
@@ -513,8 +554,8 @@ mod tests {
                     }],
                 },
             },
-            SignedAction { vault: None, expires_after_ms: None, priority: 0, kind: ActionKind::Other },
-            SignedAction { vault: Some(address("0x9e1733b7d499d6a2a6d3f5d74b942bbf5266a34d")), expires_after_ms: None, priority: 0, kind: ActionKind::Other },
+            SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Other },
+            SignedAction { vault: Some(address("0x9e1733b7d499d6a2a6d3f5d74b942bbf5266a34d")), signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Other },
         ];
         assert_eq!(tx.actions, expected);
     }

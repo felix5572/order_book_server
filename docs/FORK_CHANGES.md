@@ -1320,3 +1320,32 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - shadow：“日志先到 / 副本先到”两种顺序下，恢复可用后的成交归属一致；只有确认块时间推进也会重排；H < 400 启动报错。
   - 零费单先到、空块推进后高费单到来，高费单排在前面；两单都先到、空块推进后换位。
   - 变异 17 处都有测试失败。
+
+## 2026-11-01 影子盘口批次 2g：按签名人记住保证金被拒（设计 hyperliquid-trade 000621 r1–r3，用户 10-31 “用你推荐方案，接受这块潜在不一致”）
+
+- **起因**：批次 2d 上线后 30 分钟（10-31 19:41–20:11），预计了没发生的 5,170 笔里，3,986 笔（77%）是吃单被 HL 以 `Insufficient margin to place order` 拒掉。被拒的账户会对同一个币反复打吃单：被拒之后，同账户、同币、同方向在后面块里的下一张吃单，5 秒内 97.2%、300 秒内 98.4% 又被拒（按回执账户的事后比例）。影子原先不知道一张单是谁签的。
+- **规则**（设计 000621 r3）：
+  - 身份：动作带 `vaultAddress` 时是这个 vault，否则是从签名恢复出的签名人。一个签名人只代表一个账户（10-31 一分钟 1,196 个签名人全部如此），一个账户用几个 API 钱包就算几个身份。
+  - 区块回执里每张会吃单的单（IOC、`FrontendMarket`、GTC）给出一个结果：保证金错误为拒单；成交、挂上、IOC 没碰到挂单为清除；其他错误不更新；整批一条保证金错误，给其中每张会吃单的单。
+  - 某身份在某币某方向、按确认高度的最后结果是块时间 t_r 的拒单时，它新到的会吃单的单，只要所在行到达时间满足 t_r ≤ seen ≤ t_r + M，就不进盘口（`margin_refused_recently`，在最小金额规则之后判断）。改单不按这条判断。M 默认 300 秒。
+- **签名恢复**（`pending/signer.rs`）：与 HL Python SDK 的 `sign_l1_action` 相同。keccak(msgpack(动作) + nonce + vault 标记与地址 + expiresAfter) 作为 EIP-712 `Agent {source: "a", connectionId}` 的 `connectionId`，域为 `Exchange` / `1` / 1337 / 0x0。msgpack 由动作的 JSON 原文按原键序编码，整数与字符串取最短形式。`v` 为 27/28 或 0/1。动作含非 64 位整数（浮点、超过 64 位），或签名无法恢复时，身份未知、照常当能成交，计数。只对不带 vault、含会吃单的单的下单动作恢复，内存池与区块日志两个 watcher 共用一个函数；动作原文每行用一次 `PointerTree` + `get_many` 取出。
+- **改了什么**：
+  - `accounts/replica.rs`：`SignedAction` 改为共用，信封字段 `vaultAddress`、`expiresAfter`、`nonce`、`signature` 原样保留（账户视图与 marks 不读，解析行为不变），`vault()`、`expires_after_ms()` 由内存池与影子共用；`ReplicaLine::signed_action(bundle, position)`。
+  - `pending/mempool.rs`：改用共用的 `SignedAction`；`SignedAction.signer`；`order_tif()` 由区块日志共用。`pending/actions.rs`：`Tif::may_take()`（非 ALO），`PendingAction.signer`、`asset`、`taker_key()`。
+  - `pending/blocks.rs`：`LoggedBlock.taker_outcomes`，按区块执行顺序。动作级状态的判定（`ok` / `err` / 其他报错）与 2f 共用 `ran()`。会吃单的单的逐单状态只认单独的挂上或成交、单独的错误，其他写法与单数对不上都整行读不出。`multiSig` 包着的单不取（签名人不是账户本身，内存池也不持有它们）。
+  - `pending/refusals.rs`：`TakerRefusals`。块的结果先按块高暂存，确认高度到了才按块内执行顺序应用，同键以最后一个结果为准；`clear()`；淘汰 t_r + M < 确认块时间 − E（严格小于；仍被持有的单都晚于这个时刻，淘汰无需重放）。
+  - `pending/shadow.rs`：`on_block` 在区块日志没有缺口时（缺口由本块结束的也算）暂存本块结果；缺口期间与 `after_loss` 的块不暂存，开缺口时清空记忆与暂存。`settle` 每次都 `apply_through(确认高度)`，无论是副本推进还是日志追上触发；拒单变化的键所在、持有该键吃单的币重放，然后才发布。
+  - `pending/overlay.rs`：2f 的 `Queueing` 扩为 `Basis`（优先费、拒单记忆、确认块时间），入池和重放共用；`place_new` 判断最近被拒。
+  - `--pending-margin-refusal-ms`（默认 300000，须为正）。指标 `orderbook_pending_book_signers_total{source, outcome}`、`orderbook_pending_book_taker_outcomes_total{outcome}`。
+- **核对**（bm 11-01 05:40 一分钟真实数据，840 个区块、1,560 行内存池）：
+  - 区块的吃单结果 7,457 条（签名人 2,247 条，涉及 535 个签名人；vault 5,210 条），与研究脚本的独立 Python 实现逐行相同。
+  - 内存池里需要恢复的 2,439 个签名全部恢复。
+  - 开销（release）：单块解析 p50 / p95 从 0.31 / 0.78 ms 变为 0.82 / 2.27 ms；内存池单行 p50 0.28 ms、p95 1.4 ms。都在 watcher 线程。区块日志行比副本可确认时刻中位早约 60 ms。
+- **测试**（1,267 个通过）：
+  - msgpack 与 Python `msgpack.packb` 逐字节相同：整数边界、长度边界、键序、转义；浮点与超过 64 位的整数不编码。
+  - bm 真实签名 4 例（API 钱包的 IOC、账户自签的 GTC、vault 带 `expiresAfter`、`v` 为 1）恢复出研究脚本给出的签名人。改动作、vault、有效期任何一处，结果都不同；缺 nonce 或签名时整行读不出。前两例同时走内存池与区块两个入口，身份一致。
+  - 回执分类：拒单、清除、其他错误、整批保证金与整批其他错误、整笔 `err`；未知状态、单数对不上读不出；`multiSig` 不取。
+  - 记忆：确认后才应用、同块最后一个结果为准、闭区间边界、淘汰相等时保留、清空。
+  - 叠加层：IOC、`FrontendMarket`、不穿价的 GTC 被挡；ALO、改单、另一方向、另一资产、另一签名人、同地址的 vault、身份未知、窗口之外都照常；最小金额规则优先。
+  - shadow：日志先到与副本先到，确认高度之前预测相同，之后都挡；没入块的 GTC 在盘口不变时随拒单、清除、再拒单进出，拒单晚于它的不挡；缺口前已生效的拒单、`after_loss` 块里的拒单，缺口后都不再挡；在窗口内到达、仍被持有的单，在 t_r + M 之后重放时仍被挡。
+  - 变异 24 处都有测试失败。

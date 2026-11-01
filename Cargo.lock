@@ -3462,6 +3462,7 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "alloy-primitives",
  "axum",
  "bytes",
  "chrono",
@@ -3478,6 +3479,7 @@ dependencies = [
  "notify",
  "prometheus",
  "rayon",
+ "rmp",
  "rmp-serde",
  "rust_decimal",
  "rustc-hash",

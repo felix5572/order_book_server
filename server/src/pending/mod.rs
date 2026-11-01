@@ -11,6 +11,8 @@ pub(crate) mod mempool;
 pub(crate) mod overlay;
 pub(crate) mod publish;
 mod record;
+mod refusals;
+mod signer;
 pub(crate) mod shadow;
 
 use std::{
@@ -334,7 +336,7 @@ mod tests {
     /// Block `height`: its hashes (none) through the block log first, as it leads, then its lines through the
     /// listener's feed, each taken by the pending book.
     fn push_block(book: &mut PendingBook, feed: &mut ReplicaFeed, feeds: &mut Feeds, height: u64, statuses: Vec<serde_json::Value>, diffs: Vec<serde_json::Value>) {
-        let block = LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new() };
+        let block = LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new() };
         drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
         for batch in block_lines(height, statuses, diffs) {
             listener_applied(feed, batch);
@@ -346,7 +348,7 @@ mod tests {
         let tx = MempoolTx {
             seen_ns: seen_ms * 1_000_000,
             tx_hash: alloy::primitives::B256::repeat_byte(hash),
-            actions: actions.into_iter().map(|kind| SignedAction { vault: None, expires_after_ms: None, priority: 0, kind }).collect(),
+            actions: actions.into_iter().map(|kind| SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind }).collect(),
         };
         MempoolInput::Tx { tx, after_loss: false }
     }
@@ -475,7 +477,7 @@ mod tests {
     /// no other change to BTC, the frame the store serves on recovery is the merged book's: 101, nothing pending.
     #[test]
     fn the_set_dropped_whole_refreshes_every_frame() {
-        let (mut book, mut feed, mut feeds) = served_book_with(PendingParams::from_ms(1_000, 1_000, 10_000, 2, 60_000).unwrap());
+        let (mut book, mut feed, mut feeds) = served_book_with(PendingParams::from_ms(1_000, 1_000, 10_000, 2, 60_000, 300_000).unwrap());
         let handle = book.publisher.handle().clone();
         drop(book.on_mempool(line(3_150, 3, alo("100", "0x0a")), Some(&coins()), NONE_UNREPORTED));
         assert_eq!((btc_frame(&handle).bbo.1.unwrap().0.to_str(), btc_frame(&handle).pending.actions), ("100".to_string(), 1));
@@ -495,7 +497,7 @@ mod tests {
     /// 100.5 after.
     #[test]
     fn a_recovery_carries_the_book_of_its_commit() {
-        let (mut book, mut feed, mut feeds) = served_book_with(PendingParams::from_ms(1_000, 1_000, 10_000, 2, 60_000).unwrap());
+        let (mut book, mut feed, mut feeds) = served_book_with(PendingParams::from_ms(1_000, 1_000, 10_000, 2, 60_000, 300_000).unwrap());
         let handle = book.publisher.handle().clone();
         let mut events = handle.subscribe();
         drop(book.on_mempool(line(3_150, 3, alo("100", "0x0a")), Some(&coins()), NONE_UNREPORTED));
@@ -529,7 +531,7 @@ mod tests {
     fn a_batch_that_only_queues_settles_nothing() {
         let (mut book, mut feed, mut feeds) = served_book();
         let settles = book.shadow.settles();
-        let block = LoggedBlock { height: 32, time_ms: 3_200, hashes: Vec::new(), priorities: Vec::new() };
+        let block = LoggedBlock { height: 32, time_ms: 3_200, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new() };
         drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
         assert_eq!(book.shadow.settles(), settles + 1, "a block of the log settles");
         let [statuses, diffs] = block_lines(32, vec![], vec![]);

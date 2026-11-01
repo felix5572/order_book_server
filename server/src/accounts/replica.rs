@@ -9,6 +9,7 @@
 //! explicitly name another target: `userSetAbstraction.user` can be a subaccount of the receipt user. Payload fields are read only
 //! once the action's type is known (other action types use the same field names with other value types).
 
+use alloy::primitives::Address;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, de::DeserializeOwned};
 use sonic_rs::LazyValue;
@@ -36,10 +37,37 @@ struct Bundle<'a> {
     signed_actions: Vec<SignedAction<'a>>,
 }
 
+/// A signed action: its action, and what else its signature covers (HL's L1 action signing), kept raw - read by the
+/// pending book alone (`pending::signer`).
 #[derive(Deserialize)]
-struct SignedAction<'a> {
+pub(crate) struct SignedAction<'a> {
     #[serde(borrow)]
-    action: Action<'a>,
+    pub(crate) action: Action<'a>,
+    #[serde(borrow, rename = "vaultAddress")]
+    pub(crate) vault_address: Option<LazyValue<'a>>,
+    #[serde(borrow, rename = "expiresAfter")]
+    pub(crate) expires_after: Option<LazyValue<'a>>,
+    #[serde(borrow)]
+    pub(crate) nonce: Option<LazyValue<'a>>,
+    #[serde(borrow)]
+    pub(crate) signature: Option<LazyValue<'a>>,
+}
+
+impl SignedAction<'_> {
+    /// The vault or subaccount it acts for; `None` when the signer acts.
+    pub(crate) fn vault(&self) -> Result<Option<Address>, String> {
+        envelope_field(self.vault_address.as_ref(), "vaultAddress")
+    }
+
+    /// Its `expiresAfter`, unix ms: HL refuses it past then.
+    pub(crate) fn expires_after_ms(&self) -> Result<Option<u64>, String> {
+        envelope_field(self.expires_after.as_ref(), "expiresAfter")
+    }
+}
+
+/// An optional envelope field, `None` when absent or `null`.
+fn envelope_field<T: DeserializeOwned>(raw: Option<&LazyValue<'_>>, name: &str) -> Result<Option<T>, String> {
+    raw.map(|raw| sonic_rs::from_str(raw.as_raw_str()).map_err(|err| format!("{name} {}: {err}", raw.as_raw_str()))).transpose()
 }
 
 /// An action's type, and the raw payload fields the kept types read.
@@ -364,6 +392,11 @@ impl<'a> ReplicaLine<'a> {
     /// Its bundles' hashes, in the block's order.
     pub(crate) fn bundle_hashes(&self) -> impl Iterator<Item = &'a str> + '_ {
         self.abci_block.signed_action_bundles.iter().map(|(hash, _)| *hash)
+    }
+
+    /// The signed action at `position` of bundle `bundle`, as `PairedAction` places it.
+    pub(crate) fn signed_action(&self, bundle: usize, position: usize) -> Option<&SignedAction<'a>> {
+        self.abci_block.signed_action_bundles.get(bundle)?.1.signed_actions.get(position)
     }
 
     /// The two original wire objects for an already parsed action. Used only for a bounded number of unknown
