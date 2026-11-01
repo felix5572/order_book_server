@@ -164,6 +164,12 @@ impl<K: Clone + Eq + Hash, T: Clone> LinkedList<K, T> {
             .map(|node| &node.value)
     }
 
+    /// The values tail to head.
+    pub(crate) fn iter_rev(&self) -> impl Iterator<Item = &T> {
+        std::iter::successors(self.tail.map(|tail| &self.slab[tail]), |node| node.prev.map(|prev| &self.slab[prev]))
+            .map(|node| &node.value)
+    }
+
     #[must_use]
     pub(crate) fn to_vec(&self) -> Vec<&T> {
         let mut res = Vec::new();
@@ -438,6 +444,18 @@ mod tests {
         assert!(list.head_value_ref_mut_unsafe().is_none());
         list.push_back(1, 42);
         assert_eq!(list.head_value_ref_mut_unsafe(), Some(&mut 42));
+    }
+
+    #[test]
+    fn iter_rev_walks_tail_to_head_through_inserts_and_removes() {
+        let mut list = LinkedList::new();
+        assert_eq!(list.iter_rev().count(), 0);
+        list.push_back(1, 10);
+        list.push_back(3, 30);
+        assert!(list.insert_before(&3, 2, 20));
+        list.push_back(4, 40);
+        list.remove_node(4).unwrap();
+        assert_eq!(list.iter_rev().copied().collect::<Vec<_>>(), [30, 20, 10]);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use alloy::primitives::B256;
 use rustc_hash::FxHashMap;
 
-use super::blocks::BlockHashes;
+use super::blocks::LoggedBlock;
 
 /// Blocks the record holds above the replica's confirmed height at most (~22 min of mainnet blocks; ~2 hashes each).
 pub(crate) const MAX_LEAD_BLOCKS: u64 = 20_000;
@@ -19,29 +19,38 @@ pub(crate) const MAX_LEAD_BLOCKS: u64 = 20_000;
 #[derive(Default)]
 pub(crate) struct BlockRecord {
     /// In height order, each the one after the one before.
-    blocks: VecDeque<BlockHashes>,
+    blocks: VecDeque<LoggedBlock>,
     heights: FxHashMap<B256, u64>,
+    /// The ALO priority of each order the held blocks placed with one (batch 2f); an order not here has none.
+    priorities: FxHashMap<u64, u64>,
     /// The last height the log showed: eviction may empty `blocks`, never this (review 000611 r3 P1).
     last_height: Option<u64>,
 }
 
 impl BlockRecord {
     /// Whether `block` follows the last one the log showed (any first one does).
-    pub(crate) fn follows(&self, block: &BlockHashes) -> bool {
+    pub(crate) fn follows(&self, block: &LoggedBlock) -> bool {
         self.last_height.is_none_or(|last| block.height == last + 1)
     }
 
     /// Adds `block`; one that does not follow starts the record anew from it.
-    pub(crate) fn add(&mut self, block: BlockHashes) {
+    pub(crate) fn add(&mut self, block: LoggedBlock) {
         if !self.follows(&block) {
             self.blocks.clear();
             self.heights.clear();
+            self.priorities.clear();
         }
         for hash in &block.hashes {
             self.heights.insert(*hash, block.height);
         }
+        self.priorities.extend(block.priorities.iter().copied());
         self.last_height = Some(block.height);
         self.blocks.push_back(block);
+    }
+
+    /// The ALO priorities of the orders the held blocks placed with one, by oid.
+    pub(crate) const fn priorities(&self) -> &FxHashMap<u64, u64> {
+        &self.priorities
     }
 
     /// The height of the block holding `hash`.
@@ -60,6 +69,9 @@ impl BlockRecord {
             for hash in &block.hashes {
                 self.heights.remove(hash);
             }
+            for (oid, _) in &block.priorities {
+                self.priorities.remove(oid);
+            }
         }
     }
 
@@ -76,8 +88,9 @@ mod tests {
     use super::*;
     use crate::pending::blocks::tests::hash;
 
-    fn block(height: u64, hashes: &[u8]) -> BlockHashes {
-        BlockHashes { height, time_ms: height * 100, hashes: hashes.iter().map(|byte| hash(*byte)).collect() }
+    fn block(height: u64, hashes: &[u8]) -> LoggedBlock {
+        let hashes = hashes.iter().map(|byte| hash(*byte)).collect();
+        LoggedBlock { height, time_ms: height * 100, hashes, priorities: Vec::new() }
     }
 
     #[test]
@@ -90,6 +103,20 @@ mod tests {
         assert_eq!((record.height_of(&hash(1)), record.height_of(&hash(3))), (None, Some(11)), "10 older than 1,100 ms");
         record.evict(10, 2_000);
         assert_eq!(record.height_of(&hash(3)), Some(11), "above the confirmed height: kept");
+    }
+
+    /// Batch 2f: an order's priority is kept with the block that placed it - evicted with it, dropped with a record
+    /// started anew.
+    #[test]
+    fn priorities_go_with_their_blocks() {
+        let mut record = BlockRecord::default();
+        record.add(LoggedBlock { priorities: vec![(7, 3)], ..block(10, &[1]) });
+        record.add(LoggedBlock { priorities: vec![(8, 55)], ..block(11, &[2]) });
+        assert_eq!((record.priorities().get(&7), record.priorities().get(&8)), (Some(&3), Some(&55)));
+        record.evict(11, 1_050);
+        assert_eq!((record.priorities().get(&7), record.priorities().get(&8)), (None, Some(&55)));
+        record.add(LoggedBlock { priorities: vec![(9, 6)], ..block(13, &[3]) });
+        assert_eq!((record.priorities().get(&8), record.priorities().get(&9)), (None, Some(&6)));
     }
 
     /// A block not following the newest starts the record anew.

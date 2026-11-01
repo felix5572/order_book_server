@@ -13,8 +13,8 @@ use super::{decimal::ExactDecimal, orders::OrderKey, pairing::IocPairingMismatch
 use crate::accounts::{
     checkpoint::node_time_ns,
     replica::{
-        CANCEL_CATEGORY, OrderRef, PairedAction, ReplicaLine, WireCancel, WireCancelByCloid, WireModify, WireOrder,
-        placing_category,
+        CANCEL_CATEGORY, OrderRef, PairedAction, ReplicaLine, WireCancel, WireCancelByCloid, WireModify, WireOid, WireOrder,
+        WireResponseType, WireStatus, placing_category, response_body, response_statuses,
     },
 };
 
@@ -407,64 +407,6 @@ fn succeeded<T>(items: impl ExactSizeIterator<Item = T>, statuses: &[WireStatus]
         return Err(format!("{} cancels with {} statuses", items.len(), statuses.len()));
     }
     Ok(items.zip(statuses).filter(|(_, status)| matches!(status, WireStatus::Text(text) if text == "success")).map(|(item, _)| item).collect())
-}
-
-/// `response.data.statuses`; a response without data (`{"type": "default"}`, a modify's) has none.
-fn response_statuses(paired: &PairedAction<'_, '_>) -> Result<Vec<WireStatus>, String> {
-    Ok(response_body(paired)?.data.map(|data| data.statuses).unwrap_or_default())
-}
-
-fn response_body(paired: &PairedAction<'_, '_>) -> Result<WireResponseBody, String> {
-    let raw = paired.response.res.response.as_ref().ok_or("an ok response without a body")?;
-    sonic_rs::from_str(raw.as_raw_str()).map_err(|err| format!("response {}: {err}", raw.as_raw_str()))
-}
-
-#[derive(Deserialize, PartialEq, Eq)]
-enum WireResponseType {
-    #[serde(rename = "default")]
-    Default,
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Deserialize)]
-struct WireResponseBody {
-    #[serde(rename = "type")]
-    response_type: Option<WireResponseType>,
-    data: Option<WireResponseData>,
-}
-
-#[derive(Deserialize)]
-struct WireResponseData {
-    statuses: Vec<WireStatus>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum WireStatus {
-    /// `"success"`, or another word.
-    Text(String),
-    Object(WireStatusObject),
-}
-
-#[derive(Deserialize)]
-struct WireStatusObject {
-    error: Option<String>,
-    resting: Option<WireOid>,
-    filled: Option<WireOid>,
-}
-
-#[derive(Deserialize)]
-struct WireOid {
-    oid: u64,
-    cloid: Option<String>,
-}
-
-impl WireStatus {
-    fn placed(&self) -> Option<&WireOid> {
-        let Self::Object(object) = self else { return None };
-        object.resting.as_ref().or(object.filled.as_ref())
-    }
 }
 
 impl WireOrder {

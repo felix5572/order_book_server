@@ -17,7 +17,7 @@ use super::feed::{self, Feed, FeedEvent, FeedLosses, FeedReports};
 use crate::{
     accounts::{
         book::ActionCoins,
-        replica::{Action, OrderRef, WireCancel, WireCancelByCloid, WireModify, WireOrder},
+        replica::{Action, OrderRef, WireCancel, WireCancelByCloid, WireModify, WireOrder, alo_priority},
     },
     listeners::order_book::{
         parallel::{FileLayout, LineShape, LineStream, seconds_since_node_write},
@@ -54,6 +54,8 @@ pub(crate) struct SignedAction {
     pub(crate) vault: Option<Address>,
     /// Its `expiresAfter`, unix ms: HL refuses it past then.
     pub(crate) expires_after_ms: Option<u64>,
+    /// An `order` action's ALO priority (`Action::alo_priority`, batch 2f); 0 for any other.
+    pub(crate) priority: u64,
     pub(crate) kind: ActionKind,
 }
 
@@ -170,9 +172,11 @@ pub(crate) fn parse_line(line: &str) -> Result<MempoolTx, String> {
 
 fn signed_action(signed: &WireSignedAction<'_>) -> Result<SignedAction, String> {
     let action = &signed.action;
+    let mut priority = 0;
     let kind = match action.action_type {
         "order" => {
             let orders: Vec<WireOrder> = action.field(action.orders.as_ref(), "orders")?;
+            priority = alo_priority(action.requested_priority()?, &orders);
             ActionKind::Order(orders.iter().map(requested).collect::<Result<_, _>>()?)
         }
         "cancel" => {
@@ -199,7 +203,7 @@ fn signed_action(signed: &WireSignedAction<'_>) -> Result<SignedAction, String> 
         }
         _ => ActionKind::Other,
     };
-    Ok(SignedAction { vault: signed.vault_address, expires_after_ms: signed.expires_after, kind })
+    Ok(SignedAction { vault: signed.vault_address, expires_after_ms: signed.expires_after, priority, kind })
 }
 
 /// An action's flag that is omitted when false (a modify's `a`, a cancel's `f`).
@@ -410,6 +414,15 @@ mod tests {
         text.parse().unwrap()
     }
 
+    /// Batch 2f: an order action's ALO priority, when every order is a non-reduce-only ALO (bm 10-31 block
+    /// 1204388049's two ALOs, `{"p": 3}`); an IOC action's `{"p": 80000}` gives none, nor any other action.
+    #[test]
+    fn an_order_action_reads_its_alo_priority() {
+        let tx = parse_line(&line(&[crate::pending::blocks::tests::PRIORITY_ALOS, IOC_PRIORITY, ALO_BATCH, CANCEL])).unwrap();
+        assert_eq!(tx.actions.iter().map(|action| action.priority).collect::<Vec<_>>(), [3, 0, 0, 0]);
+        assert!(parse_line(&line(&[&ALO_BATCH.replace(r#""grouping":"na""#, r#""grouping":{"q":1}"#)])).is_err());
+    }
+
     #[test]
     fn a_line_reads_with_every_kind_in_its_order() {
         use RequestedTif::{Alo, FrontendMarket, Gtc, Ioc, Trigger};
@@ -425,6 +438,7 @@ mod tests {
             SignedAction {
                 vault: Some(address("0xfcf104006bfff47695c1dc21dad3e9de1e72098e")),
                 expires_after_ms: None,
+                priority: 0,
                 kind: ActionKind::Order(vec![
                     order(0, true, "77387", "0.135", false, Some("0x0000000000000000000001a18b7b1eef"), Alo),
                     order(0, true, "77386", "0.135", false, Some("0x0000000000000000000001a18b7b1ef0"), Alo),
@@ -433,19 +447,22 @@ mod tests {
             SignedAction {
                 vault: None,
                 expires_after_ms: Some(1_793_438_084_016),
+                priority: 0,
                 kind: ActionKind::Order(vec![order(207, true, "0.00001", "1", false, Some("0x000000000000000018de99016980e8f8"), Ioc)]),
             },
-            SignedAction { vault: None, expires_after_ms: None, kind: ActionKind::Order(vec![order(159, false, "80.47", "0.12", false, None, FrontendMarket)]) },
-            SignedAction { vault: None, expires_after_ms: None, kind: ActionKind::Order(vec![order(15, true, "0.046304", "13490", true, None, Trigger)]) },
-            SignedAction { vault: None, expires_after_ms: None, kind: ActionKind::Cancel { fast: false, cancels: vec![WireCancel { a: 151, o: 591_362_660_114 }] } },
+            SignedAction { vault: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![order(159, false, "80.47", "0.12", false, None, FrontendMarket)]) },
+            SignedAction { vault: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![order(15, true, "0.046304", "13490", true, None, Trigger)]) },
+            SignedAction { vault: None, expires_after_ms: None, priority: 0, kind: ActionKind::Cancel { fast: false, cancels: vec![WireCancel { a: 151, o: 591_362_660_114 }] } },
             SignedAction {
                 vault: Some(address("0x80196a7475464e06de641df6c66e6e278cd364d5")),
                 expires_after_ms: None,
+                priority: 0,
                 kind: ActionKind::Cancel { fast: true, cancels: vec![WireCancel { a: 159, o: 591_362_624_677 }] },
             },
             SignedAction {
                 vault: Some(address("0x7a9d45682babd8a2d79181623c75a7f615990b27")),
                 expires_after_ms: Some(1_793_438_083_555),
+                priority: 0,
                 kind: ActionKind::CancelByCloid {
                     fast: true,
                     cancels: vec![WireCancelByCloid { asset: 26, cloid: "0xe6d9f86348a64e6a84800e9d88ab3b0a".to_string() }],
@@ -454,6 +471,7 @@ mod tests {
             SignedAction {
                 vault: None,
                 expires_after_ms: None,
+                priority: 0,
                 kind: ActionKind::Modify {
                     always_place: false,
                     modifies: vec![Modify {
@@ -465,6 +483,7 @@ mod tests {
             SignedAction {
                 vault: None,
                 expires_after_ms: Some(1_793_438_093_687),
+                priority: 0,
                 kind: ActionKind::Modify {
                     always_place: true,
                     modifies: vec![Modify { target: OrderRef::Oid(591_179_694_313), order: order(200, true, "0.004512", "0", true, None, Trigger) }],
@@ -473,6 +492,7 @@ mod tests {
             SignedAction {
                 vault: None,
                 expires_after_ms: None,
+                priority: 0,
                 kind: ActionKind::Modify {
                     always_place: true,
                     modifies: vec![Modify {
@@ -484,6 +504,7 @@ mod tests {
             SignedAction {
                 vault: None,
                 expires_after_ms: None,
+                priority: 0,
                 kind: ActionKind::Modify {
                     always_place: false,
                     modifies: vec![Modify {
@@ -492,8 +513,8 @@ mod tests {
                     }],
                 },
             },
-            SignedAction { vault: None, expires_after_ms: None, kind: ActionKind::Other },
-            SignedAction { vault: Some(address("0x9e1733b7d499d6a2a6d3f5d74b942bbf5266a34d")), expires_after_ms: None, kind: ActionKind::Other },
+            SignedAction { vault: None, expires_after_ms: None, priority: 0, kind: ActionKind::Other },
+            SignedAction { vault: Some(address("0x9e1733b7d499d6a2a6d3f5d74b942bbf5266a34d")), expires_after_ms: None, priority: 0, kind: ActionKind::Other },
         ];
         assert_eq!(tx.actions, expected);
     }

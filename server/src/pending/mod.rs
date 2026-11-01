@@ -28,7 +28,7 @@ pub(crate) use self::{
     shadow::{PendingParams, PendingTrade},
 };
 use self::{
-    blocks::{BlockHashes, BlockIngest, BlockInput},
+    blocks::{LoggedBlock, BlockIngest, BlockInput},
     feed::Feed,
     mempool::{MempoolIngest, MempoolInput, MempoolTx},
     publish::Publisher,
@@ -51,7 +51,7 @@ const TICK: Duration = Duration::from_millis(100);
 /// mempool's coins by.
 pub(crate) struct PendingFeeds {
     pub(crate) mempool: Feed<MempoolTx>,
-    pub(crate) block_log: Feed<BlockHashes>,
+    pub(crate) block_log: Feed<LoggedBlock>,
     pub(crate) action_coins: watch::Receiver<Option<Arc<ActionCoins>>>,
 }
 
@@ -334,7 +334,7 @@ mod tests {
     /// Block `height`: its hashes (none) through the block log first, as it leads, then its lines through the
     /// listener's feed, each taken by the pending book.
     fn push_block(book: &mut PendingBook, feed: &mut ReplicaFeed, feeds: &mut Feeds, height: u64, statuses: Vec<serde_json::Value>, diffs: Vec<serde_json::Value>) {
-        let block = BlockHashes { height, time_ms: height * 100, hashes: Vec::new() };
+        let block = LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new() };
         drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
         for batch in block_lines(height, statuses, diffs) {
             listener_applied(feed, batch);
@@ -346,7 +346,7 @@ mod tests {
         let tx = MempoolTx {
             seen_ns: seen_ms * 1_000_000,
             tx_hash: alloy::primitives::B256::repeat_byte(hash),
-            actions: actions.into_iter().map(|kind| SignedAction { vault: None, expires_after_ms: None, kind }).collect(),
+            actions: actions.into_iter().map(|kind| SignedAction { vault: None, expires_after_ms: None, priority: 0, kind }).collect(),
         };
         MempoolInput::Tx { tx, after_loss: false }
     }
@@ -529,7 +529,7 @@ mod tests {
     fn a_batch_that_only_queues_settles_nothing() {
         let (mut book, mut feed, mut feeds) = served_book();
         let settles = book.shadow.settles();
-        let block = BlockHashes { height: 32, time_ms: 3_200, hashes: Vec::new() };
+        let block = LoggedBlock { height: 32, time_ms: 3_200, hashes: Vec::new(), priorities: Vec::new() };
         drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
         assert_eq!(book.shadow.settles(), settles + 1, "a block of the log settles");
         let [statuses, diffs] = block_lines(32, vec![], vec![]);

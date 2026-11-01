@@ -71,6 +71,10 @@ pub(crate) struct Action<'a> {
     pub(crate) payload: Option<LazyValue<'a>>,
     #[serde(borrow)]
     pub(crate) orders: Option<LazyValue<'a>>,
+    /// An `order`'s grouping: `"na"`, `"normalTpsl"`, `"positionTpsl"`, or a priority `{"p": N}` (HL docs "Priority
+    /// fees"; bm 10-31: every order action has one).
+    #[serde(borrow)]
+    pub(crate) grouping: Option<LazyValue<'a>>,
     #[serde(borrow)]
     pub(crate) cancels: Option<LazyValue<'a>>,
     #[serde(borrow)]
@@ -135,11 +139,43 @@ impl Action<'_> {
         Ok(payload.action)
     }
 
+    /// An `order`'s grouping's priority `p`; 0 for a named grouping (`na`, a TP/SL one).
+    pub(crate) fn requested_priority(&self) -> Result<u64, String> {
+        Ok(match self.field(self.grouping.as_ref(), "grouping")? {
+            WireGrouping::Priority { p } => p,
+            WireGrouping::Named(_) => 0,
+        })
+    }
+
     /// A payload field the action's type requires.
     pub(crate) fn field<T: DeserializeOwned>(&self, raw: Option<&LazyValue<'_>>, name: &str) -> Result<T, String> {
         let raw = raw.ok_or_else(|| format!("{} without {name}", self.action_type))?;
         sonic_rs::from_str(raw.as_raw_str()).map_err(|err| format!("{} {name} {}: {err}", self.action_type, raw.as_raw_str()))
     }
+}
+
+/// An `order` action's ALO priority: its `requested` one when every order of `orders` is a non-reduce-only ALO on an
+/// asset not an outcome's, else 0 (HL docs "Priority fees": "Priority grouping is only supported for order actions
+/// where both 1. every order is on a non-outcome asset 2. every order is IOC, or every order is a non-reduce-only
+/// ALO"). An action out of it carrying a `p` is accepted all the same (research `mempool_pending_book_20261031`, bm
+/// 10-31: IOC, trigger, GTC and reduce-only ALO actions with one, none refused for it); an IOC's priority orders the
+/// mempool, not a level's queue.
+pub(crate) fn alo_priority(requested: u64, orders: &[WireOrder]) -> u64 {
+    let eligible = orders.iter().all(|order| order.a < OUTCOME_ASSETS && order.is_alo() && !order.r);
+    if eligible { requested } else { 0 }
+}
+
+/// Outcomes' asset ids start here: 100,000,000 + 10 * outcome + side (HL docs "Asset IDs"; a HIP-3 perp's,
+/// 100,000 + 10,000 * dex + index, stays under it while there are fewer than 9,990 dexes).
+pub(crate) const OUTCOME_ASSETS: u32 = 100_000_000;
+
+/// An `order`'s `grouping`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireGrouping {
+    /// `na`, `normalTpsl` or `positionTpsl`: no priority.
+    Named(#[expect(dead_code, reason = "any name groups without a priority")] String),
+    Priority { p: u64 },
 }
 
 /// An order in an `order` action's `orders`, or a modify's new order.
@@ -237,6 +273,65 @@ pub(crate) struct ResponseResult<'a> {
     pub(crate) response: Option<LazyValue<'a>>,
 }
 
+/// `response.data.statuses`; a response without data (`{"type": "default"}`, a modify's) has none.
+pub(crate) fn response_statuses(paired: &PairedAction<'_, '_>) -> Result<Vec<WireStatus>, String> {
+    Ok(response_body(paired)?.data.map(|data| data.statuses).unwrap_or_default())
+}
+
+pub(crate) fn response_body(paired: &PairedAction<'_, '_>) -> Result<WireResponseBody, String> {
+    let raw = paired.response.res.response.as_ref().ok_or("an ok response without a body")?;
+    sonic_rs::from_str(raw.as_raw_str()).map_err(|err| format!("response {}: {err}", raw.as_raw_str()))
+}
+
+#[derive(Deserialize, PartialEq, Eq)]
+pub(crate) enum WireResponseType {
+    #[serde(rename = "default")]
+    Default,
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct WireResponseBody {
+    #[serde(rename = "type")]
+    pub(crate) response_type: Option<WireResponseType>,
+    pub(crate) data: Option<WireResponseData>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct WireResponseData {
+    pub(crate) statuses: Vec<WireStatus>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum WireStatus {
+    /// `"success"`, or another word.
+    Text(String),
+    Object(WireStatusObject),
+}
+
+#[derive(Deserialize)]
+pub(crate) struct WireStatusObject {
+    pub(crate) error: Option<String>,
+    pub(crate) resting: Option<WireOid>,
+    pub(crate) filled: Option<WireOid>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct WireOid {
+    pub(crate) oid: u64,
+    pub(crate) cloid: Option<String>,
+}
+
+impl WireStatus {
+    /// The order a status names as placed: resting, or filled (in part or whole) on entry.
+    pub(crate) fn placed(&self) -> Option<&WireOid> {
+        let Self::Object(object) = self else { return None };
+        object.resting.as_ref().or(object.filled.as_ref())
+    }
+}
+
 /// An action with its response and its place in the block.
 pub(crate) struct PairedAction<'r, 'a> {
     pub(crate) bundle_hash: &'a str,
@@ -264,6 +359,11 @@ impl<'a> ReplicaLine<'a> {
 
     pub(crate) const fn time(&self) -> Option<&'a str> {
         self.abci_block.time
+    }
+
+    /// Its bundles' hashes, in the block's order.
+    pub(crate) fn bundle_hashes(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.abci_block.signed_action_bundles.iter().map(|(hash, _)| *hash)
     }
 
     /// The two original wire objects for an already parsed action. Used only for a bounded number of unknown

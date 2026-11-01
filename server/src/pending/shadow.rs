@@ -33,9 +33,9 @@ use rustc_hash::FxHashMap;
 
 use super::{
     actions::{ActionId, BookActions, PendingAction, Placement, book_actions},
-    blocks::BlockHashes,
+    blocks::LoggedBlock,
     mempool::MempoolTx,
-    overlay::{BestLevel, CoinBase, Fill, Maker, Overlay},
+    overlay::{BestLevel, CoinBase, Fill, Maker, Overlay, PRIORITY_WINDOW_MS, Queueing},
     publish::{BestLevels, CoinPending},
     record::{BlockRecord, MAX_LEAD_BLOCKS},
 };
@@ -78,6 +78,11 @@ impl PendingParams {
         };
         if max_actions == 0 {
             return Err("--pending-max-actions must be positive".to_string());
+        }
+        // a confirmed order's ALO priority must outlive the window it is compared in, the record's retention R = H + E
+        // and the warm-up after a block log gap H both (review 000620 r1 P2-2)
+        if max_late_ms < PRIORITY_WINDOW_MS {
+            return Err(format!("--pending-max-late-ms {max_late_ms} under the ALO priority window, {PRIORITY_WINDOW_MS} ms"));
         }
         Ok(Self {
             expiry_ns: ns("expiry", expiry_ms)?,
@@ -171,11 +176,19 @@ struct CoinActions {
 }
 
 impl CoinActions {
-    fn replay(&mut self, base: CoinBase<'_>) {
+    fn replay(&mut self, base: CoinBase<'_>, queueing: Queueing<'_>) {
         self.overlay = Overlay::default();
         for action in self.actions.iter().filter(|action| !action.unknown) {
-            self.overlay.apply(base, action);
+            self.overlay.apply(base, queueing, action);
         }
+    }
+
+    /// Whether it holds an order with an ALO priority: its place in its queue moves with the confirmed block time, every
+    /// pending order being taken to be placed no earlier (review 000620 r2, r4 - an older order of none, compared at the
+    /// new time, may fall within its window). An order without one never moves; it is compared at the confirmed block of
+    /// each comparison (`Queueing::placed_ms`).
+    fn holds_priority(&self) -> bool {
+        self.actions.iter().any(|action| action.op.placement().is_some_and(|order| order.priority > 0))
     }
 }
 
@@ -226,6 +239,11 @@ pub(crate) struct Shadow {
     newest_seen_ns: Option<i64>,
     /// The overlays were dropped or rebuilt whole since the publisher last framed every coin (review 000614 r1 P1-1).
     refresh_all: bool,
+    /// The confirmed block time the overlays were last replayed against, unix ms (batch 2f).
+    basis_ms: u64,
+    /// Overlays were applied while the block record was behind the confirmed height, their confirmed orders' ALO
+    /// priorities possibly missing: replayed once it catches up, before the book is served (review 000620 r1 P2-2).
+    priorities_behind: bool,
     /// Settling steps taken with a replica aligned.
     #[cfg(test)]
     settles: usize,
@@ -250,6 +268,8 @@ impl Shadow {
             held: 0,
             newest_seen_ns: None,
             refresh_all: false,
+            basis_ms: 0,
+            priorities_behind: false,
             #[cfg(test)]
             settles: 0,
         }
@@ -300,7 +320,7 @@ impl Shadow {
     }
 
     /// A block of the log; `after_loss` when the watcher had found a loss not yet reported.
-    pub(crate) fn on_block(&mut self, block: BlockHashes, after_loss: bool, replica: Option<&BookReplica>) -> Step {
+    pub(crate) fn on_block(&mut self, block: LoggedBlock, after_loss: bool, replica: Option<&BookReplica>) -> Step {
         if !self.record.follows(&block) {
             self.open_block_log_gap("block_log_hole");
         }
@@ -362,7 +382,7 @@ impl Shadow {
             return Err(Unavailable::BlockLog(cause));
         }
         let (_, height, confirmed_ns) = aligned(replica).ok_or(Unavailable::Replica)?;
-        if self.record.newest().is_none_or(|newest| newest < height) {
+        if !self.record_covers(height) {
             return Err(Unavailable::BlockLogBehind);
         }
         if confirmed_ns < self.gaps.ready_from_ns {
@@ -441,10 +461,15 @@ impl Shadow {
 
     fn hold(&mut self, coin: Coin, action: PendingAction, aligned: Option<Aligned<'_>>, emit: bool, step: &mut Step) {
         self.held += 1;
-        let base = aligned.filter(|_| !self.gaps.replica).map(|(replica, _, _)| replica.coin(&coin));
+        let behind = aligned.is_some_and(|(_, height, _)| !self.record_covers(height));
+        let record = &self.record;
+        let base = aligned
+            .filter(|_| !self.gaps.replica)
+            .map(|(replica, _, confirmed_ns)| (replica.coin(&coin), Queueing::new(record.priorities(), unix_ms(confirmed_ns))));
         let actions = self.coins.entry(coin.clone()).or_default();
-        if let (false, Some(base)) = (action.unknown, base) {
-            let effect = actions.overlay.apply(base, &action);
+        if let (false, Some((base, queueing))) = (action.unknown, base) {
+            self.priorities_behind |= behind;
+            let effect = actions.overlay.apply(base, queueing, &action);
             PENDING_BOOK_OVERLAY_TOTAL.with_label_values(&[action.op.label(), effect.outcome]).inc();
             // only an action placing an order fills
             if let (true, Some(order)) = (emit, action.op.placement()) {
@@ -478,12 +503,28 @@ impl Shadow {
             changed.extend(self.coins.keys().cloned());
             self.refresh_all = true;
         }
+        let covered = self.record_covers(height);
+        if covered && std::mem::take(&mut self.priorities_behind) {
+            changed.extend(self.coins.keys().cloned());
+        }
+        let basis_ms = unix_ms(confirmed_ns);
+        if basis_ms != self.basis_ms {
+            changed.extend(self.coins.iter().filter(|(_, actions)| actions.holds_priority()).map(|(coin, _)| coin.clone()));
+            self.basis_ms = basis_ms;
+        }
+        let queueing = Queueing::new(self.record.priorities(), basis_ms);
         for coin in &changed {
             if let Some(actions) = self.coins.get_mut(coin) {
-                actions.replay(replica.coin(coin));
+                actions.replay(replica.coin(coin), queueing);
+                self.priorities_behind |= !covered;
             }
         }
         Step { trades: Vec::new(), changed }
+    }
+
+    /// Whether the block record reaches the confirmed `height`: every confirmed order's ALO priority known.
+    fn record_covers(&self, height: u64) -> bool {
+        self.record.newest().is_some_and(|newest| newest >= height)
     }
 
     /// The lines a block at or below `height` holds, and those expired, out of the set; their coins into `changed`.
@@ -668,8 +709,14 @@ pub(crate) mod tests {
 
         /// The log's next block, holding the lines of `hashes`.
         fn log(&mut self, hashes: &[u8]) -> Step {
+            self.log_placing(hashes, Vec::new())
+        }
+
+        /// The log's next block, holding the lines of `hashes`, placing orders with ALO `priorities` (oid, priority).
+        fn log_placing(&mut self, hashes: &[u8], priorities: Vec<(u64, u64)>) -> Step {
             self.logged += 1;
-            let block = BlockHashes { height: self.logged, time_ms: block_time_ms(self.logged), hashes: hashes.iter().map(|byte| hash(*byte)).collect() };
+            let hashes = hashes.iter().map(|byte| hash(*byte)).collect();
+            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes, priorities };
             self.shadow.on_block(block, false, Some(&self.replica))
         }
 
@@ -698,10 +745,15 @@ pub(crate) mod tests {
 
         /// A line seen at `seen_ms`, its hash from `byte`, with `actions`.
         fn line(&mut self, seen_ms: i64, byte: u8, actions: Vec<ActionKind>) -> Step {
+            self.priority_line(seen_ms, byte, 0, actions)
+        }
+
+        /// A line as `line`'s, its actions with the ALO priority `priority`.
+        fn priority_line(&mut self, seen_ms: i64, byte: u8, priority: u64, actions: Vec<ActionKind>) -> Step {
             let tx = MempoolTx {
                 seen_ns: seen_ms * NS_PER_MS,
                 tx_hash: hash(byte),
-                actions: actions.into_iter().map(|kind| SignedAction { vault: None, expires_after_ms: None, kind }).collect(),
+                actions: actions.into_iter().map(|kind| SignedAction { vault: None, expires_after_ms: None, priority, kind }).collect(),
             };
             self.shadow.on_tx(&tx, false, Some(&coins()), Some(&self.replica))
         }
@@ -753,6 +805,16 @@ pub(crate) mod tests {
 
     fn alo_bid(px: &str, cloid: &str) -> ActionKind {
         ActionKind::Order(vec![requested(0, true, px, RequestedTif::Alo, Some(cloid))])
+    }
+
+    fn alo_ask(px: &str, cloid: &str) -> ActionKind {
+        ActionKind::Order(vec![requested(0, false, px, RequestedTif::Alo, Some(cloid))])
+    }
+
+    /// The maker of the one trade `step` predicts.
+    fn maker_of(step: &Step) -> &Maker {
+        let [trade] = step.trades.as_slice() else { panic!("{step:?}") };
+        &trade.maker
     }
 
     fn level(px: &str, sz: &str, orders: u32) -> BestLevel {
@@ -947,7 +1009,7 @@ pub(crate) mod tests {
         let tx = MempoolTx {
             seen_ns: 1_000 * NS_PER_MS,
             tx_hash: hash(1),
-            actions: vec![SignedAction { vault: None, expires_after_ms: None, kind: ActionKind::Order(vec![requested(10_107, true, "100", RequestedTif::Alo, Some("0x0a"))]) }],
+            actions: vec![SignedAction { vault: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![requested(10_107, true, "100", RequestedTif::Alo, Some("0x0a"))]) }],
         };
         shadow.on_tx(&tx, false, Some(&coins()), None);
         assert_eq!(shadow.held("@107"), NONE_HELD);
@@ -1027,6 +1089,81 @@ pub(crate) mod tests {
         assert_eq!(harness.bbo(), (None, Some(level("100.4", "1", 1))));
     }
 
+    /// Review 000620 r3 P2: an ask of no priority seen at 3,100 ms, empty blocks to 3,500, an ask of 9 seen at 3,550:
+    /// the first is taken to be placed at 3,500 now, 50 ms before the second, which goes in front of it - an IOC meets
+    /// the second first, as a replay of both would have it.
+    #[test]
+    fn an_order_resting_from_before_the_confirmed_block_is_placed_at_it() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.line(3_100, 1, vec![alo_ask("101", "0x0a")]);
+        harness.idle_until(3_500);
+        harness.priority_line(3_550, 2, 9, vec![alo_ask("101", "0x0b")]);
+        let step = harness.line(3_560, 3, vec![ioc("0x01")]);
+        assert!(matches!(maker_of(&step), Maker::Pending { id, .. } if id.tx_hash == hash(2)), "{step:?}");
+    }
+
+    /// Review 000620 r4 P2: an ask of none at 3,100 ms and one of 9 at 3,500 - 400 ms apart, the second behind -; empty
+    /// blocks to 3,400 put the first at 3,400, 100 ms before the second, which now goes in front: an IOC meets it first.
+    #[test]
+    fn the_confirmed_block_time_requeues_orders_both_held() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.line(3_100, 1, vec![alo_ask("101", "0x0a")]);
+        harness.priority_line(3_500, 2, 9, vec![alo_ask("101", "0x0b")]);
+        harness.idle_until(3_400);
+        let step = harness.line(3_501, 3, vec![ioc("0x01")]);
+        assert!(matches!(maker_of(&step), Maker::Pending { id, .. } if id.tx_hash == hash(2)), "{step:?}");
+    }
+
+    /// Batch 2f: an ask of priority 6 seen at 3,350 ms goes in front of the ask at 101 resting from 3,100 (250 ms
+    /// before) - an IOC then meets it first. Once the confirmed block is at 3,500 it is taken to be placed then, 400 ms
+    /// after: the empty blocks replay the coin (review 000620 r2), and an IOC meets the replica's ask first.
+    #[test]
+    fn the_confirmed_block_time_alone_requeues_a_priority_order() {
+        let pending = Maker::Pending { id: ActionId { tx_hash: hash(1), action: 0, item: 0 }, cloid: Some("0x0a".to_string()) };
+        let replica = Maker::Confirmed { user: Address::with_last_byte(1), oid: Oid::new(11), cloid: None };
+        for (blocks_until_ms, first) in [(3_100, pending), (3_500, replica)] {
+            let mut harness = Harness::ready_from(1_000);
+            harness.rest_ask(11);
+            harness.priority_line(3_350, 1, 6, vec![alo_ask("101", "0x0a")]);
+            harness.idle_until(blocks_until_ms);
+            assert_eq!(maker_of(&harness.line(3_360, 2, vec![ioc("0x01")])), &first, "blocks until {blocks_until_ms}");
+        }
+    }
+
+    /// Review 000620 r1 P2-2: the same facts, the replica ahead of the log or behind it. The ask at 101 rests with a
+    /// priority of 9, an ask of 5 seen 200 ms after it stays behind it: with the replica first the ask of 5 is overlaid
+    /// while the record lacks the 9, and replayed once the log brings it, before the book is served.
+    #[test]
+    fn a_priority_the_log_brings_late_is_replayed_before_serving() {
+        for replica_first in [false, true] {
+            let mut harness = Harness::ready_from(1_000);
+            let at = block_time_ms(harness.height + 1);
+            let seen_ms = i64::try_from(at).unwrap() + 200;
+            let statuses = vec![btc_status(11, "A", "101.0", "1.0", "open", None, "Alo", at)];
+            let diffs = vec![btc_diff(11, "A", "101.0", new_diff("1.0"))];
+            if replica_first {
+                harness.confirm(statuses, diffs);
+                harness.priority_line(seen_ms, 1, 5, vec![alo_ask("101", "0x0a")]);
+                assert_eq!(harness.available(), Err(Unavailable::BlockLogBehind));
+                harness.log_placing(&[], vec![(11, 9)]);
+            } else {
+                harness.log_placing(&[], vec![(11, 9)]);
+                harness.confirm(statuses, diffs);
+                harness.priority_line(seen_ms, 1, 5, vec![alo_ask("101", "0x0a")]);
+            }
+            assert_eq!(harness.available(), Ok(()));
+            let step = harness.line(seen_ms + 10, 2, vec![ioc("0x01")]);
+            assert!(matches!(maker_of(&step), Maker::Confirmed { oid, .. } if *oid == Oid::new(11)), "replica first {replica_first}: {step:?}");
+        }
+    }
+
+    /// Review 000620 r1 P2-2: H under the ALO priority window is refused at start.
+    #[test]
+    fn a_max_late_under_the_priority_window_is_refused() {
+        assert!(PendingParams::from_ms(1_000, 399, 10_000, 1_000, 60_000).is_err());
+        assert!(PendingParams::from_ms(1_000, 400, 10_000, 1_000, 60_000).is_ok());
+    }
+
     /// R7 revision 20: past `MAX_LEAD_BLOCKS` above the confirmed height (all of them without a replica) the log's
     /// blocks are not taken.
     #[test]
@@ -1034,7 +1171,7 @@ pub(crate) mod tests {
         let mut shadow = Shadow::new(params(), true);
         for height in 1..=MAX_LEAD_BLOCKS {
             assert!(shadow.takes_blocks(None));
-            shadow.on_block(BlockHashes { height, time_ms: height * 100, hashes: Vec::new() }, false, None);
+            shadow.on_block(LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new() }, false, None);
         }
         assert!(!shadow.takes_blocks(None));
     }

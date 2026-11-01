@@ -138,6 +138,11 @@ impl<O: InnerOrder> PriceLevel<O> {
         self.orders.iter()
     }
 
+    /// The orders from the back of the queue.
+    pub(crate) fn orders_rev(&self) -> impl Iterator<Item = &O> {
+        self.orders.iter_rev()
+    }
+
     pub(crate) fn order(&self, oid: &Oid) -> Option<&O> {
         self.orders.node_value(oid)
     }

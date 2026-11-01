@@ -35,6 +35,8 @@ pub(crate) struct Placement {
     pub(crate) sz: Sz,
     pub(crate) tif: Tif,
     pub(crate) cloid: Option<String>,
+    /// Its action's ALO priority (batch 2f; `Action::alo_priority`): a modify's new order has none.
+    pub(crate) priority: u64,
 }
 
 /// A book order's time in force.
@@ -127,7 +129,7 @@ pub(crate) fn book_actions(tx: &MempoolTx, coins: &ActionCoins, spot: bool) -> B
         let expired = signed.expires_after_ms.is_some_and(|expires_ms| i64::try_from(expires_ms).is_ok_and(|expires_ms| expires_ms < seen_ms));
         // an order off the grid fails the whole signed action, trigger orders' prices too
         let batch_off_grid = signed.kind.orders().any(off_grid);
-        for (item, asset, op, order) in book_ops(&signed.kind) {
+        for (item, asset, op, order) in book_ops(&signed.kind, signed.priority) {
             let Some(named) = named(asset) else { continue };
             if expired || batch_off_grid {
                 let why = if expired { "expires_after" } else if order.is_some_and(off_grid) { "off_grid" } else { "off_grid_batch" };
@@ -178,12 +180,14 @@ fn too_large(order: &RequestedOrder, asset: &ActionAsset) -> bool {
     u128::from(order.limit_px.value()) * u128::from(order.sz.value()) > u128::from(cap) * 10_000_000_000_000_000
 }
 
-/// Each (place in the action, asset, op, the order it places as requested) of an action, in its order; a trigger
-/// order, or a modify placing one, left out (no target of a modify placing a trigger order is taken out either: design
-/// 000604 revision 8).
-fn book_ops(kind: &ActionKind) -> Vec<(usize, u32, BookOp, Option<&RequestedOrder>)> {
+/// Each (place in the action, asset, op, the order it places as requested) of an action, in its order, its orders
+/// placed with `priority`; a trigger order, or a modify placing one, left out (no target of a modify placing a trigger
+/// order is taken out either: design 000604 revision 8).
+fn book_ops(kind: &ActionKind, priority: u64) -> Vec<(usize, u32, BookOp, Option<&RequestedOrder>)> {
     let ops: Vec<Option<(u32, BookOp, Option<&RequestedOrder>)>> = match kind {
-        ActionKind::Order(orders) => orders.iter().map(|order| Some((order.asset, BookOp::Place(placement(order)?), Some(order)))).collect(),
+        ActionKind::Order(orders) => {
+            orders.iter().map(|order| Some((order.asset, BookOp::Place(placement(order, priority)?), Some(order)))).collect()
+        }
         ActionKind::Cancel { cancels, .. } => cancels.iter().map(|cancel| Some((cancel.a, BookOp::Cancel(Oid::new(cancel.o)), None))).collect(),
         ActionKind::CancelByCloid { cancels, .. } => {
             cancels.iter().map(|cancel| Some((cancel.asset, BookOp::CancelByCloid(cancel.cloid.clone()), None))).collect()
@@ -191,7 +195,7 @@ fn book_ops(kind: &ActionKind) -> Vec<(usize, u32, BookOp, Option<&RequestedOrde
         ActionKind::Modify { always_place, modifies } => modifies
             .iter()
             .map(|modify| {
-                let order = placement(&modify.order)?;
+                let order = placement(&modify.order, 0)?;
                 Some((modify.order.asset, BookOp::Modify { target: modify.target.clone(), always_place: *always_place, order }, Some(&modify.order)))
             })
             .collect(),
@@ -200,13 +204,14 @@ fn book_ops(kind: &ActionKind) -> Vec<(usize, u32, BookOp, Option<&RequestedOrde
     ops.into_iter().enumerate().filter_map(|(item, op)| op.map(|(asset, op, order)| (item, asset, op, order))).collect()
 }
 
-fn placement(order: &RequestedOrder) -> Option<Placement> {
+fn placement(order: &RequestedOrder, priority: u64) -> Option<Placement> {
     Some(Placement {
         side: if order.is_buy { Side::Bid } else { Side::Ask },
         limit_px: order.limit_px,
         sz: order.sz,
         tif: Tif::of_requested(order.tif)?,
         cloid: order.cloid.clone(),
+        priority,
     })
 }
 
@@ -307,7 +312,7 @@ pub(crate) mod tests {
         MempoolTx {
             seen_ns: 1_000_000_000,
             tx_hash: B256::repeat_byte(7),
-            actions: actions.into_iter().map(|kind| SignedAction { vault: None, expires_after_ms: None, kind }).collect(),
+            actions: actions.into_iter().map(|kind| SignedAction { vault: None, expires_after_ms: None, priority: 0, kind }).collect(),
         }
     }
 

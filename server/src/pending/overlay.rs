@@ -11,8 +11,12 @@
 //!   placed by its own rules; without, a missing or ambiguous target rejects it, an ALO replaces the target, a GTC
 //!   replaces it as an ALO when it would not take once the target is out, and any other is not supported: rejected,
 //!   the target left.
-//! - A level whose queue order the replica cannot prove names none of its replica orders as a fill's maker; its
-//!   pending orders queue behind them all the same, so what a taker takes past the replica's part is theirs.
+//! - A pending order with an ALO priority queues by HL's rule (batch 2f; HL docs "Priority fees"): from the back of its
+//!   level's merged queue it passes each order placed under `PRIORITY_WINDOW_MS` before it with a lower priority,
+//!   stopping at the first other; its place is fixed then, as HL fixes it on placement.
+//! - A level whose queue order the replica cannot prove names no maker at all (review 000620 r2): what a taker takes
+//!   there is one fill without a maker - a pending order's place there cannot be proven either (it rests behind the
+//!   replica's orders but for a priority).
 //! - An order worth less than HL's minimum, 10 of the quote at the price it would first trade at - its limit, or the
 //!   merged opposite best when that is better -, is rejected (the node's `minTradeNtlRejected`); a modify placing one
 //!   is rejected whole, its target left (an inference: no case seen).
@@ -32,6 +36,12 @@ use crate::{
 
 /// HL's minimum order value, 10 of the quote, in a price's units times a size's (1e-8 each).
 const MIN_NOTIONAL: u128 = 10 * 100_000_000 * 100_000_000;
+
+/// HL's ALO priority window T: a level's tail of orders placed within it is sorted by priority (HL docs "Priority
+/// fees"; research `mempool_pending_book_20261031`, bm 10-31 20:15-20:20: of the node's 17,187 `insertBefore` diffs,
+/// the 15,516 whose jumped order's priority a response names each jumped one placed under 400 ms before, of a lower
+/// priority; the oldest 399 ms).
+pub(crate) const PRIORITY_WINDOW_MS: u64 = 400;
 
 /// A coin's orders by cloid in the replica.
 pub(crate) type CoinCloids = FxHashMap<String, Vec<Oid>>;
@@ -79,6 +89,32 @@ impl<'a> CoinBase<'a> {
     fn with_cloid(self, cloid: &'a str) -> impl Iterator<Item = &'a InnerL4Order> {
         let oids = self.cloids.and_then(|cloids| cloids.get(cloid)).into_iter().flatten();
         oids.filter_map(move |oid| self.order(oid)).filter(move |order| order.cloid.as_deref() == Some(cloid))
+    }
+}
+
+/// What placing a pending order in its level's queue needs of the confirmed state (batch 2f).
+#[derive(Clone, Copy)]
+pub(crate) struct Queueing<'a> {
+    /// The confirmed orders' ALO priorities by oid; one not here has none.
+    priorities: &'a FxHashMap<u64, u64>,
+    /// The confirmed block time, unix ms: no pending order is placed before it.
+    basis_ms: u64,
+}
+
+impl<'a> Queueing<'a> {
+    pub(crate) const fn new(priorities: &'a FxHashMap<u64, u64>, basis_ms: u64) -> Self {
+        Self { priorities, basis_ms }
+    }
+
+    /// When an order whose line came at `seen_ms` is taken to be placed, unix ms: its block's time is past both its
+    /// arrival and the confirmed block's (review 000620 r1 P2-1). Judged at each comparison against the confirmed block
+    /// then, a pending order resting since an earlier one too (review 000620 r3 P2).
+    const fn placed_ms(self, seen_ms: u64) -> u64 {
+        if seen_ms > self.basis_ms { seen_ms } else { self.basis_ms }
+    }
+
+    fn priority(self, oid: u64) -> u64 {
+        self.priorities.get(&oid).copied().unwrap_or(0)
     }
 }
 
@@ -162,6 +198,11 @@ struct RestingOrder {
     id: ActionId,
     cloid: Option<String>,
     sz: u64,
+    /// The replica order it queues in front of; `None` behind them all.
+    ahead_of: Option<Oid>,
+    /// Its line's arrival, unix ms (`Queueing::placed_ms`).
+    seen_ms: u64,
+    priority: u64,
 }
 
 /// One coin's overlay: the replay of its known pending actions, in execution order, over the replica.
@@ -171,17 +212,19 @@ pub(crate) struct Overlay {
     left: FxHashMap<Oid, u64>,
     /// Per side (`at`) and replica level: the (size, orders) `left` took off it.
     taken: [FxHashMap<Px, (u64, usize)>; 2],
-    /// Pending orders resting, per side: price to queue in arrival order, never an empty one.
+    /// Pending orders resting, per side: price to queue, never an empty one, in their order in the merged queue - those
+    /// in front of a replica order before those in front of a later one, those behind them all last.
     resting: [BTreeMap<Px, VecDeque<RestingOrder>>; 2],
 }
 
 impl Overlay {
-    pub(crate) fn apply(&mut self, base: CoinBase<'_>, action: &PendingAction) -> Effect {
+    pub(crate) fn apply(&mut self, base: CoinBase<'_>, queueing: Queueing<'_>, action: &PendingAction) -> Effect {
+        let placing = Placing { queueing, id: action.id, seen_ms: u64::try_from(action.seen_ns / 1_000_000).unwrap_or(0) };
         match &action.op {
-            BookOp::Place(order) => self.place(base, action.id, order),
+            BookOp::Place(order) => self.place(base, placing, order),
             BookOp::Cancel(oid) => self.cancel(self.confirmed_target(base, oid)),
             BookOp::CancelByCloid(cloid) => self.cancel(self.cloid_target(base, cloid)),
-            BookOp::Modify { target, always_place, order } => self.modify(base, action.id, target, *always_place, order),
+            BookOp::Modify { target, always_place, order } => self.modify(base, placing, target, *always_place, order),
         }
     }
 
@@ -195,20 +238,20 @@ impl Overlay {
         (best(Side::Bid), best(Side::Ask))
     }
 
-    fn place(&mut self, base: CoinBase<'_>, id: ActionId, order: &Placement) -> Effect {
+    fn place(&mut self, base: CoinBase<'_>, placing: Placing<'_>, order: &Placement) -> Effect {
         if self.below_min_notional(base, order, &Target::Missing) {
             return Effect::of("min_notional");
         }
         match order.tif {
             Tif::Alo if self.crosses(base, order.side, order.limit_px) => Effect::of("alo_crossed"),
             Tif::Alo => {
-                self.rest(order, id, order.sz.value());
+                self.rest(base, placing, order, order.sz.value());
                 Effect::of("rested")
             }
             Tif::Gtc => {
                 let (fills, left) = self.take(base, order.side, order.limit_px, order.sz.value());
                 if left > 0 {
-                    self.rest(order, id, left);
+                    self.rest(base, placing, order, left);
                 }
                 Effect { outcome: if fills.is_empty() { "rested" } else { "took" }, fills }
             }
@@ -231,7 +274,7 @@ impl Overlay {
     }
 
     /// Revision 8's admission table.
-    fn modify(&mut self, base: CoinBase<'_>, id: ActionId, target: &OrderRef, always_place: bool, order: &Placement) -> Effect {
+    fn modify(&mut self, base: CoinBase<'_>, placing: Placing<'_>, target: &OrderRef, always_place: bool, order: &Placement) -> Effect {
         let target = match target {
             OrderRef::Oid(oid) => self.confirmed_target(base, &Oid::new(*oid)),
             OrderRef::Cloid(cloid) => self.cloid_target(base, cloid),
@@ -241,18 +284,18 @@ impl Overlay {
         }
         if always_place {
             self.remove(target);
-            return self.place(base, id, order);
+            return self.place(base, placing, order);
         }
         match (order.tif, target) {
             (_, Target::Missing) => Effect::of("target_missing"),
             (_, Target::Ambiguous) => Effect::of("target_ambiguous"),
             (Tif::Alo, found) => {
                 self.remove(found);
-                self.place(base, id, order)
+                self.place(base, placing, order)
             }
             (Tif::Gtc, found) if !self.crosses_without(base, order.side, order.limit_px, &found) => {
                 self.remove(found);
-                self.rest(order, id, order.sz.value());
+                self.rest(base, placing, order, order.sz.value());
                 Effect::of("rested")
             }
             (Tif::Gtc, _) => Effect::of("gtc_would_take"),
@@ -326,28 +369,30 @@ impl Overlay {
         self.best_without(base, side.opposite(), target).is_some_and(|best| reaches(side, px, best))
     }
 
-    /// A taker of `side` up to `limit_px`, `sz` at most, through the merged opposite side from its best: at each level
-    /// the replica's orders in queue order, then the pending ones (they rest behind). The fills, and the size left.
+    /// A taker of `side` up to `limit_px`, `sz` at most, through the merged opposite side from its best, each level in
+    /// its merged queue. The fills, and the size left.
     fn take(&mut self, base: CoinBase<'_>, side: Side, limit_px: Px, mut sz: u64) -> (Vec<Fill>, u64) {
         let makers = side.opposite();
         let mut fills = Vec::new();
         while sz > 0 {
             let Some(px) = self.best(base, makers).filter(|best| reaches(side, limit_px, *best)) else { break };
-            sz = self.take_confirmed(base, makers, px, sz, &mut fills);
-            sz = self.take_pending(makers, px, sz, &mut fills);
+            sz = self.take_level(base, makers, px, sz, &mut fills);
         }
         (fills, sz)
     }
 
-    fn take_confirmed(&mut self, base: CoinBase<'_>, side: Side, px: Px, mut sz: u64, fills: &mut Vec<Fill>) -> u64 {
-        let Some(level) = base.level(side, px) else { return sz };
+    /// `sz` at most of the merged level at (side, px), in its queue: before each replica order the pending ones in
+    /// front of it, then it; the pending ones behind them all last. A level whose queue order is not proven gives one
+    /// fill without a maker for all it gives. The size left.
+    fn take_level(&mut self, base: CoinBase<'_>, side: Side, px: Px, mut sz: u64, fills: &mut Vec<Fill>) -> u64 {
         let unproven = base.unproven(side, px);
-        let mut unattributed = 0;
-        for order in level.orders() {
+        let mut level_fills = Vec::new();
+        for order in base.level(side, px).into_iter().flat_map(PriceLevel::orders) {
             if sz == 0 {
                 break;
             }
             let oid = Oid::new(order.oid);
+            sz = self.take_pending(side, px, Some(&oid), sz, &mut level_fills);
             let left = self.left.get(&oid).copied().unwrap_or_else(|| order.sz.value());
             let fill = left.min(sz);
             if fill == 0 {
@@ -355,23 +400,25 @@ impl Overlay {
             }
             sz -= fill;
             self.reduce(side, px, oid.clone(), left, fill);
-            if unproven {
-                unattributed += fill;
-            } else {
-                fills.push(Fill { px, sz: Sz::new(fill), maker: Maker::Confirmed { user: order.user, oid, cloid: order.cloid.clone() } });
-            }
+            level_fills.push(Fill { px, sz: Sz::new(fill), maker: Maker::Confirmed { user: order.user, oid, cloid: order.cloid.clone() } });
         }
-        if unattributed > 0 {
+        sz = self.take_pending(side, px, None, sz, &mut level_fills);
+        if unproven && !level_fills.is_empty() {
+            let unattributed = level_fills.iter().map(|fill| fill.sz.value()).sum();
             fills.push(Fill { px, sz: Sz::new(unattributed), maker: Maker::Unattributed });
+        } else {
+            fills.extend(level_fills);
         }
         sz
     }
 
-    fn take_pending(&mut self, side: Side, px: Px, mut sz: u64, fills: &mut Vec<Fill>) -> u64 {
+    /// `sz` at most of the level's pending orders from the front, while they queue in front of the replica order
+    /// `before` - all of them for `None`, the back of the queue.
+    fn take_pending(&mut self, side: Side, px: Px, before: Option<&Oid>, mut sz: u64, fills: &mut Vec<Fill>) -> u64 {
         let levels = &mut self.resting[at(side)];
         let Some(queue) = levels.get_mut(&px) else { return sz };
         while sz > 0
-            && let Some(maker) = queue.front_mut()
+            && let Some(maker) = queue.front_mut().filter(|maker| before.is_none() || maker.ahead_of.as_ref() == before)
         {
             let fill = maker.sz.min(sz);
             maker.sz -= fill;
@@ -397,9 +444,45 @@ impl Overlay {
         }
     }
 
-    fn rest(&mut self, order: &Placement, id: ActionId, sz: u64) {
+    fn rest(&mut self, base: CoinBase<'_>, placing: Placing<'_>, order: &Placement, sz: u64) {
+        let (index, ahead_of) = self.queue_place(base, placing, order);
         let queue = self.resting[at(order.side)].entry(order.limit_px).or_default();
-        queue.push_back(RestingOrder { id, cloid: order.cloid.clone(), sz });
+        let resting = RestingOrder { id: placing.id, cloid: order.cloid.clone(), sz, ahead_of, seen_ms: placing.seen_ms, priority: order.priority };
+        queue.insert(index, resting);
+    }
+
+    /// Where `order` queues in its level: its index among the level's pending orders, and the replica order it goes in
+    /// front of. From the back of the merged queue it passes each order placed under `PRIORITY_WINDOW_MS` before it
+    /// with a lower priority and stops at the first other - "Each new order compares against the tail of orders less
+    /// than T old at placement time" (HL docs "Priority fees") -; a replica order the overlay took out is no longer
+    /// there to stop it. Without a priority, or at a level whose queue order is not proven: at the back.
+    fn queue_place(&self, base: CoinBase<'_>, placing: Placing<'_>, order: &Placement) -> (usize, Option<Oid>) {
+        let empty = VecDeque::new();
+        let pending = self.resting[at(order.side)].get(&order.limit_px).unwrap_or(&empty);
+        let mut index = pending.len();
+        if order.priority == 0 || base.unproven(order.side, order.limit_px) {
+            return (index, None);
+        }
+        let queueing = placing.queueing;
+        let placed_ms = queueing.placed_ms(placing.seen_ms);
+        let passes = |other_ms: u64, priority: u64| placed_ms.saturating_sub(other_ms) < PRIORITY_WINDOW_MS && priority < order.priority;
+        let mut ahead_of = None;
+        let mut confirmed = base.level(order.side, order.limit_px).into_iter().flat_map(PriceLevel::orders_rev);
+        loop {
+            while let Some(before) = index.checked_sub(1).map(|before| &pending[before]).filter(|before| before.ahead_of == ahead_of) {
+                if !passes(queueing.placed_ms(before.seen_ms), before.priority) {
+                    return (index, ahead_of);
+                }
+                index -= 1;
+            }
+            let Some(before) = confirmed.next() else { return (index, ahead_of) };
+            let oid = Oid::new(before.oid);
+            let live = self.left.get(&oid).is_none_or(|left| *left > 0);
+            if live && !passes(before.timestamp, queueing.priority(before.oid)) {
+                return (index, ahead_of);
+            }
+            ahead_of = Some(oid);
+        }
     }
 
     /// The merged side's best price: the replica's first level the overlay left some of, or a better pending one.
@@ -440,6 +523,14 @@ impl Overlay {
         let sz = level.total_sz().value().checked_sub(sz).expect("the overlay takes no more than a replica level holds");
         (sz, level.len().checked_sub(orders).expect("the overlay takes no more orders than a replica level holds"))
     }
+}
+
+/// An action placing an order: its queueing, its id and its line's arrival, unix ms.
+#[derive(Clone, Copy)]
+struct Placing<'a> {
+    queueing: Queueing<'a>,
+    id: ActionId,
+    seen_ms: u64,
 }
 
 const fn at(side: Side) -> usize {
@@ -528,7 +619,7 @@ mod tests {
     }
 
     fn order(side: Side, at: &str, quantity: &str, tif: Tif, cloid: Option<&str>) -> Placement {
-        Placement { side, limit_px: px(at), sz: sz(quantity), tif, cloid: cloid.map(str::to_string) }
+        Placement { side, limit_px: px(at), sz: sz(quantity), tif, cloid: cloid.map(str::to_string), priority: 0 }
     }
 
     fn place(index: usize, side: Side, at: &str, quantity: &str, tif: Tif, cloid: Option<&str>) -> PendingAction {
@@ -539,12 +630,17 @@ mod tests {
         (px(at), sz(size), orders)
     }
 
+    fn no_priorities() -> Queueing<'static> {
+        static NONE: std::sync::LazyLock<FxHashMap<u64, u64>> = std::sync::LazyLock::new(FxHashMap::default);
+        Queueing::new(&NONE, 0)
+    }
+
     /// Applies `actions` in order: their outcomes, then the merged book's best levels.
     fn run(actions: &[PendingAction]) -> (Vec<Effect>, (Option<BestLevel>, Option<BestLevel>)) {
         let (book, cloids) = book();
         let base = CoinBase::new(Some(&book), &[], Some(&cloids));
         let mut overlay = Overlay::default();
-        let effects = actions.iter().map(|action| overlay.apply(base, action)).collect();
+        let effects = actions.iter().map(|action| overlay.apply(base, no_priorities(), action)).collect();
         (effects, overlay.bbo(base))
     }
 
@@ -734,24 +830,20 @@ mod tests {
         assert_eq!(bbo, (Some(level("99", "1", 1)), Some(level("100", "1", 1))));
     }
 
-    /// A level whose queue order the replica cannot prove gives one fill without a maker for its replica orders, the
-    /// size taken of them; a pending order there queues behind them all, so what is taken past them is its own (review
-    /// 000611 r1 P2-3).
+    /// A level whose queue order the replica cannot prove gives one fill without a maker for all a taker takes there,
+    /// its pending orders' part too: one with a priority may queue in front of the replica's (review 000620 r2; the
+    /// replica's part alone before, review 000611 r1 P2-3).
     #[test]
-    fn an_unproven_level_names_no_maker_of_its_replica_orders() {
+    fn an_unproven_level_names_no_maker() {
         let (book, cloids) = book();
         let unproven = [(Side::Ask, px("101"))];
         let base = CoinBase::new(Some(&book), &unproven, Some(&cloids));
         let mut overlay = Overlay::default();
-        overlay.apply(base, &place(0, Side::Ask, "101", "1", Tif::Alo, Some("0xa")));
-        let effect = overlay.apply(base, &place(1, Side::Bid, "102", "3.5", Tif::Ioc, None));
+        overlay.apply(base, no_priorities(), &place(0, Side::Ask, "101", "1", Tif::Alo, Some("0xa")));
+        let effect = overlay.apply(base, no_priorities(), &place(1, Side::Bid, "102", "3.5", Tif::Ioc, None));
         assert_eq!(
             effect.fills,
-            [
-                Fill { px: px("101"), sz: sz("2"), maker: Maker::Unattributed },
-                Fill { px: px("101"), sz: sz("1"), maker: Maker::Pending { id: id(0), cloid: Some("0xa".to_string()) } },
-                Fill { px: px("102"), sz: sz("0.5"), maker: confirmed(BOB, 5, None) },
-            ]
+            [Fill { px: px("101"), sz: sz("3"), maker: Maker::Unattributed }, Fill { px: px("102"), sz: sz("0.5"), maker: confirmed(BOB, 5, None) }]
         );
     }
 
@@ -760,7 +852,7 @@ mod tests {
     fn a_coin_without_a_book_has_its_pending_orders_alone() {
         let base = CoinBase::new(None, &[], None);
         let mut overlay = Overlay::default();
-        let effect = overlay.apply(base, &place(0, Side::Bid, "5", "3", Tif::Gtc, None));
+        let effect = overlay.apply(base, no_priorities(), &place(0, Side::Bid, "5", "3", Tif::Gtc, None));
         assert_eq!(effect.outcome, "rested");
         assert_eq!(overlay.bbo(base), (Some(level("5", "3", 1)), None));
     }
@@ -804,5 +896,130 @@ mod tests {
         let buy = BookOp::Modify { target: OrderRef::Oid(1), always_place: true, order: order(Side::Bid, "110", "0.095", Tif::Alo, None) };
         let (effects, bbo) = run(&[action(0, buy)]);
         assert_eq!((outcomes(&effects), bbo.0), (vec!["alo_crossed"], Some(level("98", "2", 1))));
+    }
+
+    /// Asks at 105, 1.0 each: `orders` (oid, placed ms) in queue order.
+    fn asks_at_105(orders: &[(u64, u64)]) -> OrderBook<InnerL4Order> {
+        let mut book = OrderBook::new();
+        for (oid, placed_ms) in orders {
+            book.add_order(InnerL4Order { timestamp: *placed_ms, ..resting(*oid, ALICE, Side::Ask, "105", "1", None) });
+        }
+        book
+    }
+
+    /// An ALO ask of 1.0 at 105 with `priority`, seen at `seen_ms`.
+    fn alo_at_105(index: usize, priority: u64, seen_ms: i64) -> PendingAction {
+        let alo = Placement { priority, ..order(Side::Ask, "105", "1", Tif::Alo, None) };
+        PendingAction { seen_ns: seen_ms * 1_000_000, ..action(index, BookOp::Place(alo)) }
+    }
+
+    fn pending(index: usize) -> Maker {
+        Maker::Pending { id: id(index), cloid: None }
+    }
+
+    fn mine(oid: u64) -> Maker {
+        confirmed(ALICE, oid, None)
+    }
+
+    /// The fills of `takers` (IOC bids at 105 of each size) after `actions` over `book`, the confirmed orders'
+    /// `priorities`, at the confirmed block time `basis_ms`; `unproven`, the level's queue order not proven.
+    fn takes(book: &OrderBook<InnerL4Order>, priorities: &[(u64, u64)], basis_ms: u64, unproven: bool, actions: &[PendingAction], takers: &[&str]) -> Vec<Vec<(Sz, Maker)>> {
+        let priorities = priorities.iter().copied().collect();
+        let queueing = Queueing::new(&priorities, basis_ms);
+        let levels = [(Side::Ask, px("105"))];
+        let base = CoinBase::new(Some(book), if unproven { &levels } else { &[] }, None);
+        let mut overlay = Overlay::default();
+        for action in actions {
+            overlay.apply(base, queueing, action);
+        }
+        takers
+            .iter()
+            .enumerate()
+            .map(|(index, size)| {
+                let ioc = action(100 + index, BookOp::Place(order(Side::Bid, "105", size, Tif::Ioc, None)));
+                overlay.apply(base, queueing, &ioc).fills.into_iter().map(|fill| (fill.sz, fill.maker)).collect()
+            })
+            .collect()
+    }
+
+    /// The makers an IOC of 3 meets.
+    fn queue(book: &OrderBook<InnerL4Order>, priorities: &[(u64, u64)], basis_ms: u64, actions: &[PendingAction]) -> Vec<Maker> {
+        takes(book, priorities, basis_ms, false, actions, &["3"]).remove(0).into_iter().map(|(_, maker)| maker).collect()
+    }
+
+    /// Batch 2f, HL docs "Priority fees"' example: A (no fee) placed at t', B (fee p) at t' + T - 1 ms goes in front of
+    /// it, C (fee p' > p) at t' + T + 1 ms behind it - B, A, C -, whether A is a replica order or pending.
+    #[test]
+    fn the_docs_example_queues_b_a_c() {
+        let (b, c) = (alo_at_105(1, 5, 1_399), alo_at_105(2, 9, 1_401));
+        assert_eq!(queue(&asks_at_105(&[(10, 1_000)]), &[], 0, &[b.clone(), c.clone()]), [pending(1), mine(10), pending(2)]);
+        assert_eq!(queue(&asks_at_105(&[]), &[], 0, &[alo_at_105(0, 0, 1_000), b, c]), [pending(1), pending(0), pending(2)]);
+    }
+
+    /// Batch 2f: a pending ALO passes from the back each order placed under 400 ms before it with a lower priority,
+    /// and stops at the first other: one of 6 at 1,300 ms passes a replica order of 3 placed at 1,000, not one placed
+    /// at 800 or one of 9; nor one of none behind a younger one of 9 (only the tail compares); it passes two young
+    /// orders of none and stops at an old one, taken between them.
+    #[test]
+    fn a_pending_alo_passes_the_tail_of_lower_priorities_under_the_window() {
+        let alo = alo_at_105(1, 6, 1_300);
+        let book = asks_at_105(&[(10, 1_000)]);
+        assert_eq!(queue(&book, &[(10, 3)], 0, std::slice::from_ref(&alo)), [pending(1), mine(10)]);
+        assert_eq!(queue(&asks_at_105(&[(10, 800)]), &[(10, 3)], 0, std::slice::from_ref(&alo)), [mine(10), pending(1)]);
+        assert_eq!(queue(&book, &[(10, 9)], 0, std::slice::from_ref(&alo)), [mine(10), pending(1)]);
+        assert_eq!(queue(&asks_at_105(&[(10, 1_200), (11, 1_250)]), &[(11, 9)], 0, std::slice::from_ref(&alo)), [mine(10), mine(11), pending(1)]);
+        let fills = takes(&asks_at_105(&[(10, 500), (11, 1_200), (12, 1_250)]), &[], 0, false, &[alo], &["1.5"]);
+        assert_eq!(fills, [vec![(sz("1"), mine(10)), (sz("0.5"), pending(1))]]);
+    }
+
+    /// Review 000620 r1 P2-1: a pending order is placed no earlier than the confirmed block - seen at 1,100 ms with the
+    /// block at 1,800, a replica order of 1,000 is 800 ms older -; 400 ms exactly is out of the window; two pending ones
+    /// in one ms compare in execution order, a later higher priority going in front, an equal one behind.
+    #[test]
+    fn the_window_runs_from_the_confirmed_block_and_excludes_400_ms() {
+        let book = asks_at_105(&[(10, 1_000)]);
+        assert_eq!(queue(&book, &[], 1_800, &[alo_at_105(1, 6, 1_100)]), [mine(10), pending(1)]);
+        assert_eq!(queue(&book, &[], 0, &[alo_at_105(1, 6, 1_400)]), [mine(10), pending(1)]);
+        assert_eq!(queue(&book, &[], 0, &[alo_at_105(1, 6, 1_399)]), [pending(1), mine(10)]);
+        let empty = asks_at_105(&[]);
+        assert_eq!(queue(&empty, &[], 0, &[alo_at_105(1, 3, 2_000), alo_at_105(2, 6, 2_000)]), [pending(2), pending(1)]);
+        assert_eq!(queue(&empty, &[], 0, &[alo_at_105(1, 3, 2_000), alo_at_105(2, 3, 2_050)]), [pending(1), pending(2)]);
+    }
+
+    /// Batch 2f: without a priority an ALO queues behind; a replica order the overlay took out stops nothing - its
+    /// cancel by oid ahead, the ALO passes the young one of none before it -; at a level whose queue order is not proven
+    /// the ALO queues behind and the taker's fills there name no maker (review 000620 r2: the ALO would go in front of
+    /// both replica orders, the second taker's naming it wrong).
+    #[test]
+    fn no_priority_an_order_taken_out_and_an_unproven_level() {
+        let book = asks_at_105(&[(10, 1_200), (11, 1_250)]);
+        assert_eq!(queue(&book, &[(11, 9)], 0, &[alo_at_105(1, 0, 1_300)]), [mine(10), mine(11), pending(1)]);
+        let cancel = action(0, BookOp::Cancel(Oid::new(11)));
+        assert_eq!(queue(&book, &[(11, 9)], 0, &[cancel, alo_at_105(1, 6, 1_300)]), [pending(1), mine(10)]);
+        let unproven = takes(&book, &[], 0, true, &[alo_at_105(1, 5, 1_300)], &["1", "2"]);
+        assert_eq!(unproven, [vec![(sz("1"), Maker::Unattributed)], vec![(sz("2"), Maker::Unattributed)]]);
+        // behind them there: an IOC takes the replica's first, whose cancel then finds it gone; the next IOC takes 2
+        let cancel = action(3, BookOp::Cancel(Oid::new(10)));
+        let unproven = takes(&book, &[], 0, true, &[alo_at_105(1, 5, 1_300), action(2, BookOp::Place(order(Side::Bid, "105", "1", Tif::Ioc, None))), cancel], &["2"]);
+        assert_eq!(unproven, [vec![(sz("2"), Maker::Unattributed)]]);
+    }
+
+    /// Review 000620 r1 P2-4: a replica order A and a pending one P of 1.0 each at 105, an IOC of 1, a cancel of A by oid,
+    /// another IOC of 1. P in front of A, the first IOC takes P and the cancel A: the second takes nothing at 105; with P
+    /// behind A, the first takes A, the cancel finds it gone and the second takes P.
+    #[test]
+    fn the_queue_decides_what_a_cancel_leaves() {
+        let book = asks_at_105(&[(10, 1_200)]);
+        let queueing = no_priorities();
+        let base = CoinBase::new(Some(&book), &[], None);
+        for (priority, expected) in [(5, [vec![pending(1)], vec![]]), (0, [vec![mine(10)], vec![pending(1)]])] {
+            let mut overlay = Overlay::default();
+            overlay.apply(base, queueing, &alo_at_105(1, priority, 1_300));
+            let first = overlay.apply(base, queueing, &action(2, BookOp::Place(order(Side::Bid, "105", "1", Tif::Ioc, None))));
+            overlay.apply(base, queueing, &action(3, BookOp::Cancel(Oid::new(10))));
+            let second = overlay.apply(base, queueing, &action(4, BookOp::Place(order(Side::Bid, "105", "1", Tif::Ioc, None))));
+            let makers = [first, second].map(|effect| effect.fills.into_iter().map(|fill| fill.maker).collect::<Vec<_>>());
+            assert_eq!(makers, expected, "priority {priority}");
+        }
     }
 }
