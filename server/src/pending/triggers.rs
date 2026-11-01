@@ -7,11 +7,8 @@
 //!   past the frame's band leaves the coin's orders unknown: none run.
 //! - In what order: ascending (effective size, account, oid) - the node's observed activation order (README "Observed
 //!   trigger activation order"), the effective size the frame's, as the action began.
-//! - At what limit: a market trigger order takes as an IOC 10% past its trigger price, whatever its own limit (its own
-//!   is its trigger price as a rule, so it would take nothing once the mark is past: the node's order statuses of bm
-//!   11-01 17:00-19:00, 3,520 market trigger orders run, each one's limit from -1 to +10 bp of its trigger price x 0.9
-//!   for a sale, x 1.1 for a buy, its own limit kept only where it was that price already; HL docs "Take profit and
-//!   stop loss orders": a 10% slippage tolerance); a limit one is a GTC at its own.
+//! - At what limit: the entry's, the worst price the node runs it at (`forced_flow::trigger_limit`: a market trigger
+//!   order 10% past its trigger price whatever its own limit, as an IOC; a limit one at its own, as a GTC).
 //! - How much: a plain order its size; a reduce-only one its size at most what it closes of its account's position, a
 //!   position TP/SL all of it - each time the batch runs, from the positions it began with, every fill of the batch
 //!   moving its taker's and its known maker's position (review 000642 r1 P2-1, r3).
@@ -87,9 +84,6 @@ fn coin_fired(coin: &str, mark: Option<u64>, frames: &TriggerFrames) -> Result<F
     fired(ready, mark_px, TRIGGER_TIER.bps())
 }
 
-/// A market trigger order's limit past its trigger price, percent (module doc).
-const MARKET_SLIPPAGE_PERCENT: u64 = 10;
-
 /// The book's units (1e-8) of one raw size unit (10^-szDecimals).
 const fn sz_scale(size_decimals: u32) -> i128 {
     10_i128.pow(8 - size_decimals)
@@ -164,10 +158,11 @@ pub(crate) fn fired(ready: &ReadyFlow, mark_px: Px, band_bps: u32) -> Result<Fir
             (false, true) => Sizing::ReduceOnly,
             (false, false) => Sizing::Order,
         };
-        let (tif, limit_px) = match kind {
-            OrderKind::Market => (Tif::Ioc, market_limit(order.side, *trigger_px)),
-            OrderKind::Limit => (Tif::Gtc, order.limit_px),
+        let tif = match kind {
+            OrderKind::Market => Tif::Ioc,
+            OrderKind::Limit => Tif::Gtc,
         };
+        let limit_px = entry.limit_px.expect("a trigger order's entry has its limit");
         let position = i128::from(entry.position_raw) * sz_scale(ready.size_decimals);
         let run = TriggerOrder { oid: order.oid, user: order.user, side: order.side, limit_px, tif, sz: order.sz, sizing };
         fired.push(((entry.size_raw, order.user, order.oid), run, position));
@@ -181,15 +176,6 @@ pub(crate) fn fired(ready: &ReadyFlow, mark_px: Px, band_bps: u32) -> Result<Fir
     positions.dedup_by_key(|(user, _)| *user);
     let orders = fired.into_iter().map(|(_, order, _)| order).collect();
     Ok(Fired { batch: Some(TriggerBatch { orders, positions }), outcomes })
-}
-
-/// A market trigger order's limit: `MARKET_SLIPPAGE_PERCENT` below its trigger price for a sale, above for a buy.
-fn market_limit(side: Side, trigger_px: Px) -> Px {
-    let percent = match side {
-        Side::Ask => 100 - MARKET_SLIPPAGE_PERCENT,
-        Side::Bid => 100 + MARKET_SLIPPAGE_PERCENT,
-    };
-    Px::new(u64::try_from(u128::from(trigger_px.value()) * u128::from(percent) / 100).expect("a trigger price x 1.1 fits the book's units"))
 }
 
 /// The batch's positions as its orders run: the one book of a fill's bearing on them (review 000642 r3).
@@ -236,7 +222,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         accounts::{
-            forced_flow::{Entry, SizeReason},
+            forced_flow::{Entry, SizeReason, trigger_limit},
             forced_flow_owner::{FlowEntry, LocalCalibre, TriggerStatus, WalkStatus},
         },
         order_book::{Coin as BookCoin, Oid},
@@ -322,7 +308,7 @@ pub(crate) mod tests {
             size_raw: candidate.size_raw,
             size_reason: SizeReason::OrderSize,
             notional: 0.0,
-            limit_px: Some(px(candidate.limit)),
+            limit_px: Some(trigger_limit(candidate.kind, candidate.side, px(candidate.limit), px(candidate.trigger)).unwrap()),
             trailing: candidate.trailing,
         };
         FlowEntry { entry, walk: None, cumulative: None }
@@ -346,18 +332,14 @@ pub(crate) mod tests {
         fired.batch.as_ref().map_or_else(Vec::new, |batch| batch.orders.iter().map(|order| order.oid).collect())
     }
 
-    /// Bm 11-01: a market trigger order runs 10% past its trigger price - HYPE's sale at 87.98 to 79.182 (79.183 run),
-    /// SUI's buy at 0.90198 to 0.992178 (0.99218 run) -, whatever its own limit.
+    /// A batch's order takes the entry's limit: the node's (`forced_flow::trigger_limit`), never the order's own.
     #[test]
-    fn a_market_trigger_order_takes_ten_percent_past_its_trigger_price() {
+    fn a_batch_order_takes_its_entrys_limit() {
         let sale = Candidate { trigger: "87.98", limit: "87.98", ..stop(1, 1, "87.98") };
-        let buy = Candidate { side: Side::Bid, direction: Direction::Up, trigger: "0.90198", limit: "0.81", ..stop(2, 2, "0.90198") };
-        let limit = |candidate: Candidate, mark: &str| {
-            let ready = ReadyFlow { node_mark_raw: px(mark).value() / 10_000_000, ..ready("1", vec![candidate]) };
-            fired(&ready, px(mark), 50).unwrap().batch.unwrap().orders[0].limit_px
-        };
-        assert_eq!(limit(sale, "87.98"), px("79.182"));
-        assert_eq!(limit(buy, "0.90198"), px("0.992178"));
+        let ready = ReadyFlow { node_mark_raw: px("87.98").value() / 10_000_000, ..ready("1", vec![sale]) };
+        let entry_limit = ready.entries[0].entry.limit_px;
+        assert_eq!(entry_limit, Some(px("79.182")));
+        assert_eq!(fired(&ready, px("87.98"), 50).unwrap().batch.unwrap().orders[0].limit_px, px("79.182"));
     }
 
     /// A fall's order fires at its price and above it, a rise's at its price and below; one the mark is past fires at

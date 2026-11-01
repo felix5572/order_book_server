@@ -35,6 +35,11 @@ use crate::{
 
 /// The listener's fixed-point unit: its prices and sizes are integers of 1e-8.
 const FIXED_POINT_DECIMALS: u32 = 8;
+/// How far past its trigger price a market trigger order takes, percent: HL runs it as an IOC there whatever its own
+/// limit, which is its trigger price as a rule (the node's order statuses of bm 11-01 17:00-19:00: 3,520 market trigger
+/// orders run, each one's limit from -1 to +10 bp of its trigger price x 0.9 for a sale, x 1.1 for a buy, its own kept
+/// only where it was that price already; HL docs "Take profit and stop loss orders": a 10% slippage tolerance).
+const MARKET_TRIGGER_SLIPPAGE_PERCENT: u64 = 10;
 /// The summary's distances, bp; a band holds every entry up to its edge (a negative distance included).
 pub(crate) const BAND_EDGES_BPS: [u32; 9] = [1, 5, 10, 25, 50, 100, 200, 500, 1_000];
 
@@ -199,7 +204,8 @@ pub(crate) struct Entry {
     pub(crate) size_reason: SizeReason,
     /// size × level, USD.
     pub(crate) notional: f64,
-    /// The worst price it takes: a trigger order's limit; a liquidation takes any.
+    /// The worst price it takes as the node runs it: a limit trigger order's own limit, a market one's
+    /// `MARKET_TRIGGER_SLIPPAGE_PERCENT` past its trigger price; a liquidation takes any.
     pub(crate) limit_px: Option<Px>,
     /// A trailing stop, at its trigger price as it stands.
     pub(crate) trailing: bool,
@@ -304,9 +310,22 @@ fn trigger_entry(trigger: &TriggerInput, size_decimals: u32, marks: Marks, posit
         size_raw,
         size_reason,
         notional: notional(size_raw, size_decimals, level_px),
-        limit_px: Some(order.limit_px),
+        limit_px: Some(trigger_limit(kind, order.side, order.limit_px, trigger.trigger_px).map_err(|err| format!("trigger order {}: {err}", order.oid))?),
         trailing,
     }))
+}
+
+/// The worst price a trigger order takes as the node runs it: a limit one its own limit; a market one
+/// `MARKET_TRIGGER_SLIPPAGE_PERCENT` under its trigger price for a sale, over it for a buy, whatever its own. `Err` for a
+/// buy's beyond the listener's units (review 000650 r1 P3: a price it parses, x 1.1).
+pub(crate) fn trigger_limit(kind: OrderKind, side: Side, own_limit: Px, trigger_px: Px) -> Result<Px, String> {
+    let percent = match (kind, side) {
+        (OrderKind::Limit, _) => return Ok(own_limit),
+        (OrderKind::Market, Side::Ask) => 100 - MARKET_TRIGGER_SLIPPAGE_PERCENT,
+        (OrderKind::Market, Side::Bid) => 100 + MARKET_TRIGGER_SLIPPAGE_PERCENT,
+    };
+    let limit = u128::from(trigger_px.value()) * u128::from(percent) / 100;
+    u64::try_from(limit).map(Px::new).map_err(|_| format!("market limit of trigger price {} past the listener's units", trigger_px.value()))
 }
 
 /// What a trigger order of `size_raw` takes of `position_raw`: a reduce-only order at most what it reduces, a position
@@ -628,6 +647,33 @@ mod tests {
             Source::Liquidation { .. } => None,
         }).collect();
         assert_eq!(trigger_pxs, [Some(Px::new(99 * UNIT)), Some(Px::new(97 * UNIT)), None]);
+    }
+
+    /// Bm 11-01: a market trigger order takes 10% past its trigger price whatever its own limit - HYPE's sale at 87.98
+    /// to 79.182 (79.183 run), SUI's buy at 0.90198 to 0.992178 (0.99218 run) -; a limit one at its own.
+    #[test]
+    fn a_trigger_order_takes_to_the_limit_the_node_runs_it_at() {
+        let px = |text: &str| Px::parse_from_str(text).unwrap();
+        assert_eq!(trigger_limit(OrderKind::Market, Side::Ask, px("87.98"), px("87.98")), Ok(px("79.182")));
+        assert_eq!(trigger_limit(OrderKind::Market, Side::Bid, px("0.81"), px("0.90198")), Ok(px("0.992178")));
+        assert_eq!(trigger_limit(OrderKind::Limit, Side::Ask, px("87.5"), px("87.98")), Ok(px("87.5")));
+        // review 000650 r1 P3: a buy's limit past the listener's units is the coin's error, not a panic
+        let huge = Px::new(u64::MAX / 100 * 95);
+        assert!(trigger_limit(OrderKind::Market, Side::Bid, huge, huge).is_err());
+        assert_eq!(trigger_limit(OrderKind::Market, Side::Ask, huge, huge), Ok(Px::new(u64::try_from(u128::from(huge.value()) * 90 / 100).unwrap())));
+        // their own limit their trigger price, as a market trigger order's is as a rule
+        let triggers: Vec<TriggerInput> = [stop(1, 1, Side::Ask, "Price below 99", 99, UNIT), Order { oid: 2, order_type: "Stop Limit", ..stop(1, 1, Side::Ask, "Price below 99", 99, UNIT) }]
+            .iter()
+            .map(|order| {
+                let mut trigger = input(order);
+                Arc::make_mut(&mut trigger.order).limit_px = trigger.trigger_px;
+                trigger
+            })
+            .collect();
+        let inputs = CoinInputs { size_decimals: 0, node_mark_raw: MARK_RAW, local_mark_raw: None, triggers: &triggers, liquidations: &[] };
+        let flow = coin_flow(&inputs, |_| 10).unwrap();
+        let limits: Vec<Option<Px>> = flow.entries.iter().map(|entry| entry.limit_px).collect();
+        assert_eq!(limits, [Some(Px::new(99 * UNIT * 9 / 10)), Some(Px::new(99 * UNIT))], "the market one 10% under, the limit one its own");
     }
 
     #[test]

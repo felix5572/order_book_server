@@ -1599,3 +1599,23 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - 自己的限价是 1 的市价卖单，限价取 90，限价单保持自己的 1。
   - 变异两处都有测试失败：仍用自己的限价、买卖方向反了。
 - **范围外（单独报告）**：forced flow 的 walk 对市价触发单也用它自己的限价（`Entry::limit_px`），扫盘估计会在触发价处停住。不在本批。
+
+## 2026-11-01 forced flow：市价触发单的 `limitPx` 和单笔扫盘按节点的执行限价（用户 11-01 “如果小修复发现了就修复吧”）
+
+- **起因**：2l 第三步发现，市价触发单在节点上按触发价 10% 滑点执行，不用它自己的限价，见上一节。
+  - forced flow 的 `trigger_entry` 原来把 `Entry::limit_px` 设成单上自己的限价，而它通常就是触发价。
+  - 于是 `extForcedFlow` 每条市价触发单的单笔扫盘（`walk`）在触发价处停住（`end: limitReached`），低估了它会扫到的深度。
+  - 累计扫盘（`cumulativeWalk`）本来就不设价格限制，不受影响。`forced_flow_trader` 的布防判断读累计扫盘；单笔扫盘读出的盘口档位只给 IOC 用，IOC 10-31 起已关闭。
+- **改了什么**：
+  - `accounts/forced_flow.rs` 新增 `trigger_limit(kind, side, own_limit, trigger_px)`：
+    - 限价触发单取它自己的限价；
+    - 市价触发单：卖为触发价 ×0.9，买为 ×1.1（`MARKET_TRIGGER_SLIPPAGE_PERCENT` = 10）。
+    - `Entry::limit_px` 由它给出，单笔扫盘随之按这个价走。
+    - 买单的 ×1.1 超出监听价格单位时返回错误，经 `trigger_entry` 走已有分支，把该币标为不可用，不会 panic（审查 000650 r1 P3）。
+  - 影子盘口（`pending/triggers.rs`）改为直接用条目的 `limit_px`，这条规则只在 forced flow 一处，原来的 `market_limit` 删除。
+- **线上协议**：`extForcedFlow` 条目的 `limitPx`，对市价触发单从“单上自己的限价”变为“节点执行的限价”。字段与格式不变，README 写明含义。主仓的 `forced_flow_trader` 和 `forced_flow_eval` 都不读这个字段。
+- **测试**（1,347 个通过）：
+  - `trigger_limit`：HYPE 卖出 87.98 → 79.182，SUI 买入 0.90198 → 0.992178，限价单保持自己的；
+  - 自己的限价等于触发价时，市价条目取 ×0.9，限价条目取自己的；
+  - 影子盘口的批次单取条目的限价。
+  - 变异两处都有测试失败：买卖方向反了、条目仍用自己的限价。
