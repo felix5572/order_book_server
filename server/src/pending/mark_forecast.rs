@@ -87,6 +87,7 @@ struct BookForecast {
 struct CoinForecast {
     asset: u32,
     coin: String,
+    size_decimals: u32,
     submitted: u64,
     last_trade: u64,
     /// The Mark cache's stored (median, bucket).
@@ -219,12 +220,17 @@ impl SgaForecasts {
         report.counted()
     }
 
-    /// The marks the merged book forecast for the line `tx_hash` in flight - (asset, coin, mark), `None` where it gave
-    /// none - in asset order: what its triggers fire on (batch 2l second step).
-    pub(crate) fn merged_marks(&self, tx_hash: &B256) -> Vec<(u32, String, Option<u64>)> {
+    /// The marks the merged book forecast for the line `tx_hash` in flight - (asset, coin, mark as a book price), why
+    /// none where it gave none - in asset order: what its triggers fire on (batch 2l second step).
+    pub(crate) fn merged_marks(&self, tx_hash: &B256) -> Vec<(u32, String, Result<Px, &'static str>)> {
         let forecast = self.in_flight.iter().find(|forecast| forecast.tx_hash == *tx_hash);
         let coins = forecast.into_iter().flat_map(|forecast| &forecast.coins);
-        coins.map(|coin| (coin.asset, coin.coin.clone(), coin.books[0].map(|book| book.mark))).collect()
+        coins
+            .map(|coin| {
+                let mark_px = coin.books[0].ok_or("no_forecast").and_then(|book| book_px(book.mark, coin.size_decimals).ok_or("mark_overflow"));
+                (coin.asset, coin.coin.clone(), mark_px)
+            })
+            .collect()
     }
 
     fn track(&mut self, forecast: Forecast, report: &mut ForecastReport) {
@@ -313,7 +319,7 @@ fn forecast(
             let books = <[BestLevels; 2]>::from(book.best(&Coin::new(name), tx.seen_ns)).map(|best| book_forecast(state, submitted, block_ns, best));
             let books = [0, 1].map(|index| books[index].inspect_err(|outcome| report.marks.push((BOOKS[index], outcome))).ok());
             let cache = state.mark_cache.as_ref().map(|cache| (cache.median, cache.last_bucket));
-            Some(CoinForecast { asset, coin: name.clone(), submitted, last_trade: state.last_trade, cache, books })
+            Some(CoinForecast { asset, coin: name.clone(), size_decimals: state.size_decimals, submitted, last_trade: state.last_trade, cache, books })
         })
         .collect();
     Forecast { tx_hash: tx.tx_hash, seen_ns: tx.seen_ns, prices_height: prices.height, coins, block: None }
@@ -343,6 +349,11 @@ fn outcome(state: Option<&CoinPriceState>, mark: u64, time_ms: u64) -> &'static 
 fn price_units(px: Px, size_decimals: u32) -> Option<u64> {
     let step = 10_u64.pow(2 + size_decimals);
     px.value().is_multiple_of(step).then(|| px.value() / step)
+}
+
+/// A perp's price units as a book price, `price_units`' inverse; `None` past a book price's range.
+fn book_px(units: u64, size_decimals: u32) -> Option<Px> {
+    units.checked_mul(10_u64.pow(2 + size_decimals)).map(Px::new)
 }
 
 #[expect(clippy::cast_precision_loss, reason = "prices are below 2^53")]

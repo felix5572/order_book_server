@@ -240,7 +240,7 @@ mod tests {
         book::Touched,
         candidates::Candidates,
         checkpoint::tests::{HOLDER, user as checkpoint_user},
-        flow_accounts::{AccountsSnapshot, FlowAccountsValidity, link, tests::serving},
+        flow_accounts::{AccountsSnapshot, CopyOwner, FlowAccountsValidity, link, tests::serving},
         forced_flow_owner::{FlowContent, FlowDemandGuard},
         forced_flow_reader::{FlowJob, FlowJobKind},
         publish::AccountsFrame,
@@ -380,7 +380,7 @@ mod tests {
         let marks = ListedMarks { height: 1_000, marks: vec![(PUMP, 12_500)] };
         let mut candidates = Candidates::new(None);
         drop(candidates.refresh(&book, Some(&marks), &[]));
-        let (mut feed, accounts, events) = link();
+        let (mut feed, accounts, events) = link(CopyOwner::ForcedFlow);
         feed.on_applied(&book, Some(&marks), &Touched::default(), &candidates);
         let (frames, mut received) = broadcast::channel(16);
         let (queries, thread) = spawn_forced_flow(None, FlowDemand::default(), accounts, events, FlowPublisher::new(frames)).unwrap();

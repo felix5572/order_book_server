@@ -1619,3 +1619,55 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - 自己的限价等于触发价时，市价条目取 ×0.9，限价条目取自己的；
   - 影子盘口的批次单取条目的限价。
   - 变异两处都有测试失败：买卖方向反了、条目仍用自己的限价。
+
+## 2026-11-01 影子盘口批次 2m-1：止损止盈单按普通挂单的方式建模（用户 11-01 “动手吧……按照正确的来”）
+
+- **起因**：2l 第二步取了捷径，被触发单的清单直接用 forced flow 的全币 50 bp 帧，带来四个问题（设计 000652 r1）：
+  - 滞后：帧要等区块写出、再等 forced flow 一轮计算；
+  - 范围：只含 node mark 50 bp 内的单，预测 mark 越出就整币未知；
+  - 口径：帧的高度不是副本的确认高度；
+  - 内存池里的触发单挂单、撤单、改单都不进清单。
+  - 2l 第三步录制（`after2l3_20261101T1857`）里，漏掉的触发单 416 张中 234 张挂单不到 1 秒就被触发；误报的 233 张中 229 张在 SGA 前已被撤。
+- **设计**：000652 r1–r5。
+- **副本里的未触发单表**：
+  - fork 时随盘口一起复制监听线程的 `TriggerTable`（`replica_copy`），含等待母单的子单、modify 继承和逐币缺口；用同一批状态行维护。
+  - 副本的表不对外报告：计数、日志、`fired_trigger_coins`（通知 forced flow 重算）都只在监听线程执行（`Observer::{Listener, Replica}`、`OrderBookState::reports`）。
+  - 副本把“触发单表有变化的币”并入变动币，该币即使盘口没变也重放（r3 P2-2）；改单后继单挂起（`SuccessorPending`）与解除也算变化（r6 P2-4）。
+  - cloid 索引含未触发的触发单：fork 时的表，和之后 `open` 的触发单。
+- **内存池的触发单动作**：
+  - 解析 `t.trigger`（触发价、是否市价、tp/sl）和动作的 `grouping`。方向由 tp/sl 与买卖决定：止损卖、止盈买为下穿，其余为上穿（bm 11-01 19 时 122,804 张 `open` 全部符合）。
+  - `positionTpsl` 为整仓单；改单的新单数量为 0 也是整仓单；`normalTpsl` 的子单（等母单成交）不建模。
+  - 新动作 `BookOp::PlaceTrigger`、`BookOp::ModifyToTrigger`；叠加层按币维护 `triggers_gone`（副本表里被撤、改、触发掉的 oid）和 `triggers_added`（待入块、未触发的单）。
+- **撤改目标统一解析**（普通单与触发单共用；撤单统一为 `BookOp::Cancel { target, fast }`）：
+  - 动作账户已知时（vault），已知属于其他账户的单不是目标，按 oid、按 cloid 都如此（代码审查 000652 r6 P2-2）；
+  - 按 oid：副本盘口 → 副本触发单表（未移出）→ 已触发单挂回的余量；
+  - 按 cloid：待入块（挂着的单、新挂的触发单）优先，其次副本盘口和副本触发单表；多于一个为歧义。
+  - 快速撤单（`f`）不撤未触发的触发单，计 `fast_trigger_refused`（HL 文档 “Cancel order(s)”，r6 P2-1）；已触发后挂着的余量照常可撤。
+  - 改成触发单的改单，沿用原准入：`always_place` 时目标在不在都挂；否则目标缺失或歧义即拒。
+- **SGA**：
+  - 在每个有预测 mark 的主站币上持有一个动作 `BookOp::SetGlobal`：mark 按“这一行执行时”的合并盘口预测，行到达时冻结；同时冻结同一位置（TWAP 切点前后与 mark 相同，r6 P2-3）被越过单的已知账户的仓位。
+  - 仓位来自影子线程自己的账户副本：账户发布器原来只喂 forced flow 一份，改为两份，各自队列、代次、重同步和有效性 watch（`CopyOwner`）；影子那份结束只关闭它自己，不撤回 forced flow。
+  - 每次应用（首次与每次重放）：候选 = 副本表里被越过的单（`in_band(coin, mark, mark, 10_000)`，减去已移出的）加上待入块里被越过的单；各触发一次，移出未触发集合（待入块单一次过滤，r6 P3）；按（有效量，已知账户在前，副本单按 oid 在待入块单前）排序，作为一批执行，规则同 2l：冻结仓位起算、每笔成交更新吃单方和已知挂单方、`trigger_limit` 定限价、余量带账户和 cloid（副本单还带 oid）挂回。
+  - 整币不执行的条件：表不完整、越过超过 10,000 张；需要仓位的单账户未知，或账户未知的单与需要仓位的单同批；需要仓位的单其账户未冻结（`positions_unfrozen`；账户副本不可用时为 `positions_unavailable`），或在本次重放里已被成交动过（`position_moved`）。
+  - 被成交动过的账户（`moved`）：重放中每笔成交的吃单方和已知挂单方都记，普通待入块挂单也带原动作的 vault（r5 P2-1）。每次应用把 `moved ∩ 冻结账户` 写回该动作的 `stale`，直到这一行结算（r4、r5 P2-2）。
+  - 实现时补的一条：判为整币不执行时，被越过的单仍视为已触发——移出未触发集合，它们的已知账户记入 `moved`。否则同一次重放里后面的 SGA 会再次触发它们。
+- **线上协议**：`extPendingTrades` 的触发吃单方：
+  - 副本单 `{"trigger": {"oid", "user"}}`，与原来相同；
+  - 待入块单 `{"trigger": {"placed": {"txHash", "action", "item", "cloid"}, "user"}}`，`user` 不知道时为 `null`，不虚构 oid。
+- **删除**：`pending/trigger_frames.rs`、`FlowFeed`、对 forced flow 帧的订阅与需求，`orderbook_pending_book_trigger_frames_total`。forced flow 只留 `trigger_limit` 一条共用规则（`OrderKind::of` 改为 `pub(crate)`）。
+- **未建模**：只有代理钱包签名、不带 vault 的动作，账户未知（2m-2 学签名人 → 账户）；HIP-3 触发单；SGA 内的强平；`normalTpsl` 子单。
+- **指标**：
+  - `orderbook_pending_book_triggers_total{outcome}`：`confirmed`、`pending`、`zero_size`；
+  - `orderbook_pending_book_trigger_coins_total{outcome}`：`executed`、`none_fired`，及上面各个不执行原因、行到达时的 `no_forecast`、`mark_overflow`；
+  - `orderbook_pending_book_accounts_resync_total{cause}`、`_accounts_queue_depth`、`_accounts_snapshot_seconds`；
+  - `overlay_total` 新增 `trigger_placed`、`set_global`。
+- **代码审查**：000652 r6 需修改（6 项 P2、1 项 P3），r7 OB 部分通过、研究脚本 3 项 P2 和 1 项 P3，r8 研究脚本 1 项 P2，均已修复。r6 各项：快速撤单不撤触发单、撤改按账户过滤且余量保留 cloid、冻结位置与 mark 一致、后继单挂起通知重放、研究工具一对一归因与旧测试迁移、批量移出一次过滤。
+- **测试**（OB lib+bins 全量通过，数字见送审）：
+  - 叠加层：每次重放按冻结仓位重算；普通买单加仓；批内挂单方减仓；按 oid 在触发前后都能找到；最小金额不判、零量；只触发一次、等号触发；待入块单触发、同账户按 cloid 撤掉、别的账户撤不到；余量按 cloid 撤；改成触发单及目标缺失时拒；账户未知的两种情形；未冻结与副本不可用；vault 挂单被吃后整仓单未知（r5 验收）；`stale` 已写入时不再用旧仓位；表缺失或不完整；盘口与触发单表同 cloid 为歧义；判未知时仍触发；快速撤单（按 oid、按 cloid）不撤触发单、可撤余量和盘口单；他人账户按 oid 撤不到（触发单、盘口单）；已确认触发单的余量按原 cloid 撤。
+  - 影子集合：随行持有、随块离开；两条 SGA 只触发一次、第一条确认后第二条重放不再触发；待入块限价单被拒后不留余量；确认撤单单独唤起重放；IOC 先确认后 `stale` 仍生效（r5 验收）；待入块按 cloid 撤副本触发单；切点前的 SGA 按切点前的状态冻结账户（r6 P2-3 反例）。
+  - 副本：fork 后与监听线程同一批状态行下表一致，且不记 `fired_trigger_coins`（真实的母单、子单、成交释放、触发行）；cloid 索引含 fork 时与之后的触发单；后继单挂起与结算（仍等母单）都报该币变动。
+  - 端到端：SGA 行触发副本止损；冻结被越过单账户的仓位（账户副本 1 BTC，整仓单卖 1）；账户副本不可用时整仓单不执行。
+  - wire：两种触发吃单方；`user` 过滤认已知账户（两种来源），不认未知。
+  - 仓位换算：原始单位 × 10^(8−szDecimals)，币不在宇宙或无副本时为未知。
+  - 变异 34 处都有测试失败：第一轮 27 处（见送审 r6），r6 修复后 7 处（快速撤单拒、按 oid 盘口单与触发单的账户过滤、确认余量的 cloid、冻结位置、后继单挂起与结算的变动通知）。“后继单结算仍等母单”第一次漏了，改用例后抓到。
+- **研究脚本**（主仓 `analyze/research/mempool_pending_book_20261031/scripts`）：`channel_compare` 认两种触发吃单方并按来源分桶；`trade_miss_causes` 的 `PlacedTriggers`：回执给 oid 用回执，回执 `waiting` 时同块同账户同触发价同量、与预测同币、cloid 完全相同（无对无）、且不是其他回执已给出的 oid 的 `open` 行一对一关联（一条行能对应多张单、或一张单对应多条行，都不归因；回执不带币名，同组其他单的币按未知处理），吃单方和挂单方余量共用；无法归因的单列 `unattributable` 类，不进漏报误报，汇总按类别计数；挂单余量的结局里 `triggered` 不算结束（000652 r7）；窗口内所有触发单都记为触发单，经 `open` 还原的挂单方其对手也能认出（r8）。54 个测试通过，变异 13 处都有测试失败。

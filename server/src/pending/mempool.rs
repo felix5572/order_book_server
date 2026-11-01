@@ -22,7 +22,10 @@ use crate::{
     accounts::{
         book::{ActionCoins, PendingAnchor},
         marks::actions::{SubmittedPrices, set_global_prices},
-        replica::{Action, OrderRef, SignedAction as WireSignedAction, WireCancel, WireCancelByCloid, WireModify, WireOrder, alo_priority},
+        replica::{
+            Action, OrderRef, SignedAction as WireSignedAction, TpslGrouping, WireCancel, WireCancelByCloid, WireModify, WireOrder, WireTrigger,
+            alo_priority,
+        },
     },
     listeners::order_book::{
         parallel::{FileLayout, LineShape, LineStream, seconds_since_node_write},
@@ -95,6 +98,29 @@ pub(crate) struct RequestedOrder {
     pub(crate) reduce_only: bool,
     pub(crate) cloid: Option<String>,
     pub(crate) tif: RequestedTif,
+    /// A trigger order's (batch 2m): `Some` exactly when `tif` is `Trigger`.
+    pub(crate) trigger: Option<RequestedTrigger>,
+}
+
+/// A trigger order as requested (batch 2m): its trigger price, whether it runs as a market order, take profit or
+/// stop loss, and its place in its action's TP/SL grouping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RequestedTrigger {
+    pub(crate) trigger_px: Px,
+    pub(crate) is_market: bool,
+    pub(crate) take_profit: bool,
+    pub(crate) grouping: TriggerGrouping,
+}
+
+/// A trigger order's place in its action (HL docs "Exchange endpoint", "Take profit and stop loss orders").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerGrouping {
+    /// Its own.
+    Alone,
+    /// Of the account's whole position (`positionTpsl`; a modify's of size 0).
+    Position,
+    /// A child of its action's first order (`normalTpsl`): it waits for that order to fill.
+    Child,
 }
 
 /// A plain decimal as written, trailing zeros of its fraction dropped: its decimals and its significant digits.
@@ -197,7 +223,7 @@ fn signed_action(signed: &WireSignedAction<'_>) -> Result<SignedAction, String> 
         "order" => {
             let orders: Vec<WireOrder> = action.field(action.orders.as_ref(), "orders")?;
             priority = alo_priority(action.requested_priority()?, &orders);
-            ActionKind::Order(orders.iter().map(requested).collect::<Result<_, _>>()?)
+            ActionKind::Order(grouped(orders.iter().map(requested).collect::<Result<_, _>>()?, action.tpsl_grouping()?))
         }
         "cancel" => {
             let fast = flag(action, action.fast.as_ref(), "f")?;
@@ -209,7 +235,7 @@ fn signed_action(signed: &WireSignedAction<'_>) -> Result<SignedAction, String> 
         }
         "modify" => {
             let target = action.field(action.oid.as_ref(), "oid")?;
-            let order = requested(&action.field(action.order.as_ref(), "order")?)?;
+            let order = modified(requested(&action.field(action.order.as_ref(), "order")?)?);
             let always_place = flag(action, action.always_place.as_ref(), "a")?;
             ActionKind::Modify { always_place, modifies: vec![Modify { target, order }] }
         }
@@ -217,7 +243,7 @@ fn signed_action(signed: &WireSignedAction<'_>) -> Result<SignedAction, String> 
             let modifies: Vec<WireModify> = action.field(action.modifies.as_ref(), "modifies")?;
             let modifies = modifies
                 .into_iter()
-                .map(|modify| Ok(Modify { order: requested(&modify.order)?, target: modify.oid }))
+                .map(|modify| Ok(Modify { order: modified(requested(&modify.order)?), target: modify.oid }))
                 .collect::<Result<_, String>>()?;
             ActionKind::Modify { always_place: flag(action, action.always_place.as_ref(), "a")?, modifies }
         }
@@ -234,6 +260,7 @@ fn flag(action: &Action<'_>, raw: Option<&LazyValue<'_>>, name: &str) -> Result<
 
 fn requested(order: &WireOrder) -> Result<RequestedOrder, String> {
     let tif = order_tif(order)?;
+    let trigger = order.t.trigger.as_ref().map(requested_trigger).transpose()?;
     Ok(RequestedOrder {
         asset: order.a,
         is_buy: order.b,
@@ -244,7 +271,47 @@ fn requested(order: &WireOrder) -> Result<RequestedOrder, String> {
         reduce_only: order.r,
         cloid: order.c.clone(),
         tif,
+        trigger,
     })
+}
+
+/// A trigger order's fields, each required (batch 2m); its grouping its own until its action says otherwise.
+fn requested_trigger(trigger: &WireTrigger) -> Result<RequestedTrigger, String> {
+    let (Some(is_market), Some(trigger_px), Some(tpsl)) = (trigger.is_market, &trigger.trigger_px, &trigger.tpsl) else {
+        return Err(format!("trigger order without isMarket, triggerPx or tpsl: {trigger:?}"));
+    };
+    let take_profit = match tpsl.as_str() {
+        "tp" => true,
+        "sl" => false,
+        other => return Err(format!("trigger order tpsl {other:?}")),
+    };
+    let trigger_px = Px::parse_from_str(trigger_px).map_err(|err| format!("trigger price {trigger_px:?}: {err}"))?;
+    Ok(RequestedTrigger { trigger_px, is_market, take_profit, grouping: TriggerGrouping::Alone })
+}
+
+/// An `order` action's trigger orders placed in its grouping: a `positionTpsl`'s of the whole position, a
+/// `normalTpsl`'s after its first order that order's children.
+fn grouped(mut orders: Vec<RequestedOrder>, grouping: TpslGrouping) -> Vec<RequestedOrder> {
+    for (index, order) in orders.iter_mut().enumerate() {
+        let Some(trigger) = &mut order.trigger else { continue };
+        trigger.grouping = match grouping {
+            TpslGrouping::None => TriggerGrouping::Alone,
+            TpslGrouping::Position => TriggerGrouping::Position,
+            TpslGrouping::Normal if index == 0 => TriggerGrouping::Alone,
+            TpslGrouping::Normal => TriggerGrouping::Child,
+        };
+    }
+    orders
+}
+
+/// A modify's new trigger order of size 0 is a position TP/SL's (a modify carries no grouping).
+const fn modified(mut order: RequestedOrder) -> RequestedOrder {
+    if let Some(trigger) = &mut order.trigger
+        && order.sz.is_zero()
+    {
+        trigger.grouping = TriggerGrouping::Position;
+    }
+    order
 }
 
 /// An order's time in force, or its being a trigger order.
@@ -446,7 +513,14 @@ mod tests {
             reduce_only,
             cloid: cloid.map(str::to_string),
             tif,
+            trigger: None,
         }
+    }
+
+    /// `order` a market stop loss at `trigger_px` (the samples' kind), of `grouping`.
+    fn triggered(order: RequestedOrder, trigger_px: &str, grouping: TriggerGrouping) -> RequestedOrder {
+        let trigger = RequestedTrigger { trigger_px: Px::parse_from_str(trigger_px).unwrap(), is_market: true, take_profit: false, grouping };
+        RequestedOrder { trigger: Some(trigger), ..order }
     }
 
     fn address(text: &str) -> Address {
@@ -492,7 +566,7 @@ mod tests {
                 kind: ActionKind::Order(vec![order(207, true, "0.00001", "1", false, Some("0x000000000000000018de99016980e8f8"), Ioc)]),
             },
             SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![order(159, false, "80.47", "0.12", false, None, FrontendMarket)]) },
-            SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![order(15, true, "0.046304", "13490", true, None, Trigger)]) },
+            SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![triggered(order(15, true, "0.046304", "13490", true, None, Trigger), "0.042095", TriggerGrouping::Alone)]) },
             SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Cancel { fast: false, cancels: vec![WireCancel { a: 151, o: 591_362_660_114 }] } },
             SignedAction {
                 vault: Some(address("0x80196a7475464e06de641df6c66e6e278cd364d5")),
@@ -531,7 +605,7 @@ mod tests {
                 priority: 0,
                 kind: ActionKind::Modify {
                     always_place: true,
-                    modifies: vec![Modify { target: OrderRef::Oid(591_179_694_313), order: order(200, true, "0.004512", "0", true, None, Trigger) }],
+                    modifies: vec![Modify { target: OrderRef::Oid(591_179_694_313), order: triggered(order(200, true, "0.004512", "0", true, None, Trigger), "0.004102", TriggerGrouping::Position) }],
                 },
             },
             SignedAction {

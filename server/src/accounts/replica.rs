@@ -178,6 +178,20 @@ impl Action<'_> {
         })
     }
 
+    /// An `order`'s grouping by its TP/SL meaning (batch 2m): `normalTpsl` (the first order's children follow it),
+    /// `positionTpsl`, or neither (`na`, a priority's); `Err` for a name HL does not list.
+    pub(crate) fn tpsl_grouping(&self) -> Result<TpslGrouping, String> {
+        match self.field(self.grouping.as_ref(), "grouping")? {
+            WireGrouping::Priority { .. } => Ok(TpslGrouping::None),
+            WireGrouping::Named(name) => match name.as_str() {
+                "na" => Ok(TpslGrouping::None),
+                "normalTpsl" => Ok(TpslGrouping::Normal),
+                "positionTpsl" => Ok(TpslGrouping::Position),
+                other => Err(format!("order grouping {other:?}")),
+            },
+        }
+    }
+
     /// A payload field the action's type requires.
     pub(crate) fn field<T: DeserializeOwned>(&self, raw: Option<&LazyValue<'_>>, name: &str) -> Result<T, String> {
         let raw = raw.ok_or_else(|| format!("{} without {name}", self.action_type))?;
@@ -205,8 +219,18 @@ pub(crate) const OUTCOME_ASSETS: u32 = 100_000_000;
 #[serde(untagged)]
 enum WireGrouping {
     /// `na`, `normalTpsl` or `positionTpsl`: no priority.
-    Named(#[expect(dead_code, reason = "any name groups without a priority")] String),
+    Named(String),
     Priority { p: u64 },
+}
+
+/// An `order` action's TP/SL grouping (HL docs "Exchange endpoint": `na`, `normalTpsl`, `positionTpsl`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TpslGrouping {
+    None,
+    /// The first order a parent, the trigger orders after it its children: they wait for it.
+    Normal,
+    /// TP/SL orders of the account's whole position.
+    Position,
 }
 
 /// An order in an `order` action's `orders`, or a modify's new order.
@@ -228,7 +252,17 @@ pub(crate) struct WireOrder {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct WireOrderType {
     pub(crate) limit: Option<WireLimit>,
-    pub(crate) trigger: Option<serde::de::IgnoredAny>,
+    pub(crate) trigger: Option<WireTrigger>,
+}
+
+/// A trigger order's `{"isMarket", "triggerPx", "tpsl"}`: each optional here - the marks read only that an order is
+/// one -, the pending book requiring them (`mempool::requested`, batch 2m).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WireTrigger {
+    pub(crate) is_market: Option<bool>,
+    pub(crate) trigger_px: Option<String>,
+    pub(crate) tpsl: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

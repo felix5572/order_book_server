@@ -7,22 +7,22 @@
 //! a signed action past its `expiresAfter` when its line came, or with an order off its coin's price or size grid -
 //! the whole action, its orders on the grid with it (HL's pre-validation, review 000617 r1 P2-1).
 
-use std::sync::Arc;
-
 use alloy::primitives::{Address, B256};
 
 use super::{
-    mempool::{ActionKind, MempoolTx, RequestedOrder, RequestedTif},
+    mempool::{ActionKind, MempoolTx, RequestedOrder, RequestedTif, RequestedTrigger, TriggerGrouping},
     refusals::TakerKey,
     signer::ActingIdentity,
-    triggers::TriggerBatch,
+    triggers::SetGlobalCoin,
 };
 use crate::{
     accounts::{
         book::{ActionAsset, ActionCoins},
+        forced_flow::OrderKind,
         replica::{CANCEL_CATEGORY, OrderRef, placing_category},
     },
-    order_book::{Coin, Oid, Px, Side, Sz},
+    listeners::order_book::triggers::Direction,
+    order_book::{Coin, Px, Side, Sz},
 };
 
 /// One order, cancel or modify of the mempool: its transaction, its signed action's place there, its own place in the
@@ -78,12 +78,54 @@ impl Tif {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BookOp {
     Place(Placement),
-    Cancel(Oid),
-    CancelByCloid(String),
+    /// A `cancel`'s or a `cancelByCloid`'s one: its target out; a fast one (`f`) refused for an untriggered trigger order
+    /// (HL docs "Cancel order(s)"; review 000652 r6 P2-1).
+    Cancel { target: OrderRef, fast: bool },
     /// A `modify`'s or one of a `batchModify`'s: its target out, its new order in (design 000604 revision 8).
     Modify { target: OrderRef, always_place: bool, order: Placement },
-    /// A `SetGlobalAction`'s triggered orders on the coin, run as one (batch 2l, `triggers`).
-    Triggers(Arc<TriggerBatch>),
+    /// A trigger order placed (batch 2m): untriggered from now on, until a `SetGlobal` fires it or an action takes it out.
+    PlaceTrigger(PendingTrigger),
+    /// A modify whose new order is a trigger order: its target out, the trigger order in.
+    ModifyToTrigger { target: OrderRef, always_place: bool, order: PendingTrigger },
+    /// A `SetGlobalAction` on the coin (batch 2m): it fires the untriggered orders its forecast mark reaches.
+    SetGlobal(Box<SetGlobalCoin>),
+}
+
+/// A trigger order as the mempool places it (batch 2m, hyperliquid-trade design 000652): its direction the mark reaches
+/// it from - a stop loss's sale and a take profit's buy on a fall, the others on a rise (bm 11-01 19:00-20:00, 122,804
+/// trigger orders opened, every one so) -, its limit its own (a market one runs past it: `forced_flow::trigger_limit`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingTrigger {
+    pub(crate) side: Side,
+    pub(crate) trigger_px: Px,
+    pub(crate) direction: Direction,
+    pub(crate) kind: OrderKind,
+    pub(crate) limit_px: Px,
+    pub(crate) sz: Sz,
+    pub(crate) reduce_only: bool,
+    pub(crate) position_tpsl: bool,
+    pub(crate) cloid: Option<String>,
+}
+
+impl PendingTrigger {
+    fn of(order: &RequestedOrder, trigger: RequestedTrigger) -> Self {
+        let side = if order.is_buy { Side::Bid } else { Side::Ask };
+        let direction = match (side, trigger.take_profit) {
+            (Side::Ask, false) | (Side::Bid, true) => Direction::Down,
+            (Side::Bid, false) | (Side::Ask, true) => Direction::Up,
+        };
+        Self {
+            side,
+            trigger_px: trigger.trigger_px,
+            direction,
+            kind: if trigger.is_market { OrderKind::Market } else { OrderKind::Limit },
+            limit_px: order.limit_px,
+            sz: order.sz,
+            reduce_only: order.reduce_only,
+            position_tpsl: trigger.grouping == TriggerGrouping::Position,
+            cloid: order.cloid.clone(),
+        }
+    }
 }
 
 impl BookOp {
@@ -91,7 +133,7 @@ impl BookOp {
     pub(crate) const fn placement(&self) -> Option<&Placement> {
         match self {
             Self::Place(order) | Self::Modify { order, .. } => Some(order),
-            Self::Cancel(_) | Self::CancelByCloid(_) | Self::Triggers(_) => None,
+            Self::Cancel { .. } | Self::PlaceTrigger(_) | Self::ModifyToTrigger { .. } | Self::SetGlobal(_) => None,
         }
     }
 
@@ -100,10 +142,12 @@ impl BookOp {
             Self::Place(Placement { tif: Tif::Alo, .. }) => "place_alo",
             Self::Place(Placement { tif: Tif::Gtc, .. }) => "place_gtc",
             Self::Place(Placement { tif: Tif::Ioc | Tif::FrontendMarket, .. }) => "place_ioc",
-            Self::Cancel(_) => "cancel",
-            Self::CancelByCloid(_) => "cancel_by_cloid",
+            Self::Cancel { target: OrderRef::Oid(_), .. } => "cancel",
+            Self::Cancel { target: OrderRef::Cloid(_), .. } => "cancel_by_cloid",
             Self::Modify { .. } => "modify",
-            Self::Triggers(_) => "triggers",
+            Self::PlaceTrigger(_) => "place_trigger",
+            Self::ModifyToTrigger { .. } => "modify_trigger",
+            Self::SetGlobal(_) => "set_global",
         }
     }
 }
@@ -127,14 +171,6 @@ pub(crate) struct PendingAction {
 }
 
 impl PendingAction {
-    /// The orders it holds against the set's cap: a trigger batch's each (review 000642 r2), any other one.
-    pub(crate) fn occupancy(&self) -> usize {
-        match &self.op {
-            BookOp::Triggers(batch) => batch.orders.len(),
-            _ => 1,
-        }
-    }
-
     /// The key of its taker's margin refusals (batch 2g): a new order that may take, of a known identity.
     pub(crate) fn taker_key(&self) -> Option<TakerKey> {
         let BookOp::Place(order) = &self.op else { return None };
@@ -238,27 +274,41 @@ fn too_large(order: &RequestedOrder, asset: &ActionAsset) -> bool {
 }
 
 /// Each (place in the action, asset, op, the order it places as requested) of an action, in its order, its orders
-/// placed with `priority`; a trigger order, or a modify placing one, left out (no target of a modify placing a trigger
-/// order is taken out either: design 000604 revision 8).
+/// placed with `priority`; a trigger order placed, or a modify placing one, an op of its own (batch 2m; design 000604
+/// revision 8 had left them out).
 fn book_ops(kind: &ActionKind, priority: u64) -> Vec<(usize, u32, BookOp, Option<&RequestedOrder>)> {
     let ops: Vec<Option<(u32, BookOp, Option<&RequestedOrder>)>> = match kind {
-        ActionKind::Order(orders) => {
-            orders.iter().map(|order| Some((order.asset, BookOp::Place(placement(order, priority)?), Some(order)))).collect()
+        ActionKind::Order(orders) => orders.iter().map(|order| Some((order.asset, order_op(order, priority)?, Some(order)))).collect(),
+        ActionKind::Cancel { fast, cancels } => {
+            cancels.iter().map(|cancel| Some((cancel.a, BookOp::Cancel { target: OrderRef::Oid(cancel.o), fast: *fast }, None))).collect()
         }
-        ActionKind::Cancel { cancels, .. } => cancels.iter().map(|cancel| Some((cancel.a, BookOp::Cancel(Oid::new(cancel.o)), None))).collect(),
-        ActionKind::CancelByCloid { cancels, .. } => {
-            cancels.iter().map(|cancel| Some((cancel.asset, BookOp::CancelByCloid(cancel.cloid.clone()), None))).collect()
+        ActionKind::CancelByCloid { fast, cancels } => {
+            cancels.iter().map(|cancel| Some((cancel.asset, BookOp::Cancel { target: OrderRef::Cloid(cancel.cloid.clone()), fast: *fast }, None))).collect()
         }
         ActionKind::Modify { always_place, modifies } => modifies
             .iter()
             .map(|modify| {
-                let order = placement(&modify.order, 0)?;
-                Some((modify.order.asset, BookOp::Modify { target: modify.target.clone(), always_place: *always_place, order }, Some(&modify.order)))
+                let (target, always_place) = (modify.target.clone(), *always_place);
+                let op = match modify.order.trigger {
+                    Some(trigger) => BookOp::ModifyToTrigger { target, always_place, order: PendingTrigger::of(&modify.order, trigger) },
+                    None => BookOp::Modify { target, always_place, order: placement(&modify.order, 0)? },
+                };
+                Some((modify.order.asset, op, Some(&modify.order)))
             })
             .collect(),
         ActionKind::SetGlobal(_) | ActionKind::Other => Vec::new(),
     };
     ops.into_iter().enumerate().filter_map(|(item, op)| op.map(|(asset, op, order)| (item, asset, op, order))).collect()
+}
+
+/// An `order` action's order: a book order, or a trigger order of its own or of the whole position; a `normalTpsl`'s
+/// child, waiting for its parent, is left out (batch 2m: not modelled).
+fn order_op(order: &RequestedOrder, priority: u64) -> Option<BookOp> {
+    match order.trigger {
+        Some(RequestedTrigger { grouping: TriggerGrouping::Child, .. }) => None,
+        Some(trigger) => Some(BookOp::PlaceTrigger(PendingTrigger::of(order, trigger))),
+        None => Some(BookOp::Place(placement(order, priority)?)),
+    }
 }
 
 fn placement(order: &RequestedOrder, priority: u64) -> Option<Placement> {
@@ -304,6 +354,7 @@ pub(crate) mod tests {
             reduce_only: false,
             cloid: cloid.map(str::to_string),
             tif,
+            trigger: None,
         }
     }
 

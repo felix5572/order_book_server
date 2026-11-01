@@ -102,13 +102,15 @@ pub(crate) struct Publisher {
     marks_available: bool,
     /// The forced flow's copy of the view (review 000563): `None` without a forced flow thread.
     flow: Option<FlowAccountsFeed>,
+    /// The pending book's (hyperliquid-trade design 000652 r2): `None` without a pending book.
+    pending: Option<FlowAccountsFeed>,
 }
 
 impl Publisher {
     pub(crate) fn new(subscriptions: CoinSubscriptions, frames: broadcast::Sender<Arc<AccountsFrame>>) -> Self {
         let (prices, _) = watch::channel(Err(marks_unavailable(&Unavailable::Initializing)));
         let (pending_anchor, _) = watch::channel(None);
-        Self { subscriptions, frames, prices, pending_anchor, available: false, marks_available: false, flow: None }
+        Self { subscriptions, frames, prices, pending_anchor, available: false, marks_available: false, flow: None, pending: None }
     }
 
     /// The forced flow thread's copy of the view, fed from now on.
@@ -116,19 +118,29 @@ impl Publisher {
         self.flow = Some(feed);
     }
 
-    /// After an input or an anchor, before the candidates' refresh: the forced flow's copy brought to the view as it
-    /// stands (`FlowAccountsFeed::on_applied`).
-    pub(crate) fn flow_applied(&mut self, book: &AccountBook, marks: Option<&dyn MarksAt>, touched: &Touched, candidates: &Candidates) {
-        self.with_flow(|feed| feed.on_applied(book, marks, touched, candidates));
+    /// The pending book thread's copy of the view, fed from now on.
+    pub(crate) fn attach_pending(&mut self, feed: FlowAccountsFeed) {
+        self.pending = Some(feed);
     }
 
-    /// After a refresh: the height the candidates are confirmed at, for the forced flow's copy.
-    pub(crate) fn flow_candidates_confirmed(&mut self, candidates: &Candidates) {
-        self.with_flow(|feed| feed.on_candidates_confirmed(candidates));
+    /// After an input or an anchor, before the candidates' refresh: the copies brought to the view as it stands
+    /// (`FlowAccountsFeed::on_applied`).
+    pub(crate) fn copies_applied(&mut self, book: &AccountBook, marks: Option<&dyn MarksAt>, touched: &Touched, candidates: &Candidates) {
+        self.with_copies(|feed| feed.on_applied(book, marks, touched, candidates));
     }
 
-    /// A step of the feed; the forced flow thread found gone withdraws the forced flow, once.
-    fn with_flow(&mut self, step: impl FnOnce(&mut FlowAccountsFeed)) {
+    /// After a refresh: the height the candidates are confirmed at, for the copies.
+    pub(crate) fn copies_candidates_confirmed(&mut self, candidates: &Candidates) {
+        self.with_copies(|feed| feed.on_candidates_confirmed(candidates));
+    }
+
+    /// A step of each copy's feed, each on its own (design 000652 r2): the forced flow thread found gone withdraws the
+    /// forced flow, once; the pending book's gone only closes its copy (its feed logs it).
+    fn with_copies(&mut self, step: impl Fn(&mut FlowAccountsFeed)) {
+        if let Some(feed) = &mut self.pending {
+            step(feed);
+            drop(feed.take_ended());
+        }
         let Some(feed) = &mut self.flow else { return };
         step(feed);
         if let Some(reason) = feed.take_ended() {
@@ -258,11 +270,11 @@ impl Publisher {
             Refresh::Unchanged => {}
             Refresh::Changes(changes) => {
                 let changes = Arc::new(changes);
-                self.with_flow(|feed| feed.on_candidates(&changes));
+                self.with_copies(|feed| feed.on_candidates(&changes));
                 self.send(AccountsFrame::Candidates(changes), "candidates");
             }
             Refresh::Withdrawn(reason) => {
-                self.with_flow(|feed| feed.on_candidates_withdrawn(&reason));
+                self.with_copies(|feed| feed.on_candidates_withdrawn(&reason));
                 self.send(AccountsFrame::CandidatesWithdrawn { reason }, "candidatesWithdrawn");
             }
         }

@@ -1,4 +1,5 @@
-//! The forced flow's copy of the account view (hyperliquid-trade review 000563 r1–r2): what the forced flow reads of it
+//! The forced flow's copy of the account view (hyperliquid-trade review 000563 r1–r2) - and since batch 2m the pending
+//! book's, a second one fed the same way (design 000652 r2, `CopyOwner`): what the forced flow reads of it
 //! (the coins' size decimals, the node marks, the open positions and the liquidation candidates, with the heights they
 //! stand at), kept on the forced flow thread from the account owner's events, so that a long synchronous step of the
 //! owner (a candidates refresh, an anchor install) no longer holds the forced flow's frames. The account view stays the
@@ -27,6 +28,7 @@ use std::{
 
 use alloy::primitives::Address;
 use log::error;
+use prometheus::{IntCounterVec, IntGauge};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{
     mpsc::{self, error::TrySendError},
@@ -40,15 +42,58 @@ use super::{
     forced_flow::LiquidationInput,
     marks::MarksAt,
 };
-use crate::metrics::{FORCED_FLOW_ACCOUNTS_QUEUE_DEPTH, FORCED_FLOW_ACCOUNTS_RESYNC_TOTAL, FORCED_FLOW_ACCOUNTS_SNAPSHOT_SECONDS};
+use crate::metrics::{
+    FORCED_FLOW_ACCOUNTS_QUEUE_DEPTH, FORCED_FLOW_ACCOUNTS_RESYNC_TOTAL, FORCED_FLOW_ACCOUNTS_SNAPSHOT_SECONDS, PENDING_BOOK_ACCOUNTS_QUEUE_DEPTH,
+    PENDING_BOOK_ACCOUNTS_RESYNC_TOTAL, PENDING_BOOK_ACCOUNTS_SNAPSHOT_SECONDS,
+};
 
 /// Events queued for the forced flow thread. A block's event holds a few to some hundred positions, a candidates'
 /// change shares its `Arc` with the broadcast; a full queue costs a snapshot, not a wait (r2 revision 5: measured live).
 pub(crate) const FLOW_ACCOUNTS_CAPACITY: usize = 256;
 
 pub(crate) const OWNER_ENDED: &str = "the account view's owner ended";
-const BEHIND: &str = "the forced flow fell behind the account view: resynchronizing";
+const BEHIND: &str = "the copy fell behind the account view: resynchronizing";
 const NO_SNAPSHOT: &str = "waiting for the account view's snapshot";
+
+/// The thread a copy of the view serves, each copy its own queue, watch and counts: one ending or falling behind leaves
+/// the other as it is (design 000652 r2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopyOwner {
+    ForcedFlow,
+    PendingBook,
+}
+
+impl CopyOwner {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ForcedFlow => "forced flow",
+            Self::PendingBook => "pending book",
+        }
+    }
+
+    fn resyncs(self, cause: &str) {
+        let resyncs: &IntCounterVec = match self {
+            Self::ForcedFlow => &FORCED_FLOW_ACCOUNTS_RESYNC_TOTAL,
+            Self::PendingBook => &PENDING_BOOK_ACCOUNTS_RESYNC_TOTAL,
+        };
+        resyncs.with_label_values(&[cause]).inc();
+    }
+
+    fn queued(self, events: usize) {
+        let depth: &IntGauge = match self {
+            Self::ForcedFlow => &FORCED_FLOW_ACCOUNTS_QUEUE_DEPTH,
+            Self::PendingBook => &PENDING_BOOK_ACCOUNTS_QUEUE_DEPTH,
+        };
+        depth.set(i64::try_from(events).unwrap_or(i64::MAX));
+    }
+
+    fn snapshot_built(self, seconds: f64) {
+        match self {
+            Self::ForcedFlow => FORCED_FLOW_ACCOUNTS_SNAPSHOT_SECONDS.observe(seconds),
+            Self::PendingBook => PENDING_BOOK_ACCOUNTS_SNAPSHOT_SECONDS.observe(seconds),
+        }
+    }
+}
 
 /// Whether the copy may serve, as the account owner says it (r2 revision 2): `state` for `generation`, the last one
 /// it sent whole - `Ok` once that snapshot is queued, the reason while the view is unavailable or the copy behind.
@@ -113,17 +158,18 @@ impl FlowAccountsEvent {
     }
 }
 
-/// The owner's feed and the forced flow's copy, linked: the copy's events arrive on the receiver.
-pub(crate) fn link() -> (FlowAccountsFeed, FlowAccounts, mpsc::Receiver<FlowAccountsEvent>) {
+/// The owner's feed and `owner`'s copy, linked: the copy's events arrive on the receiver.
+pub(crate) fn link(owner: CopyOwner) -> (FlowAccountsFeed, FlowAccounts, mpsc::Receiver<FlowAccountsEvent>) {
     let (events, received) = mpsc::channel(FLOW_ACCOUNTS_CAPACITY);
     let (validity, watched) = watch::channel(FlowAccountsValidity { generation: 0, state: Err(NO_SNAPSHOT.to_string()) });
     let resync = Arc::new(AtomicBool::new(false));
-    let feed = FlowAccountsFeed { events, validity, resync: Arc::clone(&resync), generation: 0, sent: None, ended: None, closed: false };
-    (feed, FlowAccounts { validity: watched, generation: 0, copy: None, broken: None, resync }, received)
+    let feed = FlowAccountsFeed { owner, events, validity, resync: Arc::clone(&resync), generation: 0, sent: None, ended: None, closed: false };
+    (feed, FlowAccounts { owner, validity: watched, generation: 0, copy: None, broken: None, resync }, received)
 }
 
-/// The forced flow's copy.
+/// A thread's copy.
 pub(crate) struct FlowAccounts {
+    owner: CopyOwner,
     validity: watch::Receiver<FlowAccountsValidity>,
     /// The last generation installed.
     generation: u64,
@@ -205,7 +251,7 @@ impl FlowAccounts {
 
     /// Fail closed until the owner's next snapshot, which it is asked for.
     fn break_off(&mut self, reason: String) {
-        error!("forced flow: the account copy stops serving until the next snapshot: {reason}");
+        error!("{}: the account copy stops serving until the next snapshot: {reason}", self.owner.label());
         self.copy = None;
         self.broken = Some(format!("the account copy is resynchronizing: {reason}"));
         self.resync.store(true, Ordering::Relaxed);
@@ -422,6 +468,7 @@ impl AccountsCopy {
 
 /// The account owner's side (r2): what the copy holds, so that only what moved goes out; it never waits for the copy.
 pub(crate) struct FlowAccountsFeed {
+    owner: CopyOwner,
     events: mpsc::Sender<FlowAccountsEvent>,
     validity: watch::Sender<FlowAccountsValidity>,
     resync: Arc<AtomicBool>,
@@ -429,7 +476,7 @@ pub(crate) struct FlowAccountsFeed {
     generation: u64,
     /// What the copy holds since the last snapshot; `None` while it needs one.
     sent: Option<Sent>,
-    /// The forced flow thread found gone, for the owner to withdraw the forced flow once.
+    /// The copy's thread found gone, once: the owner withdraws the forced flow on it.
     ended: Option<String>,
     closed: bool,
 }
@@ -454,7 +501,7 @@ impl FlowAccountsFeed {
             return;
         }
         if self.resync.swap(false, Ordering::Relaxed) {
-            FORCED_FLOW_ACCOUNTS_RESYNC_TOTAL.with_label_values(&["requested"]).inc();
+            self.owner.resyncs("requested");
             self.sent = None;
         }
         let ready = book
@@ -522,7 +569,7 @@ impl FlowAccountsFeed {
         }
     }
 
-    /// The forced flow thread found gone since the last call, once: the owner withdraws the forced flow.
+    /// The copy's thread found gone since the last call, once.
     pub(crate) const fn take_ended(&mut self) -> Option<String> {
         self.ended.take()
     }
@@ -564,7 +611,7 @@ impl FlowAccountsFeed {
         let Some(snapshot) = AccountsSnapshot::of(generation, book, marks, candidates) else {
             return self.withhold("the account view has no replayed rows yet".to_string());
         };
-        FORCED_FLOW_ACCOUNTS_SNAPSHOT_SECONDS.observe(started.elapsed().as_secs_f64());
+        self.owner.snapshot_built(started.elapsed().as_secs_f64());
         let sent = Sent {
             anchor_height,
             height: snapshot.height,
@@ -585,22 +632,22 @@ impl FlowAccountsFeed {
     fn send(&mut self, event: FlowAccountsEvent) -> Result<(), Lost> {
         match self.events.try_send(event) {
             Ok(()) => {
-                let queued = self.events.max_capacity() - self.events.capacity();
-                FORCED_FLOW_ACCOUNTS_QUEUE_DEPTH.set(i64::try_from(queued).unwrap_or(i64::MAX));
+                self.owner.queued(self.events.max_capacity() - self.events.capacity());
                 Ok(())
             }
             Err(TrySendError::Full(_)) => {
-                FORCED_FLOW_ACCOUNTS_RESYNC_TOTAL.with_label_values(&["full"]).inc();
+                self.owner.resyncs("full");
                 self.sent = None;
                 self.withhold(BEHIND.to_string());
                 Err(Lost)
             }
             Err(TrySendError::Closed(_)) => {
-                FORCED_FLOW_ACCOUNTS_RESYNC_TOTAL.with_label_values(&["closed"]).inc();
-                error!("forced flow: its thread is gone; the forced flow stays withdrawn until restart");
+                self.owner.resyncs("closed");
+                let owner = self.owner.label();
+                error!("{owner}: its thread is gone; its account copy stays closed until restart");
                 self.sent = None;
                 self.closed = true;
-                self.ended = Some("the forced flow thread ended".to_string());
+                self.ended = Some(format!("the {owner} thread ended"));
                 Err(Lost)
             }
         }
@@ -629,8 +676,30 @@ pub(crate) mod tests {
     /// A copy serving the view as it stands (the owner's snapshot of it), with the watch that keeps it valid.
     pub(crate) fn serving(book: &AccountBook, marks: &dyn MarksAt, candidates: &Candidates) -> (FlowAccounts, watch::Sender<FlowAccountsValidity>) {
         let (validity, watched) = watch::channel(FlowAccountsValidity { generation: 1, state: Ok(()) });
-        let mut accounts = FlowAccounts { validity: watched, generation: 0, copy: None, broken: None, resync: Arc::new(AtomicBool::new(false)) };
+        let mut accounts = FlowAccounts {
+            owner: CopyOwner::ForcedFlow,
+            validity: watched,
+            generation: 0,
+            copy: None,
+            broken: None,
+            resync: Arc::new(AtomicBool::new(false)),
+        };
         let snapshot = AccountsSnapshot::of(1, book, marks, candidates).unwrap();
+        accounts.apply(FlowAccountsEvent::Snapshot(Box::new(snapshot)));
+        (accounts, validity)
+    }
+
+    /// A copy of the pending book serving `snapshot` as it is, with the watch that keeps it valid.
+    pub(crate) fn copy_of(snapshot: AccountsSnapshot) -> (FlowAccounts, watch::Sender<FlowAccountsValidity>) {
+        let (validity, watched) = watch::channel(FlowAccountsValidity { generation: snapshot.generation, state: Ok(()) });
+        let mut accounts = FlowAccounts {
+            owner: CopyOwner::PendingBook,
+            validity: watched,
+            generation: 0,
+            copy: None,
+            broken: None,
+            resync: Arc::new(AtomicBool::new(false)),
+        };
         accounts.apply(FlowAccountsEvent::Snapshot(Box::new(snapshot)));
         (accounts, validity)
     }
@@ -827,7 +896,14 @@ pub(crate) mod tests {
     fn a_snapshot_ahead_of_its_candidates_lists_no_liquidation_until_confirmed() {
         let (book, marks, candidates) = view();
         let (validity, watched) = watch::channel(FlowAccountsValidity { generation: 1, state: Ok(()) });
-        let mut accounts = FlowAccounts { validity: watched, generation: 0, copy: None, broken: None, resync: Arc::new(AtomicBool::new(false)) };
+        let mut accounts = FlowAccounts {
+            owner: CopyOwner::ForcedFlow,
+            validity: watched,
+            generation: 0,
+            copy: None,
+            broken: None,
+            resync: Arc::new(AtomicBool::new(false)),
+        };
         let mut snapshot = AccountsSnapshot::of(1, &book, &marks, &candidates).unwrap();
         (snapshot.height, snapshot.time_ms) = (1_005, 1_005_000);
         accounts.apply(FlowAccountsEvent::Snapshot(Box::new(snapshot)));
@@ -861,7 +937,7 @@ pub(crate) mod tests {
     #[test]
     fn a_full_queue_withdraws_the_copy_until_a_new_snapshot() {
         let (mut book, mut marks, candidates) = view();
-        let (mut feed, mut accounts, mut events) = link();
+        let (mut feed, mut accounts, mut events) = link(CopyOwner::ForcedFlow);
         feed.on_applied(&book, Some(&marks), &Touched::default(), &candidates);
         let Ok(FlowAccountsEvent::Snapshot(snapshot)) = events.try_recv() else { panic!("a snapshot") };
         assert_eq!((snapshot.generation, snapshot.height), (1, 1_000));
@@ -901,7 +977,7 @@ pub(crate) mod tests {
     #[test]
     fn candidates_back_after_a_withdrawal_go_out_whole() {
         let (book, marks, mut candidates) = view();
-        let (mut feed, mut accounts, mut events) = link();
+        let (mut feed, mut accounts, mut events) = link(CopyOwner::ForcedFlow);
         feed.on_applied(&book, Some(&marks), &Touched::default(), &candidates);
         accounts.apply(events.try_recv().unwrap());
         feed.on_candidates_confirmed(&candidates);
@@ -925,7 +1001,7 @@ pub(crate) mod tests {
     #[test]
     fn an_unavailable_view_or_a_gone_thread() {
         let (book, marks, candidates) = view();
-        let (mut feed, accounts, events) = link();
+        let (mut feed, accounts, events) = link(CopyOwner::ForcedFlow);
         feed.on_applied(&book, None, &Touched::default(), &candidates);
         assert_eq!(accounts.serving().unwrap_err(), "the node marks are unavailable");
         drop(events);

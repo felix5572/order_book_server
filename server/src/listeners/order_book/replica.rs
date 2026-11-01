@@ -246,6 +246,7 @@ impl ReplicaStop {
 struct CloidIndex(FxHashMap<Coin, CoinCloids>);
 
 impl CloidIndex {
+    /// The book's orders and the untriggered trigger orders (design 000652 r2: a cancel by cloid finds either).
     fn of(state: &OrderBookState) -> Self {
         let mut index = Self::default();
         for (coin, book) in state.books() {
@@ -257,6 +258,9 @@ impl CloidIndex {
                 }
             }
         }
+        for order in state.trigger_table().snapshot(None) {
+            index.add(&order.coin, order.cloid.as_ref(), order.oid);
+        }
         index
     }
 
@@ -264,7 +268,7 @@ impl CloidIndex {
         let order = &status.order;
         let Some(cloid) = &order.cloid else { return };
         let coin = Coin::new(&order.coin);
-        if status.is_inserted_into_book() {
+        if status.is_inserted_into_book() || (status.status == "open" && order.is_trigger) {
             return self.add(&coin, Some(cloid), order.oid);
         }
         let Some(cloids) = self.0.get_mut(&coin) else { return };
@@ -346,10 +350,10 @@ impl BookReplica {
         self.state.books().keys()
     }
 
-    /// One coin of the book, as the overlay reads it.
-    pub(crate) fn coin(&self, coin: &Coin) -> CoinBase<'_> {
+    /// One coin of the book, as the overlay reads it: its untriggered orders with it (batch 2m).
+    pub(crate) fn coin<'a>(&'a self, coin: &'a Coin) -> CoinBase<'a> {
         let cloids = self.cloids.as_ref().and_then(|index| index.0.get(coin));
-        CoinBase::new(self.state.books().get(coin), self.state.unproven_in(coin), cloids)
+        CoinBase::new(self.state.books().get(coin), self.state.unproven_in(coin), cloids).with_triggers(self.state.trigger_table(), coin)
     }
 
     /// The orders the cloid index holds.
@@ -411,6 +415,8 @@ impl BookReplica {
                     batch.events_ref().iter().for_each(|status| cloids.on_status(status));
                 }
                 changed.extend(self.state.apply_order_statuses_hft(batch).map_err(|err| ReplicaStop::Apply(err.to_string()))?);
+                // a coin whose trigger orders alone changed is replayed too (design 000652 r3 P2-2)
+                changed.extend(self.state.take_trigger_changes());
                 self.applied()?;
             }
             while let Some(batch) = self.diffs.pop_front_if(|batch| batch.block_number() == height) {
@@ -486,10 +492,11 @@ pub(crate) mod tests {
         if statuses_stream { BookBatch::Statuses(statuses(height, &[])) } else { BookBatch::Diffs(diffs(height, &[])) }
     }
 
-    /// An empty book tracking its unproven levels, as the listener's with the pending book on.
+    /// An empty book tracking its unproven levels, as the listener's with the pending book on; its trigger orders none,
+    /// the table complete.
     fn empty_state() -> OrderBookState {
-        let mut state =
-            OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Absent, &ParentLinks::default(), 0, 0, true, false, true);
+        let triggers = TriggerSection::Complete(Vec::new());
+        let mut state = OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), triggers, &ParentLinks::default(), 0, 0, true, false, true);
         state.track_unproven_levels();
         state
     }
@@ -552,7 +559,7 @@ pub(crate) mod tests {
         height * 100
     }
 
-    fn node_time(ms: u64) -> String {
+    pub(crate) fn node_time(ms: u64) -> String {
         let time = chrono::DateTime::from_timestamp_millis(i64::try_from(ms).unwrap()).unwrap().naive_utc();
         time.format("%Y-%m-%dT%H:%M:%S%.9f").to_string()
     }
@@ -566,6 +573,22 @@ pub(crate) mod tests {
                 "coin": BTC, "side": side, "limitPx": px, "sz": sz, "oid": oid, "timestamp": placed_ms,
                 "triggerCondition": "N/A", "isTrigger": false, "triggerPx": "0.0", "children": [], "isPositionTpsl": false,
                 "reduceOnly": false, "orderType": "Limit", "origSz": "1.0", "tif": tif, "cloid": cloid
+            },
+        })
+    }
+
+    /// A BTC stop of user 0x..01 at 100 - a sale's fired by a fall to it, a buy's by a rise -, `status` in a block at
+    /// `placed_ms`: a market one (`limit` `None`) or a limit one; of 1.0, or a position TP/SL (`position`, of none).
+    pub(crate) fn btc_stop_status(oid: u64, side: &str, limit: Option<&str>, position: bool, status: &str, cloid: Option<&str>, placed_ms: u64) -> serde_json::Value {
+        let condition = if side == "A" { "Price below 100" } else { "Price above 100" };
+        let kind = if limit.is_some() { "Stop Limit" } else { "Stop Market" };
+        let sz = if position { "0.0" } else { "1.0" };
+        serde_json::json!({
+            "time": node_time(placed_ms), "user": "0x0000000000000000000000000000000000000001", "hash": null, "status": status,
+            "order": {
+                "coin": BTC, "side": side, "limitPx": limit.unwrap_or("100"), "sz": sz, "oid": oid, "timestamp": placed_ms,
+                "triggerCondition": condition, "isTrigger": true, "triggerPx": "100", "children": [], "isPositionTpsl": position,
+                "reduceOnly": position, "orderType": kind, "origSz": sz, "tif": null, "cloid": cloid
             },
         })
     }
@@ -919,6 +942,26 @@ pub(crate) mod tests {
         assert_eq!(replica.confirmed(), Some(2));
         assert!(replica.coin(&Coin::new(BTC)).holds(&Oid::new(2)));
         assert_eq!(replica.cloid_orders(), 2);
+    }
+
+    /// Batch 2m (design 000652 r2): the cloid index holds the untriggered trigger orders - the fork's, and those opened
+    /// since - until one leaves them.
+    #[test]
+    fn the_cloid_index_holds_the_untriggered_trigger_orders() {
+        let mut listener = empty_state();
+        let [statuses, diffs] = block_lines(1, vec![btc_stop_status(1, "A", None, false, "open", Some("0x01"), 100)], vec![]);
+        apply(&mut listener, statuses);
+        apply(&mut listener, diffs);
+        let mut replica = fork_of(&listener, 1_000);
+        for batch in block_lines(2, vec![btc_stop_status(2, "B", Some("101"), false, "open", Some("0x02"), 200)], vec![]).into_iter().chain(block_lines(3, vec![], vec![])) {
+            replica.push(batch).unwrap();
+        }
+        assert_eq!((replica.confirmed(), replica.cloid_orders()), (Some(2), 2));
+        let canceled = block_lines(3, vec![btc_stop_status(1, "A", None, false, "canceled", Some("0x01"), 300)], vec![]);
+        for batch in canceled.into_iter().chain(block_lines(4, vec![], vec![])) {
+            replica.push(batch).unwrap();
+        }
+        assert_eq!(replica.cloid_orders(), 1);
     }
 
     fn copy(batch: &BookBatch) -> BookBatch {

@@ -100,7 +100,7 @@ pub(crate) enum OrderKind {
 }
 
 impl OrderKind {
-    fn of(order_type: &str) -> Option<Self> {
+    pub(crate) fn of(order_type: &str) -> Option<Self> {
         if order_type.ends_with(" Market") {
             Some(Self::Market)
         } else if order_type.ends_with(" Limit") {

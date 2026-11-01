@@ -40,7 +40,7 @@ pub struct FollowOptions {
 pub async fn run_accounts_follow(data_dir: &Path, options: FollowOptions, out: &mut (dyn Write + Send)) -> Result<()> {
     let FollowOptions { coins, dump_interval, candidates_out } = options;
     // standalone: no order book, so no book walks
-    let (accounts, owner) = start_accounts(data_dir, None)?;
+    let (accounts, owner) = start_accounts(data_dir, None, None)?;
     let guards: Vec<CoinSubscriptionGuard> = coins.iter().map(|coin| accounts.acquire(coin)).collect();
     tokio::spawn(watch_push(accounts.frames().ok_or("account owner task exited")?, guards, candidates_out));
     let mut ticker = tokio::time::interval(POLL_INTERVAL);

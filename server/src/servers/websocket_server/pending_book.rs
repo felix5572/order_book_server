@@ -30,6 +30,7 @@ use crate::{
         overlay::Maker,
         publish::Snapshot,
         shadow::{Taker, Unavailable},
+        triggers::TriggerSource,
     },
     types::{
         Level,
@@ -356,7 +357,8 @@ struct ActionData {
     cloid: Option<String>,
 }
 
-/// A mempool order's action; a TWAP's suborder (batch 2h); a trigger order a `SetGlobalAction` fired (batch 2l).
+/// A mempool order's action; a TWAP's suborder (batch 2h); a trigger order a `SetGlobalAction` fired (batch 2l, its two
+/// sources batch 2m).
 #[derive(Serialize)]
 #[serde(untagged)]
 enum TakerData {
@@ -366,10 +368,13 @@ enum TakerData {
     Trigger { trigger: TriggerData },
 }
 
+/// A replica's trigger order, by its oid and account; a pending one, by the action placing it, its account as known -
+/// `null` when not (design 000652 r2: no oid before its block, no account made up).
 #[derive(Serialize)]
-struct TriggerData {
-    oid: u64,
-    user: String,
+#[serde(untagged)]
+enum TriggerData {
+    Confirmed { oid: u64, user: String },
+    Pending { placed: ActionData, user: Option<String> },
 }
 
 #[derive(Serialize)]
@@ -432,8 +437,18 @@ fn trades_wire(frame: &TradesFrame, trades: &[&PendingTrade]) -> bytes::Bytes {
     })
 }
 
+fn action(id: ActionId, cloid: Option<&String>) -> ActionData {
+    ActionData { tx_hash: id.tx_hash, action: id.action, item: id.item, cloid: cloid.cloned() }
+}
+
+fn trigger_data(source: &TriggerSource) -> TriggerData {
+    match source {
+        TriggerSource::Confirmed { oid, user, .. } => TriggerData::Confirmed { oid: *oid, user: user_text(*user) },
+        TriggerSource::Pending { placed, cloid, account } => TriggerData::Pending { placed: action(*placed, cloid.as_ref()), user: account.map(user_text) },
+    }
+}
+
 fn trade_data(trade: &PendingTrade) -> TradeData {
-    let action = |id: ActionId, cloid: Option<&String>| ActionData { tx_hash: id.tx_hash, action: id.action, item: id.item, cloid: cloid.cloned() };
     let maker = match &trade.maker {
         Maker::Confirmed { user, oid, cloid } => MakerData::Confirmed { user: user_text(*user), oid: oid.clone().value(), cloid: cloid.clone() },
         Maker::Pending { id, cloid, .. } => MakerData::Pending { pending: action(*id, cloid.as_ref()) },
@@ -455,7 +470,7 @@ fn trade_data(trade: &PendingTrade) -> TradeData {
                 vault: vault.map(user_text),
             },
             Taker::Twap { twap_id, user, slot } => TakerData::Twap { twap: TwapData { twap_id: *twap_id, user: user_text(*user), slot: *slot } },
-            Taker::Trigger { oid, user, .. } => TakerData::Trigger { trigger: TriggerData { oid: *oid, user: user_text(*user) } },
+            Taker::Trigger { source, .. } => TakerData::Trigger { trigger: trigger_data(source) },
         },
     }
 }
@@ -760,7 +775,7 @@ mod tests {
     }
 
     fn three_trades(seq: u64) -> PendingEvent {
-        let pending = Maker::Pending { id: ActionId { tx_hash: B256::repeat_byte(2), action: 0, item: 1 }, cloid: None, owner: None };
+        let pending = Maker::Pending { id: ActionId { tx_hash: B256::repeat_byte(2), action: 0, item: 1 }, cloid: None, account: None };
         let alice = Maker::Confirmed { user: ALICE, oid: Oid::new(11), cloid: Some("0x0b".to_string()) };
         let trades = vec![trade("BTC", alice, None), trade("BTC", pending, Some(VAULT)), trade("ETH", Maker::Unattributed, None)];
         PendingEvent::Trades(Arc::new(TradesFrame { seq, basis: BASIS, twaps_known: true, trades }))
@@ -802,41 +817,52 @@ mod tests {
         assert!(connection.quiet());
     }
 
-    /// A `user` filter admits a trade whose maker is the account - a replica order's user, or a triggered order's
-    /// remainder's (review 000642 r4 P2-1) -, or whose taker acts for it; a mempool maker of no known account none.
+    /// A `user` filter admits a trade whose maker is the account - a replica order's user, a pending order's account as
+    /// known (a vault's, a triggered order's remainder's: review 000642 r4 P2-1, design 000652 r5) -, or whose taker acts
+    /// for it - a trigger order's of either source with its account known -; a maker or a trigger order of no known
+    /// account none.
     #[test]
     fn a_user_filter_admits_a_known_maker_or_taker() {
         let filter = TradesFilter { coin: None, user: Some(ALICE) };
         let id = ActionId { tx_hash: B256::repeat_byte(2), action: 0, item: 1 };
-        let remainder = Maker::Pending { id, cloid: None, owner: Some(ALICE) };
-        let mempool = Maker::Pending { id, cloid: None, owner: None };
+        let remainder = Maker::Pending { id, cloid: None, account: Some(ALICE) };
+        let mempool = Maker::Pending { id, cloid: None, account: None };
+        let triggered = |source| PendingTrade { taker: Taker::Trigger { source, seen_ns: 0 }, ..trade("BTC", Maker::Unattributed, None) };
+        let pending = |account| TriggerSource::Pending { placed: id, cloid: None, account };
         let admitted = [
             trade("BTC", Maker::Confirmed { user: ALICE, oid: Oid::new(11), cloid: None }, None),
             trade("BTC", remainder, None),
             trade("BTC", mempool.clone(), Some(ALICE)),
             trade("BTC", mempool, None),
-            PendingTrade { taker: Taker::Trigger { oid: 9, user: ALICE, seen_ns: 0 }, ..trade("BTC", Maker::Unattributed, None) },
+            triggered(TriggerSource::Confirmed { oid: 9, user: ALICE, cloid: None }),
+            triggered(pending(Some(ALICE))),
+            triggered(pending(None)),
         ]
         .map(|trade| filter.admits(&trade));
-        assert_eq!(admitted, [true, true, true, false, true]);
+        assert_eq!(admitted, [true, true, true, false, true, true, false]);
     }
 
     /// The wire shapes of a trade: a replica maker, a pending one, none named; a TWAP suborder's taker (batch 2h); a
-    /// triggered order's, its `seenMs` its `SetGlobalAction`'s line's (batch 2l).
+    /// triggered order's, its `seenMs` its `SetGlobalAction`'s line's (batch 2l): a replica one by its oid, a pending
+    /// one by its placement, its account `null` when not known (batch 2m, design 000652 r2).
     #[test]
     fn a_trade_on_the_wire() {
         let twap = PendingTrade { taker: Taker::Twap { twap_id: 2_470_033, user: VAULT, slot: 12 }, ..trade("BTC", Maker::Unattributed, None) };
-        let trigger = PendingTrade { taker: Taker::Trigger { oid: 345_678, user: VAULT, seen_ns: 3_150_000_000 }, ..trade("BTC", Maker::Unattributed, None) };
+        let triggered = |source| PendingTrade { taker: Taker::Trigger { source, seen_ns: 3_150_000_000 }, ..trade("BTC", Maker::Unattributed, None) };
+        let trigger = triggered(TriggerSource::Confirmed { oid: 345_678, user: VAULT, cloid: None });
+        let placed = ActionId { tx_hash: B256::repeat_byte(3), action: 1, item: 2 };
+        let pending_trigger = triggered(TriggerSource::Pending { placed, cloid: Some("0x0d".to_string()), account: None });
         let frame = TradesFrame {
             seq: 1,
             basis: BASIS,
             twaps_known: false,
             trades: vec![
                 trade("BTC", Maker::Confirmed { user: ALICE, oid: Oid::new(11), cloid: None }, Some(VAULT)),
-                trade("BTC", Maker::Pending { id: ActionId { tx_hash: B256::repeat_byte(2), action: 0, item: 1 }, cloid: Some("0x0c".to_string()), owner: None }, None),
+                trade("BTC", Maker::Pending { id: ActionId { tx_hash: B256::repeat_byte(2), action: 0, item: 1 }, cloid: Some("0x0c".to_string()), account: None }, None),
                 trade("BTC", Maker::Unattributed, None),
                 twap,
                 trigger,
+                pending_trigger,
             ],
         };
         let wire = json(&trades_wire(&frame, &frame.trades.iter().collect::<Vec<_>>()));
@@ -854,6 +880,8 @@ mod tests {
         assert_eq!((&twap["seenMs"], &twap["taker"]), (&serde_json::Value::Null, &serde_json::json!({"twap": {"twapId": 2_470_033, "user": user_text(VAULT), "slot": 12}})));
         let trigger = &data["trades"][4];
         assert_eq!((trigger["seenMs"].as_u64(), &trigger["taker"]), (Some(3_150), &serde_json::json!({"trigger": {"oid": 345_678, "user": user_text(VAULT)}})));
+        let placed = serde_json::json!({"txHash": B256::repeat_byte(3).to_string(), "action": 1, "item": 2, "cloid": "0x0d"});
+        assert_eq!(data["trades"][5]["taker"], serde_json::json!({"trigger": {"placed": placed, "user": null}}));
     }
 
     /// A broadcast gap withdraws every subscription; the pending thread's end tells each it stopped.

@@ -458,6 +458,15 @@ pub(crate) struct TriggerTable {
     coin_gaps: BTreeMap<Coin, TriggerGap>,
     /// The install's dump carried no trigger section at all: the previous table's orders stand in (`succeed`).
     section_absent: bool,
+    observer: Observer,
+}
+
+/// Who a table's changes reach: the listener's counts and logs; or, the pending book's replica's copy
+/// (hyperliquid-trade design 000652 r2 P2-4), none of them - the coins it changed kept for the replica to replay.
+#[derive(Debug, Clone)]
+enum Observer {
+    Listener,
+    Replica { changed: Vec<Coin> },
 }
 
 impl TriggerTable {
@@ -492,6 +501,7 @@ impl TriggerTable {
             availability,
             coin_gaps: BTreeMap::new(),
             section_absent: matches!(section, TriggerSection::Absent),
+            observer: Observer::Listener,
         };
         if !track {
             return table;
@@ -529,13 +539,48 @@ impl TriggerTable {
         }
     }
 
+    /// The pending book's replica's copy: the same orders and rules, reporting to nobody, the coins it changes kept.
+    pub(crate) fn replica_copy(&self) -> Self {
+        Self { observer: Observer::Replica { changed: Vec::new() }, ..self.clone() }
+    }
+
+    /// The coins whose orders or completeness changed since last taken (a replica's copy; the listener's none).
+    pub(crate) fn take_changed(&mut self) -> Vec<Coin> {
+        match &mut self.observer {
+            Observer::Listener => Vec::new(),
+            Observer::Replica { changed } => std::mem::take(changed),
+        }
+    }
+
+    /// Whether its counts and logs are the process's: the listener's table only.
+    const fn reports(&self) -> bool {
+        matches!(self.observer, Observer::Listener)
+    }
+
+    fn note_changed(&mut self, coin: &str) {
+        if let Observer::Replica { changed } = &mut self.observer {
+            changed.push(Coin::new(coin));
+        }
+    }
+
+    /// Counts and logs an unparseable trigger order or children, the listener's table only.
+    fn report_parse_error(&self, what: std::fmt::Arguments<'_>) {
+        if self.reports() {
+            crate::metrics::PARSE_ERRORS_TOTAL.with_label_values(&["untriggered"]).inc();
+            log::warn!("{what}");
+        }
+    }
+
     /// Records a gap of one coin's orders; its first one stands until the next complete install.
     fn mark_coin_gap(&mut self, coin: &str, gap: TriggerGap) {
         if self.coin_gaps.contains_key(coin) {
             return;
         }
-        crate::metrics::UNTRIGGERED_COIN_GAPS_TOTAL.with_label_values(&[gap.label()]).inc();
-        log::warn!("Untriggered trigger orders of {coin} incomplete ({}) until the next complete install", gap.label());
+        if self.reports() {
+            crate::metrics::UNTRIGGERED_COIN_GAPS_TOTAL.with_label_values(&[gap.label()]).inc();
+            log::warn!("Untriggered trigger orders of {coin} incomplete ({}) until the next complete install", gap.label());
+        }
+        self.note_changed(coin);
         self.coin_gaps.insert(Coin::new(coin), gap);
     }
 
@@ -567,6 +612,7 @@ impl TriggerTable {
     }
 
     fn bump(&mut self, coin: &str) {
+        self.note_changed(coin);
         match self.versions.get_mut(coin) {
             Some(version) => *version += 1,
             None => {
@@ -603,8 +649,7 @@ impl TriggerTable {
             Ok(()) => {}
             Err(err) => {
                 // the table under-reports this oid until a complete install: counted and marked
-                crate::metrics::PARSE_ERRORS_TOTAL.with_label_values(&["untriggered"]).inc();
-                log::warn!("Skipping unparseable untriggered trigger order oid={oid:?}: {err}");
+                self.report_parse_error(format_args!("Skipping unparseable untriggered trigger order oid={oid:?}: {err}"));
                 self.mark_coin_gap(coin, TriggerGap::LiveParseFailed);
             }
         }
@@ -630,6 +675,8 @@ impl TriggerTable {
                 if !of_a_filled_parent && hash.is_some() && !self.families.parent_of.contains_key(&order.oid) && self.families.holds_any(user, &order.coin) {
                     let order_text = parsed.map_err(|err| err.to_string());
                     self.successor = Some(Successor { height, user, coin: order.coin.clone(), oid: order.oid, order: order_text });
+                    // the coin's orders not all known until the next status settles it (review 000652 r6 P2-4)
+                    self.note_changed(&order.coin);
                     return false;
                 }
                 self.open(parsed, &order.coin, &oid);
@@ -663,6 +710,7 @@ impl TriggerTable {
     /// (a modify) waits for the same parent; any other order opens as it came.
     fn settle_successor(&mut self, height: u64, user: Address, status: &str, hash: Option<&str>, order: &L4Order) {
         let Some(successor) = self.successor.take() else { return };
+        self.note_changed(&successor.coin);
         let modifies = status == "canceled" && hash.is_none() && height == successor.height && user == successor.user && order.coin == successor.coin;
         if modifies {
             self.families.inherit(order.oid, successor.oid);
@@ -675,8 +723,7 @@ impl TriggerTable {
         let listed = match parent.children_orders() {
             Ok(children) => children.into_iter().map(|child| child.oid).filter(|&oid| oid != parent.oid).collect(),
             Err(err) => {
-                crate::metrics::PARSE_ERRORS_TOTAL.with_label_values(&["untriggered"]).inc();
-                log::warn!("Unparseable children of oid={}: {err}", parent.oid);
+                self.report_parse_error(format_args!("Unparseable children of oid={}: {err}", parent.oid));
                 self.mark_coin_gap(&parent.coin, TriggerGap::LiveParseFailed);
                 Vec::new()
             }
@@ -693,8 +740,7 @@ impl TriggerTable {
             Ok(children) => children,
             Err(err) => {
                 // its children may be served as active until a complete install: counted and marked
-                crate::metrics::PARSE_ERRORS_TOTAL.with_label_values(&["untriggered"]).inc();
-                log::warn!("Unparseable children of oid={}: {err}", parent.oid);
+                self.report_parse_error(format_args!("Unparseable children of oid={}: {err}", parent.oid));
                 self.mark_coin_gap(&parent.coin, TriggerGap::LiveParseFailed);
                 return;
             }
@@ -731,7 +777,7 @@ impl TriggerTable {
             self.expected.reject_child(user, order);
             return;
         }
-        if self.expected.announces(user, order) {
+        if self.expected.announces(user, order) && self.reports() {
             log::warn!("A child announced in block {} got `{status}` before any open: oid={} coin={}", self.expected.height, order.oid, order.coin);
         }
     }
@@ -750,9 +796,11 @@ impl TriggerTable {
             return;
         }
         let unmatched = std::mem::take(&mut self.expected.parents);
-        let count: usize = unmatched.values().map(Vec::len).sum();
-        crate::metrics::UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.inc_by(count as u64);
-        log::warn!("{count} children announced in block {} never opened: {unmatched:?}", self.expected.height);
+        if self.reports() {
+            let count: usize = unmatched.values().map(Vec::len).sum();
+            crate::metrics::UNTRIGGERED_UNMATCHED_CHILDREN_TOTAL.inc_by(count as u64);
+            log::warn!("{count} children announced in block {} never opened: {unmatched:?}", self.expected.height);
+        }
         // review 000463 r1 P2-2: the table no longer knows the coin's active set
         for child in unmatched.keys() {
             self.mark_coin_gap(&child.coin, TriggerGap::ChildUnmatched);
@@ -837,6 +885,11 @@ impl TriggerTable {
     /// The coins with a gap of their own since the install.
     pub(crate) fn incomplete_coins(&self) -> usize {
         self.coin_gaps.len()
+    }
+
+    /// The coin's untriggered order `oid`, a waiting child not included.
+    pub(crate) fn order(&self, coin: &Coin, oid: &Oid) -> Option<&Arc<InnerL4Order>> {
+        self.coins.get(coin)?.get(oid)
     }
 
     /// All coins' orders, or one coin's, the waiting children with them.

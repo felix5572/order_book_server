@@ -45,7 +45,7 @@ use super::{
     },
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, FlowPublisher, NodePrices, Publisher},
     candidates::{BookLink, Candidates, CandidatesSnapshot},
-    flow_accounts::link,
+    flow_accounts::{CopyOwner, FlowAccountsFeed, link},
     forced_flow::Tier,
     forced_flow_owner::{DemandKey, FlowDemand, FlowDemandGuard, FlowFrame},
     forced_flow_thread::{FlowQuery, spawn_forced_flow},
@@ -275,10 +275,14 @@ async fn next_walk(walks: &mut Option<mpsc::Receiver<WalkResult>>) -> Option<Wal
     }
 }
 
-/// Starts the watchers, the poller and the owner task, and with `book` the candidates' walk task. Fails when the
-/// checkpoint directory cannot be listed or holds fewer than two checkpoints (the node marks take their grid from the
-/// two newest).
-pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Result<(AccountsHandle, tokio::task::JoinHandle<()>)> {
+/// Starts the watchers, the poller and the owner task, and with `book` the candidates' walk task; `pending_copy` the
+/// pending book's copy of the view to feed (batch 2m). Fails when the checkpoint directory cannot be listed or holds
+/// fewer than two checkpoints (the node marks take their grid from the two newest).
+pub(crate) fn start_accounts(
+    data_dir: &Path,
+    book: Option<BookSource>,
+    pending_copy: Option<FlowAccountsFeed>,
+) -> Result<(AccountsHandle, tokio::task::JoinHandle<()>)> {
     let checkpoints = list_checkpoints(data_dir)?;
     let (anchor, interval) = checkpoint_grid(&checkpoints)?;
     // checkpoints already on disk predate the watchers: the first anchor is the next one (design r2 3.5)
@@ -346,6 +350,9 @@ pub(crate) fn start_accounts(data_dir: &Path, book: Option<BookSource>) -> Resul
     let mut publisher = Publisher::new(subscriptions.clone(), frames);
     let flow_demand = FlowDemand::default();
     let flow_queries = start_forced_flow(book.as_ref(), flow_demand.clone(), &mut publisher, flow_frames)?;
+    if let Some(feed) = pending_copy {
+        publisher.attach_pending(feed);
+    }
     let handle = AccountsHandle {
         queries: queries_tx,
         subscriptions,
@@ -371,7 +378,7 @@ fn start_forced_flow(
     publisher: &mut Publisher,
     frames: broadcast::Sender<Arc<AccountsFrame>>,
 ) -> std::io::Result<mpsc::Sender<FlowQuery>> {
-    let (feed, accounts, events) = link();
+    let (feed, accounts, events) = link(CopyOwner::ForcedFlow);
     publisher.attach_flow(feed);
     let (queries, _thread) = spawn_forced_flow(book, demand, accounts, events, FlowPublisher::new(frames))?;
     Ok(queries)
@@ -575,7 +582,7 @@ async fn run_owner(
                 }
                 publisher.track_marks(&mut book, &marks);
                 // the forced flow's copy before the refresh: its positions and marks do not wait for the candidates
-                publisher.flow_applied(&book, marks.at(), &touched, &candidates);
+                publisher.copies_applied(&book, marks.at(), &touched, &candidates);
                 refresh_candidates(&mut candidates, &book, &marks, &touched, &mut publisher);
             }
             Some(message) = anchors.recv() => {
@@ -584,7 +591,7 @@ async fn run_owner(
                     publisher.push_snapshots(&mut book, marks.at());
                 }
                 publisher.track_marks(&mut book, &marks);
-                publisher.flow_applied(&book, marks.at(), &Touched::default(), &candidates);
+                publisher.copies_applied(&book, marks.at(), &Touched::default(), &candidates);
                 refresh_candidates(&mut candidates, &book, &marks, &Touched::default(), &mut publisher);
             }
             walk = next_walk(&mut walks) => {
@@ -607,7 +614,7 @@ async fn run_owner(
                 supervise(&mut book, &mut marks, &threads);
                 publisher.track(&book);
                 publisher.track_marks(&mut book, &marks);
-                publisher.flow_applied(&book, marks.at(), &Touched::default(), &candidates);
+                publisher.copies_applied(&book, marks.at(), &Touched::default(), &candidates);
                 refresh_candidates(&mut candidates, &book, &marks, &Touched::default(), &mut publisher);
                 let recovered_through = book.availability().ok().filter(|_| marks.availability().is_ok())
                     .and_then(|available| marks.status().seed_height.map(|seed| seed.min(available.anchor.height)));
@@ -1139,7 +1146,7 @@ fn refresh_candidates(candidates: &mut Candidates, book: &AccountBook, marks: &N
     LIQUIDATION_CANDIDATES_REFRESH_SECONDS.observe(started.elapsed().as_secs_f64());
     LIQUIDATION_CANDIDATES.set((candidates.count() as u64).cast_signed());
     publisher.publish_candidates(refresh);
-    publisher.flow_candidates_confirmed(candidates);
+    publisher.copies_candidates_confirmed(candidates);
 }
 
 /// A finished thread stops the view and the marks for good: every input thread feeds the block assembly both apply,

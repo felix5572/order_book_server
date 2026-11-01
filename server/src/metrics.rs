@@ -1008,22 +1008,33 @@ lazy_static! {
         &["outcome"]
     ).expect("metric can be created");
 
-    /// The forced flow's frames the pending book follows for its trigger orders (batch 2l second step), by `event`:
-    /// `frame`, `lagged`, `query`; once until restart, `query_failed`, `withdrawn`, `closed`.
-    pub static ref PENDING_BOOK_TRIGGER_FRAMES_TOTAL: IntCounterVec = IntCounterVec::new(
-        Opts::new("orderbook_pending_book_trigger_frames_total", "Pending book forced flow frame events"),
-        &["event"]
+    /// The pending book's copy of the account view (batch 2m, design 000652 r2): its resynchronizations by `cause` -
+    /// `requested`, `full`, `closed` -, its queue, its snapshots' build time.
+    pub static ref PENDING_BOOK_ACCOUNTS_RESYNC_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_accounts_resync_total", "Pending book account copy resynchronizations"),
+        &["cause"]
     ).expect("metric can be created");
 
-    /// A `SetGlobalAction`'s candidate trigger orders, by `outcome`: `fired`, `not_reached`, `trailing`; once executed,
-    /// `zero_size` (no position left to close).
+    pub static ref PENDING_BOOK_ACCOUNTS_QUEUE_DEPTH: IntGauge = IntGauge::new(
+        "orderbook_pending_book_accounts_queue_depth",
+        "Account events queued for the pending book thread"
+    ).expect("metric can be created");
+
+    pub static ref PENDING_BOOK_ACCOUNTS_SNAPSHOT_SECONDS: Histogram = Histogram::with_opts(
+        HistogramOpts::new("orderbook_pending_book_accounts_snapshot_seconds", "Pending book account snapshot build time")
+            .buckets(vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
+    ).expect("metric can be created");
+
+    /// A `SetGlobalAction`'s triggered orders, as first applied, by their source - `confirmed`, `pending` -, and once more
+    /// `zero_size` when they had no position left to close (batch 2m).
     pub static ref PENDING_BOOK_TRIGGERS_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_pending_book_triggers_total", "Pending book trigger orders by outcome"),
         &["outcome"]
     ).expect("metric can be created");
 
-    /// A `SetGlobalAction`'s priced coins, by `outcome`: `executed`, `none_fired`, or why its trigger orders are unknown -
-    /// `no_forecast`, `querying`, `stopped`, `no_frame`, `unavailable`, `incomplete`, `beyond_band`, `mark_overflow`.
+    /// A `SetGlobalAction`'s priced coins, as first applied, by `outcome`: `executed`, `none_fired`, or why none ran
+    /// (batch 2m) - `no_forecast`, `mark_overflow` as its line came; `no_trigger_table`, `table_incomplete`, `truncated`,
+    /// `limit_overflow`, `account_unknown`, `position_moved`, `positions_unfrozen`, `positions_unavailable`.
     pub static ref PENDING_BOOK_TRIGGER_COINS_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_pending_book_trigger_coins_total", "Pending book SetGlobalAction coins by trigger outcome"),
         &["outcome"]
@@ -1168,7 +1179,9 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(PENDING_BOOK_SGA_MARK_ERROR_BPS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_SGA_BUCKET_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_SGA_PRICES_BEHIND_BLOCKS.clone())).ok();
-    REGISTRY.register(Box::new(PENDING_BOOK_TRIGGER_FRAMES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_ACCOUNTS_RESYNC_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_ACCOUNTS_QUEUE_DEPTH.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_ACCOUNTS_SNAPSHOT_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_TRIGGERS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_TRIGGER_COINS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_FRAMES_TOTAL.clone())).ok();

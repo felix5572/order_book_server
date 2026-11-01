@@ -12,7 +12,10 @@ use mark_prices::{MarkPricesSession, mark_prices_handler, reference_caches_handl
 use pending_book::PendingBookSession;
 
 use crate::{
-    accounts::runtime::{AccountsHandle, BookSource, start_accounts},
+    accounts::{
+        flow_accounts::{self, CopyOwner, FlowAccounts, FlowAccountsEvent, FlowAccountsFeed},
+        runtime::{AccountsHandle, BookSource, start_accounts},
+    },
     listeners::order_book::{
         ActiveL2Params, ActiveSubGuard, ActiveSubs, BookTrust, CoinBbo, InternalMessage, L2FrameCache, L2FrameKey,
         L2ParamGuard, L2SnapshotParams, OrderBookListener, bbo::{BboKey, key as bbo_key}, hl_listen_hft, replica,
@@ -30,7 +33,7 @@ use crate::{
         WS_CONNECTIONS_TOTAL, WS_SEND_ERRORS_TOTAL,
     },
     order_book::{Coin, PxBand, Snapshot},
-    pending::{FlowFeed, PendingBookHandle, PendingFeeds, PendingParams, mempool::watch_mempool, spawn_pending_book, watch_blocks, watch_twap_fills, watch_twap_statuses},
+    pending::{PendingBookHandle, PendingFeeds, PendingParams, mempool::watch_mempool, spawn_pending_book, watch_blocks, watch_twap_fills, watch_twap_statuses},
     prelude::*,
     types::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
@@ -147,6 +150,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
         let pending_setup = attach_pending_book(&config, &mut listener)?;
         (listener, pending_setup)
     };
+    let (pending_setup, pending_copy) = pending_setup.unzip();
     // Lock-free trust mirror for the send paths below (design 000249 B).
     let book_trust = listener.book_trust();
     let (book_revision, trigger_fires) = (listener.book_revision(), listener.trigger_fires());
@@ -154,6 +158,7 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
     let accounts = start_account_view(
         &config,
         BookSource { trust: book_trust.clone(), listener: listener.clone(), revision: book_revision, fires: trigger_fires },
+        pending_copy,
     )?;
     let pending_book = pending_setup.map(|setup| start_pending_book(&config, setup, accounts.as_ref())).transpose()?;
     let local_marks = start_local_marks(&config, accounts.as_ref(), &listener)?;
@@ -347,15 +352,18 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
 /// Starts the local marks when `--local-marks` is set (design 000454): the venue feeds and the owner, which reads the
 /// node replica of the account view and the listener's book.
 /// The pending book's thread and the listener's feed of it (--pending-book, hyperliquid-trade design 000604).
-/// What `--pending-book` sets up before the listener starts: its replica feed attached, its parameters checked.
+/// What `--pending-book` sets up before the listener starts: its replica feed attached, its parameters checked, its copy
+/// of the account view (batch 2m) waiting for the view's feed.
 struct PendingSetup {
     replica: replica::ReplicaInputs,
     params: PendingParams,
+    accounts: FlowAccounts,
+    account_events: mpsc::Receiver<FlowAccountsEvent>,
 }
 
-/// The pending book's replica feed attached to the listener, when `--pending-book` is set; its thread starts once the
-/// account view does (`start_pending_book`).
-fn attach_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) -> Result<Option<PendingSetup>> {
+/// The pending book's replica feed attached to the listener, when `--pending-book` is set, and the account view's feed
+/// of its copy; its thread starts once the account view does (`start_pending_book`).
+fn attach_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) -> Result<Option<(PendingSetup, FlowAccountsFeed)>> {
     if !config.pending_book {
         return Ok(None);
     }
@@ -376,7 +384,8 @@ fn attach_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) 
     )?;
     let (feed, replica) = replica::link(replica::REPLICA_QUEUE_BATCHES);
     listener.attach_replica_feed(feed);
-    Ok(Some(PendingSetup { replica, params }))
+    let (copy_feed, accounts, account_events) = flow_accounts::link(CopyOwner::PendingBook);
+    Ok(Some((PendingSetup { replica, params, accounts, account_events }, copy_feed)))
 }
 
 /// The pending thread, reading the mempool and the block log below the node's data directory; the handle the connections
@@ -396,7 +405,8 @@ fn start_pending_book(config: &ServerConfig, setup: PendingSetup, accounts: Opti
         twap_fills,
         anchor: accounts.pending_anchor(),
         prices: accounts.node_prices(),
-        flow: FlowFeed::of(accounts),
+        accounts: setup.accounts,
+        account_events: setup.account_events,
     };
     let handle = PendingBookHandle::new();
     let thread = spawn_pending_book(setup.replica, feeds, config.pending_backlog_events, setup.params, config.include_spot, handle.clone())?;
@@ -440,11 +450,11 @@ fn start_local_marks(
 
 /// Starts the account view when `--accounts` is set. Its owner ending leaves the view answering 503 (design 000419 r3
 /// revision 4); the book keeps serving.
-fn start_account_view(config: &ServerConfig, book: BookSource) -> Result<Option<AccountsHandle>> {
+fn start_account_view(config: &ServerConfig, book: BookSource, pending_copy: Option<FlowAccountsFeed>) -> Result<Option<AccountsHandle>> {
     if !config.accounts {
         return Ok(None);
     }
-    let (accounts, owner) = start_accounts(&config.resolved_data_dir()?, Some(book))?;
+    let (accounts, owner) = start_accounts(&config.resolved_data_dir()?, Some(book), pending_copy)?;
     tokio::spawn(async move {
         let ended = owner.await;
         error!("Accounts owner task ended; the account view stays unavailable until restart: {ended:?}");

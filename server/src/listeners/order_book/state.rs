@@ -256,9 +256,10 @@ impl OrderBookState {
         }
     }
 
-    /// The pending book's replica (hyperliquid-trade design 000604 revision 1): the book, both pairing caches and both
-    /// streams' progress as they stand, so that the batches applied after it bring it where the listener's goes; no
-    /// untriggered table, counters from zero, and silent on the process-wide metrics.
+    /// The pending book's replica (hyperliquid-trade design 000604 revision 1): the book, both pairing caches, the
+    /// untriggered table (design 000652 r2: its counts, logs and the forced flow's wake-ups the listener's alone) and both
+    /// streams' progress as they stand, so that the batches applied after it bring it where the listener's goes;
+    /// counters from zero, and silent on the process-wide metrics.
     pub(super) fn fork(&self) -> Self {
         Self {
             order_book: self.order_book.clone(),
@@ -274,7 +275,8 @@ impl OrderBookState {
             lost_new_diffs: 0,
             last_loss_log: None,
             insert_before_fallbacks: 0,
-            triggers: TriggerTable::seeded(TriggerSection::Absent, &ParentLinks::default(), Vec::new(), false, self.ignore_spot),
+            // the trigger orders too, as of the same cut (hyperliquid-trade design 000652 r2): reporting to nobody
+            triggers: self.triggers.replica_copy(),
             fired_trigger_coins: Vec::new(),
             reports: false,
             unproven: self.unproven.clone(),
@@ -289,6 +291,17 @@ impl OrderBookState {
     }
 
     /// Drain the coins whose held trigger orders fired since the last drain (repeats possible).
+    /// The coins whose trigger orders or their completeness the pending book's replica's table changed since last taken
+    /// (hyperliquid-trade design 000652 r3 P2-2); the listener's none.
+    pub(super) fn take_trigger_changes(&mut self) -> Vec<Coin> {
+        self.triggers.take_changed()
+    }
+
+    /// The trigger orders as of this state.
+    pub(super) const fn trigger_table(&self) -> &TriggerTable {
+        &self.triggers
+    }
+
     pub(super) fn take_fired_trigger_coins(&mut self) -> Vec<String> {
         std::mem::take(&mut self.fired_trigger_coins)
     }
@@ -657,13 +670,15 @@ impl OrderBookState {
         for order_status in batch.events() {
             let oid = Oid::new(order_status.order.oid);
 
-            if !replayed && order_status.status == "triggered" {
+            if !replayed && self.reports && order_status.status == "triggered" {
                 self.note_misread_trigger(height, &order_status);
             }
             // Maintain the untriggered-orders side table. "open" + is_trigger is a pending trigger order (never rests on
             // the book); any other status is terminal for the untriggered phase (canceled / triggered / filled /
             // rejected / ...) and evicts the oid; a parent's statuses also announce and release its children.
-            if self.triggers.on_status(height, order_status.user, &order_status.status, order_status.hash.as_deref(), &order_status.order) {
+            if self.triggers.on_status(height, order_status.user, &order_status.status, order_status.hash.as_deref(), &order_status.order)
+                && self.reports
+            {
                 // Labeled by status so a future non-terminal status string that starts wrongly evicting live triggers
                 // shows up in Prometheus immediately (today's vocabulary is all terminal-for-the-oid).
                 crate::metrics::UNTRIGGERED_EVICTIONS_TOTAL.with_label_values(&[&order_status.status]).inc();
@@ -1324,6 +1339,12 @@ mod tests {
         assert_eq!(btc[0].oid, 100);
     }
 
+    /// bm 10-21 block 1191710832: a limit buy of HYPE placed with its stop - the parent's `open` lists the stop, the
+    /// stop's own `open` follows -; block 1191755252 fills the parent.
+    const HYPE_PARENT_OPEN: &str = r#"{"local_time":"2026-10-21T08:06:45.400659915","block_time":"2026-10-21T08:06:44.977137955","block_number":1191710832,"events":[{"time":"2026-10-21T08:06:44.977137955","user":"0x27cd09a37030afa2a2ff9c0125dbb3eaf3bacaa2","hash":"0x8cd3565aaaecc17f8e4d0447081070020486004045efe051309c01ad69e09b6a","builder":{"b":"0xcd254d2a328f7f67c7c6fef930a4757516f7b601","f":0},"status":"open","order":{"coin":"HYPE","side":"B","limitPx":"81.2","sz":"12.28","oid":581250704214,"timestamp":1792570004977,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[{"coin":"HYPE","side":"A","limitPx":"69.3","sz":"12.28","oid":581250704214,"timestamp":1792570004977,"triggerCondition":"Price below 77","isTrigger":true,"triggerPx":"77.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"12.28","tif":null,"cloid":"0xe2c7dfc57470a3dc7004b5aeee155980"}],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"12.28","tif":"Gtc","cloid":"0xe2c7dfc5920b6e226bb0048f92fdeb85"}}]}"#;
+    const HYPE_CHILD_OPEN: &str = r#"{"local_time":"2026-10-21T08:06:45.400670335","block_time":"2026-10-21T08:06:44.977137955","block_number":1191710832,"events":[{"time":"2026-10-21T08:06:44.977137955","user":"0x27cd09a37030afa2a2ff9c0125dbb3eaf3bacaa2","hash":"0x8cd3565aaaecc17f8e4d0447081070020486004045efe051309c01ad69e09b6a","builder":{"b":"0xcd254d2a328f7f67c7c6fef930a4757516f7b601","f":0},"status":"open","order":{"coin":"HYPE","side":"A","limitPx":"69.3","sz":"12.28","oid":581250704215,"timestamp":1792570004977,"triggerCondition":"Price below 77","isTrigger":true,"triggerPx":"77.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"12.28","tif":null,"cloid":"0xe2c7dfc57470a3dc7004b5aeee155980"}}]}"#;
+    const HYPE_PARENT_FILLED: &str = r#"{"local_time":"2026-10-21T09:00:08.823387424","block_time":"2026-10-21T09:00:06.260628857","block_number":1191755252,"events":[{"time":"2026-10-21T09:00:06.260628857","user":"0x27cd09a37030afa2a2ff9c0125dbb3eaf3bacaa2","hash":null,"builder":{"b":"0xcd254d2a328f7f67c7c6fef930a4757516f7b601","f":0},"status":"filled","order":{"coin":"HYPE","side":"B","limitPx":"81.2","sz":"0.0","oid":581250704214,"timestamp":1792570004977,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[{"coin":"HYPE","side":"A","limitPx":"69.3","sz":"12.28","oid":581250704215,"timestamp":1792570004977,"triggerCondition":"Price below 77","isTrigger":true,"triggerPx":"77.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"12.28","tif":null,"cloid":"0xe2c7dfc57470a3dc7004b5aeee155980"}],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"12.28","tif":"Gtc","cloid":"0xe2c7dfc5920b6e226bb0048f92fdeb85"}}]}"#;
+
     /// bm 10-21 block 1191710832: a limit buy placed with its stop; the parent's `open` lists the stop under the
     /// parent's oid, the stop's own `open` follows; the stop waits out of the band until the parent's `filled`
     /// (block 1191755252) - the node triggered none of such children before.
@@ -1332,18 +1353,67 @@ mod tests {
         let mut state =
             OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Complete(Vec::new()), &ParentLinks::default(), 0, 0, true, false, true);
         let line = |text: &str| -> Batch<NodeDataOrderStatus> { serde_json::from_str(text).unwrap() };
-        let parent_open = r#"{"local_time":"2026-10-21T08:06:45.400659915","block_time":"2026-10-21T08:06:44.977137955","block_number":1191710832,"events":[{"time":"2026-10-21T08:06:44.977137955","user":"0x27cd09a37030afa2a2ff9c0125dbb3eaf3bacaa2","hash":"0x8cd3565aaaecc17f8e4d0447081070020486004045efe051309c01ad69e09b6a","builder":{"b":"0xcd254d2a328f7f67c7c6fef930a4757516f7b601","f":0},"status":"open","order":{"coin":"HYPE","side":"B","limitPx":"81.2","sz":"12.28","oid":581250704214,"timestamp":1792570004977,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[{"coin":"HYPE","side":"A","limitPx":"69.3","sz":"12.28","oid":581250704214,"timestamp":1792570004977,"triggerCondition":"Price below 77","isTrigger":true,"triggerPx":"77.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"12.28","tif":null,"cloid":"0xe2c7dfc57470a3dc7004b5aeee155980"}],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"12.28","tif":"Gtc","cloid":"0xe2c7dfc5920b6e226bb0048f92fdeb85"}}]}"#;
-        let child_open = r#"{"local_time":"2026-10-21T08:06:45.400670335","block_time":"2026-10-21T08:06:44.977137955","block_number":1191710832,"events":[{"time":"2026-10-21T08:06:44.977137955","user":"0x27cd09a37030afa2a2ff9c0125dbb3eaf3bacaa2","hash":"0x8cd3565aaaecc17f8e4d0447081070020486004045efe051309c01ad69e09b6a","builder":{"b":"0xcd254d2a328f7f67c7c6fef930a4757516f7b601","f":0},"status":"open","order":{"coin":"HYPE","side":"A","limitPx":"69.3","sz":"12.28","oid":581250704215,"timestamp":1792570004977,"triggerCondition":"Price below 77","isTrigger":true,"triggerPx":"77.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"12.28","tif":null,"cloid":"0xe2c7dfc57470a3dc7004b5aeee155980"}}]}"#;
-        let parent_filled = r#"{"local_time":"2026-10-21T09:00:08.823387424","block_time":"2026-10-21T09:00:06.260628857","block_number":1191755252,"events":[{"time":"2026-10-21T09:00:06.260628857","user":"0x27cd09a37030afa2a2ff9c0125dbb3eaf3bacaa2","hash":null,"builder":{"b":"0xcd254d2a328f7f67c7c6fef930a4757516f7b601","f":0},"status":"filled","order":{"coin":"HYPE","side":"B","limitPx":"81.2","sz":"0.0","oid":581250704214,"timestamp":1792570004977,"triggerCondition":"N/A","isTrigger":false,"triggerPx":"0.0","children":[{"coin":"HYPE","side":"A","limitPx":"69.3","sz":"12.28","oid":581250704215,"timestamp":1792570004977,"triggerCondition":"Price below 77","isTrigger":true,"triggerPx":"77.0","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Stop Market","origSz":"12.28","tif":null,"cloid":"0xe2c7dfc57470a3dc7004b5aeee155980"}],"isPositionTpsl":false,"reduceOnly":false,"orderType":"Limit","origSz":"12.28","tif":"Gtc","cloid":"0xe2c7dfc5920b6e226bb0048f92fdeb85"}}]}"#;
         let hype = Coin::new("HYPE");
         let in_band = |state: &OrderBookState| -> Vec<u64> {
             state.untriggered_in_band(&hype, Px::parse_from_str("70").unwrap(), Px::parse_from_str("80").unwrap(), 10).2.orders.iter().map(|(_, order)| order.oid).collect()
         };
-        state.apply_order_statuses_hft(line(parent_open)).unwrap();
-        state.apply_order_statuses_hft(line(child_open)).unwrap();
+        state.apply_order_statuses_hft(line(HYPE_PARENT_OPEN)).unwrap();
+        state.apply_order_statuses_hft(line(HYPE_CHILD_OPEN)).unwrap();
         assert_eq!((in_band(&state), state.untriggered_count()), (Vec::<u64>::new(), 1), "held, waiting");
-        state.apply_order_statuses_hft(line(parent_filled)).unwrap();
+        state.apply_order_statuses_hft(line(HYPE_PARENT_FILLED)).unwrap();
         assert_eq!(in_band(&state), vec![581_250_704_215]);
+    }
+
+    /// hyperliquid-trade review 000652 r6 P2-4: a trigger order of an account holding a waiting child opens with a hash -
+    /// maybe a modify's successor -: the coin's orders are not all known until the next status settles it - here the
+    /// old child's hash-less cancel in the block: the modify, its successor waiting for the parent in turn -; the fork's
+    /// changed coins tell both, though no order entered or left the price index.
+    #[test]
+    fn a_pending_successor_tells_the_fork_its_coin_changed() {
+        let mut listener =
+            OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Complete(Vec::new()), &ParentLinks::default(), 0, 0, true, false, true);
+        let line = |text: &str| -> Batch<NodeDataOrderStatus> { serde_json::from_str(text).unwrap() };
+        listener.apply_order_statuses_hft(line(HYPE_PARENT_OPEN)).unwrap();
+        listener.apply_order_statuses_hft(line(HYPE_CHILD_OPEN)).unwrap();
+        let mut fork = listener.fork();
+        let hype = Coin::new("HYPE");
+        let successor = HYPE_CHILD_OPEN.replace("581250704215", "581250704216").replace(r#""cloid":"0xe2c7dfc57470a3dc7004b5aeee155980""#, r#""cloid":null"#);
+        fork.apply_order_statuses_hft(line(&successor)).unwrap();
+        let pending = fork.trigger_table().availability(Some(&hype));
+        assert_eq!((pending, fork.take_trigger_changes().contains(&hype)), (TriggerAvailability::Gap(TriggerGap::SuccessorPending), true));
+        let modified = HYPE_CHILD_OPEN.replace(r#""status":"open""#, r#""status":"canceled""#).replace(r#""hash":"0x8cd3565aaaecc17f8e4d0447081070020486004045efe051309c01ad69e09b6a""#, r#""hash":null"#);
+        fork.apply_order_statuses_hft(line(&modified)).unwrap();
+        let band = fork.untriggered_in_band(&hype, Px::parse_from_str("70").unwrap(), Px::parse_from_str("80").unwrap(), 10).2;
+        let settled = (fork.trigger_table().availability(Some(&hype)), fork.untriggered_count(), band.orders.len(), fork.take_trigger_changes().contains(&hype));
+        assert_eq!(settled, (TriggerAvailability::Complete, 1, 0, true), "the successor waits for the parent, out of the price index");
+    }
+
+    /// hyperliquid-trade design 000652 r2 P2-4: the pending book's fork holds the listener's trigger orders - a child
+    /// waiting for its parent included - and keeps them as the listener does through the same lines (the parent's fill
+    /// releasing the child, the child firing), reporting to nobody: no fired coin noted for the forced flow, the coins
+    /// it changed kept for the replica instead.
+    #[test]
+    fn a_fork_keeps_the_trigger_orders_as_the_listener_without_its_reports() {
+        let mut listener =
+            OrderBookState::from_snapshot(Snapshots::new(HashMap::new()), TriggerSection::Complete(Vec::new()), &ParentLinks::default(), 0, 0, true, false, true);
+        let line = |text: &str| -> Batch<NodeDataOrderStatus> { serde_json::from_str(text).unwrap() };
+        listener.apply_order_statuses_hft(line(HYPE_PARENT_OPEN)).unwrap();
+        listener.apply_order_statuses_hft(line(HYPE_CHILD_OPEN)).unwrap();
+        let mut fork = listener.fork();
+        let hype = Coin::new("HYPE");
+        let held = |state: &OrderBookState| {
+            let band = state.untriggered_in_band(&hype, Px::parse_from_str("70").unwrap(), Px::parse_from_str("80").unwrap(), 10).2;
+            (band.orders.iter().map(|(_, order)| order.oid).collect::<Vec<u64>>(), state.untriggered_count(), band.availability)
+        };
+        assert_eq!(held(&fork), held(&listener));
+        let fired = HYPE_CHILD_OPEN.replace(r#""status":"open""#, r#""status":"triggered""#).replace("1191710832", "1191755253");
+        for (text, expected) in [(HYPE_PARENT_FILLED, vec![581_250_704_215]), (fired.as_str(), vec![])] {
+            listener.apply_order_statuses_hft(line(text)).unwrap();
+            fork.apply_order_statuses_hft(line(text)).unwrap();
+            assert_eq!((held(&fork), &held(&listener).0), (held(&listener), &expected));
+        }
+        assert_eq!((listener.take_fired_trigger_coins(), fork.take_fired_trigger_coins()), (vec!["HYPE".to_string()], vec![]));
+        assert_eq!((listener.take_trigger_changes(), fork.take_trigger_changes().contains(&hype)), (vec![], true));
     }
 
     /// bm 10-21 blocks 1192030080 and 1192032675: an order that fills in its own block - a market buy with its stop, an

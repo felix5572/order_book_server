@@ -39,7 +39,7 @@ use super::{
     publish::{BestLevels, CoinPending},
     record::{BlockRecord, MAX_LEAD_BLOCKS},
     refusals::{TakerKey, TakerRefusals},
-    triggers::TriggerBatch,
+    triggers::{SetGlobalCoin, TriggerSource},
     twap_streams::{TwapEvent, TwapFill},
     twaps::{DueSlices, TwapBook, TwapSlice, TwapStream, TwapsUnknown},
 };
@@ -49,7 +49,7 @@ use crate::{
     metrics::{
         PENDING_BOOK_ACTIONS_TOTAL, PENDING_BOOK_BLOCK_LOG_LEAD_BLOCKS, PENDING_BOOK_GAPS_TOTAL, PENDING_BOOK_HELD_ACTIONS,
         PENDING_BOOK_MOVED_COINS, PENDING_BOOK_OVERLAY_TOTAL, PENDING_BOOK_PREDICTED_FILLS_TOTAL, PENDING_BOOK_SPAN_SECONDS,
-        PENDING_BOOK_TRIGGERS_TOTAL,
+        PENDING_BOOK_TRIGGER_COINS_TOTAL, PENDING_BOOK_TRIGGERS_TOTAL,
     },
     order_book::{Coin, Px, Side, Sz},
 };
@@ -185,8 +185,9 @@ pub(crate) enum Taker {
     Pending { id: ActionId, seen_ns: i64, cloid: Option<String>, vault: Option<Address> },
     /// A TWAP's suborder of `slot` (batch 2h), `user` the TWAP's.
     Twap { twap_id: u64, user: Address, slot: u64 },
-    /// A trigger order a `SetGlobalAction` fired (batch 2l), `seen_ns` the action's line's `local_time`.
-    Trigger { oid: u64, user: Address, seen_ns: i64 },
+    /// A trigger order a `SetGlobalAction` fired (batch 2l; two sources since 2m), `seen_ns` the action's line's
+    /// `local_time`.
+    Trigger { source: TriggerSource, seen_ns: i64 },
 }
 
 /// What a step changed: the trades predicted, and the coins whose merged book may have moved. A change of every coin -
@@ -241,37 +242,43 @@ impl CoinActions {
     /// and the effects of the actions from `report_from` on.
     fn replay(&mut self, base: CoinBase<'_>, basis: Basis<'_>, slices: &[TwapSlice], cut_ns: i64, report_from: usize) -> Replayed {
         let mut overlay = Overlay::default();
-        let reported = |effects: Vec<(usize, Effect)>| effects.into_iter().filter(move |(index, _)| *index >= report_from);
-        if slices.is_empty() {
-            let reported = reported(self.apply_where(&mut overlay, base, basis, |_| true)).collect();
-            self.overlay = overlay;
-            return Replayed { slices: Vec::new(), reported };
-        }
-        let mut before: Vec<(usize, Effect)> = reported(self.apply_where(&mut overlay, base, basis, |action| action.seen_ns < cut_ns)).collect();
-        let slices = slices.iter().map(|slice| overlay.take_slice(base, slice)).collect();
-        before.extend(reported(self.apply_where(&mut overlay, base, basis, |action| action.seen_ns >= cut_ns)));
+        let (mut effects, slices) = if slices.is_empty() {
+            (self.apply_where(&mut overlay, base, basis, |_| true), Vec::new())
+        } else {
+            let mut effects = self.apply_where(&mut overlay, base, basis, |action| action.seen_ns < cut_ns);
+            let slices = slices.iter().map(|slice| overlay.take_slice(base, slice)).collect();
+            effects.extend(self.apply_where(&mut overlay, base, basis, |action| action.seen_ns >= cut_ns));
+            (effects, slices)
+        };
         self.overlay = overlay;
-        before.sort_unstable_by_key(|(index, _)| *index);
-        Replayed { slices, reported: before }
+        self.keep_stale(&effects);
+        effects.retain(|(index, _)| *index >= report_from);
+        effects.sort_unstable_by_key(|(index, _)| *index);
+        Replayed { slices, reported: effects }
     }
 
-    /// The merged best levels as the known actions seen before `cut_ns` leave them, before the TWAP suborders due: the
-    /// first part of `replay` (batch 2l, review 000642 r1 P2-2).
-    fn bbo_before_cut(&self, base: CoinBase<'_>, basis: Basis<'_>, cut_ns: i64) -> BestLevels {
+    /// The accounts each `SetGlobal` applied found stale, kept on it until its line leaves (design 000652 r4, r5): a
+    /// replay without the fill that moved them does not trust their frozen positions again.
+    fn keep_stale(&mut self, effects: &[(usize, Effect)]) {
+        for (index, effect) in effects.iter().filter(|(_, effect)| !effect.stale.is_empty()) {
+            if let BookOp::SetGlobal(sga) = &mut self.actions[*index].op {
+                sga.stale.extend(effect.stale.iter().copied());
+            }
+        }
+    }
+
+    /// The overlay as the known actions seen before `cut_ns` leave it, before the TWAP suborders due: the first part of
+    /// `replay` (batch 2l, review 000642 r1 P2-2).
+    fn overlay_before_cut(&self, base: CoinBase<'_>, basis: Basis<'_>, cut_ns: i64) -> Overlay {
         let mut overlay = Overlay::default();
         drop(self.apply_where(&mut overlay, base, basis, |action| action.seen_ns < cut_ns));
-        overlay.bbo(base)
+        overlay
     }
 
     /// The known actions `takes` admits applied on `overlay` in their order, each one's effect by its index.
     fn apply_where(&self, overlay: &mut Overlay, base: CoinBase<'_>, basis: Basis<'_>, takes: impl Fn(&PendingAction) -> bool) -> Vec<(usize, Effect)> {
         let known = self.actions.iter().enumerate().filter(|(_, action)| !action.unknown && takes(action));
         known.map(|(index, action)| (index, overlay.apply(base, basis, action))).collect()
-    }
-
-    /// The orders it holds against the set's cap.
-    fn occupancy(&self) -> usize {
-        self.actions.iter().map(PendingAction::occupancy).sum()
     }
 
     /// Whether it holds a taker order of `keys` (batch 2g: their margin refusals changed).
@@ -437,27 +444,36 @@ impl Shadow {
         self.hold_line(tx, actions, replica)
     }
 
-    /// A `SetGlobalAction` line's trigger batches, one a coin in its order (batch 2l, design 000642): held as the line's
-    /// actions where it stands - the cap counting each batch's orders (r2) -, settled with its block as any line's.
-    pub(crate) fn on_triggers(&mut self, tx: &MempoolTx, batches: Vec<(Coin, u32, TriggerBatch)>, replica: Option<&BookReplica>) -> Step {
-        if batches.is_empty() || self.lines.contains_key(&tx.tx_hash) || self.not_held(tx, aligned(replica)).is_some() {
+    /// A `SetGlobalAction` line's coins, each with its forecast mark and frozen positions (batch 2m, design 000652 r2):
+    /// held as the line's actions where it stands, one a coin in asset order, settled with its block as any line's.
+    pub(crate) fn on_set_global(&mut self, tx: &MempoolTx, coins: Vec<(Coin, u32, SetGlobalCoin)>, replica: Option<&BookReplica>) -> Step {
+        if coins.is_empty() || self.lines.contains_key(&tx.tx_hash) || self.not_held(tx, aligned(replica)).is_some() {
             return Step::default();
         }
-        let actions: Vec<(Coin, PendingAction)> = batches
+        let actions: Vec<(Coin, PendingAction)> = coins
             .into_iter()
             .enumerate()
-            .map(|(action, (coin, asset, batch))| {
+            .map(|(action, (coin, asset, sga))| {
                 let id = ActionId { tx_hash: tx.tx_hash, action, item: 0 };
-                let op = BookOp::Triggers(Arc::new(batch));
+                let op = BookOp::SetGlobal(Box::new(sga));
                 (coin, PendingAction { id, seen_ns: tx.seen_ns, vault: None, signer: None, asset, op, unknown: false })
             })
             .collect();
-        let occupancy = actions.iter().map(|(_, action)| action.occupancy()).sum();
-        if self.over_cap(occupancy) {
-            self.drop_over_cap(occupancy);
+        if self.over_cap(actions.len()) {
+            self.drop_over_cap(actions.len());
             return Step::default();
         }
         self.hold_line(tx, actions, replica)
+    }
+
+    /// The accounts, as known, of `coin`'s untriggered orders a mark at `mark_px` reaches where a line seen at `seen_ns`
+    /// runs - the replica's and the pending ones -: whose positions a `SetGlobalAction` freezes (design 000652 r2, r5),
+    /// on the same overlay as its mark (review 000652 r6 P2-3). None while no replica is aligned or the coin's orders are
+    /// not all known (the action tells why as it applies).
+    pub(crate) fn reached_accounts(&self, coin: &Coin, replica: Option<&BookReplica>, mark_px: Px, seen_ns: i64) -> Vec<Address> {
+        let Some((replica, _, _)) = aligned(replica).filter(|_| !self.gaps.replica) else { return Vec::new() };
+        let base = replica.coin(coin);
+        self.at_line(coin, base, seen_ns, |overlay| overlay.reached_accounts(base, mark_px))
     }
 
     /// Whether `arriving` more orders take the set past its cap, the price band's slots waiting counted (r4).
@@ -701,7 +717,7 @@ impl Shadow {
     /// The gauges: actions held, known and unknown; the mempool's lead on the confirmed blocks; the coins whose
     /// merged best levels differ from the replica's; the log's blocks above the confirmed height.
     pub(crate) fn export(&self, replica: Option<&BookReplica>) {
-        let unknown: usize = self.coins.values().flat_map(|actions| &actions.actions).filter(|action| action.unknown).map(PendingAction::occupancy).sum();
+        let unknown = self.coins.values().flat_map(|actions| &actions.actions).filter(|action| action.unknown).count();
         PENDING_BOOK_HELD_ACTIONS.with_label_values(&["unknown"]).set(gauge(unknown));
         PENDING_BOOK_HELD_ACTIONS.with_label_values(&["known"]).set(gauge(self.held - unknown));
         let aligned = aligned(replica);
@@ -739,15 +755,26 @@ impl Shadow {
         (self.bbo(coin, replica), Overlay::default().bbo(replica.coin(coin)))
     }
 
-    /// `best_levels` where a line seen at `seen_ns` runs: before the coin's TWAP suborders due when it comes before
-    /// their cut, as `CoinActions::replay` runs it (batch 2l, review 000642 r1 P2-2).
+    /// `best_levels` where a line seen at `seen_ns` runs (`at_line`).
     pub(crate) fn best_at_line(&self, coin: &Coin, replica: &BookReplica, seen_ns: i64) -> (BestLevels, BestLevels) {
-        let cut_ns = slice_cut_ns(self.basis_ms);
-        let due = self.due.get(coin).is_some_and(|slices| !slices.is_empty());
-        let (Some(actions), true) = (self.coins.get(coin), due && seen_ns < cut_ns) else { return self.best_levels(coin, replica) };
         let base = replica.coin(coin);
-        let basis = Basis::new(self.record.priorities(), &self.refusals, self.basis_ms);
-        (actions.bbo_before_cut(base, basis, cut_ns), Overlay::default().bbo(base))
+        (self.at_line(coin, base, seen_ns, |overlay| overlay.bbo(base)), Overlay::default().bbo(base))
+    }
+
+    /// What `read` takes of `coin`'s overlay where a line seen at `seen_ns` runs: before the coin's TWAP suborders due
+    /// when it comes before their cut, as `CoinActions::replay` runs it (batch 2l, review 000642 r1 P2-2); with every
+    /// action held otherwise.
+    fn at_line<R>(&self, coin: &Coin, base: CoinBase<'_>, seen_ns: i64, read: impl FnOnce(&Overlay) -> R) -> R {
+        let due = self.due.get(coin).is_some_and(|slices| !slices.is_empty());
+        let cut_ns = slice_cut_ns(self.basis_ms);
+        match self.coins.get(coin) {
+            Some(actions) if due && seen_ns < cut_ns => {
+                let basis = Basis::new(self.record.priorities(), &self.refusals, self.basis_ms);
+                read(&actions.overlay_before_cut(base, basis, cut_ns))
+            }
+            Some(actions) => read(&actions.overlay),
+            None => read(&Overlay::default()),
+        }
     }
 
     /// Whether the block log showed the block holding `tx_hash`, still recorded (batch 2l).
@@ -789,7 +816,7 @@ impl Shadow {
     /// come - or, the coin holding TWAP suborders the line comes before, the coin replayed with them, the suborders after
     /// it (batch 2j) -, their trades into `trades` while `emit`.
     fn hold(&mut self, coin: Coin, line_actions: Vec<(usize, PendingAction)>, seen_ns: i64, aligned: Option<Aligned<'_>>, emit: bool, trades: &mut LineTrades) {
-        self.held += line_actions.iter().map(|(_, action)| action.occupancy()).sum::<usize>();
+        self.held += line_actions.len();
         let behind = aligned.is_some_and(|(_, height, _)| !self.record_covers(height));
         let emit_twaps = emit && self.in_trade_window(self.basis_ms);
         let Self { coins, due, emitted, record, refusals, gaps, priorities_behind, .. } = self;
@@ -809,7 +836,10 @@ impl Shadow {
             replayed.reported
         } else {
             let CoinActions { actions: held, overlay } = &mut *actions;
-            (first..held.len()).filter(|index| !held[*index].unknown).map(|index| (index, overlay.apply(base, basis, &held[index]))).collect()
+            let effects: Vec<(usize, Effect)> =
+                (first..held.len()).filter(|index| !held[*index].unknown).map(|index| (index, overlay.apply(base, basis, &held[index]))).collect();
+            actions.keep_stale(&effects);
+            effects
         };
         *priorities_behind |= behind && !effects.is_empty();
         let in_line = effects.into_iter().map(|(index, effect)| (orders[index - first], &actions.actions[index], effect));
@@ -873,7 +903,7 @@ impl Shadow {
             .map(|(key, _)| key)
             .collect();
         for (coin, actions) in &mut self.coins {
-            let before = actions.occupancy();
+            let before = actions.actions.len();
             actions.actions.retain(|action| {
                 let out = banded.contains(&(action.id.tx_hash, action.id.action));
                 if out {
@@ -881,8 +911,8 @@ impl Shadow {
                 }
                 !out
             });
-            if actions.occupancy() < before {
-                self.held -= before - actions.occupancy();
+            if actions.actions.len() < before {
+                self.held -= before - actions.actions.len();
                 changed.insert(coin.clone());
             }
         }
@@ -919,7 +949,7 @@ impl Shadow {
             actions.actions.retain(|action| {
                 let Some(outcome) = gone.get(&action.id.tx_hash) else { return true };
                 count_action(action, outcome);
-                *held -= action.occupancy();
+                *held -= 1;
                 false
             });
             !actions.actions.is_empty() || due.contains_key(coin)
@@ -996,11 +1026,12 @@ impl PendingTrade {
         }
     }
 
-    /// The account the taker acts for, as known: a pending order's vault, a TWAP's or a trigger order's user.
+    /// The account the taker acts for, as known: a pending order's vault, a TWAP's user, a trigger order's account.
     pub(crate) const fn taker_account(&self) -> Option<Address> {
         match &self.taker {
             Taker::Pending { vault, .. } => *vault,
-            Taker::Twap { user, .. } | Taker::Trigger { user, .. } => Some(*user),
+            Taker::Twap { user, .. } => Some(*user),
+            Taker::Trigger { source, .. } => source.account(),
         }
     }
 }
@@ -1036,8 +1067,9 @@ fn slice_cut_ns(basis_ms: u64) -> i64 {
 fn trades_of<'a>(coin: &Coin, applied: impl Iterator<Item = (usize, &'a PendingAction, Effect)>, emit: bool, trades: &mut Vec<(usize, PendingTrade)>) {
     for (order_in_line, action, effect) in applied {
         PENDING_BOOK_OVERLAY_TOTAL.with_label_values(&[action.op.label(), effect.outcome]).inc();
-        if let BookOp::Triggers(batch) = &action.op {
-            let triggered = effect.triggered.into_iter().flat_map(|fills| trigger_trades(coin, action.seen_ns, batch, fills, emit));
+        if let BookOp::SetGlobal(_) = &action.op {
+            PENDING_BOOK_TRIGGER_COINS_TOTAL.with_label_values(&[coin_outcome(&effect)]).inc();
+            let triggered = effect.triggered.into_iter().flat_map(|fills| trigger_trades(coin, action.seen_ns, fills, emit));
             trades.extend(triggered.map(|trade| (order_in_line, trade)));
             continue;
         }
@@ -1064,23 +1096,32 @@ fn slice_trades(coin: &Coin, slices: &[TwapSlice], filled: Vec<Vec<Fill>>, emit_
     }
 }
 
-/// A batch's triggered order's trades, out while `emit`; its outcome counted.
-fn trigger_trades(coin: &Coin, seen_ns: i64, batch: &TriggerBatch, triggered: TriggerFills, emit: bool) -> Vec<PendingTrade> {
-    let TriggerFills { item, fills, outcome } = triggered;
+/// A `SetGlobal`'s first application on its coin, as counted: why none ran, or whether any fired.
+fn coin_outcome(effect: &Effect) -> &'static str {
+    match (effect.outcome, effect.triggered.is_empty()) {
+        ("set_global", true) => "none_fired",
+        ("set_global", false) => "executed",
+        (reason, _) => reason,
+    }
+}
+
+/// A batch's triggered order's trades, out while `emit`; its outcome and source counted.
+fn trigger_trades(coin: &Coin, seen_ns: i64, triggered: TriggerFills, emit: bool) -> Vec<PendingTrade> {
+    let TriggerFills { source, side, fills, outcome } = triggered;
     PENDING_BOOK_OVERLAY_TOTAL.with_label_values(&["trigger", outcome]).inc();
+    PENDING_BOOK_TRIGGERS_TOTAL.with_label_values(&[source.label()]).inc();
     if outcome == "zero_size" {
         PENDING_BOOK_TRIGGERS_TOTAL.with_label_values(&["zero_size"]).inc();
     }
     if !emit {
         return Vec::new();
     }
-    let order = &batch.orders[item];
-    let taker = Taker::Trigger { oid: order.oid, user: order.user, seen_ns };
+    let taker = Taker::Trigger { source, seen_ns };
     fills
         .into_iter()
         .map(|fill| {
             PENDING_BOOK_PREDICTED_FILLS_TOTAL.with_label_values(&[fill.maker.label()]).inc();
-            PendingTrade { coin: coin.clone(), side: order.side, px: fill.px, sz: fill.sz, maker: fill.maker, taker: taker.clone() }
+            PendingTrade { coin: coin.clone(), side, px: fill.px, sz: fill.sz, maker: fill.maker, taker: taker.clone() }
         })
         .collect()
 }
@@ -1144,14 +1185,12 @@ fn gauge(count: usize) -> i64 {
 pub(crate) mod tests {
     use super::*;
     use crate::{
-        listeners::order_book::replica::tests::{block_lines, block_time_ms, btc_diff, btc_status, new_diff, remove, replica_of_empty_book},
+        listeners::order_book::replica::tests::{block_lines, block_time_ms, btc_diff, btc_status, btc_stop_status, new_diff, remove, replica_of_empty_book},
         order_book::Oid,
         pending::{
             actions::tests::{coins, requested},
             blocks::tests::hash,
-            mempool::{ActionKind, RequestedTif, SignedAction},
-            actions::Tif,
-            triggers::{Sizing, TriggerOrder},
+            mempool::{ActionKind, RequestedTif, RequestedTrigger, SignedAction, TriggerGrouping},
             refusals::TakerOutcome,
             signer::ActingIdentity,
         },
@@ -1347,13 +1386,8 @@ pub(crate) mod tests {
         (statuses, vec![btc_diff(11, "A", "101.0", remove())])
     }
 
-    /// BTC's forced flow frame of the pending book's tier: node mark 100, `candidates` its trigger orders.
-    pub(crate) fn trigger_flow_frame(candidates: Vec<crate::pending::triggers::tests::Candidate>) -> Arc<crate::accounts::forced_flow_owner::FlowFrame> {
-        use crate::accounts::forced_flow_owner::{FlowContent, FlowFrame, FlowHeights};
-        let ready = crate::pending::triggers::tests::ready("100", candidates);
-        let tier = crate::pending::trigger_frames::TRIGGER_TIER;
-        Arc::new(FlowFrame { coin: BTC.to_string(), tier, seq: 1, heights: FlowHeights::default(), content: FlowContent::Ready(Box::new(ready)) })
-    }
+    /// The account of the replica's orders in these tests (`btc_status`'s and `btc_stop_status`'s user).
+    pub(crate) const ACCOUNT: Address = Address::with_last_byte(1);
 
     /// A `SetGlobalAction`'s line seen at `seen_ms`, its hash from `byte`.
     fn set_global_line(seen_ms: i64, byte: u8) -> MempoolTx {
@@ -1361,45 +1395,129 @@ pub(crate) mod tests {
         MempoolTx { seen_ns: seen_ms * NS_PER_MS, tx_hash: hash(byte), actions: vec![SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind }] }
     }
 
-    /// `orders` plain market buys of BTC, 1 each, up to 101, oids from 77.
-    fn buys(orders: u64) -> TriggerBatch {
-        let buy = |oid| TriggerOrder { oid, user: TAKER, side: Side::Bid, limit_px: Px::parse_from_str("101").unwrap(), tif: Tif::Ioc, sz: Sz::parse_from_str("1").unwrap(), sizing: Sizing::Order };
-        TriggerBatch { orders: (77..77 + orders).map(buy).collect(), positions: vec![(TAKER, 0)] }
+    /// BTC's coin of a `SetGlobalAction` at mark 100, the positions (whole units) of `positions` frozen.
+    fn btc_at_100(positions: &[(Address, i128)]) -> Vec<(Coin, u32, SetGlobalCoin)> {
+        let positions = positions.iter().map(|(account, units)| (*account, units * 100_000_000)).collect();
+        let sga = SetGlobalCoin { mark_px: Px::parse_from_str("100").unwrap(), positions, positions_known: true, stale: std::collections::BTreeSet::new() };
+        vec![(Coin::new(BTC), 0, sga)]
     }
 
-    /// Batch 2l second step: a trigger batch is held with its `SetGlobalAction`'s line, takes where it stands - its
-    /// taker the trigger order, its `seenMs` the line's - and leaves with the line's block; the line again holds none.
+    impl Harness {
+        /// A confirmed stop of `ACCOUNT` opened in the next block (`btc_stop_status`).
+        fn open_stop(&mut self, oid: u64, side: &str, limit: Option<&str>, position: bool, cloid: Option<&str>) {
+            let at = block_time_ms(self.height + 1);
+            self.block(&[], vec![btc_stop_status(oid, side, limit, position, "open", cloid, at)], vec![]);
+        }
+
+        /// A bid of `sz` at 99, oid `oid`, resting in the next block.
+        fn rest_bid(&mut self, oid: u64, sz: &str) {
+            let at = block_time_ms(self.height + 1);
+            self.block(&[], vec![btc_status(oid, "B", "99.0", sz, "open", None, "Alo", at)], vec![btc_diff(oid, "B", "99.0", new_diff(sz))]);
+        }
+
+        /// The `SetGlobal` held on BTC: the accounts kept stale on it.
+        fn stale_on_set_global(&self) -> Vec<Address> {
+            let actions = &self.shadow.coins[&Coin::new(BTC)].actions;
+            actions.iter().find_map(|action| if let BookOp::SetGlobal(sga) = &action.op { Some(sga.stale.iter().copied().collect()) } else { None }).unwrap()
+        }
+    }
+
+    /// Batch 2m: a `SetGlobalAction`'s coin is held with its line, fires the replica's stop where it stands - its taker
+    /// the trigger order, its `seenMs` the line's - and leaves with the line's block; the line again holds none.
     #[test]
-    fn a_trigger_batch_takes_with_its_line_and_leaves_with_its_block() {
+    fn a_set_global_fires_with_its_line_and_leaves_with_its_block() {
         let mut harness = Harness::ready_from(1_000);
         harness.rest_ask(11);
+        harness.open_stop(77, "B", None, false, None);
         let tx = set_global_line(3_150, 1);
-        let step = harness.shadow.on_triggers(&tx, vec![(Coin::new(BTC), 0, buys(1))], Some(&harness.replica));
+        let step = harness.shadow.on_set_global(&tx, btc_at_100(&[]), Some(&harness.replica));
         let [trade] = step.trades.as_slice() else { panic!("{step:?}") };
-        assert_eq!((&trade.taker, trade.seen_ms(), trade.taker_account()), (&Taker::Trigger { oid: 77, user: TAKER, seen_ns: tx.seen_ns }, Some(3_150), Some(TAKER)));
+        let taker = Taker::Trigger { source: TriggerSource::Confirmed { oid: 77, user: ACCOUNT, cloid: None }, seen_ns: tx.seen_ns };
+        assert_eq!((&trade.taker, trade.seen_ms(), trade.taker_account()), (&taker, Some(3_150), Some(ACCOUNT)));
         assert!(matches!(&trade.maker, Maker::Confirmed { oid, .. } if *oid == Oid::new(11)));
         assert_eq!((harness.shadow.held, harness.bbo().1, step.changed.len()), (1, None, 1));
-        assert!(harness.shadow.on_triggers(&tx, vec![(Coin::new(BTC), 0, buys(1))], Some(&harness.replica)).trades.is_empty(), "held already");
+        assert!(harness.shadow.on_set_global(&tx, btc_at_100(&[]), Some(&harness.replica)).trades.is_empty(), "held already");
         harness.block(&[1], vec![], vec![]);
         assert_eq!((harness.shadow.held, harness.bbo().1), (0, Some(level("101", "1", 1))), "its block confirmed it");
     }
 
-    /// Review 000642 r2: a batch holds each of its orders against the cap - 3 of 3 -, and gives them all back with its
-    /// block; one more line past the cap, or a batch of 4 alone, drops the set.
+    /// Design 000652 r2 P2-1 acceptance: two actions of different lines reaching the stop fire it once; the first's
+    /// block triggering it there, the second replayed fires nothing.
     #[test]
-    fn a_trigger_batch_holds_each_order_against_the_cap() {
-        let capped = || Harness::ready_with(PendingParams::from_ms(1_000, 1_000, 10_000, 3, 60_000, 300_000, 1_000).unwrap(), 1_000);
-        let mut harness = capped();
-        drop(harness.shadow.on_triggers(&set_global_line(3_150, 1), vec![(Coin::new(BTC), 0, buys(3))], Some(&harness.replica)));
-        assert_eq!(harness.shadow.held, 3);
-        harness.block(&[1], vec![], vec![]);
-        assert_eq!(harness.shadow.held, 0, "its block confirmed all three");
-        drop(harness.shadow.on_triggers(&set_global_line(3_250, 2), vec![(Coin::new(BTC), 0, buys(3))], Some(&harness.replica)));
-        drop(harness.line(3_260, 3, vec![ioc("0x03")]));
-        assert_eq!((harness.shadow.held, harness.shadow.lines.len()), (0, 0), "over the cap: the set dropped");
-        let mut harness = capped();
-        let step = harness.shadow.on_triggers(&set_global_line(3_150, 1), vec![(Coin::new(BTC), 0, buys(4))], Some(&harness.replica));
-        assert_eq!((step.trades.len(), harness.shadow.held, harness.shadow.lines.len()), (0, 0, 0), "a batch past the cap alone");
+    fn two_set_globals_fire_a_stop_once() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        harness.open_stop(77, "B", None, false, None);
+        let first = harness.shadow.on_set_global(&set_global_line(3_150, 1), btc_at_100(&[]), Some(&harness.replica));
+        let second = harness.shadow.on_set_global(&set_global_line(3_160, 2), btc_at_100(&[]), Some(&harness.replica));
+        assert_eq!((first.trades.len(), second.trades.len(), harness.bbo().1), (1, 0, None));
+        let at = block_time_ms(harness.height + 1);
+        let fired = vec![btc_stop_status(77, "B", None, false, "triggered", None, at), btc_status(11, "A", "101.0", "0.0", "filled", None, "Alo", 1_000)];
+        let step = harness.block(&[1], fired, vec![btc_diff(11, "A", "101.0", remove())]);
+        assert_eq!((step.trades.len(), harness.shadow.held, harness.bbo().1), (0, 1, None));
+    }
+
+    /// Design 000652 r2 P2-1 acceptance: a pending limit stop's remainder rests where the action fires it; its line
+    /// confirmed without the order opening - rejected -, the action replayed leaves no remainder.
+    #[test]
+    fn a_rejected_pending_stop_leaves_no_remainder() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        let mut order = requested(0, false, "100.5", RequestedTif::Trigger, Some("0x0c"));
+        order.trigger = Some(RequestedTrigger { trigger_px: Px::parse_from_str("100").unwrap(), is_market: false, take_profit: false, grouping: TriggerGrouping::Alone });
+        drop(harness.line(3_150, 2, vec![ActionKind::Order(vec![order])]));
+        drop(harness.shadow.on_set_global(&set_global_line(3_160, 1), btc_at_100(&[]), Some(&harness.replica)));
+        assert_eq!(harness.bbo().1, Some(level("100.5", "1", 1)));
+        harness.block(&[2], vec![], vec![]);
+        assert_eq!(harness.bbo().1, Some(level("101", "1", 1)));
+    }
+
+    /// Batch 2m (design 000652 r2 P2-3): a pending cancel by cloid of the stop's account takes the replica's stop out
+    /// of the untriggered ones - the cloid index holding it -: the action fires nothing.
+    #[test]
+    fn a_pending_cancel_by_cloid_takes_a_confirmed_stop_out() {
+        for (vault, trades) in [(ACCOUNT, 0), (Address::with_last_byte(2), 1)] {
+            let mut harness = Harness::ready_from(1_000);
+            harness.rest_ask(11);
+            harness.open_stop(77, "B", None, false, Some("0x0e"));
+            let cancel = ActionKind::CancelByCloid { fast: false, cancels: vec![crate::accounts::replica::WireCancelByCloid { asset: 0, cloid: "0x0e".to_string() }] };
+            let tx = MempoolTx { seen_ns: 3_140 * NS_PER_MS, tx_hash: hash(2), actions: vec![SignedAction { vault: Some(vault), signer: None, expires_after_ms: None, priority: 0, kind: cancel }] };
+            drop(harness.shadow.on_tx(&tx, false, Some(&coins()), Some(&harness.replica)));
+            let step = harness.shadow.on_set_global(&set_global_line(3_150, 1), btc_at_100(&[]), Some(&harness.replica));
+            assert_eq!(step.trades.len(), trades, "vault {vault}");
+        }
+    }
+
+    /// Design 000652 r3 P2-2: a confirmed cancel of a stop - no pending cancel, no book change - replays its coin: the
+    /// remainder its action rested goes.
+    #[test]
+    fn a_confirmed_cancel_of_a_stop_replays_its_coin() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        harness.open_stop(77, "A", Some("100.5"), false, None);
+        drop(harness.shadow.on_set_global(&set_global_line(3_150, 1), btc_at_100(&[(ACCOUNT, 0)]), Some(&harness.replica)));
+        assert_eq!(harness.bbo().1, Some(level("100.5", "1", 1)));
+        let at = block_time_ms(harness.height + 1);
+        let step = harness.block(&[], vec![btc_stop_status(77, "A", Some("100.5"), false, "canceled", None, at)], vec![]);
+        assert_eq!((step.changed.contains(&Coin::new(BTC)), harness.bbo().1), (true, Some(level("101", "1", 1))));
+    }
+
+    /// Design 000652 r5 acceptance: long 2, `ACCOUNT`'s vault IOC sells 1 before the action, which reaches only its plain
+    /// stop - run, `ACCOUNT` kept stale on it -; the IOC confirmed and a position stop of `ACCOUNT` opened, the action
+    /// replayed runs none: no 2 offered.
+    #[test]
+    fn a_stale_account_stays_stale_after_the_fill_confirms() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_bid(12, "5.0");
+        harness.open_stop(77, "A", None, false, None);
+        let sells = ActionKind::Order(vec![requested(0, false, "99", RequestedTif::Ioc, Some("0x05"))]);
+        let tx = MempoolTx { seen_ns: 3_150 * NS_PER_MS, tx_hash: hash(2), actions: vec![SignedAction { vault: Some(ACCOUNT), signer: None, expires_after_ms: None, priority: 0, kind: sells }] };
+        drop(harness.shadow.on_tx(&tx, false, Some(&coins()), Some(&harness.replica)));
+        let step = harness.shadow.on_set_global(&set_global_line(3_160, 1), btc_at_100(&[(ACCOUNT, 2)]), Some(&harness.replica));
+        assert_eq!((step.trades.len(), harness.stale_on_set_global()), (1, vec![ACCOUNT]));
+        let at = block_time_ms(harness.height + 1);
+        harness.block(&[2], vec![btc_stop_status(78, "A", Some("100.5"), true, "open", None, at)], vec![]);
+        assert_eq!((harness.bbo(), harness.stale_on_set_global()), ((Some(level("99", "5", 1)), None), vec![ACCOUNT]));
     }
 
     /// Review 000642 r1 P2-2: a line before the suborder's cut runs before it - its book the one the suborder has not
@@ -1415,6 +1533,24 @@ pub(crate) mod tests {
         assert_eq!(ask(3_150), Some(level("101", "1", 1)), "before the cut: the suborder not run yet");
         assert_eq!(ask(3_980), Some(level("101", "0.9", 1)), "at the cut: after it");
         assert_eq!(harness.shadow.best_at_line(&btc, &harness.replica, 3_150 * NS_PER_MS).1, harness.shadow.best_levels(&btc, &harness.replica).1);
+    }
+
+    /// Review 000652 r6 P2-3: the accounts a `SetGlobalAction` freezes are those of the orders it reaches where its line
+    /// runs - before the TWAP suborder's cut, ahead of a cancel seen at the cut though received first -; at the cut,
+    /// after that cancel.
+    #[test]
+    fn the_accounts_frozen_are_those_where_the_line_runs() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        harness.open_stop(77, "A", None, true, None);
+        drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+        drop(harness.twaps_known_now());
+        let cancel = ActionKind::Cancel { fast: false, cancels: vec![crate::accounts::replica::WireCancel { a: 0, o: 77 }] };
+        let tx = MempoolTx { seen_ns: 3_981 * NS_PER_MS, tx_hash: hash(2), actions: vec![SignedAction { vault: Some(ACCOUNT), signer: None, expires_after_ms: None, priority: 0, kind: cancel }] };
+        drop(harness.shadow.on_tx(&tx, false, Some(&coins()), Some(&harness.replica)));
+        let (btc, mark_px) = (Coin::new(BTC), Px::parse_from_str("100").unwrap());
+        let reached = |seen_ms: i64| harness.shadow.reached_accounts(&btc, Some(&harness.replica), mark_px, seen_ms * NS_PER_MS);
+        assert_eq!((reached(3_979), reached(3_990)), (vec![ACCOUNT], vec![]));
     }
 
     /// Batch 2l: a `SetGlobalAction`'s line holds no book action - its forecast is `mark_forecast`'s alone -: no coin
@@ -1720,7 +1856,7 @@ pub(crate) mod tests {
     /// after: the empty blocks replay the coin (review 000620 r2), and an IOC meets the replica's ask first.
     #[test]
     fn the_confirmed_block_time_alone_requeues_a_priority_order() {
-        let pending = Maker::Pending { id: ActionId { tx_hash: hash(1), action: 0, item: 0 }, cloid: Some("0x0a".to_string()), owner: None };
+        let pending = Maker::Pending { id: ActionId { tx_hash: hash(1), action: 0, item: 0 }, cloid: Some("0x0a".to_string()), account: None };
         let replica = Maker::Confirmed { user: Address::with_last_byte(1), oid: Oid::new(11), cloid: None };
         for (blocks_until_ms, first) in [(3_100, pending), (3_500, replica)] {
             let mut harness = Harness::ready_from(1_000);
