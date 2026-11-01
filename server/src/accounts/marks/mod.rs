@@ -29,6 +29,8 @@ pub(crate) mod pairing;
 pub(crate) mod rules;
 pub(crate) mod seed;
 pub(crate) mod system;
+#[cfg(test)]
+mod sga_prediction;
 
 use rustc_hash::FxHashMap;
 

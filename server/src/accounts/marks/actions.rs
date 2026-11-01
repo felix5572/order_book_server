@@ -250,18 +250,7 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
         "perpDeploy" => {
             (3, hip3_oracle(action)?)
         }
-        "SetGlobalAction" => {
-            let pxs: Vec<(Option<String>, Option<String>)> = action.field(action.pxs.as_ref(), "pxs")?;
-            let pxs = pxs
-                .into_iter()
-                .map(|pair| match pair {
-                    (Some(oracle), Some(mark)) => SubmittedPrices::Priced { oracle, mark },
-                    (None, None) => SubmittedPrices::Unpriced,
-                    _ => SubmittedPrices::Partial,
-                })
-                .collect();
-            (3, MarkAction::SetGlobal(pxs))
-        }
+        "SetGlobalAction" => (3, MarkAction::SetGlobal(set_global_prices(action)?)),
         _ => {
             let oracle = action.field(action.oracle_pxs.as_ref(), "oraclePxs")?;
             let external = action.field(action.external_perp_pxs.as_ref(), "externalPerpPxs")?;
@@ -269,6 +258,17 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
         }
     };
     Ok(Some(RankedAction { rank: (paired.bundle, category, paired.position), user, action }))
+}
+
+/// A `SetGlobalAction`'s `pxs`: per main-dex asset, the prices submitted (also the pending book's, batch 2l).
+pub(crate) fn set_global_prices(action: &crate::accounts::replica::Action<'_>) -> Result<Vec<SubmittedPrices>, String> {
+    let pxs: Vec<(Option<String>, Option<String>)> = action.field(action.pxs.as_ref(), "pxs")?;
+    let prices = pxs.into_iter().map(|pair| match pair {
+        (Some(oracle), Some(mark)) => SubmittedPrices::Priced { oracle, mark },
+        (None, None) => SubmittedPrices::Unpriced,
+        _ => SubmittedPrices::Partial,
+    });
+    Ok(prices.collect())
 }
 
 /// The hash locator counts all outer actions (including rejects and noops), in execution order.

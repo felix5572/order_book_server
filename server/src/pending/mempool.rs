@@ -21,6 +21,7 @@ use super::{
 use crate::{
     accounts::{
         book::{ActionCoins, PendingAnchor},
+        marks::actions::{SubmittedPrices, set_global_prices},
         replica::{Action, OrderRef, SignedAction as WireSignedAction, WireCancel, WireCancelByCloid, WireModify, WireOrder, alo_priority},
     },
     listeners::order_book::{
@@ -75,6 +76,8 @@ pub(crate) enum ActionKind {
     CancelByCloid { fast: bool, cancels: Vec<WireCancelByCloid> },
     /// A `modify` (one) or a `batchModify`; `always_place` is the action's `a`.
     Modify { always_place: bool, modifies: Vec<Modify> },
+    /// A validator's `SetGlobalAction`: per main-dex asset, the prices submitted (batch 2l, `mark_forecast`).
+    SetGlobal(Vec<SubmittedPrices>),
     /// Any other type (counted only).
     Other,
 }
@@ -218,6 +221,7 @@ fn signed_action(signed: &WireSignedAction<'_>) -> Result<SignedAction, String> 
                 .collect::<Result<_, String>>()?;
             ActionKind::Modify { always_place: flag(action, action.always_place.as_ref(), "a")?, modifies }
         }
+        "SetGlobalAction" => ActionKind::SetGlobal(set_global_prices(action)?),
         _ => ActionKind::Other,
     };
     Ok(SignedAction { vault: signed.vault()?, signer: None, expires_after_ms: signed.expires_after_ms()?, priority, kind })
@@ -286,6 +290,7 @@ impl ActionKind {
             Self::Cancel { .. } => "cancel",
             Self::CancelByCloid { .. } => "cancel_by_cloid",
             Self::Modify { .. } => "modify",
+            Self::SetGlobal(_) => "set_global",
             Self::Other => "other",
         }
     }
@@ -297,7 +302,7 @@ impl ActionKind {
             Self::Cancel { cancels, .. } => cancels.iter().map(|cancel| cancel.a).collect(),
             Self::CancelByCloid { cancels, .. } => cancels.iter().map(|cancel| cancel.asset).collect(),
             Self::Modify { modifies, .. } => modifies.iter().map(|modify| modify.order.asset).collect(),
-            Self::Other => Vec::new(),
+            Self::SetGlobal(_) | Self::Other => Vec::new(),
         }
     }
 
@@ -559,6 +564,22 @@ mod tests {
             SignedAction { vault: Some(address("0x9e1733b7d499d6a2a6d3f5d74b942bbf5266a34d")), signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Other },
         ];
         assert_eq!(tx.actions, expected);
+    }
+
+    /// bm 11-01 15:37-15:38, a validator's `SetGlobalAction` alone on its line (47 of 47 such lines), its `pxs` cut to
+    /// three assets and a fourth made partial.
+    const SET_GLOBAL: &str = r#"{"signature":{"r":"0x6d36759485b99e20a2c806929afb800dd76235997ed17ab7a78eedda1063f65e","s":"0x75cffeb5d78cd3b14d5de14b4acbbf4e13e28f864d94bc4cd65157e8023ca00e","v":28},"action":{"type":"SetGlobalAction","pxs":[["78129","78115"],["2270.9","2270"],[null,null],["1.473",null]],"externalPerpPxs":[["0G","0.1676"],["2Z","0.02535"]],"usdtUsdcPx":"0.9990109791306606","nativePx":"87.84490829982927"},"nonce":1793547443362,"expiresAfter":1793547518788}"#;
+
+    /// Batch 2l: a `SetGlobalAction` reads as the marks read it (`set_global_prices`), each asset's pair priced, unpriced
+    /// or partial.
+    #[test]
+    fn a_set_global_action_reads_its_submitted_prices() {
+        let tx = parse_line(&line(&[SET_GLOBAL])).unwrap();
+        let priced = |oracle: &str, mark: &str| SubmittedPrices::Priced { oracle: oracle.to_string(), mark: mark.to_string() };
+        let submitted = vec![priced("78129", "78115"), priced("2270.9", "2270"), SubmittedPrices::Unpriced, SubmittedPrices::Partial];
+        let expected = SignedAction { vault: None, signer: None, expires_after_ms: Some(1_793_547_518_788), priority: 0, kind: ActionKind::SetGlobal(submitted) };
+        assert_eq!(tx.actions, [expected]);
+        assert!(parse_line(&line(&[&SET_GLOBAL.replace(r#""pxs":"#, r#""prices":"#)])).is_err(), "no pxs");
     }
 
     /// Design 000604 section 2: an action that does not read loses its whole line, whatever kind it is.

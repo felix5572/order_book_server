@@ -7,6 +7,7 @@
 pub(crate) mod actions;
 mod blocks;
 mod feed;
+mod mark_forecast;
 pub(crate) mod mempool;
 pub(crate) mod overlay;
 pub(crate) mod publish;
@@ -35,16 +36,18 @@ pub(crate) use self::{
 use self::{
     blocks::{LoggedBlock, BlockIngest, BlockInput},
     feed::{Feed, FeedEvent, FeedReports, Proven},
+    mark_forecast::{ForecastBook, ServedBook, SgaForecasts},
     mempool::{MempoolIngest, MempoolInput, MempoolTx},
     twap_streams::{TwapFillLine, TwapStatusLine},
     twaps::TwapStream,
     publish::Publisher,
-    shadow::{Shadow, Step, wall_ms},
+    shadow::{Shadow, Step, unix_ns, wall_ms},
 };
 use crate::{
     accounts::{
         book::{ActionCoins, PendingAnchor},
         owner_thread::spawn_owner,
+        publish::NodePrices,
     },
     listeners::order_book::replica::{BookReplica, ReplicaBatch, ReplicaControl, ReplicaFork, ReplicaInputs},
     metrics::{
@@ -67,6 +70,9 @@ pub(crate) struct PendingFeeds {
     pub(crate) twap_fills: Feed<Proven<TwapFillLine>>,
     /// The account view's anchor: its asset table and running TWAPs.
     pub(crate) anchor: watch::Receiver<Option<Arc<PendingAnchor>>>,
+    /// The account view's node prices after every applied block: what the `SetGlobalAction` forecasts read and are
+    /// checked against (batch 2l).
+    pub(crate) prices: watch::Receiver<NodePrices>,
 }
 
 /// The pending thread, owner of the replica, the feeds' reading and the pending set (`pending-book`, on its own OS
@@ -88,7 +94,7 @@ async fn run(inputs: ReplicaInputs, feeds: PendingFeeds, backlog_events: usize, 
     let ReplicaInputs { control, forks, batches } = inputs;
     let mut listener = Feeds { forks, batches };
     let mut book = PendingBook::new(control, backlog_events, shadow, publisher);
-    let PendingFeeds { mempool: Feed { events: mut mempool, losses: mempool_losses }, block_log, twap_statuses, twap_fills, anchor } = feeds;
+    let PendingFeeds { mempool: Feed { events: mut mempool, losses: mempool_losses }, block_log, twap_statuses, twap_fills, anchor, mut prices } = feeds;
     let Feed { events: mut blocks, losses: block_losses } = block_log;
     let Feed { events: mut statuses, losses: statuses_losses } = twap_statuses;
     let Feed { events: mut fills, losses: fills_losses } = twap_fills;
@@ -104,6 +110,7 @@ async fn run(inputs: ReplicaInputs, feeds: PendingFeeds, backlog_events: usize, 
     if let Some(current) = current {
         book.on_anchor(current, readings.unreported());
     }
+    let mut prices_open = book.take_prices(&mut prices, true);
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let closed = loop {
@@ -157,6 +164,7 @@ async fn run(inputs: ReplicaInputs, feeds: PendingFeeds, backlog_events: usize, 
                     book.on_anchor(anchor, readings.unreported());
                 }
             }
+            changed = prices.changed(), if prices_open => prices_open = book.take_prices(&mut prices, changed.is_ok()),
             _ = tick.tick() => book.on_tick(readings.unreported()),
         }
     };
@@ -250,13 +258,15 @@ struct PendingBook {
     backlog_events: usize,
     shadow: Shadow,
     publisher: Publisher,
+    /// The `SetGlobalAction` forecasts (batch 2l): metrics only, nothing served.
+    forecasts: SgaForecasts,
 }
 
 impl PendingBook {
     fn new(control: Arc<ReplicaControl>, backlog_events: usize, shadow: Shadow, publisher: Publisher) -> Self {
         let ended = control.ended();
         control.request(1);
-        Self { control, wanted: 1, replica: None, ended, backlog_events, shadow, publisher }
+        Self { control, wanted: 1, replica: None, ended, backlog_events, shadow, publisher, forecasts: SgaForecasts::default() }
     }
 
     fn on_fork(&mut self, fork: ReplicaFork) {
@@ -316,6 +326,10 @@ impl PendingBook {
                 // a loss found since the line was taken is not before it in the file, so the line ends no gap
                 let step = self.shadow.on_tx(&tx, after_loss || unreported.mempool, coins, self.replica.as_ref());
                 PENDING_BOOK_STEP_SECONDS.with_label_values(&["transaction"]).observe(started.elapsed().as_secs_f64());
+                // on the book the line leaves - a `SetGlobalAction`'s holds no book action
+                let served = ServedBook::of(&self.shadow, self.replica.as_ref());
+                let book: Option<&dyn ForecastBook> = served.as_ref().map(|served| -> &dyn ForecastBook { served });
+                let _report = self.forecasts.on_tx(&tx, coins, book, unix_ns(wall_ms()));
                 step
             }
             MempoolInput::Loss => {
@@ -332,6 +346,7 @@ impl PendingBook {
         let mut step = self.sync(unreported);
         step.absorb(match input {
             BlockInput::Block { block, after_loss } => {
+                let _report = self.forecasts.on_block(&block);
                 let started = Instant::now();
                 // a loss found since the block was taken is not before it in the file, so the block ends no gap
                 let step = self.shadow.on_block(block, after_loss || unreported.block_log, self.replica.as_ref());
@@ -362,6 +377,23 @@ impl PendingBook {
         let mut step = self.sync(unreported);
         step.absorb(self.shadow.on_anchor(anchor, self.replica.as_ref()));
         self.publish(&step);
+    }
+
+    /// The account view's node prices as the watch now has them (batch 2l), `open` while it has a sender: once closed,
+    /// the prices it last gave are withdrawn (review 000639 r2 P2) and it is read no more. Whether it stays open.
+    fn take_prices(&mut self, prices: &mut watch::Receiver<NodePrices>, open: bool) -> bool {
+        if !open {
+            error!("pending book: the account view's node prices closed; no SetGlobalAction is forecast");
+            self.on_prices(&Err("the account view's node prices closed".to_string()));
+            return false;
+        }
+        let current = prices.borrow_and_update().clone();
+        self.on_prices(&current);
+        true
+    }
+
+    fn on_prices(&mut self, prices: &NodePrices) {
+        let _report = self.forecasts.on_prices(prices, unix_ns(wall_ms()));
     }
 
     fn takes_blocks(&self) -> bool {
@@ -507,6 +539,39 @@ mod tests {
         }
         assert_eq!(book.shadow.availability(book.replica.as_ref()), Ok(()));
         (book, feed, feeds)
+    }
+
+    /// Batch 2l, review 000639 r2 P2: the node prices' watch closing withdraws the prices it last gave - a
+    /// `SetGlobalAction` then forecasts nothing - while the book is still served.
+    #[test]
+    fn closed_node_prices_withdraw_the_last_ones() {
+        let (mut book, _feed, _feeds) = served_book();
+        let btc = crate::local_marks::compute::tests::btc_state(0.0, 1_000_000_000);
+        let snapshot = crate::accounts::marks::NativePriceSnapshot {
+            seed_height: 1,
+            height: 30,
+            block_time_ms: 3_000,
+            coins: rustc_hash::FxHashMap::from_iter([("BTC".to_string(), btc)]),
+            hip3: rustc_hash::FxHashMap::default(),
+        };
+        let (sender, mut prices) = watch::channel(Ok(Arc::new(snapshot)));
+        assert!(book.take_prices(&mut prices, true));
+        let set_global = |hash: u8| {
+            let btc = crate::accounts::marks::actions::SubmittedPrices::Priced { oracle: "101".to_string(), mark: "101".to_string() };
+            let MempoolInput::Tx { tx, .. } = line(3_150, hash, vec![ActionKind::SetGlobal(vec![btc])]) else { unreachable!() };
+            tx
+        };
+        let forecast = |book: &mut PendingBook, hash: u8| {
+            let served = ServedBook::of(&book.shadow, book.replica.as_ref());
+            let served: Option<&dyn ForecastBook> = served.as_ref().map(|served| -> &dyn ForecastBook { served });
+            book.forecasts.on_tx(&set_global(hash), Some(&coins()), served, 3_150_000_000).lines
+        };
+        assert_eq!(forecast(&mut book, 1), ["forecast"]);
+        drop(sender);
+        let open = prices.has_changed().is_ok();
+        assert!(!book.take_prices(&mut prices, open), "closed");
+        assert_eq!(forecast(&mut book, 2), ["no_prices"]);
+        assert_eq!(book.on_mempool(ioc(), Some(&coins()), NONE_UNREPORTED).trades.len(), 1, "still served");
     }
 
     /// The IOC crossing the resting ask predicts its trade on a book served.

@@ -1469,3 +1469,57 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - 价格带：中间价 100（99 / 101）时，4.99 被拒、5 不拒；买一 0.00002000、卖一 0.00002001 时，0.00000100 被拒；只有卖一 101 时，5.04 被拒、5.05 不拒；没有盘口时不判。
   - 影子端到端：只有卖一 101 时，含买 4 和买 101 两张 IOC 的动作没有成交，盘口不变；同一行的另一个 IOC 吃掉卖一。
   - 变异 16 处都有测试失败：逐单判、不判、触发单也判、边界含等号、先除后比、参考价只取买一、单边含等号、影子不传判断、没有副本时不记、之后不补判、补判时逐单移除、超上限不清、槽位不计入上限、不按币压缩、补判后槽位不归零、超上限后槽位不归零。
+
+## 2026-11-01 影子盘口批次 2l 第一步：从内存池的 SetGlobalAction 预测新 mark，只出指标（用户 11-01 “分两步做”）
+
+- **起因**：2i 录制里“真实成交没预计”有 36% 是触发单（2,270 笔），其中 2,263 笔在含 `SetGlobalAction`（下称 SGA）的块里。触发单在主站推 mark 时触发，所以第一步先确认能否在 SGA 行进内存池时算出它要写的 mark。第二步才在影子里执行触发单。
+- **证据**（离线用例 `accounts/marks/sga_prediction.rs`，`--ignored`，真实数据 4 万块）：
+  - 方法：取 SGA 所在块之前第 k 块的状态和盘口，在 SGA 的块时间刷新缓存，再施加该块的价格动作。
+  - 精确比例：k=1 为 99.79%，k=3 为 98.70%（49,193/49,840）。
+  - 有触发单成交的币：k=1 时 170 个中 169 个精确，k=3 时 167 个精确。
+  - bm 11-01：内存池 47 条 SGA 行都只含这一个动作；236 个 SGA 块里只有 2 个是 3 s 桶的第一块。
+- **规则只有一份**：
+  - `native.rs` 抽出 `refreshed`，即缓存刷新：新桶的第一块取 10 s 内成员的中位数，没有成员就保留原中位数，桶号照样前进。`MemberCache::begin_block` 和快照都调用它。
+  - `select_price` 改为接收中位数本身。
+  - 新增 `CoinPriceState::set_global_mark`：只是 `set_global` 选 mark 的那一半。账户视图在 oracle 选价失败、lmpe 断档时不写 mark，这些情况由核对环节记为“未写入”。
+  - `SetGlobalAction` 的 `pxs` 解析抽成 `marks::actions::set_global_prices`，marks 和内存池两处共用。
+- **内存池解析**：`ActionKind::SetGlobal(Vec<SubmittedPrices>)`。它对盘口的处理与 `Other` 相同：不进叠加，不影响频道。
+- **新 owner `pending/mark_forecast.rs` 的 `SgaForecasts`**：
+  - 由 `PendingBook` 持有，与 `Shadow` 并列，只读影子的合并盘口和副本盘口，不改影子状态。
+  - 价格状态来自账户视图每块发布的 `NodePrices`。pending 线程只多订阅一个 watch，账户线程不多做任何事。
+  - watch 关闭（账户线程结束，盘口照常服务）时，撤回它最后给的快照，之后的 SGA 记 `no_prices`，不再读这个 watch（`PendingBook::take_prices`，审查 000639 r2 P2）。
+  - **预测**：SGA 行到来、影子可服务时，对每个有报价的主站币分别用两种盘口预测：
+    - `pending`：合并盘口的买一卖一；
+    - `confirmed`：副本已确认的买一卖一。
+    - 块时间取这一行的时间。它既影响是否跨桶，也影响刷新时成员 10 s 有效期的判断（审查 000639 r1 P3）。
+  - **认块**：区块日志按哈希告诉预测它在哪一块。
+  - **核对**：账户视图的快照到达该块时，按 `mark_update == SetGlobal` 且 mark 时间等于块时间认定为“这一块写的 mark”，再与预测比较。同块多条 SGA 不建模。
+  - **容量**：在途最多 8 条，30 s 未核对即过期。
+- **指标**：
+  - `orderbook_pending_book_sga_lines_total{outcome}`
+  - `orderbook_pending_book_sga_marks_total{book,outcome}`
+  - `orderbook_pending_book_sga_mark_error_bps{book}`
+  - `orderbook_pending_book_sga_bucket_total{outcome}`
+  - `orderbook_pending_book_sga_prices_behind_blocks`
+  - `orderbook_pending_book_step_seconds{step="sga_forecast"}`
+  - 偏离的输入每 10 s 至多记一条日志。
+  - 计数先汇总成 `ForecastReport` 再计入，测试读这份报告。
+- **测试**（1,325 个通过）：
+  - `set_global_mark` 与 `set_global` 写出的 mark 相等，覆盖以下几种情况：
+    - 同桶；
+    - 新桶有新鲜成员；
+    - 新桶成员全部过期；
+    - 成员恰好 10 s；
+    - `Submitted` 模式。
+  - 内存池解析真实形状的 SGA 行，覆盖 Priced、Unpriced、Partial 三种。
+  - SGA 行进影子后不改盘口、不发成交。
+  - 先收到有效快照，再关闭发送端，之后的 SGA 记 `no_prices`；盘口仍服务，IOC 照常预测成交。
+  - 预测与核对：`exact` 与 `off`（含 bp）、`superseded`、`not_set`（含同块自动刷新）、`unclaimed`、两处 `late`、过期、在途上限、重复行、无价格表、无快照、不可服务。
+  - 两种盘口一边为空，单位不能整除，没有中位数，提交值读不出，币不在快照里。
+  - 桶号与实际块时间相同和不同两种情况。
+  - 变异 20 处都有测试失败（第 20 处是 watch 关闭时不撤回快照）：
+    - 同桶也刷新、成员寿命含等号、用未刷新的中位数、本地价不看最后成交、无成员时清空中位数；
+    - 用确认盘口代替合并盘口、核对不看 mark 时间、不看更新来源；
+    - 单位少一个 10、单位不整除也换算；
+    - 不判两处 `late`、过期含等号、不限在途、重复行再预测、未到块就核对、桶号两边都用行时间、价格不可用时留旧快照、不解析 SGA。
+    - 第一次跑时漏了“成员寿命含等号”，补了恰好 10 s 的用例后抓到。

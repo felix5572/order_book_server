@@ -389,7 +389,7 @@ fn start_pending_book(config: &ServerConfig, setup: PendingSetup, accounts: Opti
     let (block_log, _block_log_watcher) = watch_blocks(&data_dir);
     let (twap_statuses, _twap_statuses_watcher) = watch_twap_statuses(&data_dir);
     let (twap_fills, _twap_fills_watcher) = watch_twap_fills(&data_dir);
-    let feeds = PendingFeeds { mempool, block_log, twap_statuses, twap_fills, anchor: accounts.pending_anchor() };
+    let feeds = PendingFeeds { mempool, block_log, twap_statuses, twap_fills, anchor: accounts.pending_anchor(), prices: accounts.node_prices() };
     let handle = PendingBookHandle::new();
     let thread = spawn_pending_book(setup.replica, feeds, config.pending_backlog_events, setup.params, config.include_spot, handle.clone())?;
     // the shadow's end is no reason to stop the book: logged, the feed stops on its closed queue, and every

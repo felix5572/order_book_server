@@ -970,11 +970,48 @@ lazy_static! {
 
     /// The pending thread's time per `step`: `transaction` (a mempool line's actions held and overlaid), `replica` (a
     /// replica push applied, the set settled, the coins replayed), `block_log` (a block's hashes recorded, the set
-    /// settled).
+    /// settled), `sga_forecast` (a `SetGlobalAction`'s marks forecast, batch 2l).
     pub static ref PENDING_BOOK_STEP_SECONDS: HistogramVec = HistogramVec::new(
         HistogramOpts::new("orderbook_pending_book_step_seconds", "Pending book step time")
             .buckets(vec![0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]),
         &["step"]
+    ).expect("metric can be created");
+
+    /// The mempool's `SetGlobalAction` lines (batch 2l, `pending::mark_forecast`), by `outcome`: `forecast`, or why
+    /// none - `no_asset_table`, `no_prices` (the account view's node prices unavailable), `unavailable` (the pending book
+    /// may not be served), `late` (its block logged already) -; once its block applies, `checked` or `late` (the prices
+    /// read held it already); `expired` (unchecked for 30 s, or pushed out by newer ones).
+    pub static ref PENDING_BOOK_SGA_LINES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_sga_lines_total", "Pending book SetGlobalAction lines by outcome"),
+        &["outcome"]
+    ).expect("metric can be created");
+
+    /// A `SetGlobalAction`'s forecast marks by `book` (`pending`: the merged best prices; `confirmed`: the replica's)
+    /// and `outcome`: checked, `exact`, `off`, `superseded` (a later mark stored), `not_set` (its block stored none),
+    /// `unclaimed` (the coin left the node prices); none made, `no_state`, `unreadable`, `no_book`, `unit_mismatch`,
+    /// `unselected`.
+    pub static ref PENDING_BOOK_SGA_MARKS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_sga_marks_total", "Pending book SetGlobalAction forecast marks by outcome"),
+        &["book", "outcome"]
+    ).expect("metric can be created");
+
+    /// How far an `off` forecast mark was from the stored one, in basis points, by `book`.
+    pub static ref PENDING_BOOK_SGA_MARK_ERROR_BPS: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("orderbook_pending_book_sga_mark_error_bps", "Pending book SetGlobalAction forecast mark error")
+            .buckets(vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 200.0]),
+        &["book"]
+    ).expect("metric can be created");
+
+    /// Whether a `SetGlobalAction`'s line time fell in its block time's reference cache bucket: `same` or `different`.
+    pub static ref PENDING_BOOK_SGA_BUCKET_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_sga_bucket_total", "Pending book SetGlobalAction bucket estimates"),
+        &["outcome"]
+    ).expect("metric can be created");
+
+    /// Blocks between the node prices a checked forecast read and its `SetGlobalAction`'s block.
+    pub static ref PENDING_BOOK_SGA_PRICES_BEHIND_BLOCKS: Histogram = Histogram::with_opts(
+        HistogramOpts::new("orderbook_pending_book_sga_prices_behind_blocks", "Pending book SetGlobalAction forecast prices behind")
+            .buckets(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 20.0, 50.0])
     ).expect("metric can be created");
 }
 
@@ -1105,6 +1142,11 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LEAD_BLOCKS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_UNAVAILABLE_SECONDS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_STEP_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_SGA_LINES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_SGA_MARKS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_SGA_MARK_ERROR_BPS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_SGA_BUCKET_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_SGA_PRICES_BEHIND_BLOCKS.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL.clone())).ok();

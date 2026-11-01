@@ -209,7 +209,7 @@ fn category(kind: &ActionKind) -> Option<u8> {
         ActionKind::Order(orders) => Some(placing_category(orders.iter().all(|order| order.tif == RequestedTif::Alo))),
         ActionKind::Modify { modifies, .. } => Some(placing_category(modifies.iter().all(|modify| modify.order.tif == RequestedTif::Alo))),
         ActionKind::Cancel { .. } | ActionKind::CancelByCloid { .. } => Some(CANCEL_CATEGORY),
-        ActionKind::Other => None,
+        ActionKind::SetGlobal(_) | ActionKind::Other => None,
     }
 }
 
@@ -242,7 +242,7 @@ fn book_ops(kind: &ActionKind, priority: u64) -> Vec<(usize, u32, BookOp, Option
                 Some((modify.order.asset, BookOp::Modify { target: modify.target.clone(), always_place: *always_place, order }, Some(&modify.order)))
             })
             .collect(),
-        ActionKind::Other => Vec::new(),
+        ActionKind::SetGlobal(_) | ActionKind::Other => Vec::new(),
     };
     ops.into_iter().enumerate().filter_map(|(item, op)| op.map(|(asset, op, order)| (item, asset, op, order))).collect()
 }

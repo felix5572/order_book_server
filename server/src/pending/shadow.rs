@@ -681,7 +681,18 @@ impl Shadow {
             oldest_seen_ms: seen_ms(actions.iter().map(|action| action.seen_ns).min()),
             newest_seen_ms: seen_ms(actions.iter().map(|action| action.seen_ns).max()),
         };
-        CoinView { bbo: self.bbo(coin, replica), basis_bbo: Overlay::default().bbo(replica.coin(coin)), pending }
+        let (bbo, basis_bbo) = self.best_levels(coin, replica);
+        CoinView { bbo, basis_bbo, pending }
+    }
+
+    /// `coin`'s merged and its replica's best levels.
+    pub(crate) fn best_levels(&self, coin: &Coin, replica: &BookReplica) -> (BestLevels, BestLevels) {
+        (self.bbo(coin, replica), Overlay::default().bbo(replica.coin(coin)))
+    }
+
+    /// Whether the block log showed the block holding `tx_hash`, still recorded (batch 2l).
+    pub(crate) fn logged(&self, tx_hash: &B256) -> bool {
+        self.record.height_of(tx_hash).is_some()
     }
 
     /// The coins the set holds actions on.
@@ -1029,7 +1040,7 @@ fn aligned(replica: Option<&BookReplica>) -> Option<Aligned<'_>> {
 
 /// A block time's unix ms in ns.
 #[expect(clippy::expect_used, reason = "a block time is a chrono time's unix ms, an i64 to begin with")]
-fn unix_ns(ms: u64) -> i64 {
+pub(crate) fn unix_ns(ms: u64) -> i64 {
     i64::try_from(ms).expect("a block time in unix ms fits in i64") * NS_PER_MS
 }
 
@@ -1245,6 +1256,19 @@ pub(crate) mod tests {
             btc_status(11, "A", "101.0", "0.0", "filled", None, "Alo", 1_000),
         ];
         (statuses, vec![btc_diff(11, "A", "101.0", remove())])
+    }
+
+    /// Batch 2l: a `SetGlobalAction`'s line holds no book action - its forecast is `mark_forecast`'s alone -: no coin
+    /// changes, nothing trades.
+    #[test]
+    fn a_set_global_action_line_leaves_the_book() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        let before = harness.bbo();
+        let btc = crate::accounts::marks::actions::SubmittedPrices::Priced { oracle: "101".to_string(), mark: "101".to_string() };
+        let step = harness.line(3_150, 1, vec![ActionKind::SetGlobal(vec![btc])]);
+        assert_eq!((step.trades.as_slice(), step.changed.len(), harness.bbo()), (&NO_TRADES[..], 0, before));
+        assert_eq!(harness.shadow.held, 0);
     }
 
     /// An IOC's trade goes out at its arrival, never on a replay; the block holding its line takes it out.

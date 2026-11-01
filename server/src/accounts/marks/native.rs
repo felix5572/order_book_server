@@ -60,18 +60,7 @@ impl MemberCache {
     }
 
     fn begin_block(&mut self, block_ns: u64) {
-        let bucket = block_ns / BUCKET_NS;
-        if bucket <= self.last_bucket {
-            return;
-        }
-        // BucketGuard advances before aggregation (0x3ca3ece); only the median write requires a nonempty result
-        // (0x42c13fe). In particular, an empty live ExternalPerp cache must cross action-free blocks too.
-        self.last_bucket = bucket;
-        let fresh: Vec<u64> =
-            self.members.values().filter(|(_, time_ns)| block_ns.saturating_sub(*time_ns) < MEMBER_LIFETIME_NS).map(|(value, _)| *value).collect();
-        if let Some(median) = median_units(&fresh) {
-            self.median = Some(median);
-        }
+        (self.median, self.last_bucket) = refreshed(self.median, self.last_bucket, self.members.values().copied(), block_ns);
     }
 
     fn insert(&mut self, user: Address, value: u64, time_ns: u64) {
@@ -94,6 +83,24 @@ impl MemberCache {
         members.sort_unstable();
         ReferenceCache { last_bucket: self.last_bucket, median: self.median, members }
     }
+}
+
+/// The reference caches' 3 s bucket of a block time (unix ns).
+pub(crate) const fn reference_bucket(block_ns: u64) -> u64 {
+    block_ns / BUCKET_NS
+}
+
+/// A reference cache's (median, bucket) once a block at `block_ns` began: the first block of a newer 3 s bucket takes the
+/// median of the members (value, block time ns) fresh at it; an earlier one of the bucket leaves both.
+fn refreshed(median: Option<u64>, last_bucket: u64, members: impl Iterator<Item = (u64, u64)>, block_ns: u64) -> (Option<u64>, u64) {
+    let bucket = reference_bucket(block_ns);
+    if bucket <= last_bucket {
+        return (median, last_bucket);
+    }
+    // BucketGuard advances before aggregation (0x3ca3ece); only the median write requires a nonempty result
+    // (0x42c13fe). In particular, an empty live ExternalPerp cache must cross action-free blocks too.
+    let fresh: Vec<u64> = members.filter(|(_, time_ns)| block_ns.saturating_sub(*time_ns) < MEMBER_LIFETIME_NS).map(|(value, _)| value).collect();
+    (median_units(&fresh).or(median), bucket)
 }
 
 /// What last set a coin's stored mark.
@@ -272,8 +279,9 @@ impl CoinPrices {
             self.unsupported.get_or_insert("noEma");
             return Ok(());
         };
-        let selected_oracle = select_price(self.reference_modes.spot, submitted_oracle, self.spot.as_ref(), || inverse_basis(local, emas.basis.basis_ratio()))?;
-        let selected_mark = select_price(self.reference_modes.mark, submitted_mark, self.marks.as_ref(), || Ok(local))?;
+        let median = |cache: &Option<MemberCache>| cache.as_ref().and_then(|cache| cache.median);
+        let selected_oracle = select_price(self.reference_modes.spot, submitted_oracle, median(&self.spot), || inverse_basis(local, emas.basis.basis_ratio()))?;
+        let selected_mark = select_price(self.reference_modes.mark, submitted_mark, median(&self.marks), || Ok(local))?;
         let (Some(stored), Some(new_mark)) = (selected_oracle, selected_mark) else {
             self.unsupported.get_or_insert("noCacheOrMode");
             return Ok(());
@@ -291,12 +299,13 @@ impl CoinPrices {
     }
 }
 
-/// A disabled reference selector returns before reading any cache or inverse-basis candidate.
-fn select_price(mode: ReferenceMode, submitted: u64, cache: Option<&MemberCache>, local: impl FnOnce() -> Result<u64, String>) -> Result<Option<u64>, String> {
+/// A disabled reference selector returns before reading any cache or inverse-basis candidate. `median`: the reference
+/// cache's.
+fn select_price(mode: ReferenceMode, submitted: u64, median: Option<u64>, local: impl FnOnce() -> Result<u64, String>) -> Result<Option<u64>, String> {
     match mode {
         ReferenceMode::Submitted => Ok(Some(submitted)),
         ReferenceMode::Median => {
-            let Some(median) = cache.and_then(|cache| cache.median) else { return Ok(None) };
+            let Some(median) = median else { return Ok(None) };
             Ok(median_units(&[submitted, median, local()?]))
         }
         ReferenceMode::Unsupported => Ok(None),
@@ -359,6 +368,22 @@ pub(crate) struct CoinPriceState {
     pub(crate) spot_cache: Option<ReferenceCache>,
     pub(crate) mark_cache: Option<ReferenceCache>,
     pub(crate) last_trade: u64,
+}
+
+impl CoinPriceState {
+    /// The mark a `SetGlobalAction` submitting `submitted_mark` would store in a block at `block_ns` whose cut reads
+    /// (`bid`, `ask`) and no trade of the block: `CoinPrices::set_global`'s choice of the mark on this state, its Mark
+    /// cache refreshed as that block begins (pending book batch 2l, hyperliquid-trade design 000639). `None` where the
+    /// mode selects none. Where `set_global` stores nothing - no oracle selected, lmpe past its decay - the replay marks
+    /// the coin unsupported instead; members the blocks between this state and that one add are not known here.
+    pub(crate) fn set_global_mark(&self, submitted_mark: u64, block_ns: u64, bid: u64, ask: u64) -> Option<u64> {
+        let median = self.mark_cache.as_ref().and_then(|cache| {
+            let members = cache.members.iter().map(|(_, value, time_ns)| (*value, *time_ns));
+            refreshed(cache.median, cache.last_bucket, members, block_ns).0
+        });
+        let local = local_price(bid, ask, self.last_trade);
+        select_price(self.reference_modes.mark, submitted_mark, median, || Ok(local)).expect("the mark's local candidate is given")
+    }
 }
 
 /// A main-dex price field where the replay and the checkpoint differ, both values as evidence text.
@@ -441,6 +466,11 @@ impl NativePrices {
             };
             Some((coin.name.as_str(), state))
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn coin_count(&self) -> usize {
+        self.coins.len()
     }
 
     /// The coin's mark in price units; `None` while it is unsupported.
@@ -649,6 +679,40 @@ mod tests {
         assert_eq!(adjustment.amount_wei, -17);
         prices.coins[0].unsupported = Some("partialEmas");
         assert!(crate::accounts::funding::balance(&rows, |_| prices.stored_oracle(0).map(|px| (px, 0))).is_err());
+    }
+
+    /// Batch 2l: the mark a coin's price state previews for a `SetGlobalAction` is the one `set_global` stores from that
+    /// state - the block in the Mark cache's bucket or a newer one, its members fresh or all stale, either mode.
+    #[test]
+    fn the_previewed_set_global_mark_is_the_one_stored() {
+        let bucket = T1 / BUCKET_NS;
+        let member = |byte: u8, px: u64| (Address::repeat_byte(byte), px, T1 - 1_000_000_000);
+        // the stored median from an earlier refresh; the members, a second before T1, of median 828,700
+        let cache = ReferenceCache { last_bucket: bucket, median: Some(828_590), members: vec![member(1, 828_650), member(2, 828_700), member(3, 828_800)] };
+        let next_bucket = (bucket + 1) * BUCKET_NS + 100_000_000;
+        // submitted 828,000 and L 829,000 (the last trade inside the book) leave the cache's median the mark
+        let cases = [
+            ("the cache's bucket: the stored median", T1, ReferenceMode::Median, 828_590),
+            ("a newer bucket: the fresh members' median", next_bucket, ReferenceMode::Median, 828_700),
+            ("a newer bucket, every member stale: the median stays", T1 + 12_000_000_000, ReferenceMode::Median, 828_590),
+            ("a member exactly 10 s old is stale", T1 + 9_000_000_000, ReferenceMode::Median, 828_590),
+            ("submitted mode", next_bucket, ReferenceMode::Submitted, 828_000),
+        ];
+        for (case, block_ns, mode, expected) in cases {
+            let mut seed = native_seed();
+            seed.assets[0].references.mark = Some(cache.clone());
+            seed.assets[0].reference_modes.mark = mode;
+            seed.assets[0].last_trade_px = 829_000;
+            let mut prices = NativePrices::seeded(&seed);
+            let state = prices.price_states().find(|(coin, _)| *coin == "BTC").unwrap().1;
+            let previewed = state.set_global_mark(828_000, block_ns, 828_500, 829_500);
+            prices.begin_block(block_ns);
+            let set_global = MarkAction::SetGlobal(vec![SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: "82800.0".to_string() }, SubmittedPrices::Unpriced]);
+            let cut = CoinCut { best: (Some(828_500), Some(829_500)), spot_reference: None, block_trade: None };
+            prices.apply(&set_global, None, block_ns, |_| cut).unwrap();
+            assert_eq!(prices.mark_of(0), (StoredMark { px: expected, time_ns: block_ns }, None), "{case}");
+            assert_eq!(previewed, Some(expected), "{case}");
+        }
     }
 
     #[test]
