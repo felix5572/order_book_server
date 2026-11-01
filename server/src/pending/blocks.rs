@@ -4,14 +4,16 @@
 //! (`ReplicaLine`). Of each: its height, time and its bundles' hashes - a bundle's hash is the mempool line's `tx_hash`
 //! it ran (research `mempool_pending_book_20261031`, 10-31 after the node upgrade: 18,939 of 18,939 bundles) -, and the
 //! oids its order actions with an ALO priority placed, with the priority (batch 2f: a confirmed order's place in its
-//! level's queue), and its taker orders' outcomes for the takers' margin refusals (batch 2g, `refusals`). Read by the
+//! level's queue), its taker orders' outcomes for the takers' margin refusals (batch 2g, `refusals`), and the account
+//! each signer it recovered acted for (batch 2m-2, `signer_accounts`). Read by the
 //! pending thread's own watcher, which parses each line - the account view parses each on its own, later - from the end
 //! of the current file.
 
 use std::{path::Path, thread, time::Instant as ReadInstant};
 
-use alloy::primitives::B256;
+use alloy::primitives::{Address, B256};
 use log::error;
+use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 
 use super::{
@@ -21,7 +23,7 @@ use super::{
     signer::{self, ActingIdentity},
 };
 use crate::{
-    accounts::replica::{PairedAction, ReplicaLine, WireOrder, WireStatus, WireStatusObject, alo_priority, response_statuses},
+    accounts::replica::{Action, PairedAction, ReplicaLine, WireModify, WireOrder, WireStatus, WireStatusObject, alo_priority, response_statuses},
     listeners::order_book::{
         parallel::{FileLayout, LineShape, LineStream},
         throttled_log_due,
@@ -54,6 +56,9 @@ pub(crate) struct LoggedBlock {
     pub(crate) priorities: Vec<(u64, u64)>,
     /// Its taker orders' outcomes, in execution order (batch 2g).
     pub(crate) taker_outcomes: Vec<TakerOutcome>,
+    /// (signer, account) of each action without a vault whose signer was recovered, its account the one its response
+    /// names (batch 2m-2).
+    pub(crate) signer_accounts: Vec<(Address, Address)>,
     /// The TWAPs its successful `twapCancel`s ended (batch 2h).
     pub(crate) twap_cancels: Vec<u64>,
     /// When the watcher read its line: the TWAP book's completeness proof (design 000624 r3 P1).
@@ -89,9 +94,11 @@ pub(crate) fn parse_block(line: &str) -> Result<LoggedBlock, String> {
         .collect::<Result<_, _>>()?;
     let paired = block.paired().map_err(|err| format!("block {height}: {err}"))?;
     let priorities = placed_priorities(&paired).map_err(|err| format!("block {height}: {err}"))?;
-    let taker_outcomes = taker_outcomes(line, &block, &paired).map_err(|err| format!("block {height}: {err}"))?;
+    let signers = signers(line, &block, &paired).map_err(|err| format!("block {height}: {err}"))?;
+    let taker_outcomes = taker_outcomes(&block, &paired, &signers).map_err(|err| format!("block {height}: {err}"))?;
+    let signer_accounts = signer_accounts(&paired, &signers).map_err(|err| format!("block {height}: {err}"))?;
     let twap_cancels = twap_cancels(&paired).map_err(|err| format!("block {height}: {err}"))?;
-    Ok(LoggedBlock { height, time_ms, hashes, priorities, taker_outcomes, twap_cancels, read_at })
+    Ok(LoggedBlock { height, time_ms, hashes, priorities, taker_outcomes, signer_accounts, twap_cancels, read_at })
 }
 
 /// The TWAPs the block's successful `twapCancel`s ended (`{"type": "twapCancel", "data": {"status": "success"}}`; an
@@ -190,14 +197,74 @@ fn placed_priorities(paired_actions: &[PairedAction<'_, '_>]) -> Result<Vec<(u64
     Ok(placed)
 }
 
+/// The signer of each action without a vault the pending set reads one of (`reads_signer`) that ran, by (bundle,
+/// position) - `None` where it cannot be told -, the actions as written read from `line` in one pass. A `multiSig`'s,
+/// whose signer is not its account's, is left out (the pending set never holds it).
+fn signers(line: &str, block: &ReplicaLine<'_>, paired_actions: &[PairedAction<'_, '_>]) -> Result<FxHashMap<(usize, usize), Option<Address>>, String> {
+    let mut wanted = Vec::new();
+    for paired in paired_actions {
+        let at = |err: String| format!("bundle {} action {}: {err}", paired.bundle_hash, paired.position);
+        if !ran(paired)? || !reads_signer(paired.action).map_err(at)? {
+            continue;
+        }
+        let signed = block.signed_action(paired.bundle, paired.position).ok_or_else(|| at("not in its bundle".to_string()))?;
+        if signed.vault().map_err(at)?.is_none() {
+            wanted.push((paired, signed));
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(FxHashMap::default());
+    }
+    let paths = wanted
+        .iter()
+        .map(|(paired, _)| sonic_rs::pointer!["abci_block", "signed_action_bundles", paired.bundle, 1, "signed_actions", paired.position, "action"]);
+    let written = signer::actions_written(line, paths)?;
+    if written.len() != wanted.len() {
+        return Err(format!("{} actions written for {} wanted", written.len(), wanted.len()));
+    }
+    let mut signers = FxHashMap::default();
+    for ((paired, signed), action) in wanted.into_iter().zip(written) {
+        let signer = signer::signer(signed, action.as_raw_str()).map_err(|err| format!("bundle {} action {}: {err}", paired.bundle_hash, paired.position))?;
+        PENDING_BOOK_SIGNERS_TOTAL.with_label_values(&["block_log", if signer.is_some() { "recovered" } else { "unknown" }]).inc();
+        signers.insert((paired.bundle, paired.position), signer);
+    }
+    Ok(signers)
+}
+
+/// Whether the pending set reads an action's signer: an `order` with an order that may take (batch 2g: its taker's
+/// margin refusals), or an `order`, `modify` or `batchModify` placing a trigger order (batch 2m-2: its account).
+fn reads_signer(action: &Action<'_>) -> Result<bool, String> {
+    let orders: Vec<WireOrder> = match action.action_type {
+        "order" => action.field(action.orders.as_ref(), "orders")?,
+        "modify" => vec![action.field(action.order.as_ref(), "order")?],
+        "batchModify" => action.field::<Vec<WireModify>>(action.modifies.as_ref(), "modifies")?.into_iter().map(|modify| modify.order).collect(),
+        _ => return Ok(false),
+    };
+    let places_trigger = orders.iter().any(|order| order.t.trigger.is_some());
+    Ok(places_trigger || (action.action_type == "order" && !taking_items(&orders)?.is_empty()))
+}
+
+/// (signer, account) of each action whose signer was recovered: the account its response names (batch 2m-2).
+fn signer_accounts(paired_actions: &[PairedAction<'_, '_>], signers: &FxHashMap<(usize, usize), Option<Address>>) -> Result<Vec<(Address, Address)>, String> {
+    let mut learned = Vec::new();
+    for paired in paired_actions {
+        let Some(Some(signer)) = signers.get(&(paired.bundle, paired.position)) else { continue };
+        let at = |err: String| format!("bundle {} action {}: {err}", paired.bundle_hash, paired.position);
+        let user = paired.response.user.ok_or_else(|| at("ran without its user".to_string()))?;
+        let account: Address = user.parse().map_err(|err| at(format!("user {user:?}: {err}")))?;
+        learned.push((*signer, account));
+    }
+    Ok(learned)
+}
+
 /// Each taker order's outcome (design 000621 r3), in execution order - the block's, each action's orders in theirs; a
 /// taker's are all in its bundle's last category, which keeps the proposal order: the orders that may take
 /// (`RequestedTif::may_take`) of the `order` actions that ran, by their statuses. Refused for margin, or cleared -
 /// placed (filled, resting), or an IOC missing every level -; any other error says nothing, nor does a batch refused
-/// whole but for margin. Its identity is the vault the action names, else its signer; a `multiSig`'s orders, whose
-/// signer is not their account's, are left out (the pending set never holds them).
-fn taker_outcomes(line: &str, block: &ReplicaLine<'_>, paired_actions: &[PairedAction<'_, '_>]) -> Result<Vec<TakerOutcome>, String> {
-    let mut takers = Vec::new();
+/// whole but for margin. Its identity is the vault the action names, else its signer (`signers`); a `multiSig`'s
+/// orders are left out.
+fn taker_outcomes(block: &ReplicaLine<'_>, paired_actions: &[PairedAction<'_, '_>], signers: &FxHashMap<(usize, usize), Option<Address>>) -> Result<Vec<TakerOutcome>, String> {
+    let mut taken = Vec::new();
     for paired in paired_actions {
         if !ran(paired)? || paired.action.action_type != "order" {
             continue;
@@ -214,29 +281,12 @@ fn taker_outcomes(line: &str, block: &ReplicaLine<'_>, paired_actions: &[PairedA
             continue;
         }
         let signed = block.signed_action(paired.bundle, paired.position).ok_or_else(|| at("not in its bundle".to_string()))?;
-        takers.push((paired, signed, signed.vault().map_err(at)?, outcomes));
-    }
-    let signed_by = takers.iter().filter(|(_, _, vault, _)| vault.is_none()).map(|(paired, ..)| *paired).collect::<Vec<_>>();
-    let mut written = if signed_by.is_empty() {
-        Vec::new().into_iter()
-    } else {
-        let paths = signed_by.iter().map(|paired| {
-            sonic_rs::pointer!["abci_block", "signed_action_bundles", paired.bundle, 1, "signed_actions", paired.position, "action"]
-        });
-        signer::actions_written(line, paths)?.into_iter()
-    };
-    let mut taken = Vec::new();
-    for (paired, signed, vault, outcomes) in takers {
-        let signer = if vault.is_some() {
-            None
-        } else {
-            let action = written.next().ok_or("fewer actions written than wanted")?;
-            let signer = signer::signer(signed, action.as_raw_str())
-                .map_err(|err| format!("bundle {} action {}: {err}", paired.bundle_hash, paired.position))?;
-            PENDING_BOOK_SIGNERS_TOTAL.with_label_values(&["block_log", if signer.is_some() { "recovered" } else { "unknown" }]).inc();
-            signer
+        let vault = signed.vault().map_err(at)?;
+        let recovered = match vault {
+            Some(_) => None,
+            None => *signers.get(&(paired.bundle, paired.position)).ok_or_else(|| at("its signer not read".to_string()))?,
         };
-        let Some(identity) = ActingIdentity::of(vault, signer) else {
+        let Some(identity) = ActingIdentity::of(vault, recovered) else {
             PENDING_BOOK_TAKER_OUTCOMES_TOTAL.with_label_values(&["no_identity"]).inc_by(u64::try_from(outcomes.len()).unwrap_or(u64::MAX));
             continue;
         };
@@ -556,6 +606,22 @@ pub(crate) mod tests {
             r#"{{"signature":{{"r":"0x1","s":"0x2","v":27}},"action":{{"type":"multiSig","signatureChainId":"0x66eee","signatures":[],"payload":{{"multiSigUser":"0x09f15dacf13c0fcb64594452506b52393fb13c39","outerSigner":"0x1","action":{inner}}}}},"nonce":1}}"#
         );
         assert_eq!(parse_block(&block_of(&[&multisig], &[&vault_response(r#"{"error":"Insufficient margin to place order. asset=1"}"#)])).unwrap().taker_outcomes, []);
+    }
+
+    /// Batch 2m-2: a block teaches the account each signer it reads acts for - an `order` that may take, one placing a
+    /// trigger order, without a vault -, as its response names it; an ALO-only action and a vault's teach nothing. A ran
+    /// action whose response names no user does not read.
+    #[test]
+    fn a_line_teaches_the_accounts_of_the_signers_it_reads() {
+        let trigger = crate::pending::mempool::tests::TRIGGER;
+        let waiting = |user: &str| format!(r#"{{"user":{user},"res":{{"status":"ok","response":{{"type":"order","data":{{"statuses":["waitingForTrigger"]}}}}}}}}"#);
+        let alice = r#""0x00000000000000000000000000000000000000a1""#;
+        let vault_trigger = trigger.replace(r#""action":"#, r#""vaultAddress":"0xbff945932b5ff40699e9f12fa40927c5667df619","action":"#);
+        let block = parse_block(&block_of(&[PRIORITY_IOC, trigger, PRIORITY_ALOS, &vault_trigger], &[PRIORITY_IOC_RESPONSE, &waiting(alice), PRIORITY_ALOS_RESPONSE, &waiting(alice)])).unwrap();
+        let accounts: Vec<String> = block.signer_accounts.iter().map(|(_, account)| account.to_string().to_lowercase()).collect();
+        assert_eq!(accounts, ["0x8e555c7f07eebea796dec9b9273e8c1b88a1abdc", "0x00000000000000000000000000000000000000a1"]);
+        assert_eq!(block.signer_accounts[1].0, "0x12cb6a66fe95a62d901eee587499670e89b3a926".parse::<Address>().unwrap(), "the signer the mempool recovers");
+        assert!(parse_block(&block_of(&[trigger], &[&waiting("null")])).is_err());
     }
 
     #[test]

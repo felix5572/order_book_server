@@ -61,8 +61,8 @@ pub(crate) struct MempoolTx {
 pub(crate) struct SignedAction {
     /// The vault or subaccount it acts for; otherwise the signer acts.
     pub(crate) vault: Option<Address>,
-    /// Its signer, recovered for an order action that may take without a vault alone (batch 2g, `signer`); `None` for
-    /// any other, or when it cannot be told.
+    /// Its signer, recovered for an action without a vault that may take (batch 2g, `signer`) or places a trigger order
+    /// (batch 2m-2); `None` for any other, or when it cannot be told.
     pub(crate) signer: Option<Address>,
     /// Its `expiresAfter`, unix ms: HL refuses it past then.
     pub(crate) expires_after_ms: Option<u64>,
@@ -200,10 +200,16 @@ pub(crate) fn parse_line(line: &str) -> Result<MempoolTx, String> {
     Ok(MempoolTx { seen_ns, tx_hash: tx.tx_hash, actions })
 }
 
-/// The signer of each order action that may take without a vault (batch 2g: what its taker's margin refusals go by),
-/// the actions as written read from `line` in one pass.
+/// The signer of each action without a vault that may take (batch 2g: what its taker's margin refusals go by) or places
+/// a trigger order (batch 2m-2: its account, as the block log taught it), the actions as written read from `line` in one
+/// pass.
 fn recover_signers(line: &str, wire_actions: &[WireSignedAction<'_>], actions: &mut [SignedAction]) -> Result<(), String> {
-    let wanted: Vec<usize> = actions.iter().enumerate().filter(|(_, action)| action.vault.is_none() && action.kind.may_take()).map(|(index, _)| index).collect();
+    let wanted: Vec<usize> = actions
+        .iter()
+        .enumerate()
+        .filter(|(_, action)| action.vault.is_none() && (action.kind.may_take() || action.kind.places_trigger()))
+        .map(|(index, _)| index)
+        .collect();
     if wanted.is_empty() {
         return Ok(());
     }
@@ -379,6 +385,11 @@ impl ActionKind {
         matches!(self, Self::Order(orders) if orders.iter().any(|order| order.tif.may_take()))
     }
 
+    /// Whether it places a trigger order: an `order`, or a modify's new order (batch 2m-2: its signer read).
+    fn places_trigger(&self) -> bool {
+        self.orders().any(|order| order.trigger.is_some())
+    }
+
     /// The orders it places: an `order`'s, a modify's new ones; trigger orders among them.
     pub(crate) fn orders(&self) -> impl Iterator<Item = &RequestedOrder> {
         let (orders, modifies) = match self {
@@ -473,7 +484,7 @@ fn unnamed_assets(coins: Option<&ActionCoins>, assets: &[u32]) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
@@ -487,7 +498,8 @@ mod tests {
     const ALO_BATCH: &str = r#"{"signature":{"r":"0x79e6","s":"0x297b","v":28},"vaultAddress":"0xfcf104006bfff47695c1dc21dad3e9de1e72098e","action":{"type":"order","orders":[{"a":0,"b":true,"p":"77387","s":"0.135","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x0000000000000000000001a18b7b1eef"},{"a":0,"b":true,"p":"77386","s":"0.135","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x0000000000000000000001a18b7b1ef0"}],"grouping":"na"},"nonce":1793438078596}"#;
     const IOC_PRIORITY: &str = r#"{"signature":{"r":"0xe91a","s":"0x4ccb","v":27},"action":{"type":"order","orders":[{"a":207,"b":true,"p":"0.00001","s":"1","r":false,"t":{"limit":{"tif":"Ioc"}},"c":"0x000000000000000018de99016980e8f8"}],"grouping":{"p":80000}},"nonce":1793437815043,"expiresAfter":1793438084016}"#;
     const MARKET_NO_CLOID_BUILDER: &str = r#"{"signature":{"r":"0x4e28","s":"0x3d6c","v":27},"action":{"type":"order","orders":[{"a":159,"b":false,"p":"80.47","s":"0.12","r":false,"t":{"limit":{"tif":"FrontendMarket"}}}],"grouping":"na","builder":{"b":"0xe1f55f2f25884c2ddc86b6f7efa5f45b2ef04221","f":50}},"nonce":1793438081798}"#;
-    const TRIGGER: &str = r#"{"signature":{"r":"0x340e","s":"0x2791","v":28},"action":{"type":"order","orders":[{"a":15,"b":true,"p":"0.046304","s":"13490","r":true,"t":{"trigger":{"isMarket":true,"triggerPx":"0.042095","tpsl":"sl"}}}],"grouping":"na","builder":{"b":"0x891dc6f05ad47a3c1a05da55e7a7517971faaf0d","f":40}},"nonce":1793438078536}"#;
+    /// A trigger order action as bm read it, its signature shortened (some address recovers it).
+    pub(crate) const TRIGGER: &str = r#"{"signature":{"r":"0x340e","s":"0x2791","v":28},"action":{"type":"order","orders":[{"a":15,"b":true,"p":"0.046304","s":"13490","r":true,"t":{"trigger":{"isMarket":true,"triggerPx":"0.042095","tpsl":"sl"}}}],"grouping":"na","builder":{"b":"0x891dc6f05ad47a3c1a05da55e7a7517971faaf0d","f":40}},"nonce":1793438078536}"#;
     const CANCEL: &str = r#"{"signature":{"r":"0x33a1","s":"0x338e","v":27},"action":{"type":"cancel","cancels":[{"a":151,"o":591362660114}]},"nonce":1793438078289}"#;
     const CANCEL_F: &str = r#"{"signature":{"r":"0x34b5","s":"0x2fca","v":28},"vaultAddress":"0x80196a7475464e06de641df6c66e6e278cd364d5","action":{"type":"cancel","cancels":[{"a":159,"o":591362624677}],"f":true},"nonce":1793438078567}"#;
     const CANCEL_BY_CLOID: &str = r#"{"signature":{"r":"0x6087","s":"0x20ff","v":27},"vaultAddress":"0x7a9d45682babd8a2d79181623c75a7f615990b27","action":{"type":"cancelByCloid","cancels":[{"asset":26,"cloid":"0xe6d9f86348a64e6a84800e9d88ab3b0a"}],"f":true},"nonce":1793438078625,"expiresAfter":1793438083555}"#;
@@ -566,7 +578,14 @@ mod tests {
                 kind: ActionKind::Order(vec![order(207, true, "0.00001", "1", false, Some("0x000000000000000018de99016980e8f8"), Ioc)]),
             },
             SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![order(159, false, "80.47", "0.12", false, None, FrontendMarket)]) },
-            SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Order(vec![triggered(order(15, true, "0.046304", "13490", true, None, Trigger), "0.042095", TriggerGrouping::Alone)]) },
+            // a trigger order's signer recovered (batch 2m-2), the sample's shortened signature giving some address
+            SignedAction {
+                vault: None,
+                signer: Some(address("0x12cb6a66fe95a62d901eee587499670e89b3a926")),
+                expires_after_ms: None,
+                priority: 0,
+                kind: ActionKind::Order(vec![triggered(order(15, true, "0.046304", "13490", true, None, Trigger), "0.042095", TriggerGrouping::Alone)]),
+            },
             SignedAction { vault: None, signer: None, expires_after_ms: None, priority: 0, kind: ActionKind::Cancel { fast: false, cancels: vec![WireCancel { a: 151, o: 591_362_660_114 }] } },
             SignedAction {
                 vault: Some(address("0x80196a7475464e06de641df6c66e6e278cd364d5")),

@@ -443,7 +443,7 @@ mod tests {
             time_ms: SEEN_MS + after_ms,
             hashes: bytes.iter().map(|byte| hash(*byte)).collect(),
             priorities: Vec::new(),
-            taker_outcomes: Vec::new(),
+            taker_outcomes: Vec::new(), signer_accounts: Vec::new(),
             twap_cancels: Vec::new(),
             read_at: std::time::Instant::now(),
         }

@@ -14,6 +14,7 @@ pub(crate) mod publish;
 mod record;
 mod refusals;
 mod signer;
+mod signer_accounts;
 pub(crate) mod triggers;
 mod twap_streams;
 mod twaps;
@@ -549,7 +550,7 @@ mod tests {
     /// Block `height`: its hashes (none) through the block log first, as it leads, then its lines through the
     /// listener's feed, each taken by the pending book.
     fn push_block(book: &mut PendingBook, feed: &mut ReplicaFeed, feeds: &mut Feeds, height: u64, statuses: Vec<serde_json::Value>, diffs: Vec<serde_json::Value>) {
-        let block = LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), twap_cancels: Vec::new(), read_at: Instant::now() };
+        let block = LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), read_at: Instant::now() };
         drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
         for batch in block_lines(height, statuses, diffs) {
             listener_applied(feed, batch);
@@ -843,7 +844,7 @@ mod tests {
     fn a_batch_that_only_queues_settles_nothing() {
         let (mut book, mut feed, mut feeds) = served_book();
         let settles = book.shadow.settles();
-        let block = LoggedBlock { height: 32, time_ms: 3_200, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), twap_cancels: Vec::new(), read_at: Instant::now() };
+        let block = LoggedBlock { height: 32, time_ms: 3_200, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), read_at: Instant::now() };
         drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
         assert_eq!(book.shadow.settles(), settles + 1, "a block of the log settles");
         let [statuses, diffs] = block_lines(32, vec![], vec![]);

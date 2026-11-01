@@ -10,9 +10,10 @@
 use alloy::primitives::{Address, B256};
 
 use super::{
-    mempool::{ActionKind, MempoolTx, RequestedOrder, RequestedTif, RequestedTrigger, TriggerGrouping},
+    mempool::{ActionKind, MempoolTx, RequestedOrder, RequestedTif, RequestedTrigger, SignedAction, TriggerGrouping},
     refusals::TakerKey,
     signer::ActingIdentity,
+    signer_accounts::SignerAccounts,
     triggers::SetGlobalCoin,
 };
 use crate::{
@@ -22,6 +23,7 @@ use crate::{
         replica::{CANCEL_CATEGORY, OrderRef, placing_category},
     },
     listeners::order_book::triggers::Direction,
+    metrics::PENDING_BOOK_TRIGGER_ACCOUNTS_TOTAL,
     order_book::{Coin, Px, Side, Sz},
 };
 
@@ -162,6 +164,9 @@ pub(crate) struct PendingAction {
     pub(crate) vault: Option<Address>,
     /// Its signer, when recovered (`SignedAction::signer`).
     pub(crate) signer: Option<Address>,
+    /// The account it acts for as known as it came (batch 2m-2, `account_of`): its vault, else its signer's as the block
+    /// log taught it (`SignerAccounts`).
+    pub(crate) account: Option<Address>,
     /// The asset id it names.
     pub(crate) asset: u32,
     pub(crate) op: BookOp,
@@ -193,7 +198,7 @@ pub(crate) struct BookActions {
 /// limit)`: whether an order's limit is under its coin's price band (batch 2k) - HL refuses its whole signed action
 /// before any of it, one status for all (review 000637 r1 P2-1; bm 11-01 13:20-14:30, 479 actions of several orders
 /// answered with the one error, none a status per order).
-pub(crate) fn book_actions(tx: &MempoolTx, coins: &ActionCoins, spot: bool, below_band: &dyn Fn(&str, Px) -> bool) -> BookActions {
+pub(crate) fn book_actions(tx: &MempoolTx, coins: &ActionCoins, spot: bool, below_band: &dyn Fn(&str, Px) -> bool, accounts: &SignerAccounts) -> BookActions {
     let mut ranked: Vec<(u8, usize)> = tx.actions.iter().enumerate().filter_map(|(index, action)| Some((category(&action.kind)?, index))).collect();
     ranked.sort_unstable();
     let named = |asset: u32| coins.coins.get(&asset).filter(|named| spot || !Coin::str_is_spot(&named.coin));
@@ -225,11 +230,26 @@ pub(crate) fn book_actions(tx: &MempoolTx, coins: &ActionCoins, spot: bool, belo
                 continue;
             }
             let id = ActionId { tx_hash: tx.tx_hash, action: index, item };
-            let action = PendingAction { id, seen_ns: tx.seen_ns, vault: signed.vault, signer: signed.signer, asset, op, unknown: false };
+            let account = account_of(signed, accounts, &op);
+            let action = PendingAction { id, seen_ns: tx.seen_ns, vault: signed.vault, signer: signed.signer, account, asset, op, unknown: false };
             actions.held.push((Coin::new(&named.coin), action));
         }
     }
     actions
+}
+
+/// The account `action` acts for as known as it comes (batch 2m-2): its vault, else its signer's as the block log taught
+/// it; for a trigger order placed, how it was known counted.
+fn account_of(action: &SignedAction, accounts: &SignerAccounts, op: &BookOp) -> Option<Address> {
+    let known = match (action.vault, action.signer) {
+        (Some(vault), _) => Ok((vault, "vault")),
+        (None, Some(signer)) => accounts.account(signer).map(|account| (account, "learned")),
+        (None, None) => Err("no_signer"),
+    };
+    if matches!(op, BookOp::PlaceTrigger(_) | BookOp::ModifyToTrigger { .. }) {
+        PENDING_BOOK_TRIGGER_ACCOUNTS_TOTAL.with_label_values(&[known.map_or_else(|why| why, |(_, how)| how)]).inc();
+    }
+    known.ok().map(|(account, _)| account)
 }
 
 /// The (coin, limit) of each order of a signed action the price band judges (batch 2k): every one but a trigger order,
@@ -368,11 +388,11 @@ pub(crate) mod tests {
         let below = |_: &str, px: Px| px < Px::parse_from_str("5").unwrap();
         let banded = ActionKind::Order(vec![requested(0, true, "4", RequestedTif::Ioc, None), requested(0, true, "101", RequestedTif::Ioc, None)]);
         let other = ActionKind::Order(vec![requested(0, true, "101", RequestedTif::Ioc, None)]);
-        let actions = book_actions(&tx(vec![banded, other]), &coins(), false, &below);
+        let actions = book_actions(&tx(vec![banded, other]), &coins(), false, &below, &SignerAccounts::default());
         assert_eq!(actions.refused, [["place_ioc", "price_band"]; 2]);
         assert_eq!(actions.held.iter().map(|(_, action)| action.id.action).collect::<Vec<_>>(), [1]);
         let trigger = ActionKind::Order(vec![requested(0, true, "4", RequestedTif::Trigger, None), requested(0, true, "101", RequestedTif::Ioc, None)]);
-        let actions = book_actions(&tx(vec![trigger]), &coins(), false, &below);
+        let actions = book_actions(&tx(vec![trigger]), &coins(), false, &below, &SignerAccounts::default());
         assert_eq!((actions.held.len(), actions.refused.len()), (1, 0), "the trigger order's price not judged");
     }
 
@@ -385,15 +405,15 @@ pub(crate) mod tests {
             ..requested(0, true, px, RequestedTif::Alo, None)
         };
         let mut line = tx(vec![ActionKind::Order(vec![order("123456", "0.001"), order("77655", "0.00100")])]);
-        assert_eq!(book_actions(&line, &coins(), false, &|_, _| false).held.len(), 2);
+        assert_eq!(book_actions(&line, &coins(), false, &|_, _| false, &SignerAccounts::default()).held.len(), 2);
         line.actions[0].expires_after_ms = Some(999);
-        let actions = book_actions(&line, &coins(), false, &|_, _| false);
+        let actions = book_actions(&line, &coins(), false, &|_, _| false, &SignerAccounts::default());
         assert_eq!((actions.held.len(), actions.refused), (0, vec![["place_alo", "expires_after"]; 2]));
         line.actions[0].expires_after_ms = Some(1_000);
-        assert_eq!(book_actions(&line, &coins(), false, &|_, _| false).held.len(), 2);
+        assert_eq!(book_actions(&line, &coins(), false, &|_, _| false, &SignerAccounts::default()).held.len(), 2);
         for off in [order("77655.5", "0.001"), order("7765.55", "0.001"), order("77655", "0.000001")] {
             let line = tx(vec![ActionKind::Order(vec![off.clone()])]);
-            assert_eq!(book_actions(&line, &coins(), false, &|_, _| false).refused, [["place_alo", "off_grid"]], "{off:?}");
+            assert_eq!(book_actions(&line, &coins(), false, &|_, _| false, &SignerAccounts::default()).refused, [["place_alo", "off_grid"]], "{off:?}");
         }
     }
 
@@ -405,7 +425,7 @@ pub(crate) mod tests {
     fn an_order_off_the_grid_refuses_its_signed_action_whole() {
         let line = format!(r#"["2026-10-31T18:04:08.825404321",{{"tx_hash":"0x71469c86420999a72184eec1f563d9330d974568da21b0d26ca676fe99b70a3d","signed_actions":[{MIXED_TICK_ACTION},{ON_GRID_ACTION}]}}]"#);
         let tx = crate::pending::mempool::parse_line(&line).unwrap();
-        let actions = book_actions(&tx, &coins(), false, &|_, _| false);
+        let actions = book_actions(&tx, &coins(), false, &|_, _| false, &SignerAccounts::default());
         let mut refused = vec![["place_alo", "off_grid"]; 10];
         refused[4] = ["place_alo", "off_grid_batch"];
         assert_eq!(actions.refused, refused);
@@ -423,13 +443,32 @@ pub(crate) mod tests {
             ..requested(1, true, px, tif, None)
         };
         let orders = vec![order("2000", "255", FrontendMarket), order("2000", "227", FrontendMarket), order("2000", "255", Ioc), order("2000", "2501", Ioc)];
-        let actions = book_actions(&tx(vec![ActionKind::Order(orders)]), &coins(), false, &|_, _| false);
+        let actions = book_actions(&tx(vec![ActionKind::Order(orders)]), &coins(), false, &|_, _| false, &SignerAccounts::default());
         assert_eq!(actions.held.iter().map(|(_, action)| action.id.item).collect::<Vec<_>>(), [1, 2]);
         assert_eq!(actions.refused, [["place_ioc", "too_large"]; 2]);
     }
 
     const MIXED_TICK_ACTION: &str = r#"{"signature":{"r":"0xb8e8a2ed193ba5cda5b6599d5e5d67c476c9e115b9f86ce17fe347b1f2f8e145","s":"0x89a7eab30cebce29300ad9ac703e761085230a00b6253aa91ae9b6c2b9dad44","v":27},"vaultAddress":"0xf36c562be0598b8ce109998b6aa2d53ffcd8316b","action":{"type":"order","orders":[{"a":0,"b":false,"p":"77896.3","s":"0.62909","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405259"},{"a":0,"b":false,"p":"77807.6","s":"0.47182","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405258"},{"a":0,"b":false,"p":"77741.1","s":"0.31454","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405257"},{"a":0,"b":false,"p":"77696.7","s":"0.12582","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405256"},{"a":0,"b":false,"p":"77679","s":"0.03145","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405255"},{"a":0,"b":true,"p":"77395.7","s":"0.64086","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405254"},{"a":0,"b":true,"p":"77501.4","s":"0.48064","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405253"},{"a":0,"b":true,"p":"77580.7","s":"0.32043","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405252"},{"a":0,"b":true,"p":"77633.6","s":"0.12817","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405251"},{"a":0,"b":true,"p":"77653.5","s":"0.03204","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405250"}],"grouping":"na"},"nonce":1793469848762,"expiresAfter":1793469858741}"#;
     const ON_GRID_ACTION: &str = r#"{"signature":{"r":"0x1","s":"0x2","v":27},"action":{"type":"order","orders":[{"a":0,"b":true,"p":"77387","s":"0.135","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x01"}],"grouping":"na"},"nonce":1793469848000}"#;
+
+    /// Batch 2m-2: an action's account as it comes - its vault; else its signer's as the block log taught it; none for a
+    /// signer seen for two accounts, a signer not seen, or none recovered.
+    #[test]
+    fn an_actions_account_is_its_vault_else_its_signers() {
+        let (signer, shared, alice, bob) = (Address::repeat_byte(0x51), Address::repeat_byte(0x52), Address::repeat_byte(0xa1), Address::repeat_byte(0xb0));
+        let mut accounts = SignerAccounts::default();
+        accounts.learn(1, signer, alice);
+        accounts.learn(1, shared, alice);
+        accounts.learn(2, shared, bob);
+        let account_of = |vault, signer| {
+            let mut line = tx(vec![ActionKind::Order(vec![requested(0, true, "100", RequestedTif::Ioc, None)])]);
+            line.actions[0] = SignedAction { vault, signer, ..line.actions[0].clone() };
+            book_actions(&line, &coins(), false, &|_, _| false, &accounts).held[0].1.account
+        };
+        let unseen = Address::repeat_byte(0x53);
+        let accounts = [account_of(Some(bob), Some(signer)), account_of(None, Some(signer)), account_of(None, Some(shared)), account_of(None, Some(unseen)), account_of(None, None)];
+        assert_eq!(accounts, [Some(bob), Some(alice), None, None, None]);
+    }
 
     pub(crate) fn tx(actions: Vec<ActionKind>) -> MempoolTx {
         MempoolTx {
@@ -440,7 +479,7 @@ pub(crate) mod tests {
     }
 
     fn ops(tx: &MempoolTx, spot: bool) -> Vec<(String, usize, usize, &'static str)> {
-        book_actions(tx, &coins(), spot, &|_, _| false).held.into_iter().map(|(coin, action)| (coin.value(), action.id.action, action.id.item, action.op.label())).collect()
+        book_actions(tx, &coins(), spot, &|_, _| false, &SignerAccounts::default()).held.into_iter().map(|(coin, action)| (coin.value(), action.id.action, action.id.item, action.op.label())).collect()
     }
 
     /// A bundle as `0xc9ba...` lists it - cancels, then ALOs, then takers - runs ALOs, then cancels, then the rest,

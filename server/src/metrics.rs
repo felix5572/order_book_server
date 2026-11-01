@@ -917,12 +917,25 @@ lazy_static! {
         &["cause"]
     ).expect("metric can be created");
 
-    /// Signed actions whose signer the pending book recovered (batch 2g: the order actions that may take, without a
-    /// vault), by `source` (`mempool`, `block_log`) and `outcome`: `recovered`, or `unknown` - a number not a 64-bit
-    /// integer in the action, or a signature no key signed.
+    /// Signed actions whose signer the pending book recovered (without a vault: batch 2g's order actions that may take,
+    /// batch 2m-2's actions placing a trigger order), by `source` (`mempool`, `block_log`) and `outcome`: `recovered`, or
+    /// `unknown` - a number not a 64-bit integer in the action, or a signature no key signed.
     pub static ref PENDING_BOOK_SIGNERS_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_pending_book_signers_total", "Pending book signed actions whose signer was recovered"),
         &["source", "outcome"]
+    ).expect("metric can be created");
+
+    /// The trigger orders the mempool placed, by how their account was known (batch 2m-2): `vault`, `learned` (its
+    /// signer's, as the block log taught it), `signer_unseen`, `signer_conflicting`, `no_signer`.
+    pub static ref PENDING_BOOK_TRIGGER_ACCOUNTS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_trigger_accounts_total", "Pending book trigger orders placed by how their account was known"),
+        &["source"]
+    ).expect("metric can be created");
+
+    /// The signers whose account the block log taught (batch 2m-2), by `state`: `known`, `conflicting`.
+    pub static ref PENDING_BOOK_SIGNER_ACCOUNTS: IntGaugeVec = IntGaugeVec::new(
+        Opts::new("orderbook_pending_book_signer_accounts", "Pending book signers whose account the block log taught"),
+        &["state"]
     ).expect("metric can be created");
 
     /// The pending book's TWAP book (batch 2h) by `event`: `anchor_installed`, `anchor_not_linked`, `loss`,
@@ -1168,6 +1181,8 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(PENDING_BOOK_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LINES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_SIGNERS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_TRIGGER_ACCOUNTS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_SIGNER_ACCOUNTS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_TAKER_OUTCOMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_TWAP_EVENTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_BLOCK_LOG_LOSSES_TOTAL.clone())).ok();

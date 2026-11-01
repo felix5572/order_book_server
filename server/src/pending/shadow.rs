@@ -39,6 +39,7 @@ use super::{
     publish::{BestLevels, CoinPending},
     record::{BlockRecord, MAX_LEAD_BLOCKS},
     refusals::{TakerKey, TakerRefusals},
+    signer_accounts::SignerAccounts,
     triggers::{SetGlobalCoin, TriggerSource},
     twap_streams::{TwapEvent, TwapFill},
     twaps::{DueSlices, TwapBook, TwapSlice, TwapStream, TwapsUnknown},
@@ -48,8 +49,8 @@ use crate::{
     listeners::order_book::replica::BookReplica,
     metrics::{
         PENDING_BOOK_ACTIONS_TOTAL, PENDING_BOOK_BLOCK_LOG_LEAD_BLOCKS, PENDING_BOOK_GAPS_TOTAL, PENDING_BOOK_HELD_ACTIONS,
-        PENDING_BOOK_MOVED_COINS, PENDING_BOOK_OVERLAY_TOTAL, PENDING_BOOK_PREDICTED_FILLS_TOTAL, PENDING_BOOK_SPAN_SECONDS,
-        PENDING_BOOK_TRIGGER_COINS_TOTAL, PENDING_BOOK_TRIGGERS_TOTAL,
+        PENDING_BOOK_MOVED_COINS, PENDING_BOOK_OVERLAY_TOTAL, PENDING_BOOK_PREDICTED_FILLS_TOTAL, PENDING_BOOK_SIGNER_ACCOUNTS,
+        PENDING_BOOK_SPAN_SECONDS, PENDING_BOOK_TRIGGER_COINS_TOTAL, PENDING_BOOK_TRIGGERS_TOTAL,
     },
     order_book::{Coin, Px, Side, Sz},
 };
@@ -339,6 +340,8 @@ pub(crate) struct Shadow {
     record: BlockRecord,
     /// The takers' margin refusals by the block log's trusted blocks (batch 2g).
     refusals: TakerRefusals,
+    /// The signers' accounts the block log taught (batch 2m-2): an action without a vault acts for its signer's.
+    signer_accounts: SignerAccounts,
     /// The running TWAPs (batch 2h); the suborders overlaid, as of the book's version and the confirmed block time's
     /// second they were known at - kept through that second while the next height is not proven, `None` while none are
     /// (batch 2i) -; the (twap, slot) whose trades went out, with the slot's due time: kept until the slot is past,
@@ -381,6 +384,7 @@ impl Shadow {
             lines: FxHashMap::default(),
             record: BlockRecord::default(),
             refusals: TakerRefusals::new(params.margin_refusal_ms),
+            signer_accounts: SignerAccounts::default(),
             twaps: TwapBook::new(started_ms),
             due: DueSlices::default(),
             due_of: None,
@@ -418,7 +422,7 @@ impl Shadow {
         self.newest_seen_ns = Some(self.newest_seen_ns.map_or(tx.seen_ns, |newest| newest.max(tx.seen_ns)));
         let Some(coins) = coins else { return step };
         let below_band = |coin: &str, limit_px: Px| aligned.is_some_and(|(replica, _, _)| below_price_band(replica.coin(&Coin::new(coin)), limit_px));
-        let BookActions { held: actions, refused } = book_actions(tx, coins, self.spot, &below_band);
+        let BookActions { held: actions, refused } = book_actions(tx, coins, self.spot, &below_band, &self.signer_accounts);
         for labels in refused {
             PENDING_BOOK_ACTIONS_TOTAL.with_label_values(&labels).inc();
         }
@@ -456,7 +460,7 @@ impl Shadow {
             .map(|(action, (coin, asset, sga))| {
                 let id = ActionId { tx_hash: tx.tx_hash, action, item: 0 };
                 let op = BookOp::SetGlobal(Box::new(sga));
-                (coin, PendingAction { id, seen_ns: tx.seen_ns, vault: None, signer: None, asset, op, unknown: false })
+                (coin, PendingAction { id, seen_ns: tx.seen_ns, vault: None, signer: None, account: None, asset, op, unknown: false })
             })
             .collect();
         if self.over_cap(actions.len()) {
@@ -524,9 +528,40 @@ impl Shadow {
         if self.gaps.block_log.is_none() {
             self.refusals.stage(block.height, block.time_ms, std::mem::take(&mut block.taker_outcomes));
         }
+        // what a block ran is so whatever gap the log is in: a signer's account taught by any block read, the expired
+        // forgotten first (review 000656 r1 P2-1); what was learned of a signer forgotten or turned conflicting taken
+        // back (r1 P2-2, r2 P2)
+        let mut unlearned = FxHashSet::default();
+        self.signer_accounts.evict(block.time_ms, &mut unlearned);
+        for (signer, account) in std::mem::take(&mut block.signer_accounts) {
+            if self.signer_accounts.learn(block.time_ms, signer, account) {
+                unlearned.insert(signer);
+            }
+        }
+        self.signer_accounts.evict(block.time_ms, &mut unlearned);
+        let changed = self.unlearn(&unlearned);
         self.twaps.on_block(block.height, block.read_at, block.time_ms, &block.twap_cancels);
         self.record.add(block);
-        self.settle(replica, HashSet::new())
+        self.settle(replica, changed)
+    }
+
+    /// What was learned of `signers` - forgotten, or turned out to act for two accounts - no longer stands: the actions
+    /// held of them without a vault lose the account learned of them (review 000656 r1 P2-2, r2 P2). Their coins, to
+    /// replay; what they predicted before stands.
+    fn unlearn(&mut self, signers: &FxHashSet<Address>) -> HashSet<Coin> {
+        let mut changed = HashSet::new();
+        if signers.is_empty() {
+            return changed;
+        }
+        for (coin, actions) in &mut self.coins {
+            let learned_of = |action: &&mut PendingAction| action.vault.is_none() && action.signer.is_some_and(|signer| signers.contains(&signer));
+            for action in actions.actions.iter_mut().filter(learned_of) {
+                if action.account.take().is_some() {
+                    changed.insert(coin.clone());
+                }
+            }
+        }
+        changed
     }
 
     /// The replica applied batches, changing `changed`'s books.
@@ -729,6 +764,9 @@ impl Shadow {
         PENDING_BOOK_MOVED_COINS.set(gauge(moved));
         let lead = self.record.lead(replica.and_then(BookReplica::confirmed));
         PENDING_BOOK_BLOCK_LOG_LEAD_BLOCKS.set(i64::try_from(lead).unwrap_or(i64::MAX));
+        let (known, conflicting) = self.signer_accounts.counts();
+        PENDING_BOOK_SIGNER_ACCOUNTS.with_label_values(&["known"]).set(gauge(known));
+        PENDING_BOOK_SIGNER_ACCOUNTS.with_label_values(&["conflicting"]).set(gauge(conflicting));
     }
 
     /// `coin`'s merged book's best levels, (bid, ask).
@@ -1259,7 +1297,7 @@ pub(crate) mod tests {
             self.logged += 1;
             let hashes = hashes.iter().map(|byte| hash(*byte)).collect();
             let read_at = self.tick();
-            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes, priorities, taker_outcomes: Vec::new(), twap_cancels: Vec::new(), read_at };
+            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes, priorities, taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), read_at };
             self.shadow.on_block(block, false, Some(&self.replica))
         }
 
@@ -1267,7 +1305,7 @@ pub(crate) mod tests {
         fn log_outcomes(&mut self, outcomes: Vec<TakerOutcome>, after_loss: bool) -> Step {
             self.logged += 1;
             let read_at = self.tick();
-            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: outcomes, twap_cancels: Vec::new(), read_at };
+            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: outcomes, signer_accounts: Vec::new(), twap_cancels: Vec::new(), read_at };
             self.shadow.on_block(block, after_loss, Some(&self.replica))
         }
 
@@ -1485,6 +1523,106 @@ pub(crate) mod tests {
             drop(harness.shadow.on_tx(&tx, false, Some(&coins()), Some(&harness.replica)));
             let step = harness.shadow.on_set_global(&set_global_line(3_150, 1), btc_at_100(&[]), Some(&harness.replica));
             assert_eq!(step.trades.len(), trades, "vault {vault}");
+        }
+    }
+
+    impl Harness {
+        /// The log's next block, teaching `signer_accounts`; `after_loss` as the watcher tells it.
+        fn log_teaching(&mut self, signer_accounts: Vec<(Address, Address)>, after_loss: bool) -> Step {
+            let time_ms = block_time_ms(self.logged + 1);
+            self.log_teaching_at(time_ms, signer_accounts, after_loss)
+        }
+
+        /// `log_teaching`, its block at `time_ms`.
+        fn log_teaching_at(&mut self, time_ms: u64, signer_accounts: Vec<(Address, Address)>, after_loss: bool) -> Step {
+            self.logged += 1;
+            let read_at = self.tick();
+            let block = LoggedBlock {
+                height: self.logged,
+                time_ms,
+                hashes: Vec::new(),
+                priorities: Vec::new(),
+                taker_outcomes: Vec::new(),
+                signer_accounts,
+                twap_cancels: Vec::new(),
+                read_at,
+            };
+            self.shadow.on_block(block, after_loss, Some(&self.replica))
+        }
+
+        /// A reduce-only stop limit selling 1 at 99 on a fall to 100, placed without a vault by `signer` at `seen_ms`.
+        fn place_close_by(&mut self, seen_ms: i64, byte: u8, signer: Address) {
+            let mut close = requested(0, false, "99", RequestedTif::Trigger, None);
+            close.reduce_only = true;
+            close.trigger = Some(RequestedTrigger { trigger_px: Px::parse_from_str("100").unwrap(), is_market: false, take_profit: false, grouping: TriggerGrouping::Alone });
+            drop(self.signed_line(seen_ms, byte, 0, Some(signer), vec![ActionKind::Order(vec![close])]));
+        }
+
+        fn held_accounts(&self) -> Vec<Option<Address>> {
+            self.shadow.coins[&Coin::new(BTC)].actions.iter().map(|action| action.account).collect()
+        }
+    }
+
+    /// Batch 2m-2: a block teaches a signer's account - a block log gap notwithstanding: what a block ran is so -; that
+    /// signer's trigger order placed without a vault then acts for it.
+    #[test]
+    fn a_learned_signer_gives_a_pending_trigger_order_its_account() {
+        let mut harness = Harness::ready_from(1_000);
+        let signer = Address::with_last_byte(0x51);
+        drop(harness.log_teaching(vec![(signer, ACCOUNT)], true));
+        harness.place_close_by(3_150, 2, signer);
+        assert_eq!(harness.held_accounts(), [Some(ACCOUNT)]);
+    }
+
+    /// Review 000656 r1 P2-1: a block a day after a signer was last seen forgets it before learning its own: the account
+    /// it names is the signer's anew, not a conflict.
+    #[test]
+    fn a_signer_expired_by_a_block_is_learned_anew_there() {
+        let mut harness = Harness::ready_from(1_000);
+        let signer = Address::with_last_byte(0x51);
+        drop(harness.log_teaching(vec![(signer, ACCOUNT)], false));
+        let day_later = block_time_ms(harness.logged) + 25 * 3_600_000;
+        drop(harness.log_teaching_at(day_later, vec![(signer, Address::with_last_byte(0xb0))], true));
+        assert_eq!(harness.shadow.signer_accounts.account(signer), Ok(Address::with_last_byte(0xb0)));
+    }
+
+    /// Review 000656 r2 P2: a signer forgotten - unseen past its time, or the longest unseen past the cap - takes the
+    /// account it gave back from the actions held of it, whatever account it is learned anew for: the close of
+    /// `ACCOUNT`, long 1, sells nothing on the action reaching it.
+    #[test]
+    fn a_signer_forgotten_takes_its_account_back() {
+        for (anew, sold) in [(ACCOUNT, 0), (Address::with_last_byte(0xb0), 0)] {
+            let mut harness = Harness::ready_from(1_000);
+            harness.rest_bid(12, "5.0");
+            let signer = Address::with_last_byte(0x51);
+            drop(harness.log_teaching(vec![(signer, ACCOUNT)], false));
+            harness.place_close_by(3_150, 2, signer);
+            let day_later = block_time_ms(harness.logged) + 25 * 3_600_000;
+            drop(harness.log_teaching_at(day_later, vec![(signer, anew)], false));
+            let accounts = harness.held_accounts();
+            let step = harness.shadow.on_set_global(&set_global_line(3_160, 1), btc_at_100(&[(ACCOUNT, 1)]), Some(&harness.replica));
+            assert_eq!((accounts, step.trades.len()), (vec![None], sold), "learned anew for {anew}");
+        }
+    }
+
+    /// Review 000656 r1 P2-2: a signer turned conflicting takes the account it gave back from the actions held of it:
+    /// the reduce-only close of `ACCOUNT`, long 1, is then of no known account - the action reaching it runs none on the
+    /// coin, where the old account would have sold 1 at 99.
+    #[test]
+    fn a_signer_turned_conflicting_takes_its_account_back() {
+        for conflicting in [false, true] {
+            let mut harness = Harness::ready_from(1_000);
+            harness.rest_bid(12, "5.0");
+            let signer = Address::with_last_byte(0x51);
+            drop(harness.log_teaching(vec![(signer, ACCOUNT)], false));
+            harness.place_close_by(3_150, 2, signer);
+            if conflicting {
+                drop(harness.log_teaching(vec![(signer, Address::with_last_byte(0xb0))], false));
+            }
+            let accounts = harness.held_accounts();
+            let step = harness.shadow.on_set_global(&set_global_line(3_160, 1), btc_at_100(&[(ACCOUNT, 1)]), Some(&harness.replica));
+            let expected = if conflicting { (vec![None], 0) } else { (vec![Some(ACCOUNT)], 1) };
+            assert_eq!((accounts, step.trades.len()), expected, "conflicting {conflicting}");
         }
     }
 
@@ -2423,7 +2561,7 @@ pub(crate) mod tests {
         let mut shadow = Shadow::new(params(), true, 0);
         for height in 1..=MAX_LEAD_BLOCKS {
             assert!(shadow.takes_blocks(None));
-            shadow.on_block(LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), twap_cancels: Vec::new(), read_at: std::time::Instant::now() }, false, None);
+            shadow.on_block(LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), read_at: std::time::Instant::now() }, false, None);
         }
         assert!(!shadow.takes_blocks(None));
     }

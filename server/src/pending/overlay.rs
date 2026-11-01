@@ -5,7 +5,7 @@
 //! - ALO: a price crossing the merged opposite side is rejected (the node's `badAloPxRejected`), else it rests.
 //! - GTC takes, its remainder rests; IOC and `FrontendMarket` take, their remainder goes.
 //! - A cancel's or a modify's target is looked for as the merged book stands (revision 12) - its trigger orders too
-//!   (batch 2m) -, of the acting account when known (its `vaultAddress`: an order known another's is not it; design
+//!   (batch 2m) -, of the acting account when known (`PendingAction::account`: an order known another's is not it; design
 //!   000652 r3, review 000652 r6 P2-2): by oid in the replica's book, then its untriggered orders, then a triggered
 //!   order's remainder, an order the overlay took out or filled not found; by cloid among the pending orders first
 //!   (resting, or trigger orders placed), then the replica's book and untriggered orders; more than one is ambiguous
@@ -333,10 +333,10 @@ struct AddedTrigger {
 impl Overlay {
     pub(crate) fn apply(&mut self, base: CoinBase<'_>, basis: Basis<'_>, action: &PendingAction) -> Effect {
         let seen_ms = u64::try_from(action.seen_ns / 1_000_000).unwrap_or(0);
-        let placing = Placing { basis, id: action.id, seen_ms, account: action.vault, trigger_oid: None };
+        let placing = Placing { basis, id: action.id, seen_ms, account: action.account, trigger_oid: None };
         match &action.op {
             BookOp::Place(order) => self.place_new(base, placing, action.taker_key(), order),
-            BookOp::Cancel { target, fast } => self.cancel(self.target_of(base, target, action.vault), *fast),
+            BookOp::Cancel { target, fast } => self.cancel(self.target_of(base, target, action.account), *fast),
             BookOp::Modify { target, always_place, order } => self.modify(base, placing, target, *always_place, order),
             BookOp::PlaceTrigger(order) => self.place_trigger(placing, order),
             BookOp::ModifyToTrigger { target, always_place, order } => self.modify_to_trigger(base, placing, target, *always_place, order),
@@ -957,7 +957,7 @@ mod tests {
     }
 
     fn action(index: usize, op: BookOp) -> PendingAction {
-        PendingAction { id: id(index), seen_ns: 0, vault: None, signer: None, asset: 0, op, unknown: false }
+        PendingAction { id: id(index), seen_ns: 0, vault: None, signer: None, account: None, asset: 0, op, unknown: false }
     }
 
     fn order(side: Side, at: &str, quantity: &str, tif: Tif, cloid: Option<&str>) -> Placement {
@@ -1032,8 +1032,8 @@ mod tests {
         }
     }
 
-    /// `stop`'s order pending, placed by an action of `vault` (its account as known).
-    fn place_stop(index: usize, vault: Option<Address>, side: Side, limit: Option<&str>, quantity: &str, sizing: Sizing, cloid: Option<&str>) -> PendingAction {
+    /// `stop`'s order pending, placed by an action of `account` (as known).
+    fn place_stop(index: usize, account: Option<Address>, side: Side, limit: Option<&str>, quantity: &str, sizing: Sizing, cloid: Option<&str>) -> PendingAction {
         let order = PendingTrigger {
             side,
             trigger_px: px("100"),
@@ -1045,7 +1045,7 @@ mod tests {
             position_tpsl: sizing == Sizing::WholePosition,
             cloid: cloid.map(str::to_string),
         };
-        PendingAction { vault, ..action(index, BookOp::PlaceTrigger(order)) }
+        PendingAction { account, ..action(index, BookOp::PlaceTrigger(order)) }
     }
 
     /// A `SetGlobalAction` on BTC at `mark`, its accounts' positions (whole units, signed) frozen.
@@ -1171,7 +1171,7 @@ mod tests {
     #[test]
     fn a_pending_trigger_order_fires_and_its_accounts_cancel_takes_it_out() {
         let placed = || place_stop(0, Some(CAROL), Side::Ask, None, "1", Sizing::Order, Some("0x0c"));
-        let cancel = |vault| PendingAction { vault, ..action(1, cancel_cloid_op("0x0c")) };
+        let cancel = |account| PendingAction { account, ..action(1, cancel_cloid_op("0x0c")) };
         let (effects, bbo) = run_with(Vec::new(), &[placed(), set_global(2, "100", &[(CAROL, 0)])]);
         let source = TriggerSource::Pending { placed: id(0), cloid: Some("0x0c".to_string()), account: Some(CAROL) };
         assert_eq!((outcomes(&effects), fired(&effects[1]), bbo.0), (vec!["trigger_placed", "set_global"], vec![(source.clone(), "took", sz("1"))], Some(level("98", "2", 1))));
@@ -1186,18 +1186,18 @@ mod tests {
     #[test]
     fn a_pending_remainder_is_found_by_its_cloid_and_a_modify_places_a_trigger_order() {
         let placed = place_stop(0, Some(CAROL), Side::Ask, Some("100.5"), "1", Sizing::Order, Some("0x0c"));
-        let cancel = PendingAction { vault: Some(CAROL), ..action(2, cancel_cloid_op("0x0c")) };
+        let cancel = PendingAction { account: Some(CAROL), ..action(2, cancel_cloid_op("0x0c")) };
         let (effects, bbo) = run_with(Vec::new(), &[placed.clone(), set_global(1, "100", &[(CAROL, 0)])]);
         assert_eq!((effects[1].triggered[0].outcome, bbo.1), ("rested", Some(level("100.5", "1", 1))));
         let (effects, bbo) = run_with(Vec::new(), &[placed, set_global(1, "100", &[(CAROL, 0)]), cancel]);
         assert_eq!((effects[2].outcome, bbo.1), ("canceled", Some(level("101", "2", 2))));
-        let resting = PendingAction { vault: Some(CAROL), ..place(0, Side::Ask, "105", "1", Tif::Alo, Some("0x0d")) };
+        let resting = PendingAction { account: Some(CAROL), ..place(0, Side::Ask, "105", "1", Tif::Alo, Some("0x0d")) };
         let PendingAction { op: BookOp::PlaceTrigger(order), .. } = place_stop(1, None, Side::Ask, None, "1", Sizing::Order, None) else { unreachable!() };
-        let modify = PendingAction { vault: Some(CAROL), ..action(1, BookOp::ModifyToTrigger { target: OrderRef::Cloid("0x0d".to_string()), always_place: false, order }) };
+        let modify = PendingAction { account: Some(CAROL), ..action(1, BookOp::ModifyToTrigger { target: OrderRef::Cloid("0x0d".to_string()), always_place: false, order }) };
         let (effects, bbo) = run_with(Vec::new(), &[resting.clone(), modify.clone(), set_global(2, "100", &[(CAROL, 0)])]);
         assert_eq!((outcomes(&effects), effects[2].triggered[0].outcome, bbo.1), (vec!["rested", "trigger_placed", "set_global"], "took", Some(level("101", "2", 2))));
         let BookOp::ModifyToTrigger { order, .. } = modify.op else { unreachable!() };
-        let missing = PendingAction { vault: Some(CAROL), ..action(1, BookOp::ModifyToTrigger { target: OrderRef::Cloid("0x0e".to_string()), always_place: false, order }) };
+        let missing = PendingAction { account: Some(CAROL), ..action(1, BookOp::ModifyToTrigger { target: OrderRef::Cloid("0x0e".to_string()), always_place: false, order }) };
         let (effects, bbo) = run_with(Vec::new(), &[resting, missing, set_global(2, "100", &[(CAROL, 0)])]);
         assert_eq!((outcomes(&effects), fired(&effects[2]), bbo.1), (vec!["rested", "target_missing", "set_global"], vec![], Some(level("101", "2", 2))));
     }
@@ -1239,8 +1239,8 @@ mod tests {
     #[test]
     fn a_fill_of_a_frozen_account_in_the_run_leaves_its_position_orders_unknown() {
         let close_all = || vec![stop(1, CAROL, Side::Ask, Some("100.5"), "0", Sizing::WholePosition)];
-        let rests = PendingAction { vault: Some(CAROL), ..place(0, Side::Ask, "100.5", "1", Tif::Gtc, None) };
-        let takes = |index| PendingAction { vault: Some(DAVE), ..place(index, Side::Bid, "101", "1", Tif::Ioc, None) };
+        let rests = PendingAction { account: Some(CAROL), ..place(0, Side::Ask, "100.5", "1", Tif::Gtc, None) };
+        let takes = |index| PendingAction { account: Some(DAVE), ..place(index, Side::Bid, "101", "1", Tif::Ioc, None) };
         let (effects, bbo) = run_with(close_all(), &[rests, takes(1), set_global(2, "100", &[(CAROL, 2)])]);
         assert_eq!((effects[2].outcome, &effects[2].stale, bbo.1), ("position_moved", &vec![CAROL], Some(level("101", "2", 2))));
         let (effects, bbo) = run_with(close_all(), &[takes(0), set_global(1, "100", &[(CAROL, 2)])]);
@@ -1251,7 +1251,7 @@ mod tests {
     /// an account kept stale on the action leaves its position orders unknown though nothing moved it in this run.
     #[test]
     fn a_stale_account_is_kept_and_rules_its_position_orders_out() {
-        let ioc = PendingAction { vault: Some(CAROL), ..place(0, Side::Ask, "99", "1", Tif::Ioc, None) };
+        let ioc = PendingAction { account: Some(CAROL), ..place(0, Side::Ask, "99", "1", Tif::Ioc, None) };
         let plain = vec![stop(1, CAROL, Side::Ask, None, "1", Sizing::Order)];
         let (effects, _) = run_with(plain, &[ioc, set_global(1, "100", &[(CAROL, 2)])]);
         assert_eq!((effects[1].outcome, &effects[1].stale, fired(&effects[1]).len()), ("set_global", &vec![CAROL], 1));
@@ -1270,7 +1270,7 @@ mod tests {
         let unknown_close = place_stop(0, None, Side::Ask, None, "1", Sizing::ReduceOnly, None);
         let (effects, _) = run_with(triggers.clone(), &[unknown_close, set_global(1, "100", &[(CAROL, 2)]), set_global(2, "99", &[(CAROL, 2)])]);
         assert_eq!((effects[1].outcome, effects[2].outcome, fired(&effects[2])), ("account_unknown", "set_global", vec![]));
-        let late_close = || PendingAction { vault: Some(CAROL), ..action(3, BookOp::PlaceTrigger(PendingTrigger { position_tpsl: true, ..pending_stop() })) };
+        let late_close = || PendingAction { account: Some(CAROL), ..action(3, BookOp::PlaceTrigger(PendingTrigger { position_tpsl: true, ..pending_stop() })) };
         let unknown_close = place_stop(0, None, Side::Ask, None, "1", Sizing::ReduceOnly, None);
         let (effects, _) = run_with(triggers, &[unknown_close, set_global(1, "100", &[(CAROL, 2)]), late_close(), set_global(4, "99", &[(CAROL, 2)])]);
         assert_eq!((effects[3].outcome, &effects[3].stale), ("position_moved", &vec![CAROL]));
@@ -1286,7 +1286,7 @@ mod tests {
     /// left to fire; a fast cancel of a book order, or of a triggered order's remainder resting, takes it out.
     #[test]
     fn a_fast_cancel_takes_no_untriggered_order() {
-        let fast = |index, target| PendingAction { vault: Some(CAROL), ..action(index, BookOp::Cancel { target, fast: true }) };
+        let fast = |index, target| PendingAction { account: Some(CAROL), ..action(index, BookOp::Cancel { target, fast: true }) };
         let stop_77 = || vec![stop(77, CAROL, Side::Ask, None, "1", Sizing::Order)];
         let (effects, _) = run_with(stop_77(), &[fast(0, OrderRef::Oid(77)), set_global(1, "100", &[(CAROL, 0)])]);
         assert_eq!((effects[0].outcome, fired(&effects[1]).len()), ("fast_trigger_refused", 1));
@@ -1296,7 +1296,7 @@ mod tests {
         let limit_77 = vec![stop(77, CAROL, Side::Ask, Some("100.5"), "1", Sizing::Order)];
         let (effects, bbo) = run_with(limit_77, &[set_global(0, "100", &[(CAROL, 0)]), fast(1, OrderRef::Oid(77))]);
         assert_eq!((effects[1].outcome, bbo.1), ("canceled", Some(level("101", "2", 2))));
-        let book_order = PendingAction { vault: Some(ALICE), ..action(0, BookOp::Cancel { target: OrderRef::Oid(3), fast: true }) };
+        let book_order = PendingAction { account: Some(ALICE), ..action(0, BookOp::Cancel { target: OrderRef::Oid(3), fast: true }) };
         assert_eq!(outcomes(&run(&[book_order]).0), ["canceled"]);
     }
 
@@ -1305,7 +1305,7 @@ mod tests {
     /// it takes it out.
     #[test]
     fn a_cancel_finds_only_its_accounts_orders_and_a_remainder_keeps_its_cloid() {
-        let by = |vault, index, target| PendingAction { vault: Some(vault), ..action(index, BookOp::Cancel { target, fast: false }) };
+        let by = |account, index, target| PendingAction { account: Some(account), ..action(index, BookOp::Cancel { target, fast: false }) };
         let stop_71 = || vec![stop(71, CAROL, Side::Ask, None, "1", Sizing::Order)];
         let (effects, _) = run_with(stop_71(), &[by(DAVE, 0, OrderRef::Oid(71)), set_global(1, "100", &[(CAROL, 0)])]);
         assert_eq!((effects[0].outcome, fired(&effects[1]).len()), ("target_missing", 1));
@@ -1333,7 +1333,7 @@ mod tests {
     #[test]
     fn a_cloid_on_the_book_and_the_trigger_table_is_ambiguous() {
         let twin = || vec![InnerL4Order { cloid: Some("0x03".to_string()), ..stop(9, ALICE, Side::Ask, None, "1", Sizing::Order) }];
-        let cancel = |vault| PendingAction { vault, ..action(0, cancel_cloid_op("0x03")) };
+        let cancel = |account| PendingAction { account, ..action(0, cancel_cloid_op("0x03")) };
         let (effects, _) = run_with(twin(), &[cancel(Some(ALICE))]);
         assert_eq!(outcomes(&effects), ["target_ambiguous"]);
         let (effects, _) = run_with(twin(), &[cancel(Some(BOB))]);
