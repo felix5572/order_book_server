@@ -40,7 +40,7 @@ use super::{
     record::{BlockRecord, MAX_LEAD_BLOCKS},
     refusals::{TakerKey, TakerRefusals},
     twap_streams::{TwapEvent, TwapFill},
-    twaps::{DueSlices, TwapBook, TwapSlice, TwapStream},
+    twaps::{DueSlices, TwapBook, TwapSlice, TwapStream, TwapsUnknown},
 };
 use crate::{
     accounts::book::ActionCoins,
@@ -70,6 +70,8 @@ pub(crate) struct PendingParams {
     pub(crate) silence_ns: i64,
     /// M: a taker's margin refusal stands for its orders whose lines come this long after its block, ms (batch 2g).
     pub(crate) margin_refusal_ms: u64,
+    /// W: a TWAP suborder's trades go out once the confirmed block time is this close to the next second, ms (batch 2i).
+    pub(crate) twap_trade_window_ms: u64,
 }
 
 impl PendingParams {
@@ -81,6 +83,7 @@ impl PendingParams {
         max_actions: usize,
         silence_ms: u64,
         margin_refusal_ms: u64,
+        twap_trade_window_ms: u64,
     ) -> Result<Self, String> {
         let ns = |name: &str, ms: u64| -> Result<i64, String> {
             if ms == 0 {
@@ -94,6 +97,9 @@ impl PendingParams {
         if margin_refusal_ms == 0 {
             return Err("--pending-margin-refusal-ms must be positive".to_string());
         }
+        if twap_trade_window_ms == 0 {
+            return Err("--pending-twap-trade-window-ms must be positive".to_string());
+        }
         // a confirmed order's ALO priority must outlive the window it is compared in, the record's retention R = H + E
         // and the warm-up after a block log gap H both (review 000620 r1 P2-2)
         if max_late_ms < PRIORITY_WINDOW_MS {
@@ -106,6 +112,7 @@ impl PendingParams {
             max_actions,
             silence_ns: ns("mempool-silence", silence_ms)?,
             margin_refusal_ms,
+            twap_trade_window_ms,
         })
     }
 
@@ -275,12 +282,15 @@ pub(crate) struct Shadow {
     /// The takers' margin refusals by the block log's trusted blocks (batch 2g).
     refusals: TakerRefusals,
     /// The running TWAPs (batch 2h); the suborders overlaid, as of the book's version and the confirmed block time's
-    /// second - `None` while their state is not known at the confirmed height, none overlaid -; the (twap, slot) whose
-    /// trades went out, with the slot's due time: kept until the slot is past, unknown spells between.
+    /// second they were known at - kept through that second while the next height is not proven, `None` while none are
+    /// (batch 2i) -; the (twap, slot) whose trades went out, with the slot's due time: kept until the slot is past,
+    /// unknown spells between; the confirmed height the trade window last replayed its coins at (review 000631 r1
+    /// P2-2).
     twaps: TwapBook,
     due: DueSlices,
     due_of: Option<(u64, u64)>,
     emitted: FxHashMap<(u64, u64), u64>,
+    window_height: Option<u64>,
     gaps: Gaps,
     held: usize,
     newest_seen_ns: Option<i64>,
@@ -311,6 +321,7 @@ impl Shadow {
             due: DueSlices::default(),
             due_of: None,
             emitted: FxHashMap::default(),
+            window_height: None,
             gaps: Gaps {
                 mempool: Some("start"),
                 block_log: Some("block_log_start"),
@@ -426,7 +437,8 @@ impl Shadow {
         self.twap_step(replica)
     }
 
-    /// Whether the TWAPs are known at the confirmed height: their suborders overlaid (design 000624 r4 section 5).
+    /// Whether the suborders overlaid are those of a TWAP state proven complete, at the confirmed height or earlier in
+    /// its block time's second (batch 2i, user 11-01; design 000624 r4 section 5 otherwise).
     pub(crate) const fn twaps_known(&self) -> bool {
         self.due_of.is_some()
     }
@@ -435,21 +447,35 @@ impl Shadow {
     fn twap_step(&mut self, replica: Option<&BookReplica>) -> Step {
         let mut step = Step::default();
         let Some((replica, height, confirmed_ns)) = aligned(replica).filter(|_| !self.gaps.replica) else { return step };
-        step.changed = self.settle_twaps(height, unix_ms(confirmed_ns));
         let emit = self.availability(Some(replica)).is_ok();
+        step.changed = self.settle_twaps(height, unix_ms(confirmed_ns), emit);
         self.replay_coins(replica, &step.changed, emit, &mut step.trades);
         step
     }
 
-    /// The TWAP book settled at `height`; when what it serves changed - its state, the confirmed block time's second,
-    /// whether known -, the suborders due anew (none while not known). The coins whose suborders changed, each holding
-    /// an entry while it has any (design 000624 r4: no other coin replays for it).
-    fn settle_twaps(&mut self, height: u64, basis_ms: u64) -> HashSet<Coin> {
-        let known = self.twaps.settle(height).is_ok();
-        let due_of = known.then(|| (self.twaps.version(), basis_ms / 1_000));
+    /// The TWAP book settled at `height`: the suborders due anew when what they stand on changed, and the coins the
+    /// trade window replays. The coins whose suborders changed, each holding an entry while it has any (design 000624
+    /// r4: no other coin replays for it).
+    fn settle_twaps(&mut self, height: u64, basis_ms: u64, emit: bool) -> HashSet<Coin> {
+        let second = basis_ms / 1_000;
+        let due_of = match self.twaps.settle(height) {
+            Ok(()) => Some((self.twaps.version(), second)),
+            // the next height not proven yet: this second's suborders stand (batch 2i, design 000631 r2)
+            Err(TwapsUnknown::Incomplete) if self.due_of.is_some_and(|(_, of)| of == second) => self.due_of,
+            Err(_) => None,
+        };
+        let mut affected = self.due_anew(due_of, basis_ms);
+        affected.extend(self.trade_window_coins(height, basis_ms, emit));
+        affected
+    }
+
+    /// The suborders due as of `due_of`, when it is not what they stand on: none while `None`. The coins whose
+    /// suborders changed.
+    fn due_anew(&mut self, due_of: Option<(u64, u64)>, basis_ms: u64) -> HashSet<Coin> {
         if due_of == self.due_of {
             return HashSet::new();
         }
+        let known = due_of.is_some();
         let due = if known { self.twaps.due(basis_ms) } else { DueSlices::default() };
         let mut affected: HashSet<Coin> = due.iter().filter(|(coin, slices)| self.due.get(*coin) != Some(slices)).map(|(coin, _)| coin.clone()).collect();
         affected.extend(self.due.keys().filter(|coin| !due.contains_key(*coin)).cloned());
@@ -465,9 +491,32 @@ impl Shadow {
         affected
     }
 
+    /// Whether a confirmed block time is in the trade window: within W of the next second, the start of the block that
+    /// runs the suborders due (batch 2i); a W of a second or more takes every one (review 000631 r3 P3: no sum to
+    /// overflow).
+    const fn in_trade_window(&self, basis_ms: u64) -> bool {
+        self.params.twap_trade_window_ms >= 1_000 - basis_ms % 1_000
+    }
+
+    /// The coins holding a suborder whose trades have not gone out, once the confirmed block time is in the trade window:
+    /// at most once a confirmed height, while the book may be served (review 000631 r1 P2-2).
+    fn trade_window_coins(&mut self, height: u64, basis_ms: u64, emit: bool) -> HashSet<Coin> {
+        if !emit || !self.in_trade_window(basis_ms) || self.window_height == Some(height) {
+            return HashSet::new();
+        }
+        self.window_height = Some(height);
+        let emitted = &self.emitted;
+        self.due
+            .iter()
+            .filter(|(_, slices)| slices.iter().any(|slice| !emitted.contains_key(&(slice.twap_id, slice.slot))))
+            .map(|(coin, _)| coin.clone())
+            .collect()
+    }
+
     /// `coins` replayed over the replica, each one's TWAP suborders first; a suborder's fills go out once, the first time
-    /// it fills while `emit`.
+    /// it fills while `emit` in the trade window.
     fn replay_coins(&mut self, replica: &BookReplica, coins: &HashSet<Coin>, emit: bool, trades: &mut Vec<PendingTrade>) {
+        let emit_twaps = emit && self.in_trade_window(self.basis_ms);
         let Self { coins: held, due, emitted, record, refusals, basis_ms, .. } = self;
         let basis = Basis::new(record.priorities(), refusals, *basis_ms);
         for coin in coins {
@@ -475,7 +524,7 @@ impl Shadow {
             let slices = due.get(coin).map_or(&[][..], Vec::as_slice);
             let filled = actions.replay(replica.coin(coin), basis, slices);
             for (slice, fills) in slices.iter().zip(filled) {
-                if !emit || fills.is_empty() || emitted.insert((slice.twap_id, slice.slot), slice.due_ms).is_some() {
+                if !emit_twaps || fills.is_empty() || emitted.insert((slice.twap_id, slice.slot), slice.due_ms).is_some() {
                     continue;
                 }
                 for fill in &fills {
@@ -670,9 +719,9 @@ impl Shadow {
             changed.extend(self.coins.iter().filter(|(_, actions)| actions.holds_priority()).map(|(coin, _)| coin.clone()));
             self.basis_ms = basis_ms;
         }
-        changed.extend(self.settle_twaps(height, basis_ms));
-        self.priorities_behind |= !covered && changed.iter().any(|coin| self.coins.contains_key(coin));
         let emit = self.availability(Some(replica)).is_ok();
+        changed.extend(self.settle_twaps(height, basis_ms, emit));
+        self.priorities_behind |= !covered && changed.iter().any(|coin| self.coins.contains_key(coin));
         let mut trades = Vec::new();
         self.replay_coins(replica, &changed, emit, &mut trades);
         Step { trades, changed }
@@ -864,12 +913,12 @@ pub(crate) mod tests {
 
     /// E 1 s, H 1 s, the span 10 s, 1,000 actions; silence 60 s, out of the way unless a test sets it.
     pub(crate) fn params() -> PendingParams {
-        PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 60_000, 300_000).unwrap()
+        PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 60_000, 300_000, 1_000).unwrap()
     }
 
     /// As `params`, H as r6 revision 17's default.
     fn params_late(max_late_ms: u64) -> PendingParams {
-        PendingParams::from_ms(1_000, max_late_ms, 10_000, 1_000, 60_000, 300_000).unwrap()
+        PendingParams::from_ms(1_000, max_late_ms, 10_000, 1_000, 60_000, 300_000, 1_000).unwrap()
     }
 
     const BTC: &str = "BTC";
@@ -1257,7 +1306,7 @@ pub(crate) mod tests {
     /// fresh one does, served E after it.
     #[test]
     fn a_stale_line_ends_no_silence() {
-        let mut harness = Harness::new(PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 500, 300_000).unwrap());
+        let mut harness = Harness::new(PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 500, 300_000, 1_000).unwrap());
         harness.height = 9;
         harness.logged = 9;
         harness.replica = replica_at(9);
@@ -1277,7 +1326,7 @@ pub(crate) mod tests {
     /// Review 000611 r1 P1-2: a line that would take the set past its cap drops it before any of it applies.
     #[test]
     fn a_line_past_the_cap_trades_nothing() {
-        let mut harness = Harness::ready_with(PendingParams::from_ms(1_000, 1_000, 10_000, 1, 60_000, 300_000).unwrap(), 1_000);
+        let mut harness = Harness::ready_with(PendingParams::from_ms(1_000, 1_000, 10_000, 1, 60_000, 300_000, 1_000).unwrap(), 1_000);
         harness.rest_ask(11);
         harness.line(3_150, 1, vec![alo_bid("99", "0x0a")]);
         assert_eq!(harness.line(3_160, 2, vec![ioc("0x01")]).trades, NO_TRADES);
@@ -1456,7 +1505,7 @@ pub(crate) mod tests {
     /// after M, is still refused.
     #[test]
     fn a_refusal_stays_while_an_order_it_reaches_is_held() {
-        let mut harness = Harness::ready_with(PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 60_000, 1_000).unwrap(), 1_000);
+        let mut harness = Harness::ready_with(PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 60_000, 1_000, 1_000).unwrap(), 1_000);
         harness.rest_ask(11);
         harness.log_outcomes(vec![taker_outcome(true)], false);
         harness.confirm(vec![], vec![]);
@@ -1534,8 +1583,8 @@ pub(crate) mod tests {
     }
 
     /// Batch 2h: a TWAP suborder due in the next first-of-second block takes before the pending takers - at its block's
-    /// start -, its fill out once when it first fills; an unknown spell between (the next block's log not yet read)
-    /// withdraws it, and its return sends nothing again.
+    /// start -, its fill out once when it first fills; a block of its second whose next is not proven yet keeps it
+    /// (batch 2i), and its being proven sends nothing again.
     #[test]
     fn a_twap_suborder_takes_first_and_trades_once() {
         let mut harness = Harness::ready_from(1_000);
@@ -1549,9 +1598,8 @@ pub(crate) mod tests {
         assert_eq!(harness.bbo().1, Some(level("101", "0.9", 1)));
         let step = harness.line(3_150, 1, vec![ioc("0x01")]);
         assert_eq!(step.trades.iter().map(|trade| trade.sz).collect::<Vec<_>>(), [Sz::parse_from_str("0.9").unwrap()], "behind the suborder");
-        // the replica's next block: unknown until the log's next one is read and proven through
         let step = harness.confirm(vec![], vec![]);
-        assert!(!harness.shadow.twaps_known());
+        assert!(harness.shadow.twaps_known(), "kept through its second");
         assert_eq!(twap_trades(&step), []);
         let step = harness.twaps_known_now();
         assert!(harness.shadow.twaps_known());
@@ -1570,27 +1618,46 @@ pub(crate) mod tests {
         assert_eq!(twap_trades(&step), [(7, 0, Sz::parse_from_str("0.1").unwrap(), Px::parse_from_str("101").unwrap())]);
     }
 
-    /// Batch 2h: an unknown spell withdraws the suborder - its coin replayed without it -, known again it returns; a
-    /// block log loss (its `twapCancel`s lost too) leaves the TWAPs unknown.
+    /// Batch 2i (design 000631 r2): the next height not proven yet, the suborders of the second stand - no replay, the
+    /// TWAPs known -; into the next second unproven they go, their block having run them - the coin replayed -, and
+    /// that second's come once proven; a TWAP stream's loss within a second, or the block log's, withdraws them at once.
     #[test]
-    fn an_unknown_spell_withdraws_the_suborder() {
+    fn a_suborder_stays_through_its_second() {
         let mut harness = Harness::ready_from(1_000);
         harness.rest_ask(11);
         drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
         drop(harness.twaps_known_now());
         assert_eq!(harness.bbo().1, Some(level("101", "0.9", 1)));
         let step = harness.confirm(vec![], vec![]);
-        assert!(step.changed.contains(&Coin::new(BTC)));
-        assert_eq!(harness.bbo().1, Some(level("101", "1", 1)));
-        drop(harness.twaps_known_now());
+        assert!(!step.changed.contains(&Coin::new(BTC)));
+        assert!(harness.shadow.twaps_known());
         assert_eq!(harness.bbo().1, Some(level("101", "0.9", 1)));
+        let mut step = Step::default();
+        while block_time_ms(harness.height) < 4_000 {
+            step = harness.block(&[], vec![], vec![]);
+            assert_eq!(harness.bbo().1.map(|level| level.1), Some(Sz::parse_from_str(if block_time_ms(harness.height) < 4_000 { "0.9" } else { "1" }).unwrap()));
+        }
+        assert!(step.changed.contains(&Coin::new(BTC)), "withdrawn into second 4");
+        assert!(!harness.shadow.twaps_known());
+        drop(harness.twaps_known_now());
+        assert!(harness.shadow.twaps_known(), "second 4 proven: slot 1 due past it, none overlaid");
+        assert_eq!(harness.bbo().1, Some(level("101", "1", 1)));
         drop(harness.shadow.on_block_log_loss(Some(&harness.replica)));
         assert!(!harness.shadow.twaps_known());
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+        drop(harness.twaps_known_now());
+        let step = harness.shadow.on_twap_loss(wall_ms(), Some(&harness.replica));
+        assert!(step.changed.contains(&Coin::new(BTC)));
+        assert!(!harness.shadow.twaps_known());
+        assert_eq!(harness.bbo().1, Some(level("101", "1", 1)));
     }
 
-    /// Design 000624 r4 section 5: with no suborder due, the TWAPs turning unknown and known again replays no coin.
+    /// Batch 2i (design 000631 r2): with no suborder due, a block of the second proven later sends nothing at all - no
+    /// event a subscription would be told -; into the next second the state change alone goes out, no frame, and back.
     #[test]
-    fn the_twaps_turning_known_replays_no_coin_without_a_suborder() {
+    fn the_twaps_state_changes_alone_by_the_second() {
         let mut harness = Harness::ready_from(1_000);
         harness.rest_ask(11);
         let mut anchor = twap_anchor(harness.height);
@@ -1598,37 +1665,111 @@ pub(crate) mod tests {
         drop(harness.shadow.on_anchor(anchor, Some(&harness.replica)));
         assert!(harness.twaps_known_now().changed.is_empty());
         assert!(harness.shadow.twaps_known());
-        // published: the state change alone goes out, no frame, the store's snapshot telling it
         let handle = crate::pending::publish::PendingBookHandle::new();
         let mut events = handle.subscribe();
         let mut publisher = crate::pending::publish::Publisher::new(handle.clone());
         publisher.publish(&Step::default(), true, &harness.shadow, Some(&harness.replica));
         while events.try_recv().is_ok() {}
-        let confirmed = harness.confirm(vec![], vec![]);
-        assert!(!harness.shadow.twaps_known());
-        assert!(confirmed.changed.is_empty());
-        publisher.publish(&confirmed, false, &harness.shadow, Some(&harness.replica));
         let told = |event: Result<crate::pending::publish::PendingEvent, tokio::sync::broadcast::error::TryRecvError>| match event {
             Ok(crate::pending::publish::PendingEvent::Availability(state)) => (state.availability(), state.twaps_known()),
             other => panic!("{other:?}"),
         };
+        while block_time_ms(harness.height + 1) < 4_000 {
+            let step = harness.block(&[], vec![], vec![]);
+            publisher.publish(&step, false, &harness.shadow, Some(&harness.replica));
+            assert!(events.try_recv().is_err(), "nothing within the second, at {}", block_time_ms(harness.height));
+        }
+        let into_next = harness.block(&[], vec![], vec![]);
+        assert!(into_next.changed.is_empty());
+        publisher.publish(&into_next, false, &harness.shadow, Some(&harness.replica));
         assert_eq!(told(events.try_recv()), (Ok(()), false));
         assert!(events.try_recv().is_err(), "no frame");
         assert!(!handle.snapshot().twaps_known());
         let known = harness.twaps_known_now();
         assert!(known.changed.is_empty());
-        assert!(harness.shadow.twaps_known());
         publisher.publish(&known, false, &harness.shadow, Some(&harness.replica));
         assert_eq!(told(events.try_recv()), (Ok(()), true));
         assert!(events.try_recv().is_err());
         assert!(handle.snapshot().twaps_known());
     }
 
+    fn params_window(window_ms: u64) -> PendingParams {
+        PendingParams::from_ms(1_000, 1_000, 10_000, 1_000, 60_000, 300_000, window_ms).unwrap()
+    }
+
+    /// Batch 2i: W 400 ms - the suborder overlaid from 3.1 s, its trade goes out once the confirmed block time reaches
+    /// 3.6 s (the window's edge), its second's blocks between proven or not, and once.
+    #[test]
+    fn a_suborder_trades_in_the_window_alone() {
+        let mut harness = Harness::ready_with(params_window(400), 1_000);
+        harness.rest_ask(11);
+        drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+        assert_eq!(twap_trades(&harness.twaps_known_now()), []);
+        assert_eq!(harness.bbo().1, Some(level("101", "0.9", 1)), "overlaid out of the window");
+        let mut traded_at = Vec::new();
+        while block_time_ms(harness.height) < 3_900 {
+            let step = harness.block(&[], vec![], vec![]);
+            if !twap_trades(&step).is_empty() {
+                traded_at.push(block_time_ms(harness.height));
+            }
+        }
+        assert_eq!(traded_at, [3_600]);
+    }
+
+    /// Review 000631 r1 P2-2: the window replays a coin at most once a confirmed height - two read-through proofs at it
+    /// replay nothing, the suborder taking nothing (no ask) -; the next height's ask, its book changed, takes it, the
+    /// trade out once. Entered while the book may not be served, the window does not spend the height.
+    #[test]
+    fn the_window_replays_a_coin_once_a_height() {
+        let mut harness = Harness::ready_with(params_window(400), 1_000);
+        drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+        drop(harness.twaps_known_now());
+        let mut step = Step::default();
+        while block_time_ms(harness.height) < 3_600 {
+            step = harness.block(&[], vec![], vec![]);
+        }
+        assert!(step.changed.contains(&Coin::new(BTC)), "replayed entering the window");
+        assert_eq!(twap_trades(&step), []);
+        assert!(harness.prove_twaps().changed.is_empty());
+        assert!(harness.prove_twaps().changed.is_empty());
+        let at = block_time_ms(harness.height + 1);
+        let step = harness.block(&[], vec![btc_status(11, "A", "101.0", "1.0", "open", None, "Alo", at)], vec![btc_diff(11, "A", "101.0", new_diff("1.0"))]);
+        assert_eq!(twap_trades(&step), [(7, 0, Sz::parse_from_str("0.1").unwrap(), Px::parse_from_str("101").unwrap())], "the ask's block");
+        let traded: Vec<_> = std::iter::repeat_with(|| harness.block(&[], vec![], vec![])).take(2).flat_map(|step| twap_trades(&step)).collect();
+        assert_eq!(traded, [], "once");
+    }
+
+    /// Review 000631 r3 P3: the window's edge, and a W past a second taking every block time, `u64::MAX` too.
+    #[test]
+    fn the_trade_window_takes_its_edge_and_any_wide_w() {
+        let edge = Shadow::new(params_window(400), true, 0);
+        assert_eq!([3_599, 3_600, 3_999, 4_000].map(|basis_ms| edge.in_trade_window(basis_ms)), [false, true, true, false]);
+        for window_ms in [1_000, u64::MAX] {
+            let wide = Shadow::new(params_window(window_ms), true, 0);
+            assert!([3_000, 3_600, 3_999, u64::MAX].iter().all(|basis_ms| wide.in_trade_window(*basis_ms)), "W {window_ms}");
+        }
+    }
+
+    /// Review 000631 r1 P2-2: the window entered while the book may not be served keeps the height for when it may.
+    #[test]
+    fn the_window_waits_for_the_book_served() {
+        let mut harness = Harness::ready_with(params_window(400), 1_000);
+        drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+        drop(harness.twaps_known_now());
+        while block_time_ms(harness.height) < 3_500 {
+            drop(harness.block(&[], vec![], vec![]));
+        }
+        let (height, basis_ms) = (harness.height, block_time_ms(harness.height) + 100);
+        assert!(harness.shadow.trade_window_coins(height, basis_ms, false).is_empty());
+        assert_eq!(harness.shadow.trade_window_coins(height, basis_ms, true), std::iter::once(Coin::new(BTC)).collect());
+        assert!(harness.shadow.trade_window_coins(height, basis_ms, true).is_empty(), "once a height");
+    }
+
     /// Review 000620 r1 P2-2: H under the ALO priority window is refused at start.
     #[test]
     fn a_max_late_under_the_priority_window_is_refused() {
-        assert!(PendingParams::from_ms(1_000, 399, 10_000, 1_000, 60_000, 300_000).is_err());
-        assert!(PendingParams::from_ms(1_000, 400, 10_000, 1_000, 60_000, 300_000).is_ok());
+        assert!(PendingParams::from_ms(1_000, 399, 10_000, 1_000, 60_000, 300_000, 1_000).is_err());
+        assert!(PendingParams::from_ms(1_000, 400, 10_000, 1_000, 60_000, 300_000, 1_000).is_ok());
     }
 
     /// R7 revision 20: past `MAX_LEAD_BLOCKS` above the confirmed height (all of them without a replica) the log's

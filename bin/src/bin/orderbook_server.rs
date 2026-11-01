@@ -167,6 +167,12 @@ struct Args {
     /// of the trades predicted for such takers, 9 independent fills suppressed).
     #[arg(long, default_value = "300000")]
     pending_margin_refusal_ms: u64,
+
+    /// The pending book's TWAP trade window W (batch 2i): a TWAP suborder's predicted trades go out once the confirmed
+    /// block time is within this long of the next second, the start of the block that runs it (the replica confirms a
+    /// block ~230 ms after its time, bm 11-01: at 400 ms the trades go out ~150 ms before it runs).
+    #[arg(long, default_value = "400")]
+    pending_twap_trade_window_ms: u64,
 }
 
 /// Start the Prometheus metrics HTTP server
@@ -243,6 +249,7 @@ async fn main() -> Result<()> {
         pending_max_actions: args.pending_max_actions,
         pending_mempool_silence_ms: args.pending_mempool_silence_ms,
         pending_margin_refusal_ms: args.pending_margin_refusal_ms,
+        pending_twap_trade_window_ms: args.pending_twap_trade_window_ms,
     };
 
     println!("Orderbook Server v{}", env!("CARGO_PKG_VERSION"));
@@ -277,14 +284,15 @@ async fn main() -> Result<()> {
     }
     if config.pending_book {
         println!(
-            "  Pending book: ON (book replica, backlog budget {} events; mempool, expiry {} ms, max late {} ms, max span {} ms, max {} actions, silence {} ms, margin refusal {} ms)",
+            "  Pending book: ON (book replica, backlog budget {} events; mempool, expiry {} ms, max late {} ms, max span {} ms, max {} actions, silence {} ms, margin refusal {} ms, TWAP trade window {} ms)",
             config.pending_backlog_events,
             config.pending_expiry_ms,
             config.pending_max_late_ms,
             config.pending_max_span_ms,
             config.pending_max_actions,
             config.pending_mempool_silence_ms,
-            config.pending_margin_refusal_ms
+            config.pending_margin_refusal_ms,
+            config.pending_twap_trade_window_ms
         );
     }
     println!();

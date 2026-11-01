@@ -602,7 +602,7 @@ mod tests {
     /// no other change to BTC, the frame the store serves on recovery is the merged book's: 101, nothing pending.
     #[test]
     fn the_set_dropped_whole_refreshes_every_frame() {
-        let (mut book, mut feed, mut feeds) = served_book_with(PendingParams::from_ms(1_000, 1_000, 10_000, 2, 60_000, 300_000).unwrap());
+        let (mut book, mut feed, mut feeds) = served_book_with(PendingParams::from_ms(1_000, 1_000, 10_000, 2, 60_000, 300_000, 1_000).unwrap());
         let handle = book.publisher.handle().clone();
         drop(book.on_mempool(line(3_150, 3, alo("100", "0x0a")), Some(&coins()), NONE_UNREPORTED));
         assert_eq!((btc_frame(&handle).bbo.1.unwrap().0.to_str(), btc_frame(&handle).pending.actions), ("100".to_string(), 1));
@@ -622,7 +622,7 @@ mod tests {
     /// 100.5 after.
     #[test]
     fn a_recovery_carries_the_book_of_its_commit() {
-        let (mut book, mut feed, mut feeds) = served_book_with(PendingParams::from_ms(1_000, 1_000, 10_000, 2, 60_000, 300_000).unwrap());
+        let (mut book, mut feed, mut feeds) = served_book_with(PendingParams::from_ms(1_000, 1_000, 10_000, 2, 60_000, 300_000, 1_000).unwrap());
         let handle = book.publisher.handle().clone();
         let mut events = handle.subscribe();
         drop(book.on_mempool(line(3_150, 3, alo("100", "0x0a")), Some(&coins()), NONE_UNREPORTED));

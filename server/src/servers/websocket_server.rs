@@ -372,6 +372,7 @@ fn attach_pending_book(config: &ServerConfig, listener: &mut OrderBookListener) 
         config.pending_max_actions,
         config.pending_mempool_silence_ms,
         config.pending_margin_refusal_ms,
+        config.pending_twap_trade_window_ms,
     )?;
     let (feed, replica) = replica::link(replica::REPLICA_QUEUE_BATCHES);
     listener.attach_replica_feed(feed);
