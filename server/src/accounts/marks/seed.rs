@@ -648,10 +648,10 @@ struct PartialCaches {
 }
 
 impl PartialCaches {
-    /// A missing key is allowed only when its configured selector does not consume a reference cache.
+    /// A missing key is allowed when its configured selector does not consume a reference cache, and for the Spot key,
+    /// whose median selector then takes the oracle's two other candidates (`native::select_oracle`, XTEN since 10-31).
     fn complete(self, modes: ReferenceModes) -> (ReferenceCaches, Option<&'static str>) {
         let missing = [
-            (self.spot.is_none() && modes.spot != ReferenceMode::Submitted, "noSpotReferenceCache"),
             (self.external_perp.is_none() && modes.external_perp != ReferenceMode::Submitted, "noExternalPerpReferenceCache"),
             (self.mark.is_none() && modes.mark != ReferenceMode::Submitted, "noMarkReferenceCache"),
         ];
@@ -831,9 +831,10 @@ pub(crate) mod tests {
         MarkSeed::from_checkpoint(parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap()).unwrap()
     }
 
-    /// bm 10-27: XTEN, listed that day, had lmpe without msoe at 1198840000; an ordinary-mode coin missing its Spot key
+    /// bm 10-27: XTEN, listed that day, had lmpe without msoe at 1198840000; an ordinary-mode coin missing a key it reads
     /// each failed the whole seed and withheld every coin's marks. Such a coin alone is unsupported now: the replay does
-    /// not claim it, and a checkpoint holding it so is not checked against.
+    /// not claim it, and a checkpoint holding it so is not checked against. A missing Spot key alone is a full state
+    /// (XTEN since 10-31).
     #[test]
     fn a_coin_whose_state_is_not_fully_built_seeds_unsupported_alone() {
         let oracle = "/exchange/locus/cls/0/oracle";
@@ -843,17 +844,22 @@ pub(crate) mod tests {
         let no_spot = seed_with(|checkpoint| {
             checkpoint.pointer_mut(&format!("{oracle}/ror/ktm")).unwrap().as_array_mut().unwrap().remove(0);
         });
-        let [btc, pump] = no_spot.native.assets.as_slice() else { panic!("two main assets") };
-        assert_eq!((btc.unsupported, &btc.references.spot, pump.unsupported), (Some("noSpotReferenceCache"), &None, None));
-        assert_eq!(btc.references.mark.as_ref().unwrap().median, Some(828_590), "the caches it has are read");
+        let [btc, _] = no_spot.native.assets.as_slice() else { panic!("two main assets") };
+        assert_eq!((btc.unsupported, &btc.references.spot), (None, &None), "no Spot key: full");
+        let no_mark = seed_with(|checkpoint| {
+            checkpoint.pointer_mut(&format!("{oracle}/ror/ktm")).unwrap().as_array_mut().unwrap().remove(1);
+        });
+        let [btc, pump] = no_mark.native.assets.as_slice() else { panic!("two main assets") };
+        assert_eq!((btc.unsupported, &btc.references.mark, pump.unsupported), (Some("noMarkReferenceCache"), &None, None));
+        assert_eq!(btc.references.spot.as_ref().unwrap().median, Some(828_720), "the caches it has are read");
         let cached_mark_alone = seed_with(|checkpoint| checkpoint["exchange"]["msc"]["mou"]["u"][1] = json!([[0, 828_576]]));
         let [btc, pump] = cached_mark_alone.native.assets.as_slice() else { panic!("two main assets") };
         assert_eq!((btc.unsupported, pump.unsupported, &cached_mark_alone.native.refresh.submitted), (Some("partialSubmittedPrices"), None, &vec![None, None]));
-        let replay = super::super::native::NativePrices::seeded(&no_spot.native);
+        let replay = super::super::native::NativePrices::seeded(&no_mark.native);
         assert_eq!((replay.stored_oracle(0), replay.mark(0)), (None, None), "BTC is not claimed");
         let full = MarkSeed::from_checkpoint(parse_checkpoint_bytes(&fixture()).unwrap()).unwrap();
-        let check = super::super::native::NativePrices::seeded(&full.native).check_against(&no_spot.native);
-        assert_eq!(check.unsupported, [("noSpotReferenceCache", vec!["BTC".to_string()])]);
+        let check = super::super::native::NativePrices::seeded(&full.native).check_against(&no_mark.native);
+        assert_eq!(check.unsupported, [("noMarkReferenceCache", vec!["BTC".to_string()])]);
         assert!(check.samples.is_empty(), "{:?}", check.samples);
     }
 

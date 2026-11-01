@@ -17,7 +17,9 @@
 //!      `hype_purr_internal_reference_20261020`: 12,819 reference actions, both coins equal at three interval ends);
 //!    - a `SetGlobalAction` stores the oracle median(submitted, Spot cache, L with the basis undone) and the mark
 //!      median(submitted, Mark cache, L), then samples msoe with the new oracle and lmpe with L. A key configured
-//!      with `ror.roc` mode d uses the submitted price directly, without a reference cache (XTEN, 2026-10-27).
+//!      with `ror.roc` mode d uses the submitted price directly, without a reference cache (XTEN, 2026-10-27). A coin
+//!      without a Spot key under the median selector (XTEN since 2026-10-31) stores the oracle median(submitted, L
+//!      with the basis undone), the floor midpoint of the two (`select_oracle`).
 //!
 //! Main-dex marks are NOT step-limited. In binary 6911b792, 0x2965e0a tests clearinghouse.moh at +0x378:
 //! Main (0x8000000000000000) jumps straight to the selected-price write, bypassing the Hip3 1% limit.
@@ -209,17 +211,18 @@ impl CoinPrices {
             // a `psro` coin the validator does not price whose spot book has no midpoint: no input for it (0x2da772e)
             return Ok(());
         }
-        // XTEN has no reference inputs or cache keys. A later first reference needs its key-creation rule proved;
-        // retain that boundary explicitly instead of fabricating an empty, already-refreshed cache.
-        let (Some(spot_cache), Some(external_cache), Some(_)) = (&mut self.spot, &mut self.external_perp, &mut self.marks) else {
+        // XTEN has no Spot key since 2026-10-31: its validators' ExternalPerp prices still make Mark members (bm 11-01
+        // replay, its caches exact). A price for an absent key needs its key-creation rule proved; retain that boundary
+        // explicitly instead of fabricating an empty, already-refreshed cache.
+        if spot.is_some() && self.spot.is_none() || external.is_some() && self.external_perp.is_none() || self.marks.is_none() {
             self.unsupported.get_or_insert("referenceCacheCreationUnsupported");
             return Ok(());
-        };
-        if let Some(spot) = spot {
-            spot_cache.insert(user, spot, time_ns);
         }
-        if let Some(external) = external {
-            external_cache.insert(user, external, time_ns);
+        if let (Some(spot), Some(cache)) = (spot, &mut self.spot) {
+            cache.insert(user, spot, time_ns);
+        }
+        if let (Some(external), Some(cache)) = (external, &mut self.external_perp) {
+            cache.insert(user, external, time_ns);
         }
         let Some((bid, ask, local)) = self.local(cut) else { return Ok(()) };
         let Some(emas) = &self.emas else {
@@ -280,7 +283,7 @@ impl CoinPrices {
             return Ok(());
         };
         let median = |cache: &Option<MemberCache>| cache.as_ref().and_then(|cache| cache.median);
-        let selected_oracle = select_price(self.reference_modes.spot, submitted_oracle, median(&self.spot), || inverse_basis(local, emas.basis.basis_ratio()))?;
+        let selected_oracle = select_oracle(self.reference_modes.spot, submitted_oracle, self.spot.as_ref(), || inverse_basis(local, emas.basis.basis_ratio()))?;
         let selected_mark = select_price(self.reference_modes.mark, submitted_mark, median(&self.marks), || Ok(local))?;
         let (Some(stored), Some(new_mark)) = (selected_oracle, selected_mark) else {
             self.unsupported.get_or_insert("noCacheOrMode");
@@ -309,6 +312,17 @@ fn select_price(mode: ReferenceMode, submitted: u64, median: Option<u64>, local:
             Ok(median_units(&[submitted, median, local()?]))
         }
         ReferenceMode::Unsupported => Ok(None),
+    }
+}
+
+/// The oracle's selector. Without a Spot key, the median selector takes the median of the two other candidates, the
+/// submitted and the inverse-basis local prices: their floor midpoint (XTEN since 2026-10-31; bm 11-01, four
+/// 10,000-block checkpoint intervals replayed with every coin's oracle, mark, EMAs and caches exact, where the submitted
+/// price, the local one, or their minimum or maximum each left XTEN's oracle and msoe off).
+fn select_oracle(mode: ReferenceMode, submitted: u64, spot: Option<&MemberCache>, local: impl FnOnce() -> Result<u64, String>) -> Result<Option<u64>, String> {
+    match spot {
+        None if mode == ReferenceMode::Median => Ok(median_units(&[submitted, local()?])),
+        spot => select_price(mode, submitted, spot.and_then(|cache| cache.median), local),
     }
 }
 
@@ -720,6 +734,8 @@ mod tests {
         assert_eq!(select_price(ReferenceMode::Submitted, 123, None, || panic!("disabled selector read local inputs")), Ok(Some(123)));
         assert_eq!(select_price(ReferenceMode::Median, 123, None, || Ok(5)), Ok(None));
         assert_eq!(select_price(ReferenceMode::Unsupported, 123, None, || Ok(5)), Ok(None));
+        assert_eq!(select_oracle(ReferenceMode::Median, 100, None, || Ok(201)), Ok(Some(150)), "no Spot key: the floor midpoint");
+        assert_eq!(select_oracle(ReferenceMode::Submitted, 123, None, || panic!("disabled selector read local inputs")), Ok(Some(123)));
     }
 
     /// bm 10-27, XTEN's listing withheld every coin's marks. A `SetGlobalAction` pricing a coin with one of the two, a
@@ -793,6 +809,44 @@ mod tests {
         let mut prices = NativePrices::seeded(&cold);
         prices.apply(&spot_only, Some(VALIDATOR), T1, |_| cut(819_900, 820_100, 820_000)).unwrap();
         assert_eq!((prices.coins[0].marks.as_ref().unwrap().members.get(&VALIDATOR), prices.coins[0].unsupported), (None, Some("coldLocalPriceFill")));
+    }
+
+    /// BTC without a Spot key, as XTEN since 2026-10-31.
+    fn without_spot_key() -> NativePrices {
+        let mut seed = native_seed();
+        seed.assets[0].references.spot = None;
+        NativePrices::seeded(&seed)
+    }
+
+    /// The oracle median(submitted 828,900, L 828,600 with the basis -0.04 / 371.5 undone 828,689): the floor midpoint
+    /// 828,794. A Spot key whose cache has no median still prices nothing.
+    #[test]
+    fn without_a_spot_key_the_oracle_is_the_midpoint_of_the_submitted_and_the_local_price() {
+        let set_global = MarkAction::SetGlobal(vec![SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: "82860.0".to_string() }, SubmittedPrices::Unpriced]);
+        let mut prices = without_spot_key();
+        prices.apply(&set_global, None, T1, |_| cut(828_500, 828_700, 828_600)).unwrap();
+        assert_eq!((prices.stored_oracle(0), prices.coins[0].unsupported), (Some(828_794), None));
+        let mut no_median = native_seed();
+        let spot = no_median.assets[0].references.spot.as_mut().unwrap();
+        spot.median = None;
+        spot.members.clear();
+        let mut prices = NativePrices::seeded(&no_median);
+        prices.apply(&set_global, None, T1, |_| cut(828_500, 828_700, 828_600)).unwrap();
+        assert_eq!(prices.coins[0].unsupported, Some("noCacheOrMode"));
+    }
+
+    /// An `ExternalPerp` price without a Spot key: median(L 820,000, C 828,650, lmpe 823,100), lmpe the third candidate
+    /// as in `a_reference_with_two_candidates_takes_lmpe_as_the_third`. A Spot price for the absent key is not claimed.
+    #[test]
+    fn without_a_spot_key_an_external_price_still_makes_a_mark_member() {
+        let mut prices = without_spot_key();
+        let external_only = MarkAction::Reference { oracle: Vec::new(), external: vec![("BTC".to_string(), "82865.0".to_string())] };
+        prices.apply(&external_only, Some(VALIDATOR), T1, |_| cut(819_900, 820_100, 820_000)).unwrap();
+        let btc = &prices.coins[0];
+        assert_eq!((btc.marks.as_ref().unwrap().members[&VALIDATOR], btc.external_perp.as_ref().unwrap().members[&VALIDATOR], btc.unsupported), ((823_100, T1), (828_650, T1), None));
+        let spot_price = MarkAction::Reference { oracle: vec![("BTC".to_string(), "82875.0".to_string())], external: Vec::new() };
+        prices.apply(&spot_price, Some(VALIDATOR), T1, |_| cut(819_900, 820_100, 820_000)).unwrap();
+        assert_eq!(prices.coins[0].unsupported, Some("referenceCacheCreationUnsupported"));
     }
 
     /// BTC given a spot book of 3 price decimals, as `psro` gives HYPE and PURR theirs.

@@ -6,6 +6,9 @@
 //! `SGA_CHECKPOINT=<.rmp> SGA_BLOCKS=<replica_cmds files,...> SGA_DIFFS=<hour files,...> SGA_FILLS=... SGA_STATUSES=...
 //! SGA_SYSTEM=... SGA_HIP3=... SGA_BLOCK_COUNT=<n> cargo test --release -p server --lib -- --ignored
 //! sga_marks_from_the_block_before --nocapture`
+//!
+//! The same inputs with `SGA_NEXT_CHECKPOINT=<.rmp>` in place of `SGA_BLOCK_COUNT` replay to that checkpoint and check
+//! every main-dex coin against it (`replay_checks_against_the_next_checkpoint`; XTEN's oracle without a Spot key, bm 11-01).
 
 use std::{
     collections::BTreeMap,
@@ -238,4 +241,49 @@ fn sga_marks_from_the_block_before() {
     println!("{counts:?}");
     println!("off by, bp: all {}", quantiles(errors_bps.into_iter().filter(|bps| *bps > 0.0).collect()));
     println!("off by, bp: coins with a trigger fired {}", quantiles(triggered_errors_bps.into_iter().filter(|bps| *bps > 0.0).collect()));
+}
+
+/// From `SGA_CHECKPOINT` to `SGA_NEXT_CHECKPOINT`, every block applied as the account view applies it; each main-dex coin's
+/// prices and caches against the next checkpoint's, the mismatches printed.
+#[test]
+#[ignore = "requires real node data: see the module's doc"]
+fn replay_checks_against_the_next_checkpoint() {
+    let seed = MarkSeed::from_checkpoint(parse_checkpoint_file(std::path::Path::new(&env("SGA_CHECKPOINT"))).unwrap()).unwrap();
+    let next = MarkSeed::from_checkpoint(parse_checkpoint_file(std::path::Path::new(&env("SGA_NEXT_CHECKPOINT"))).unwrap()).unwrap();
+    let (start, end) = (seed.height, next.height);
+    let mut state = MarkState::seeded(seed);
+    let (mut diffs, mut fills, mut statuses) = (Blocks::<NodeDataOrderDiff>::open("SGA_DIFFS"), Blocks::<NodeDataFill>::open("SGA_FILLS"), Blocks::<NodeDataOrderStatus>::open("SGA_STATUSES"));
+    let (mut system, mut hip3) = (Blocks::<system::SystemAction>::open("SGA_SYSTEM"), Blocks::<OracleUpdateEvent>::open("SGA_HIP3"));
+    let mut blocks = 0_u64;
+    for line in lines("SGA_BLOCKS") {
+        let actions = MarkActions::of(&ReplicaLine::parse(&line).unwrap()).unwrap();
+        let height = actions.height;
+        if height <= start {
+            continue;
+        }
+        if height > end {
+            break;
+        }
+        let inputs = MarkInputs {
+            hip3_oracle_updates: hip3.take(height),
+            book_diffs: diffs.take(height),
+            mark_actions: Ok(actions),
+            order_statuses: statuses.take(height),
+            fills: fills.take(height).iter().flat_map(Batch::events_ref).map(BlockFill::of).collect(),
+            system_actions: system.take(height),
+            collateral_coins: Vec::new(),
+        };
+        let mut report = MarksBlockReport::default();
+        let block = BlockInputs::of(height, inputs, &mut report);
+        state.apply(height, &block, &mut report);
+        assert!(report.errors.is_empty(), "{height}: {:?}", report.errors);
+        blocks += 1;
+    }
+    let check = state.prices.check_against(&next.native);
+    println!("{start} -> {end}: {blocks} blocks");
+    println!("fields (equal, differ) {:?}", check.fields);
+    println!("unsupported {:?}", check.unsupported);
+    for sample in &check.samples {
+        println!("mismatch {} {}: replayed {} checkpoint {}", sample.coin, sample.field, sample.replayed, sample.checkpoint);
+    }
 }
