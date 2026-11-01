@@ -1008,6 +1008,27 @@ lazy_static! {
         &["outcome"]
     ).expect("metric can be created");
 
+    /// The forced flow's frames the pending book follows for its trigger orders (batch 2l second step), by `event`:
+    /// `frame`, `lagged`, `query`; once until restart, `query_failed`, `withdrawn`, `closed`.
+    pub static ref PENDING_BOOK_TRIGGER_FRAMES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_trigger_frames_total", "Pending book forced flow frame events"),
+        &["event"]
+    ).expect("metric can be created");
+
+    /// A `SetGlobalAction`'s candidate trigger orders, by `outcome`: `fired`, `not_reached`, `trailing`; once executed,
+    /// `zero_size` (no position left to close).
+    pub static ref PENDING_BOOK_TRIGGERS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_triggers_total", "Pending book trigger orders by outcome"),
+        &["outcome"]
+    ).expect("metric can be created");
+
+    /// A `SetGlobalAction`'s priced coins, by `outcome`: `executed`, `none_fired`, or why its trigger orders are unknown -
+    /// `no_forecast`, `querying`, `stopped`, `no_frame`, `unavailable`, `incomplete`, `beyond_band`, `mark_overflow`.
+    pub static ref PENDING_BOOK_TRIGGER_COINS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_trigger_coins_total", "Pending book SetGlobalAction coins by trigger outcome"),
+        &["outcome"]
+    ).expect("metric can be created");
+
     /// Blocks between the node prices a checked forecast read and its `SetGlobalAction`'s block.
     pub static ref PENDING_BOOK_SGA_PRICES_BEHIND_BLOCKS: Histogram = Histogram::with_opts(
         HistogramOpts::new("orderbook_pending_book_sga_prices_behind_blocks", "Pending book SetGlobalAction forecast prices behind")
@@ -1147,6 +1168,9 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(PENDING_BOOK_SGA_MARK_ERROR_BPS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_SGA_BUCKET_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_SGA_PRICES_BEHIND_BLOCKS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_TRIGGER_FRAMES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_TRIGGERS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_TRIGGER_COINS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL.clone())).ok();

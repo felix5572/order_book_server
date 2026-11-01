@@ -14,6 +14,8 @@ pub(crate) mod publish;
 mod record;
 mod refusals;
 mod signer;
+mod trigger_frames;
+mod triggers;
 mod twap_streams;
 mod twaps;
 pub(crate) mod shadow;
@@ -25,18 +27,21 @@ use std::{
 };
 
 use log::{error, info};
-use tokio::{sync::{mpsc, watch}, task::JoinHandle};
+use tokio::{sync::{broadcast, mpsc, watch}, task::JoinHandle};
 
 pub(crate) use self::{
     blocks::watch_blocks,
     twap_streams::{watch_twap_fills, watch_twap_statuses},
     publish::{BboFrame, BestLevels, PendingBookHandle, PendingEvent, TradesFrame},
     shadow::{PendingParams, PendingTrade},
+    trigger_frames::FlowFeed,
 };
 use self::{
     blocks::{LoggedBlock, BlockIngest, BlockInput},
     feed::{Feed, FeedEvent, FeedReports, Proven},
     mark_forecast::{ForecastBook, ServedBook, SgaForecasts},
+    trigger_frames::{FlowQuery, Received, TriggerFrames},
+    triggers::SgaTriggers,
     mempool::{MempoolIngest, MempoolInput, MempoolTx},
     twap_streams::{TwapFillLine, TwapStatusLine},
     twaps::TwapStream,
@@ -47,7 +52,7 @@ use crate::{
     accounts::{
         book::{ActionCoins, PendingAnchor},
         owner_thread::spawn_owner,
-        publish::NodePrices,
+        publish::{AccountsFrame, NodePrices},
     },
     listeners::order_book::replica::{BookReplica, ReplicaBatch, ReplicaControl, ReplicaFork, ReplicaInputs},
     metrics::{
@@ -73,6 +78,8 @@ pub(crate) struct PendingFeeds {
     /// The account view's node prices after every applied block: what the `SetGlobalAction` forecasts read and are
     /// checked against (batch 2l).
     pub(crate) prices: watch::Receiver<NodePrices>,
+    /// The forced flow's frames the trigger orders come from (batch 2l second step).
+    pub(crate) flow: FlowFeed,
 }
 
 /// The pending thread, owner of the replica, the feeds' reading and the pending set (`pending-book`, on its own OS
@@ -94,7 +101,7 @@ async fn run(inputs: ReplicaInputs, feeds: PendingFeeds, backlog_events: usize, 
     let ReplicaInputs { control, forks, batches } = inputs;
     let mut listener = Feeds { forks, batches };
     let mut book = PendingBook::new(control, backlog_events, shadow, publisher);
-    let PendingFeeds { mempool: Feed { events: mut mempool, losses: mempool_losses }, block_log, twap_statuses, twap_fills, anchor, mut prices } = feeds;
+    let PendingFeeds { mempool: Feed { events: mut mempool, losses: mempool_losses }, block_log, twap_statuses, twap_fills, anchor, mut prices, mut flow } = feeds;
     let Feed { events: mut blocks, losses: block_losses } = block_log;
     let Feed { events: mut statuses, losses: statuses_losses } = twap_statuses;
     let Feed { events: mut fills, losses: fills_losses } = twap_fills;
@@ -111,6 +118,13 @@ async fn run(inputs: ReplicaInputs, feeds: PendingFeeds, backlog_events: usize, 
         book.on_anchor(current, readings.unreported());
     }
     let mut prices_open = book.take_prices(&mut prices, true);
+    // the demand stays with `flow` while the thread runs
+    let mut flow_frames = flow.frames.take();
+    let mut flow_query: Option<FlowQuery> = None;
+    match flow_frames {
+        Some(_) => flow_query = Some(flow.query()),
+        None => book.trigger_frames.on_closed(),
+    }
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let closed = loop {
@@ -165,10 +179,38 @@ async fn run(inputs: ReplicaInputs, feeds: PendingFeeds, backlog_events: usize, 
                 }
             }
             changed = prices.changed(), if prices_open => prices_open = book.take_prices(&mut prices, changed.is_ok()),
+            received = next_frame(&mut flow_frames) => match book.trigger_frames.on_received(received) {
+                Received::Taken => {}
+                Received::QueryDue => flow_query = Some(flow.query()),
+                Received::Ended => {
+                    flow_frames = None;
+                    flow_query = None;
+                }
+            },
+            answer = next_answer(&mut flow_query) => {
+                flow_query = None;
+                book.trigger_frames.on_query(answer);
+            }
             _ = tick.tick() => book.on_tick(readings.unreported()),
         }
     };
     error!("pending book: {closed} closed; the pending thread ends");
+}
+
+/// The broadcast's next frame; none ever without it.
+async fn next_frame(frames: &mut Option<broadcast::Receiver<Arc<AccountsFrame>>>) -> Result<Arc<AccountsFrame>, broadcast::error::RecvError> {
+    match frames {
+        Some(frames) => frames.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The full query's answer; none ever without one under way.
+async fn next_answer(query: &mut Option<FlowQuery>) -> Result<Vec<Arc<crate::accounts::forced_flow_owner::FlowFrame>>, String> {
+    match query {
+        Some(query) => query.await,
+        None => std::future::pending().await,
+    }
 }
 
 /// The pending thread's readings of its node feeds.
@@ -260,13 +302,15 @@ struct PendingBook {
     publisher: Publisher,
     /// The `SetGlobalAction` forecasts (batch 2l): metrics only, nothing served.
     forecasts: SgaForecasts,
+    /// The trigger orders near each coin's mark, as the forced flow's frames carry them (batch 2l second step).
+    trigger_frames: TriggerFrames,
 }
 
 impl PendingBook {
     fn new(control: Arc<ReplicaControl>, backlog_events: usize, shadow: Shadow, publisher: Publisher) -> Self {
         let ended = control.ended();
         control.request(1);
-        Self { control, wanted: 1, replica: None, ended, backlog_events, shadow, publisher, forecasts: SgaForecasts::default() }
+        Self { control, wanted: 1, replica: None, ended, backlog_events, shadow, publisher, forecasts: SgaForecasts::default(), trigger_frames: TriggerFrames::default() }
     }
 
     fn on_fork(&mut self, fork: ReplicaFork) {
@@ -324,12 +368,17 @@ impl PendingBook {
             MempoolInput::Tx { tx, after_loss } => {
                 let started = Instant::now();
                 // a loss found since the line was taken is not before it in the file, so the line ends no gap
-                let step = self.shadow.on_tx(&tx, after_loss || unreported.mempool, coins, self.replica.as_ref());
+                let mut step = self.shadow.on_tx(&tx, after_loss || unreported.mempool, coins, self.replica.as_ref());
                 PENDING_BOOK_STEP_SECONDS.with_label_values(&["transaction"]).observe(started.elapsed().as_secs_f64());
                 // on the book the line leaves - a `SetGlobalAction`'s holds no book action
-                let served = ServedBook::of(&self.shadow, self.replica.as_ref());
-                let book: Option<&dyn ForecastBook> = served.as_ref().map(|served| -> &dyn ForecastBook { served });
-                let _report = self.forecasts.on_tx(&tx, coins, book, unix_ns(wall_ms()));
+                let forecast = {
+                    let served = ServedBook::of(&self.shadow, self.replica.as_ref());
+                    let book: Option<&dyn ForecastBook> = served.as_ref().map(|served| -> &dyn ForecastBook { served });
+                    self.forecasts.on_tx(&tx, coins, book, unix_ns(wall_ms()))
+                };
+                if forecast.lines.contains(&"forecast") {
+                    step.absorb(self.fire_triggers(&tx));
+                }
                 step
             }
             MempoolInput::Loss => {
@@ -377,6 +426,16 @@ impl PendingBook {
         let mut step = self.sync(unreported);
         step.absorb(self.shadow.on_anchor(anchor, self.replica.as_ref()));
         self.publish(&step);
+    }
+
+    /// A `SetGlobalAction` line's triggered orders, on the marks its forecast gave the merged book, run where it stands
+    /// (batch 2l second step).
+    fn fire_triggers(&mut self, tx: &MempoolTx) -> Step {
+        let started = Instant::now();
+        let batches = SgaTriggers::of(self.forecasts.merged_marks(&tx.tx_hash), &self.trigger_frames).counted();
+        let step = self.shadow.on_triggers(tx, batches, self.replica.as_ref());
+        PENDING_BOOK_STEP_SECONDS.with_label_values(&["sga_triggers"]).observe(started.elapsed().as_secs_f64());
+        step
     }
 
     /// The account view's node prices as the watch now has them (batch 2l), `open` while it has a sender: once closed,
@@ -476,7 +535,7 @@ impl PendingBook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{order_book::Coin, pending::shadow::Unavailable};
+    use crate::{order_book::Coin, pending::shadow::{Taker, Unavailable}};
     use crate::{
         listeners::order_book::replica::{
             ReplicaFeed, link,
@@ -572,6 +631,42 @@ mod tests {
         assert!(!book.take_prices(&mut prices, open), "closed");
         assert_eq!(forecast(&mut book, 2), ["no_prices"]);
         assert_eq!(book.on_mempool(ioc(), Some(&coins()), NONE_UNREPORTED).trades.len(), 1, "still served");
+    }
+
+    /// Batch 2l second step: on a book served - bid 99 (a pending ALO), ask 101 -, a `SetGlobalAction` whose mark comes
+    /// to 100 (submitted 100, L median(99, 101, last trade 100)) fires a stop selling the fall to 100: it sells 1 into
+    /// the bid, its taker the trigger order. The forced flow withdrawn, the same action fires none.
+    #[test]
+    fn a_set_global_action_fires_the_trigger_orders_its_mark_reaches() {
+        for withdrawn in [false, true] {
+            let (mut book, _feed, _feeds) = served_book();
+            let btc = crate::accounts::marks::native::CoinPriceState { last_trade: 1_000, ..crate::local_marks::compute::tests::btc_state(0.0, 1_000_000_000) };
+            let snapshot = crate::accounts::marks::NativePriceSnapshot {
+                seed_height: 1,
+                height: 30,
+                block_time_ms: 3_000,
+                coins: rustc_hash::FxHashMap::from_iter([("BTC".to_string(), btc)]),
+                hip3: rustc_hash::FxHashMap::default(),
+            };
+            let (_sender, mut prices) = watch::channel(Ok(Arc::new(snapshot)));
+            assert!(book.take_prices(&mut prices, true));
+            let flow = shadow::tests::trigger_flow_frame(vec![triggers::tests::stop(77, 1, "100")]);
+            book.trigger_frames.on_query(Ok(vec![flow]));
+            if withdrawn {
+                let frame = Arc::new(AccountsFrame::ForcedFlowWithdrawn { reason: "gone".to_string() });
+                assert_eq!(book.trigger_frames.on_received(Ok(frame)), Received::Ended);
+            }
+            let bid = ActionKind::Order(vec![requested(0, true, "99", RequestedTif::Alo, Some("0x08"))]);
+            drop(book.on_mempool(line(3_100, 8, vec![bid]), Some(&coins()), NONE_UNREPORTED));
+            let priced = crate::accounts::marks::actions::SubmittedPrices::Priced { oracle: "100".to_string(), mark: "100".to_string() };
+            let step = book.on_mempool(line(3_150, 1, vec![ActionKind::SetGlobal(vec![priced])]), Some(&coins()), NONE_UNREPORTED);
+            let fired_trades: Vec<_> = step.trades.iter().map(|trade| (trade.taker.clone(), trade.px, trade.sz)).collect();
+            let expected = (!withdrawn).then(|| {
+                let taker = Taker::Trigger { oid: 77, user: alloy::primitives::Address::repeat_byte(1), seen_ns: 3_150_000_000 };
+                (taker, crate::order_book::Px::parse_from_str("99").unwrap(), crate::order_book::Sz::parse_from_str("1").unwrap())
+            });
+            assert_eq!(fired_trades, expected.into_iter().collect::<Vec<_>>(), "withdrawn {withdrawn}");
+        }
     }
 
     /// The IOC crossing the resting ask predicts its trade on a book served.

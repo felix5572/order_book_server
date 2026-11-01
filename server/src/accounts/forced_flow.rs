@@ -137,7 +137,8 @@ pub(crate) struct CoinInputs<'a> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Source {
-    Trigger { order: Arc<InnerL4Order>, kind: OrderKind },
+    /// `trigger_px` as the listener's index holds it (exact, where `Entry::level_px` is its float; pending book batch 2l).
+    Trigger { order: Arc<InnerL4Order>, kind: OrderKind, trigger_px: Px },
     /// `order` boxed to keep the trigger entries small; `cash_estimated` as `LiquidationInput`'s.
     Liquidation { user: Address, order: Box<ExpectedOrder>, cash_estimated: bool },
 }
@@ -293,7 +294,7 @@ fn trigger_entry(trigger: &TriggerInput, size_decimals: u32, marks: Marks, posit
     let level_px = listener_px(trigger.trigger_px);
     let (distance_node_bps, distance_local_bps) = marks.distances(direction, level_px);
     Ok(Ok(Entry {
-        source: Source::Trigger { order: Arc::clone(order), kind },
+        source: Source::Trigger { order: Arc::clone(order), kind, trigger_px: trigger.trigger_px },
         direction,
         side: order.side,
         level_px,
@@ -510,7 +511,7 @@ pub(crate) fn bands(entries: &[Entry], calibre: Calibre, max_bps: u32, sources: 
         for band in side_bands.iter_mut().filter(|band| distance <= f64::from(band.edge_bps)) {
             match &entry.source {
                 Source::Liquidation { .. } => band.liquidations.add(entry),
-                Source::Trigger { order, kind } => {
+                Source::Trigger { order, kind, .. } => {
                     band.triggers.add(entry);
                     match kind {
                         OrderKind::Market => band.market_triggers.add(entry),
@@ -621,6 +622,12 @@ mod tests {
         assert!(flow.entries.iter().all(|entry| entry.direction == Direction::Down && entry.side == Side::Ask && entry.position_raw == 10));
         assert_eq!(flow.entries[2].limit_px, None, "a liquidation takes any price");
         assert_eq!(flow.entries[0].limit_px, Some(Px::new(99 * UNIT * 9 / 10)));
+        // the exact trigger price as indexed (pending book batch 2l)
+        let trigger_pxs: Vec<Option<Px>> = flow.entries.iter().map(|entry| match &entry.source {
+            Source::Trigger { trigger_px, .. } => Some(*trigger_px),
+            Source::Liquidation { .. } => None,
+        }).collect();
+        assert_eq!(trigger_pxs, [Some(Px::new(99 * UNIT)), Some(Px::new(97 * UNIT)), None]);
     }
 
     #[test]

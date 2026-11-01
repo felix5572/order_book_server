@@ -7,12 +7,15 @@
 //! a signed action past its `expiresAfter` when its line came, or with an order off its coin's price or size grid -
 //! the whole action, its orders on the grid with it (HL's pre-validation, review 000617 r1 P2-1).
 
+use std::sync::Arc;
+
 use alloy::primitives::{Address, B256};
 
 use super::{
     mempool::{ActionKind, MempoolTx, RequestedOrder, RequestedTif},
     refusals::TakerKey,
     signer::ActingIdentity,
+    triggers::TriggerBatch,
 };
 use crate::{
     accounts::{
@@ -79,6 +82,8 @@ pub(crate) enum BookOp {
     CancelByCloid(String),
     /// A `modify`'s or one of a `batchModify`'s: its target out, its new order in (design 000604 revision 8).
     Modify { target: OrderRef, always_place: bool, order: Placement },
+    /// A `SetGlobalAction`'s triggered orders on the coin, run as one (batch 2l, `triggers`).
+    Triggers(Arc<TriggerBatch>),
 }
 
 impl BookOp {
@@ -86,7 +91,7 @@ impl BookOp {
     pub(crate) const fn placement(&self) -> Option<&Placement> {
         match self {
             Self::Place(order) | Self::Modify { order, .. } => Some(order),
-            Self::Cancel(_) | Self::CancelByCloid(_) => None,
+            Self::Cancel(_) | Self::CancelByCloid(_) | Self::Triggers(_) => None,
         }
     }
 
@@ -98,6 +103,7 @@ impl BookOp {
             Self::Cancel(_) => "cancel",
             Self::CancelByCloid(_) => "cancel_by_cloid",
             Self::Modify { .. } => "modify",
+            Self::Triggers(_) => "triggers",
         }
     }
 }
@@ -121,6 +127,14 @@ pub(crate) struct PendingAction {
 }
 
 impl PendingAction {
+    /// The orders it holds against the set's cap: a trigger batch's each (review 000642 r2), any other one.
+    pub(crate) fn occupancy(&self) -> usize {
+        match &self.op {
+            BookOp::Triggers(batch) => batch.orders.len(),
+            _ => 1,
+        }
+    }
+
     /// The key of its taker's margin refusals (batch 2g): a new order that may take, of a known identity.
     pub(crate) fn taker_key(&self) -> Option<TakerKey> {
         let BookOp::Place(order) = &self.op else { return None };

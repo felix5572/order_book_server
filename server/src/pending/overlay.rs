@@ -22,6 +22,10 @@
 //!   is rejected whole, its target left (an inference: no case seen).
 //! - A new order that may take, of a taker HL lately refused for margin on its coin and side, is rejected (batch 2g,
 //!   `TakerRefusals`) when the minimum value does not reject it first; a modify is not judged by it.
+//! - A `SetGlobalAction`'s triggered orders on the coin (batch 2l, `triggers`) run as one batch, in its order: each one
+//!   sized against the batch's positions as they stand, then placed as an IOC (market) or a GTC (limit) - neither the
+//!   minimum value nor a margin refusal judged (no evidence the node judges a triggered order so) -, a GTC's remainder
+//!   resting with its account and oid, found by its oid as a replica order is.
 //! - Self-trades, reduce-only, price bands above the reference and margin otherwise are not modelled (design 000604's
 //!   non-goals).
 
@@ -33,6 +37,7 @@ use rustc_hash::FxHashMap;
 use super::{
     actions::{ActionId, BookOp, PendingAction, Placement, Tif},
     refusals::{TakerKey, TakerRefusals},
+    triggers::{BatchPositions, TriggerBatch},
     twaps::TwapSlice,
 };
 use crate::{
@@ -138,13 +143,23 @@ impl<'a> Basis<'a> {
 pub(crate) enum Maker {
     /// A replica order.
     Confirmed { user: Address, oid: Oid, cloid: Option<String> },
-    /// A pending order resting in the overlay.
-    Pending { id: ActionId, cloid: Option<String> },
+    /// A pending order resting in the overlay; `owner` the account of a triggered order's remainder (batch 2l, review
+    /// 000642 r3), none for a mempool order's.
+    Pending { id: ActionId, cloid: Option<String>, owner: Option<Address> },
     /// A replica level whose queue order is not proven: the size taken there, its makers unknown.
     Unattributed,
 }
 
 impl Maker {
+    /// Its account as known: a replica order's user, a triggered order's remainder's (batch 2l).
+    pub(crate) const fn account(&self) -> Option<Address> {
+        match self {
+            Self::Confirmed { user, .. } => Some(*user),
+            Self::Pending { owner, .. } => *owner,
+            Self::Unattributed => None,
+        }
+    }
+
     pub(crate) const fn label(&self) -> &'static str {
         match self {
             Self::Confirmed { .. } => "confirmed",
@@ -162,17 +177,30 @@ pub(crate) struct Fill {
     pub(crate) maker: Maker,
 }
 
-/// What an action did: its fills, and its outcome for the counts.
+/// What an action did: its fills, and its outcome for the counts; a trigger batch, each of its orders' (batch 2l).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Effect {
     pub(crate) fills: Vec<Fill>,
     pub(crate) outcome: &'static str,
+    pub(crate) triggered: Vec<TriggerFills>,
 }
 
 impl Effect {
     const fn of(outcome: &'static str) -> Self {
-        Self { fills: Vec::new(), outcome }
+        Self { fills: Vec::new(), outcome, triggered: Vec::new() }
     }
+
+    const fn filled(fills: Vec<Fill>, outcome: &'static str) -> Self {
+        Self { fills, outcome, triggered: Vec::new() }
+    }
+}
+
+/// A triggered order of a batch, by its place in it: its fills and outcome.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TriggerFills {
+    pub(crate) item: usize,
+    pub(crate) fills: Vec<Fill>,
+    pub(crate) outcome: &'static str,
 }
 
 /// A cancel's or a modify's target as the merged book stands.
@@ -212,6 +240,8 @@ impl Target {
 struct RestingOrder {
     id: ActionId,
     cloid: Option<String>,
+    /// A triggered order's remainder: its account and oid (batch 2l).
+    trigger: Option<(Address, u64)>,
     sz: u64,
     /// The replica order it queues in front of; `None` behind them all.
     ahead_of: Option<Oid>,
@@ -234,13 +264,35 @@ pub(crate) struct Overlay {
 
 impl Overlay {
     pub(crate) fn apply(&mut self, base: CoinBase<'_>, basis: Basis<'_>, action: &PendingAction) -> Effect {
-        let placing = Placing { basis, id: action.id, seen_ms: u64::try_from(action.seen_ns / 1_000_000).unwrap_or(0) };
+        let placing = Placing { basis, id: action.id, seen_ms: u64::try_from(action.seen_ns / 1_000_000).unwrap_or(0), trigger: None };
         match &action.op {
             BookOp::Place(order) => self.place_new(base, placing, action.taker_key(), order),
-            BookOp::Cancel(oid) => self.cancel(self.confirmed_target(base, oid)),
+            BookOp::Cancel(oid) => self.cancel(self.oid_target(base, oid)),
             BookOp::CancelByCloid(cloid) => self.cancel(self.cloid_target(base, cloid)),
             BookOp::Modify { target, always_place, order } => self.modify(base, placing, target, *always_place, order),
+            BookOp::Triggers(batch) => self.run_triggers(base, placing, batch),
         }
+    }
+
+    /// A trigger batch (batch 2l, review 000642 r1 P2-1, r3): its orders in its order, each sized against the batch's
+    /// positions as they stand - from those it began with, each run -, every fill moving them.
+    fn run_triggers(&mut self, base: CoinBase<'_>, placing: Placing<'_>, batch: &TriggerBatch) -> Effect {
+        let mut positions = BatchPositions::of(batch);
+        let mut triggered = Vec::with_capacity(batch.orders.len());
+        for (item, order) in batch.orders.iter().enumerate() {
+            let Some(sz) = positions.size(order) else {
+                triggered.push(TriggerFills { item, fills: Vec::new(), outcome: "zero_size" });
+                continue;
+            };
+            let placing = Placing { id: ActionId { item, ..placing.id }, trigger: Some((order.user, order.oid)), ..placing };
+            let placement = Placement { side: order.side, limit_px: order.limit_px, sz, tif: order.tif, cloid: None, priority: 0 };
+            let Effect { fills, outcome, .. } = self.execute(base, placing, &placement);
+            for fill in &fills {
+                positions.apply_fill(order.user, order.side, fill);
+            }
+            triggered.push(TriggerFills { item, fills, outcome });
+        }
+        Effect { fills: Vec::new(), outcome: "triggers", triggered }
     }
 
     /// A TWAP suborder (batch 2h): a taker through the merged opposite side from its best, at most 3% past it (HL docs
@@ -283,6 +335,11 @@ impl Overlay {
         if self.below_min_notional(base, order, &Target::Missing) {
             return Effect::of("min_notional");
         }
+        self.execute(base, placing, order)
+    }
+
+    /// An order by its time in force alone.
+    fn execute(&mut self, base: CoinBase<'_>, placing: Placing<'_>, order: &Placement) -> Effect {
         match order.tif {
             Tif::Alo if self.crosses(base, order.side, order.limit_px) => Effect::of("alo_crossed"),
             Tif::Alo => {
@@ -294,11 +351,13 @@ impl Overlay {
                 if left > 0 {
                     self.rest(base, placing, order, left);
                 }
-                Effect { outcome: if fills.is_empty() { "rested" } else { "took" }, fills }
+                let outcome = if fills.is_empty() { "rested" } else { "took" };
+                Effect::filled(fills, outcome)
             }
             Tif::Ioc | Tif::FrontendMarket => {
                 let (fills, _) = self.take(base, order.side, order.limit_px, order.sz.value());
-                Effect { outcome: if fills.is_empty() { "missed" } else { "took" }, fills }
+                let outcome = if fills.is_empty() { "missed" } else { "took" };
+                Effect::filled(fills, outcome)
             }
         }
     }
@@ -317,7 +376,7 @@ impl Overlay {
     /// Revision 8's admission table.
     fn modify(&mut self, base: CoinBase<'_>, placing: Placing<'_>, target: &OrderRef, always_place: bool, order: &Placement) -> Effect {
         let target = match target {
-            OrderRef::Oid(oid) => self.confirmed_target(base, &Oid::new(*oid)),
+            OrderRef::Oid(oid) => self.oid_target(base, &Oid::new(*oid)),
             OrderRef::Cloid(cloid) => self.cloid_target(base, cloid),
         };
         if self.below_min_notional(base, order, &target) {
@@ -344,9 +403,16 @@ impl Overlay {
         }
     }
 
-    /// A replica order by oid, live in the merged book.
-    fn confirmed_target(&self, base: CoinBase<'_>, oid: &Oid) -> Target {
-        base.order(oid).map_or(Target::Missing, |order| self.live(order).unwrap_or(Target::Missing))
+    /// By oid: a replica order live in the merged book, else a triggered order's remainder resting (batch 2l).
+    fn oid_target(&self, base: CoinBase<'_>, oid: &Oid) -> Target {
+        if let Some(order) = base.order(oid) {
+            return self.live(order).unwrap_or(Target::Missing);
+        }
+        Target::one_of(self.resting.iter().zip([Side::Bid, Side::Ask]).flat_map(|(levels, side)| {
+            levels.iter().flat_map(move |(px, queue)| {
+                queue.iter().filter(|order| order.trigger.is_some_and(|(_, held)| Oid::new(held) == *oid)).map(move |order| Target::Pending { id: order.id, side, px: *px })
+            })
+        }))
     }
 
     /// By cloid: the pending resting orders first, then the replica's live ones.
@@ -464,7 +530,8 @@ impl Overlay {
             let fill = maker.sz.min(sz);
             maker.sz -= fill;
             sz -= fill;
-            fills.push(Fill { px, sz: Sz::new(fill), maker: Maker::Pending { id: maker.id, cloid: maker.cloid.clone() } });
+            let owner = maker.trigger.map(|(user, _)| user);
+            fills.push(Fill { px, sz: Sz::new(fill), maker: Maker::Pending { id: maker.id, cloid: maker.cloid.clone(), owner } });
             if maker.sz == 0 {
                 queue.pop_front();
             }
@@ -488,7 +555,8 @@ impl Overlay {
     fn rest(&mut self, base: CoinBase<'_>, placing: Placing<'_>, order: &Placement, sz: u64) {
         let (index, ahead_of) = self.queue_place(base, placing, order);
         let queue = self.resting[at(order.side)].entry(order.limit_px).or_default();
-        let resting = RestingOrder { id: placing.id, cloid: order.cloid.clone(), sz, ahead_of, seen_ms: placing.seen_ms, priority: order.priority };
+        let resting =
+            RestingOrder { id: placing.id, cloid: order.cloid.clone(), trigger: placing.trigger, sz, ahead_of, seen_ms: placing.seen_ms, priority: order.priority };
         queue.insert(index, resting);
     }
 
@@ -566,12 +634,14 @@ impl Overlay {
     }
 }
 
-/// An action placing an order: the confirmed state it is placed on, its id and its line's arrival, unix ms.
+/// An action placing an order: the confirmed state it is placed on, its id and its line's arrival, unix ms; a
+/// triggered order's account and oid (batch 2l).
 #[derive(Clone, Copy)]
 struct Placing<'a> {
     basis: Basis<'a>,
     id: ActionId,
     seen_ms: u64,
+    trigger: Option<(Address, u64)>,
 }
 
 const fn at(side: Side) -> usize {
@@ -615,6 +685,7 @@ mod tests {
     use alloy::primitives::B256;
 
     use super::*;
+    use crate::pending::triggers::{Sizing, TriggerOrder};
 
     const ALICE: Address = Address::repeat_byte(0xa1);
     const BOB: Address = Address::repeat_byte(0xb0);
@@ -710,6 +781,93 @@ mod tests {
 
     fn confirmed(user: Address, oid: u64, cloid: Option<&str>) -> Maker {
         Maker::Confirmed { user, oid: Oid::new(oid), cloid: cloid.map(str::to_string) }
+    }
+
+    const CAROL: Address = Address::repeat_byte(0xc1);
+    const DAVE: Address = Address::repeat_byte(0xd0);
+
+    fn trigger_order(oid: u64, user: Address, side: Side, limit: &str, size: &str, tif: Tif, sizing: Sizing) -> TriggerOrder {
+        TriggerOrder { oid, user, side, limit_px: px(limit), tif, sz: sz(size), sizing }
+    }
+
+    /// A trigger batch of `orders`, its accounts' positions (whole units, signed) as it began.
+    fn batch(index: usize, orders: Vec<TriggerOrder>, positions: &[(Address, i128)]) -> PendingAction {
+        let positions = positions.iter().map(|(user, units)| (*user, units * 100_000_000)).collect();
+        action(index, BookOp::Triggers(std::sync::Arc::new(TriggerBatch { orders, positions })))
+    }
+
+    /// What an IOC buying everything up to `limit` takes at `at`, after `actions`.
+    fn taken_at(actions: &[PendingAction], limit: &str, at: &str) -> Sz {
+        let mut actions = actions.to_vec();
+        actions.push(place(99, Side::Bid, limit, "1000", Tif::Ioc, None));
+        let (effects, _) = run(&actions);
+        Sz::new(effects.last().unwrap().fills.iter().filter(|fill| fill.px == px(at)).map(|fill| fill.sz.value()).sum())
+    }
+
+    /// Review 000642 r1 P2-1: long 10, a reduce-only sale of 6 then a position TP/SL. Over the replica's bids (3) the
+    /// first sells 3 and the second rests the 7 left; with 3 more bid ahead - the same batch run again on another book -
+    /// the first sells 6 and the second 4: sized each run from the batch's start, never past the position.
+    #[test]
+    fn a_batch_sizes_its_orders_anew_each_run() {
+        let orders = vec![
+            trigger_order(1, CAROL, Side::Ask, "1", "6", Tif::Ioc, Sizing::ReduceOnly),
+            trigger_order(2, CAROL, Side::Ask, "97", "0", Tif::Gtc, Sizing::WholePosition),
+        ];
+        let alone = batch(0, orders.clone(), &[(CAROL, 10)]);
+        let (effects, bbo) = run(std::slice::from_ref(&alone));
+        let first: u64 = effects[0].triggered[0].fills.iter().map(|fill| fill.sz.value()).sum();
+        assert_eq!((Sz::new(first), bbo.1), (sz("3"), Some(level("97", "7", 1))));
+        let deeper = [place(0, Side::Bid, "99.5", "3", Tif::Alo, None), batch(1, orders, &[(CAROL, 10)])];
+        let (effects, bbo) = run(&deeper);
+        let first: u64 = effects[1].triggered[0].fills.iter().map(|fill| fill.sz.value()).sum();
+        assert_eq!((Sz::new(first), bbo.1), (sz("6"), Some(level("97", "4", 1))));
+    }
+
+    /// Review 000642 r1 P2-1: long 10, a plain buy of 2 fills, so a reduce-only sale of 10 places all 10 (of 12).
+    #[test]
+    fn a_plain_trigger_order_grows_the_position_closed_after_it() {
+        let orders = vec![
+            trigger_order(1, CAROL, Side::Bid, "101", "2", Tif::Ioc, Sizing::Order),
+            trigger_order(2, CAROL, Side::Ask, "105", "10", Tif::Gtc, Sizing::ReduceOnly),
+        ];
+        assert_eq!(taken_at(&[batch(0, orders, &[(CAROL, 10)])], "105", "105"), sz("10"));
+    }
+
+    /// Review 000642 r3: long 10, CAROL's limit sale of 1 rests; DAVE's buy of 2 takes it - its maker CAROL's - and
+    /// ALICE's 1 at 101; CAROL's position TP/SL then sells the 9 left, not 10.
+    #[test]
+    fn a_maker_of_the_batch_moves_its_position() {
+        let orders = vec![
+            trigger_order(1, CAROL, Side::Ask, "100.5", "1", Tif::Gtc, Sizing::Order),
+            trigger_order(2, DAVE, Side::Bid, "101", "2", Tif::Ioc, Sizing::Order),
+            trigger_order(3, CAROL, Side::Ask, "120", "0", Tif::Gtc, Sizing::WholePosition),
+        ];
+        let batch = batch(0, orders, &[(CAROL, 10), (DAVE, 0)]);
+        let (effects, _) = run(std::slice::from_ref(&batch));
+        let makers: Vec<Maker> = effects[0].triggered[1].fills.iter().map(|fill| fill.maker.clone()).collect();
+        let carols = ActionId { item: 0, ..id(0) };
+        assert_eq!(makers, [Maker::Pending { id: carols, cloid: None, owner: Some(CAROL) }, confirmed(ALICE, 3, Some("0x03"))]);
+        assert_eq!(taken_at(&[batch], "120", "120"), sz("9"));
+    }
+
+    /// A limit trigger order's remainder rests with its oid: a cancel by that oid finds it (design 000642 r2).
+    #[test]
+    fn a_triggered_orders_remainder_is_found_by_its_oid() {
+        let rests = batch(0, vec![trigger_order(77, CAROL, Side::Ask, "100.5", "1", Tif::Gtc, Sizing::Order)], &[(CAROL, 0)]);
+        let (effects, bbo) = run(&[rests.clone(), action(1, BookOp::Cancel(Oid::new(77)))]);
+        assert_eq!((outcomes(&effects), bbo.1), (vec!["triggers", "canceled"], Some(level("101", "2", 2))));
+        let (_, bbo) = run(&[rests]);
+        assert_eq!(bbo.1, Some(level("100.5", "1", 1)));
+    }
+
+    /// Neither the minimum value judges a triggered order nor does a reduce-only one of no position place anything.
+    #[test]
+    fn a_triggered_order_is_not_judged_by_its_value_and_closes_only_a_position() {
+        let tiny = trigger_order(1, DAVE, Side::Bid, "101", "0.00001", Tif::Ioc, Sizing::Order);
+        let nothing = trigger_order(2, CAROL, Side::Ask, "1", "1", Tif::Ioc, Sizing::ReduceOnly);
+        let (effects, _) = run(&[batch(0, vec![tiny, nothing], &[(DAVE, 0), (CAROL, 0)])]);
+        let triggered: Vec<&str> = effects[0].triggered.iter().map(|order| order.outcome).collect();
+        assert_eq!(triggered, ["took", "zero_size"]);
     }
 
     /// Batch 2k: the price band against the confirmed book - its midpoint 100 (99 / 101): 4.99 under it, 5 not; the
@@ -815,7 +973,7 @@ mod tests {
         assert_eq!(
             effects[2].fills.iter().map(|fill| (fill.px, fill.maker.clone())).collect::<Vec<_>>(),
             [
-                (px("100.5"), Maker::Pending { id: id(1), cloid: None }),
+                (px("100.5"), Maker::Pending { id: id(1), cloid: None, owner: None }),
                 (px("101"), confirmed(ALICE, 3, Some("0x03"))),
                 (px("101"), confirmed(BOB, 4, None)),
             ]
@@ -970,7 +1128,7 @@ mod tests {
             place(5, Side::Bid, "200", "0.1", Tif::Ioc, None),
         ]);
         assert_eq!(outcomes(&effects), ["min_notional", "min_notional", "min_notional", "rested", "rested", "took"]);
-        assert_eq!(effects[5].fills, [Fill { px: px("100.5"), sz: sz("0.1"), maker: Maker::Pending { id: id(3), cloid: None } }]);
+        assert_eq!(effects[5].fills, [Fill { px: px("100.5"), sz: sz("0.1"), maker: Maker::Pending { id: id(3), cloid: None, owner: None } }]);
         assert_eq!(bbo, (Some(level("100", "0.1", 1)), Some(level("101", "2", 2))));
     }
 
@@ -1012,7 +1170,7 @@ mod tests {
     }
 
     fn pending(index: usize) -> Maker {
-        Maker::Pending { id: id(index), cloid: None }
+        Maker::Pending { id: id(index), cloid: None, owner: None }
     }
 
     fn mine(oid: u64) -> Maker {

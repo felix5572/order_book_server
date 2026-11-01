@@ -43,8 +43,9 @@ const BOOKS: [&str; 2] = ["pending", "confirmed"];
 
 /// What a forecast reads of the pending book while it may be served.
 pub(crate) trait ForecastBook {
-    /// The coin's best levels: the merged book's, the replica's confirmed ones.
-    fn best(&self, coin: &Coin) -> (BestLevels, BestLevels);
+    /// The coin's best levels where a line seen at `seen_ns` runs: the merged book's, the replica's confirmed ones
+    /// (review 000642 r1 P2-2).
+    fn best(&self, coin: &Coin, seen_ns: i64) -> (BestLevels, BestLevels);
     /// Whether the block log showed the line's block already.
     fn logged(&self, tx_hash: &B256) -> bool;
 }
@@ -64,8 +65,8 @@ impl<'a> ServedBook<'a> {
 }
 
 impl ForecastBook for ServedBook<'_> {
-    fn best(&self, coin: &Coin) -> (BestLevels, BestLevels) {
-        self.shadow.best_levels(coin, self.replica)
+    fn best(&self, coin: &Coin, seen_ns: i64) -> (BestLevels, BestLevels) {
+        self.shadow.best_at_line(coin, self.replica, seen_ns)
     }
 
     fn logged(&self, tx_hash: &B256) -> bool {
@@ -84,6 +85,7 @@ struct BookForecast {
 /// A coin's forecast marks and the node prices' inputs they read (for the evidence of one off).
 #[derive(Debug)]
 struct CoinForecast {
+    asset: u32,
     coin: String,
     submitted: u64,
     last_trade: u64,
@@ -217,6 +219,14 @@ impl SgaForecasts {
         report.counted()
     }
 
+    /// The marks the merged book forecast for the line `tx_hash` in flight - (asset, coin, mark), `None` where it gave
+    /// none - in asset order: what its triggers fire on (batch 2l second step).
+    pub(crate) fn merged_marks(&self, tx_hash: &B256) -> Vec<(u32, String, Option<u64>)> {
+        let forecast = self.in_flight.iter().find(|forecast| forecast.tx_hash == *tx_hash);
+        let coins = forecast.into_iter().flat_map(|forecast| &forecast.coins);
+        coins.map(|coin| (coin.asset, coin.coin.clone(), coin.books[0].map(|book| book.mark))).collect()
+    }
+
     fn track(&mut self, forecast: Forecast, report: &mut ForecastReport) {
         self.in_flight.push_back(forecast);
         if self.in_flight.len() > MAX_IN_FLIGHT {
@@ -290,7 +300,8 @@ fn forecast(
             SubmittedPrices::Unpriced | SubmittedPrices::Partial => None,
         })
         .filter_map(|(asset, mark)| {
-            let named = u32::try_from(asset).ok().and_then(|asset| coins.coins.get(&asset));
+            let asset = u32::try_from(asset).ok()?;
+            let named = coins.coins.get(&asset);
             let Some((name, state)) = named.and_then(|named| prices.coins.get_key_value(&named.coin)) else {
                 report.both("no_state");
                 return None;
@@ -299,10 +310,10 @@ fn forecast(
                 report.both("unreadable");
                 return None;
             };
-            let books = <[BestLevels; 2]>::from(book.best(&Coin::new(name))).map(|best| book_forecast(state, submitted, block_ns, best));
+            let books = <[BestLevels; 2]>::from(book.best(&Coin::new(name), tx.seen_ns)).map(|best| book_forecast(state, submitted, block_ns, best));
             let books = [0, 1].map(|index| books[index].inspect_err(|outcome| report.marks.push((BOOKS[index], outcome))).ok());
             let cache = state.mark_cache.as_ref().map(|cache| (cache.median, cache.last_bucket));
-            Some(CoinForecast { coin: name.clone(), submitted, last_trade: state.last_trade, cache, books })
+            Some(CoinForecast { asset, coin: name.clone(), submitted, last_trade: state.last_trade, cache, books })
         })
         .collect();
     Forecast { tx_hash: tx.tx_hash, seen_ns: tx.seen_ns, prices_height: prices.height, coins, block: None }
@@ -379,7 +390,7 @@ mod tests {
     }
 
     impl ForecastBook for Book {
-        fn best(&self, coin: &Coin) -> (BestLevels, BestLevels) {
+        fn best(&self, coin: &Coin, _: i64) -> (BestLevels, BestLevels) {
             assert_eq!(coin, &Coin::new("BTC"));
             (self.merged, self.confirmed)
         }
