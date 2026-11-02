@@ -326,6 +326,8 @@ pub(crate) struct Overlay {
     /// Pending orders resting, per side: price to queue, never an empty one, in their order in the merged queue - those
     /// in front of a replica order before those in front of a later one, those behind them all last.
     resting: [BTreeMap<Px, VecDeque<RestingOrder>>; 2],
+    /// `resting` by what a cancel or a modify names an order by.
+    resting_index: RestingIndex,
     /// The replica's untriggered orders the actions took out - cancelled, modified, fired - (batch 2m), and the pending
     /// trigger orders placed and untriggered still, as they came.
     triggers_gone: FxHashSet<u64>,
@@ -338,6 +340,70 @@ pub(crate) struct Overlay {
     /// have fired a trailing stop not known, or came where the run was so. The actions after it still apply, so that
     /// later ones find what they take out gone, but report no fill.
     undecided: Option<&'static str>,
+}
+
+/// The pending resting orders by what a cancel or a modify names one by - its cloid, a confirmed triggered order's oid -
+/// so that its target is found without walking every resting order of the coin (bm 11-02 after the US open: those
+/// walks some 22% of the pending thread, a cancel by cloid the commonest action and every coin's actions replayed each
+/// block).
+#[derive(Default)]
+struct RestingIndex {
+    by_cloid: FxHashMap<String, Vec<Indexed>>,
+    by_trigger_oid: FxHashMap<u64, Vec<Indexed>>,
+}
+
+/// A pending resting order as the index holds it: where it rests, its account as known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Indexed {
+    id: ActionId,
+    side: Side,
+    px: Px,
+    account: Option<Address>,
+}
+
+impl RestingIndex {
+    fn insert(&mut self, order: &RestingOrder, side: Side, px: Px) {
+        let indexed = Indexed { id: order.id, side, px, account: order.account };
+        if let Some(cloid) = &order.cloid {
+            self.by_cloid.entry(cloid.clone()).or_default().push(indexed);
+        }
+        if let Some(oid) = order.trigger_oid {
+            self.by_trigger_oid.entry(oid).or_default().push(indexed);
+        }
+    }
+
+    /// `order` out of `resting`.
+    fn remove(&mut self, order: &RestingOrder) {
+        if let Some(cloid) = &order.cloid {
+            unindex(&mut self.by_cloid, cloid, order.id);
+        }
+        if let Some(oid) = order.trigger_oid {
+            unindex(&mut self.by_trigger_oid, &oid, order.id);
+        }
+    }
+
+    fn with_cloid<'s>(&'s self, cloid: &str) -> impl Iterator<Item = &'s Indexed> + 's {
+        self.by_cloid.get(cloid).into_iter().flatten()
+    }
+
+    fn with_trigger_oid(&self, oid: u64) -> impl Iterator<Item = &Indexed> + '_ {
+        self.by_trigger_oid.get(&oid).into_iter().flatten()
+    }
+}
+
+/// Order `id` out of its key's entries; the key out with its last.
+fn unindex<K: std::hash::Hash + Eq + std::borrow::Borrow<Q>, Q: std::hash::Hash + Eq + ?Sized>(by: &mut FxHashMap<K, Vec<Indexed>>, key: &Q, id: ActionId) {
+    let Some(entries) = by.get_mut(key) else { return };
+    entries.retain(|indexed| indexed.id != id);
+    if entries.is_empty() {
+        by.remove(key);
+    }
+}
+
+impl Indexed {
+    const fn target(&self) -> Target {
+        Target::Pending { id: self.id, side: self.side, px: self.px }
+    }
 }
 
 /// What a mark reaches: the orders it fires, and the accounts of the trailing stops not known that it may fire.
@@ -697,7 +763,7 @@ impl Overlay {
         if let Some(order) = base.trigger(oid).filter(|order| !self.triggers_gone.contains(&order.oid)) {
             return if owned_by(account, Some(order.user)) { Target::ConfirmedTrigger { oid: order.oid } } else { Target::Missing };
         }
-        Target::one_of(self.resting_where(|order| order.trigger_oid.is_some_and(|held| Oid::new(held) == *oid) && owned_by(account, order.account)))
+        Target::one_of(self.resting_index.with_trigger_oid(oid.clone().value()).filter(|indexed| owned_by(account, indexed.account)).map(Indexed::target))
     }
 
     /// By cloid, of the acting account `account` when known (an order known another's left out; design 000652 r3):
@@ -705,7 +771,7 @@ impl Overlay {
     /// or untriggered and not taken out here -; more than one of either is ambiguous.
     fn cloid_target(&self, base: CoinBase<'_>, cloid: &str, account: Option<Address>) -> Target {
         let theirs = |of: Option<Address>| owned_by(account, of);
-        let resting = self.resting_where(|order| order.cloid.as_deref() == Some(cloid) && theirs(order.account));
+        let resting = self.resting_index.with_cloid(cloid).filter(|indexed| theirs(indexed.account)).map(Indexed::target);
         let added = self.triggers_added.iter().filter(|added| added.order.cloid.as_deref() == Some(cloid) && theirs(added.account));
         let pending = Target::one_of(resting.chain(added.map(|added| Target::PendingTrigger { id: added.id })));
         if pending != Target::Missing {
@@ -717,18 +783,6 @@ impl Overlay {
             .filter(|order| theirs(Some(order.user)) && !self.triggers_gone.contains(&order.oid))
             .map(|order| Target::ConfirmedTrigger { oid: order.oid });
         Target::one_of(book.chain(untriggered))
-    }
-
-    /// The pending resting orders `chosen` admits, as targets.
-    fn resting_where<'s>(&'s self, chosen: impl Fn(&RestingOrder) -> bool + 's) -> impl Iterator<Item = Target> + 's {
-        let chosen = std::rc::Rc::new(chosen);
-        self.resting.iter().zip([Side::Bid, Side::Ask]).flat_map(move |(levels, side)| {
-            let chosen = std::rc::Rc::clone(&chosen);
-            levels.iter().flat_map(move |(px, queue)| {
-                let chosen = std::rc::Rc::clone(&chosen);
-                queue.iter().filter(move |order| chosen(order)).map(move |order| Target::Pending { id: order.id, side, px: *px })
-            })
-        })
     }
 
     /// A replica order as a target, when the overlay left some of it.
@@ -746,7 +800,11 @@ impl Overlay {
                 let levels = &mut self.resting[at(side)];
                 #[expect(clippy::expect_used, reason = "a pending target was found resting at its level just before")]
                 let queue = levels.get_mut(&px).expect("a pending target rests at its level");
-                queue.retain(|order| order.id != id);
+                #[expect(clippy::expect_used, reason = "a pending target was found resting at its level just before")]
+                let place = queue.iter().position(|order| order.id == id).expect("a pending target rests in its level's queue");
+                if let Some(gone) = queue.remove(place) {
+                    self.resting_index.remove(&gone);
+                }
                 if queue.is_empty() {
                     levels.remove(&px);
                 }
@@ -883,21 +941,22 @@ impl Overlay {
     /// `sz` at most of the level's pending orders from the front, while they queue in front of the replica order
     /// `before` - all of them for `None`, the back of the queue; one of the `taker`'s own account canceled.
     fn take_pending(&mut self, side: Side, px: Px, before: Option<&Oid>, mut sz: u64, taker: Option<Address>, fills: &mut Vec<Fill>) -> u64 {
-        let levels = &mut self.resting[at(side)];
+        let (levels, index) = (&mut self.resting[at(side)], &mut self.resting_index);
         let Some(queue) = levels.get_mut(&px) else { return sz };
         while sz > 0
             && let Some(maker) = queue.front_mut().filter(|maker| before.is_none() || maker.ahead_of.as_ref() == before)
         {
-            if taker.is_some() && maker.account == taker {
-                queue.pop_front();
-                continue;
+            let own = taker.is_some() && maker.account == taker;
+            if !own {
+                let fill = maker.sz.min(sz);
+                maker.sz -= fill;
+                sz -= fill;
+                fills.push(Fill { px, sz: Sz::new(fill), maker: Maker::Pending { id: maker.id, cloid: maker.cloid.clone(), account: maker.account } });
             }
-            let fill = maker.sz.min(sz);
-            maker.sz -= fill;
-            sz -= fill;
-            fills.push(Fill { px, sz: Sz::new(fill), maker: Maker::Pending { id: maker.id, cloid: maker.cloid.clone(), account: maker.account } });
-            if maker.sz == 0 {
-                queue.pop_front();
+            if (own || maker.sz == 0)
+                && let Some(gone) = queue.pop_front()
+            {
+                index.remove(&gone);
             }
         }
         if queue.is_empty() {
@@ -918,7 +977,6 @@ impl Overlay {
 
     fn rest(&mut self, base: CoinBase<'_>, placing: Placing<'_>, order: &Placement, sz: u64) {
         let (index, ahead_of) = self.queue_place(base, placing, order);
-        let queue = self.resting[at(order.side)].entry(order.limit_px).or_default();
         let resting = RestingOrder {
             id: placing.id,
             cloid: order.cloid.clone(),
@@ -929,7 +987,8 @@ impl Overlay {
             seen_ms: placing.seen_ms,
             priority: order.priority,
         };
-        queue.insert(index, resting);
+        self.resting_index.insert(&resting, order.side, order.limit_px);
+        self.resting[at(order.side)].entry(order.limit_px).or_default().insert(index, resting);
     }
 
     /// Where `order` queues in its level: its index among the level's pending orders, and the replica order it goes in
@@ -1304,6 +1363,53 @@ mod tests {
         let carols = ActionId { item: 0, ..id(0) };
         assert_eq!(makers, [Maker::Pending { id: carols, cloid: None, account: Some(CAROL) }, confirmed(ALICE, 3, Some("0x03"))]);
         assert_eq!(taken_at(triggers(), &[fires], "120", "120"), sz("9"));
+    }
+
+    /// The index's entries - by cloid, by a triggered order's oid - those of one rebuilt from the resting orders.
+    fn assert_index_kept(overlay: &Overlay, step: &str) {
+        let entries = |index: &RestingIndex| {
+            let cloids = index.by_cloid.iter().flat_map(|(cloid, entries)| entries.iter().map(move |entry| (format!("cloid {cloid}"), *entry)));
+            let oids = index.by_trigger_oid.iter().flat_map(|(oid, entries)| entries.iter().map(move |entry| (format!("oid {oid}"), *entry)));
+            cloids.chain(oids).collect::<FxHashSet<_>>()
+        };
+        let mut rebuilt = RestingIndex::default();
+        for (levels, side) in overlay.resting.iter().zip([Side::Bid, Side::Ask]) {
+            for (px, order) in levels.iter().flat_map(|(px, queue)| queue.iter().map(move |order| (px, order))) {
+                rebuilt.insert(order, side, *px);
+            }
+        }
+        assert_eq!(entries(&overlay.resting_index), entries(&rebuilt), "{step}");
+    }
+
+    /// The pending resting orders' index kept through each way an order rests and leaves (bm 11-02 perf: the targets
+    /// found through it, not walking every resting order): rested, canceled by its cloid, taken whole or in part, its
+    /// own account's taker canceling it, and a cloid on both sides ambiguous until one goes.
+    #[test]
+    fn the_resting_orders_index_follows_them() {
+        let (book, cloids) = book();
+        let base = CoinBase::new(Some(&book), &[], Some(&cloids));
+        let by = |account, action: PendingAction| PendingAction { account: Some(account), ..action };
+        let steps = [
+            ("an ask rests", place(0, Side::Ask, "105", "1", Tif::Alo, Some("0xa1"))),
+            ("ALICE's ask behind it", by(ALICE, place(1, Side::Ask, "105", "2", Tif::Alo, Some("0xa2")))),
+            ("a bid of the same cloid", place(2, Side::Bid, "90", "1", Tif::Alo, Some("0xa1"))),
+            ("ALICE's canceled by its cloid", by(ALICE, action(3, cancel_cloid_op("0xa2")))),
+            ("ALICE's again", by(ALICE, place(4, Side::Ask, "105", "2", Tif::Alo, Some("0xa3")))),
+            ("an IOC through 105: the first whole, ALICE's in part", place(5, Side::Bid, "105", "5", Tif::Ioc, None)),
+            ("ALICE's IOC cancels her own", by(ALICE, place(6, Side::Bid, "105", "1", Tif::Ioc, None))),
+        ];
+        let mut overlay = Overlay::default();
+        for (step, action) in &steps {
+            drop(overlay.apply(base, no_priorities(), action));
+            assert_index_kept(&overlay, step);
+        }
+        assert_eq!(overlay.target_of(base, &OrderRef::Cloid("0xa1".to_string()), None), Target::Pending { id: id(2), side: Side::Bid, px: px("90") });
+        assert_eq!(overlay.target_of(base, &OrderRef::Cloid("0xa3".to_string()), Some(ALICE)), Target::Missing, "canceled by her own IOC");
+        let mut ambiguous = Overlay::default();
+        for action in &steps[..3] {
+            drop(ambiguous.apply(base, no_priorities(), &action.1));
+        }
+        assert_eq!(ambiguous.target_of(base, &OrderRef::Cloid("0xa1".to_string()), None), Target::Ambiguous);
     }
 
     /// A confirmed limit trigger order's remainder rests with its oid: a cancel by that oid finds it (design 000642

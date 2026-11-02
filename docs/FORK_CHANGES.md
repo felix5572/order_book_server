@@ -2013,3 +2013,16 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - **说明**：合并刷新时，两次刷新之间进入又退出的候选不会被发出，README 已写明。
   - **用例**：`the_book_moving_is_seen_until_a_refresh_takes_it`（撤回、撤回后恢复且代数变化、未接盘口）；`the_candidates_refresh_once_the_queued_inputs_are_applied` 加了可控时钟，第 1,000 ms 刷新、第 999 ms 不刷。变异 4 处都有失败：`book_moved` 恒为假、去掉时间上限、忽略立即刷新、刷新后不清起点。
 - 代码审查 000680 r2 后（1 条 P2）：延后已满 `MAX_REFRESH_DEFER` 时，主循环若先选中查询或扫盘结果，原来会先用上一次确认的候选去服务。现在这两个分支处理之前先检查 `DeferredRefresh::overdue`，到期就先刷新。输入分支照旧在应用输入后检查。用例加了 `overdue` 的边界：无暂存时为假，满 1,000 ms 为真、999 ms 为假。
+
+## 2026-11-02 影子盘口线程性能：待入块挂单按 cloid / 触发单 oid 建索引，未证实价位按币合并检查
+
+- **依据**：
+  - 用户的 forced flow 会话看到，账户数据在 16:00:20、16:10:25 过期约 4 s。同一时段影子盘口副本因 `queue_full` 成串重建：15:58 有 26 次，16:00 有 11 次，16:10 有 17 次。每次重建，监听器都在持锁时 `fork`，58 次平均 0.22 s，最长约 0.5 s。
+  - 16:15 一串重建期间，pending-book 线程 CPU 为 90–118%。perf 显示：逐单遍历待入块挂单（`resting_where`）约 22%，`has_level` 6.2%。
+- **改了什么**：
+  - `pending/overlay.rs` 新增 `RestingIndex`，含 `by_cloid` 和 `by_trigger_oid`。在挂上、被成交或自撤出队、撤单或改单移除这三处同步维护。`cloid_target` 和 `oid_target` 的兜底改为查索引，`resting_where` 删除。
+  - `listeners/order_book/state.rs` 的 `apply_order_diffs_hft`：Remove 和改量为零只登记币，并且只登记有未证实价位的币（`UnprovenLevels::holds`）。同币下一条 New 之前先结算（审查 000682 r1 P2：避免合批与拆批时挂单方归属不同），批次末尾再处理剩下的币。
+- **用例**：
+  - `the_resting_orders_index_follows_them`：每步都与重建出的索引比对，并检查同一 cloid 两边挂单时为 `Ambiguous`、自撤后为 `Missing`。
+  - `a_removal_then_a_crossing_new_leave_the_marks_alike_however_batched`：一批与拆两批的结果对照。
+  - 变异 6 处都有失败，另有一处 `holds` 恒为真只影响开销。审查方用 3,000 个动作重放，做了 90,000 次 cloid 查找，与逐单扫描全部一致。

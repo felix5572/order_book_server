@@ -90,6 +90,11 @@ impl UnprovenLevels {
         self.levels.values().map(Vec::len).sum()
     }
 
+    /// Whether `coin` holds an unproven level.
+    fn holds(&self, coin: &Coin) -> bool {
+        self.levels.contains_key(coin)
+    }
+
     /// Before an order rests at `level`: a mark of a level emptied meanwhile - a crossing order's match leaves no
     /// removal to look at it, and the cleanup may not have come - is the old orders', not this one's (review 000607 r1).
     fn forget_if_emptied(&mut self, book: &OrderBooks<InnerL4Order>, (coin, side, px): &LevelKey) {
@@ -105,7 +110,7 @@ impl UnprovenLevels {
         }
     }
 
-    /// After a removal in `coin`: its levels emptied leave, their next orders' order the node's again.
+    /// After removals in `coin`: its levels emptied leave, their next orders' order the node's again.
     fn forget_emptied_in(&mut self, book: &OrderBooks<InnerL4Order>, coin: &Coin) {
         if self.levels.is_empty() {
             return;
@@ -740,6 +745,11 @@ impl OrderBookState {
         let height = batch.block_number();
         let time = batch.block_time();
         let mut changed_coins = HashSet::new();
+        // the coins holding an unproven level a removal touched: their emptied levels looked at before the coin's next
+        // New and once the batch is applied, not at each removal (bm 11-02 after the US open: each removal looking at
+        // its coin's every level, `has_level` 6% of the pending thread); a New resting, crossing, sees them as each
+        // removal left them looked at, however the blocks are batched (review 000682 r1 P2)
+        let mut removed_in: HashSet<Coin> = HashSet::new();
 
         self.diffs.advance(height, time);
         self.latest.advance(height, time);
@@ -754,6 +764,9 @@ impl OrderBookState {
                 continue;
             }
             let inner_diff = diff.diff().try_into()?;
+            if matches!(inner_diff, InnerOrderDiff::New { .. }) && removed_in.remove(&coin) {
+                self.unproven.forget_emptied_in(&self.order_book, &coin);
+            }
             match inner_diff {
                 InnerOrderDiff::New { sz, insert_before } => {
                     // Official PR#9: the diff's px is the true resting price. Parse failure =
@@ -820,7 +833,9 @@ impl OrderBookState {
                     } else if self.order_book.modify_sz(oid.clone(), coin.clone(), new_sz) {
                         if new_sz.is_zero() {
                             self.zeroed_awaiting_remove.insert(oid, Instant::now());
-                            self.unproven.forget_emptied_in(&self.order_book, &coin);
+                            if self.unproven.holds(&coin) {
+                                removed_in.insert(coin.clone());
+                            }
                         }
                     } else {
                         self.missing_diff_targets += 1;
@@ -840,10 +855,15 @@ impl OrderBookState {
                             note_diff_target_missing("remove", &oid, &coin);
                         }
                     }
-                    self.unproven.forget_emptied_in(&self.order_book, &coin);
+                    if self.unproven.holds(&coin) {
+                        removed_in.insert(coin.clone());
+                    }
                     changed_coins.insert(coin);
                 }
             }
+        }
+        for coin in &removed_in {
+            self.unproven.forget_emptied_in(&self.order_book, coin);
         }
         Ok(changed_coins)
     }

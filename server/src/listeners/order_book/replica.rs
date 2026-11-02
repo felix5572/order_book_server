@@ -901,6 +901,39 @@ pub(crate) mod tests {
         assert!(!ask_101_unproven(&state), "3 rested on an empty level");
     }
 
+    /// Review 000682 r1 P2: the 101 ask level unproven (2's anchor missing), an ask 6 at 103; in one block 6 is removed,
+    /// then a crossing bid takes the whole 101 level with no removal diff. Its old mark stays - as after
+    /// `a_level_emptied_and_rested_again_drops_its_old_mark`'s crossing bid - whether the block's diffs come as one batch
+    /// or two: the removal's look at its coin goes before the New, not at the batch's end.
+    #[test]
+    fn a_removal_then_a_crossing_new_leave_the_marks_alike_however_batched() {
+        let missing_anchor = serde_json::json!({"new": {"sz": "1.0", "insertBefore": 9}});
+        let crossing = serde_json::json!({"new": {"sz": "2.0"}});
+        let unproven_after = |split: bool| {
+            let mut state = empty_state();
+            for batch in [
+                BookBatch::Statuses(statuses(10, &[(1, "A", "101.0", "open"), (6, "A", "103.0", "open")])),
+                BookBatch::Diffs(diffs(10, &[(1, "A", "101.0", new_order()), (6, "A", "103.0", new_order())])),
+                BookBatch::Statuses(statuses(11, &[(2, "A", "101.0", "open")])),
+                BookBatch::Diffs(diffs(11, &[(2, "A", "101.0", missing_anchor.clone())])),
+                BookBatch::Statuses(statuses(12, &[(5, "B", "101.0", "open")])),
+            ] {
+                apply(&mut state, batch);
+            }
+            assert!(ask_101_unproven(&state));
+            let block = [(6, "A", "103.0", remove()), (5, "B", "101.0", crossing.clone())];
+            if split {
+                apply(&mut state, BookBatch::Diffs(diffs(12, &block[..1])));
+                apply(&mut state, BookBatch::Diffs(diffs(12, &block[1..])));
+            } else {
+                apply(&mut state, BookBatch::Diffs(diffs(12, &block)));
+            }
+            assert_eq!(btc(&state), [Vec::<u64>::new(), vec![]], "split {split}: 103 removed, 101 taken");
+            ask_101_unproven(&state)
+        };
+        assert_eq!((unproven_after(false), unproven_after(true)), (true, true));
+    }
+
     /// The cloid index follows the statuses - a resting one adds its order, any other takes it out - and a lookup
     /// reads only what the book holds; the coins changed come back.
     #[test]
