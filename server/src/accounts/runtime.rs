@@ -35,7 +35,7 @@ use super::{
     },
     checkpoint::parse_checkpoint_file,
     marks::{
-        CheckpointGrid, MarkInputs, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild,
+        CheckpointGrid, MarkInputs, MarksAt, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild,
         actions::MarkActions, execution::BlockFill, pairing::PairingDiagnostics, seed::MarkSeed, system::SystemAction,
         trailing::{TrailingCounts, TrailingReport},
     },
@@ -616,8 +616,11 @@ async fn run_owner(
                 if publisher.track(&book) {
                     publisher.push_changes(&mut book, &touched, marks.at());
                 }
-                if install_ready(&mut diagnostics, &mut book, &mut held) && publisher.track(&book) {
-                    publisher.push_snapshots(&mut book, marks.at());
+                if let Some(installed) = install_ready(&mut diagnostics, &mut book, &mut held) {
+                    continue_installed(&mut publisher, &installed, &book, marks.at());
+                    if publisher.track(&book) {
+                        publisher.push_snapshots(&mut book, marks.at());
+                    }
                 }
                 publisher.track_marks(&mut book, &marks);
                 // the forced flow's copy before the refresh: its positions and marks do not wait for the candidates
@@ -628,8 +631,11 @@ async fn run_owner(
                 }
             }
             Some(message) = anchors.recv() => {
-                let installed = receive_anchor(&mut diagnostics, &mut book, &mut marks, &mut held, &mut held_seed, message);
-                if publisher.track(&book) && installed {
+                let (installed, restored) = receive_anchor(&mut diagnostics, &mut book, &mut marks, &mut held, &mut held_seed, message);
+                if let Some(installed) = &installed {
+                    continue_installed(&mut publisher, installed, &book, marks.at());
+                }
+                if publisher.track(&book) && (installed.is_some() || restored) {
                     publisher.push_snapshots(&mut book, marks.at());
                 }
                 publisher.track_marks(&mut book, &marks);
@@ -944,7 +950,7 @@ fn receive_anchor(
     held: &mut Option<Box<ParsedAnchor>>,
     held_seed: &mut Option<Box<MarkSeed>>,
     message: AnchorMessage,
-) -> bool {
+) -> (Option<Installed>, bool) {
     match message {
         AnchorMessage::Parsed { parsed, seed } => {
             let restored = receive_seed(diagnostics, book, marks, held_seed, parsed.anchor.height, seed);
@@ -956,14 +962,14 @@ fn receive_anchor(
             if let Some(waiting) = held {
                 info!("accounts: anchor {} waits until its blocks are applied", waiting.anchor.height);
             }
-            installed || !restored.accounts.is_empty()
+            (installed, !restored.accounts.is_empty())
         }
         AnchorMessage::Failed { height, error } => {
             error!("accounts: checkpoint {height} failed to parse, withholding the view and the node marks: {error}");
             ACCOUNTS_CHECKPOINT_FAILURES_TOTAL.inc();
             marks.record_seed_failure(height, error.clone());
             book.record_checkpoint_failure(height, error);
-            false
+            (None, false)
         }
     }
 }
@@ -1100,10 +1106,24 @@ fn log_marks_install(diagnostics: &mut AccountDiagnostics, height: u64, report: 
 }
 
 /// Installs the held anchor once the book is ready for it; returns whether it did.
-fn install_ready(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, held: &mut Option<Box<ParsedAnchor>>) -> bool {
-    let Some(parsed) = held.take_if(|parsed| book.anchor_ready(parsed.anchor.height)) else {
-        return false;
-    };
+/// A checkpoint the view installed: the anchor it replaced when it changed none of the view's coins and none of its
+/// positions - the copies then stand on through it, not a new generation (bm 11-02: 63 of 75 checked installs changed no
+/// row, each new generation withdrawing every forced flow frame); one correcting anything has them take a new one, as
+/// before (review 000687 r1: increments of a correction at the same height left marks, confirmed candidates and walks
+/// under way behind).
+struct Installed {
+    continues: Option<(u64, u64)>,
+}
+
+/// The copies onto a checkpoint installed changing nothing (`Installed`).
+fn continue_installed(publisher: &mut Publisher, installed: &Installed, book: &AccountBook, marks: Option<&dyn MarksAt>) {
+    if let Some((from, to)) = installed.continues {
+        publisher.continue_copies(from, to, book, marks);
+    }
+}
+
+fn install_ready(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, held: &mut Option<Box<ParsedAnchor>>) -> Option<Installed> {
+    let parsed = held.take_if(|parsed| book.anchor_ready(parsed.anchor.height))?;
     let ParsedAnchor { anchor, parse_seconds, skipped } = *parsed;
     let height = anchor.height;
     let started = Instant::now();
@@ -1114,7 +1134,9 @@ fn install_ready(diagnostics: &mut AccountDiagnostics, book: &mut AccountBook, h
     ACCOUNTS_ANCHOR_PARSE_SECONDS.set(parse_seconds);
     ACCOUNTS_ANCHOR_SKIPPED_TOTAL.inc_by(skipped as u64);
     ACCOUNTS_SILENT_POSITION_CHANGES_TOTAL.inc_by(report.silent_position_changes);
-    true
+    let unchanged = !report.universe_changed && report.touched == Touched::default();
+    let continues = report.previous_anchor.filter(|_| unchanged).map(|from| (from, height));
+    Some(Installed { continues })
 }
 
 /// Rare checkpoint phases only: no per-input metric work or high-cardinality labels.
@@ -1533,18 +1555,40 @@ mod tests {
         let mut book = trusted_book(&[(user(1), 5)]);
         let mut marks = NodeMarks::new(TEST_GRID, 0);
         let (mut held, mut held_seed) = (None, None);
-        assert!(!receive_anchor(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut held, &mut held_seed, parsed(1_002)), "block 1002 is not applied");
-        assert!(!receive_anchor(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut held, &mut held_seed, parsed(1_003)));
+        assert!(receive_anchor(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut held, &mut held_seed, parsed(1_002)).0.is_none(), "block 1002 is not applied");
+        assert!(receive_anchor(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut held, &mut held_seed, parsed(1_003)).0.is_none());
         assert_eq!(held.as_ref().map(|held| held.anchor.height), Some(1_003), "the newer one is held");
         book.apply_block_actions(block_actions(1_001, &[]));
         book.apply_block_actions(block_actions(1_002, &[]));
-        assert!(!install_ready(&mut AccountDiagnostics::default(), &mut book, &mut held));
+        assert!(install_ready(&mut AccountDiagnostics::default(), &mut book, &mut held).is_none());
         assert_eq!(installed_height(&book), Ok(1_000));
         book.apply_block_actions(block_actions(1_003, &[]));
-        assert!(install_ready(&mut AccountDiagnostics::default(), &mut book, &mut held));
+        let installed = install_ready(&mut AccountDiagnostics::default(), &mut book, &mut held).expect("installs");
         assert_eq!((installed_height(&book), held.is_none()), (Ok(1_003), true));
+        assert_eq!(installed.continues, Some((1_000, 1_003)), "its coins and positions the view's");
         book.apply_block_actions(block_actions(1_004, &[]));
-        assert!(receive_anchor(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut held, &mut held_seed, parsed(1_004)), "applied already: installs at once");
+        let (installed, _) = receive_anchor(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut held, &mut held_seed, parsed(1_004));
+        assert!(installed.is_some(), "applied already: installs at once");
+    }
+
+    /// A checkpoint installed changing nothing has the copies stand on through it; one correcting a position (a silent
+    /// change, a position new to the view), listing another coin or another `szDecimals` has them take a new generation.
+    #[test]
+    fn an_install_continues_the_copies_unless_it_changed_a_coin_or_a_position() {
+        use crate::accounts::test_support::{CoinSpec, PUMP, anchor as test_anchor, block_actions, trusted_book, user};
+        let none: &[(Address, i64)] = &[];
+        let install = |coins: &[CoinSpec<'_>]| {
+            let mut book = trusted_book(&[(user(1), 5)]);
+            book.apply_block_actions(block_actions(1_001, &[]));
+            let mut held = Some(Box::new(ParsedAnchor { anchor: test_anchor(1_001, coins), parse_seconds: 0.0, skipped: 0 }));
+            install_ready(&mut AccountDiagnostics::default(), &mut book, &mut held).expect("installs")
+        };
+        assert_eq!(install(&[(PUMP, 0, &[(user(1), 5)])]).continues, Some((1_000, 1_001)), "nothing changed");
+        assert_eq!(install(&[(PUMP, 0, &[(user(1), 6)])]).continues, None, "a silent change");
+        assert_eq!(install(&[(PUMP, 0, &[(user(1), 5), (user(2), 3)])]).continues, None, "a position new to the view");
+        assert_eq!(install(&[(PUMP, 0, &[(user(1), 5)]), ("NEW", 2, none)]).continues, None, "a coin joined");
+        assert_eq!(install(&[]).continues, None, "a coin left");
+        assert_eq!(install(&[(PUMP, 1, &[(user(1), 50)])]).continues, None, "its szDecimals changed");
     }
 
     #[test]

@@ -435,6 +435,7 @@ impl CoinBook {
         let size_decimals = self.size_decimals;
         let mut silent = |user: Address, projected: Option<(i64, u64)>, anchor_size_raw: i64| {
             report.silent_position_changes += 1;
+            report.touched.positions.push((name.to_string(), user));
             if report.silent_samples.len() < MAX_SILENT_SAMPLES {
                 report.silent_samples.push(SilentChange { coin: name.to_string(), user, size_decimals, projected, anchor_size_raw });
             }
@@ -642,6 +643,11 @@ pub(crate) struct InstallReport {
     /// Replayed fills that violate the size contract (recorded as a fills data loss).
     pub(crate) replay_errors: Vec<String>,
     pub(crate) replay_check: ReplayCheck,
+    /// The positions the install changed: each silent change, each held fill replayed onto a listed coin.
+    pub(crate) touched: Touched,
+    /// A coin left the universe, joined it, or changed its `szDecimals`: what a copy of the view holds of the coins is
+    /// no longer the view's.
+    pub(crate) universe_changed: bool,
 }
 
 impl Default for ReplayCheck {
@@ -1198,9 +1204,11 @@ impl AccountBook {
         self.coins.retain(|name, coin| {
             let Some(anchor_coin) = anchor_coins.remove(name) else {
                 report.dropped_coin_records += coin.records.len();
+                report.universe_changed = true;
                 return false;
             };
             if anchor_coin.size_decimals != coin.size_decimals {
+                report.universe_changed = true;
                 // records newer than the anchor are in the old unit: drop them (a loss up to the newest) and take the
                 // anchor's
                 report.merge_errors.push(format!(
@@ -1219,6 +1227,7 @@ impl AccountBook {
             true
         });
         self.fills.lost_block = lost_block;
+        report.universe_changed |= !anchor_coins.is_empty();
         self.coins.extend(anchor_coins.into_iter().map(|(name, coin)| (name, CoinBook::anchored(height, coin, 0))));
         self.rebuild_marks(height);
         self.pending_anchor = Some(Arc::new(PendingAnchor { height, coins: ActionCoins { coins: margins.action_coins() }, twaps, waiting_twaps }));
@@ -1378,6 +1387,7 @@ impl AccountBook {
         }
         report.replayed_fills = uncovered - fills_report.held - fills_report.errors.len();
         report.replay_errors = fills_report.errors;
+        report.touched.absorb(fills_report.touched);
     }
 
     /// A line of `block` was lost; a stream the view does not read leaves it as it is.

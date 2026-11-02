@@ -129,6 +129,12 @@ impl Publisher {
         self.with_copies(|feed| feed.on_applied(book, marks, touched, candidates));
     }
 
+    /// A checkpoint installed under the view changing none of its coins or positions: the copies standing on `from`
+    /// stand on `to` (`FlowAccountsFeed::continue_anchor`).
+    pub(crate) fn continue_copies(&mut self, from: u64, to: u64, book: &AccountBook, marks: Option<&dyn MarksAt>) {
+        self.with_copies(|feed| feed.continue_anchor(from, to, book, marks));
+    }
+
     /// After a refresh: the height the candidates are confirmed at, for the copies.
     pub(crate) fn copies_candidates_confirmed(&mut self, candidates: &Candidates) {
         self.with_copies(|feed| feed.on_candidates_confirmed(candidates));

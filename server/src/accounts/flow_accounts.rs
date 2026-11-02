@@ -690,6 +690,26 @@ impl FlowAccountsFeed {
         }
     }
 
+    /// A checkpoint installed under the view that changed none of its coins and none of its positions
+    /// (`InstallReport`): the copy standing on `from` stands on `to` from now rather than taking a new generation whole,
+    /// which withdraws every forced flow frame (bm 11-02: 63 of 75 checked installs changed no row, the frames
+    /// withdrawn at each one, every ~12 minutes) - unless at the copy's height a mark it holds is no longer the view's (a
+    /// seed installed with the checkpoint correcting it; review 000687 r1 P1-1): a block to come carries every mark
+    /// moved, a seed's too, but none comes at the same height. The forced flow's copy alone: the pending book's trailing
+    /// stops carry the height each was set at, which a checkpoint correcting an earlier block changes though a stop ends
+    /// as it was (review 000687 r2 P2).
+    pub(crate) fn continue_anchor(&mut self, from: u64, to: u64, book: &AccountBook, marks: Option<&dyn MarksAt>) {
+        if self.keeps_trailing() {
+            return;
+        }
+        let Some(sent) = self.sent.as_mut().filter(|sent| sent.anchor_height == from) else { return };
+        let height = book.replay_at().map(|(_, height, _)| height);
+        let marks_held = |marks: &dyn MarksAt| book.coins().all(|coin| sent.marks.get(coin).copied() == marks.mark(coin));
+        if height > Some(sent.height) || marks.is_some_and(marks_held) {
+            sent.anchor_height = to;
+        }
+    }
+
     /// Only the pending book's copy keeps the trailing stops.
     fn keeps_trailing(&self) -> bool {
         self.owner == CopyOwner::PendingBook
@@ -1226,6 +1246,68 @@ pub(crate) mod tests {
         forced.on_applied(&book, Some(&held), &Touched::default(), &candidates);
         let Ok(FlowAccountsEvent::Snapshot(snapshot)) = forced_events.try_recv() else { panic!("a snapshot") };
         assert_eq!(snapshot.trailing, None, "the forced flow's copy keeps none");
+    }
+
+    /// A checkpoint installed under the view changing nothing: the copy stands on through it - no new generation, nothing
+    /// sent at its height -; at the copy's height a mark it holds no longer the view's (a seed correcting it, review
+    /// 000687 r1 P1-1), a new generation whole; the view's height past the copy's, the block carries the marks moved.
+    #[test]
+    fn a_copy_stands_on_through_a_checkpoint_that_changes_nothing() {
+        use crate::accounts::{replay::tests::per_dex_with_main_cash, test_support::anchor as test_anchor};
+        let (mut book, mut marks, candidates) = view();
+        let (mut feed, mut accounts, mut events) = link(CopyOwner::ForcedFlow);
+        let reanchor = |book: &mut AccountBook, height: u64| {
+            let mut anchor = test_anchor(height, &[(PUMP, 0, &[(holder(), 1_000_000)]), ("BTC", 5, &[])]);
+            anchor.margins = per_dex_with_main_cash(-12_000_000_000);
+            let report = book.install_anchor(anchor);
+            assert_eq!((report.universe_changed, &report.touched), (false, &Touched::default()), "changes nothing at {height}");
+        };
+        feed.on_applied(&book, Some(&marks), &Touched::default(), &candidates);
+        let Ok(snapshot @ FlowAccountsEvent::Snapshot(_)) = events.try_recv() else { panic!("a snapshot") };
+        accounts.apply(snapshot);
+        book.apply_block_actions(block_actions(1_001, &[]));
+        marks.height = 1_001;
+        feed.on_applied(&book, Some(&marks), &Touched::default(), &candidates);
+        let Ok(block @ FlowAccountsEvent::Block { height: 1_001, .. }) = events.try_recv() else { panic!("block 1001") };
+        accounts.apply(block);
+        // at the copy's height, its marks the view's
+        reanchor(&mut book, 1_001);
+        feed.continue_anchor(1_000, 1_001, &book, Some(&marks));
+        feed.on_applied(&book, Some(&marks), &Touched::default(), &candidates);
+        assert!(events.try_recv().is_err(), "stood on through 1001, nothing sent");
+        assert_eq!(accounts.serving().map(AccountsCopy::generation), Ok(1));
+        // the view's height past the copy's: the block carries the marks moved
+        book.apply_block_actions(block_actions(1_002, &[]));
+        reanchor(&mut book, 1_002);
+        (marks.height, marks.marks[0].1) = (1_002, 12_700);
+        feed.continue_anchor(1_001, 1_002, &book, Some(&marks));
+        feed.on_applied(&book, Some(&marks), &Touched::default(), &candidates);
+        let Ok(FlowAccountsEvent::Block { height: 1_002, marks: moved, .. }) = events.try_recv() else { panic!("block 1002") };
+        assert_eq!(moved, [(PUMP.to_string(), Some(12_700))]);
+        // at the copy's height a mark corrected (a seed): a new generation whole
+        book.apply_block_actions(block_actions(1_003, &[]));
+        marks.height = 1_003;
+        feed.on_applied(&book, Some(&marks), &Touched::default(), &candidates);
+        drop(events.try_recv());
+        reanchor(&mut book, 1_003);
+        marks.marks[0].1 = 12_800;
+        feed.continue_anchor(1_002, 1_003, &book, Some(&marks));
+        feed.on_applied(&book, Some(&marks), &Touched::default(), &candidates);
+        let Ok(FlowAccountsEvent::Snapshot(snapshot)) = events.try_recv() else { panic!("a new generation") };
+        assert_eq!((snapshot.generation, snapshot.height), (2, 1_003));
+        // the pending book's copy, its trailing stops' heights not proven alike, takes a new generation (review 000687
+        // r2 P2)
+        let (mut pending, _, mut pending_events) = link(CopyOwner::PendingBook);
+        let held = TrailingMarks { marks: ListedMarks { height: 1_003, marks: marks.marks.clone() }, trailing: TrailingCopy::default(), revision: 1 };
+        pending.on_applied(&book, Some(&held), &Touched::default(), &candidates);
+        let Ok(FlowAccountsEvent::Snapshot(_)) = pending_events.try_recv() else { panic!("the pending book's snapshot") };
+        book.apply_block_actions(block_actions(1_004, &[]));
+        reanchor(&mut book, 1_004);
+        let held = TrailingMarks { marks: ListedMarks { height: 1_004, marks: marks.marks.clone() }, ..held };
+        pending.continue_anchor(1_003, 1_004, &book, Some(&held));
+        pending.on_applied(&book, Some(&held), &Touched::default(), &candidates);
+        let Ok(FlowAccountsEvent::Snapshot(snapshot)) = pending_events.try_recv() else { panic!("a new generation") };
+        assert_eq!((snapshot.generation, snapshot.height), (2, 1_004));
     }
 
     /// The feed: a snapshot first, declared valid once queued; then blocks of what moved; the queue full withdraws the
