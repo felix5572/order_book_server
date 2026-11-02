@@ -32,6 +32,10 @@ pub(crate) const EXT_HIP3_MARK_PRICES: &str = "extHip3MarkPrices";
 pub(crate) const EXT_HIP3_MARK_PRICES_PATH: &str = "/extHip3MarkPrices";
 pub(crate) const EXT_HIP3_EXTERNAL_QUOTES: &str = "extHip3ExternalQuotes";
 pub(crate) const EXT_HIP3_EXTERNAL_QUOTES_PATH: &str = "/extHip3ExternalQuotes";
+/// The main-dex coins' external quotes (hyperliquid-trade design 000673 §4): their own channel, `extMarkPrices`
+/// unchanged.
+pub(crate) const EXT_EXTERNAL_QUOTES: &str = "extExternalQuotes";
+pub(crate) const EXT_EXTERNAL_QUOTES_PATH: &str = "/extExternalQuotes";
 /// The `GET` path of the node's reference caches with their members, beside `extMarkPrices` (user 2026-10-27).
 pub(crate) const EXT_MARK_REFERENCE_CACHES_PATH: &str = "/extMarkReferenceCaches";
 /// The subscription type and channel of the liquidation candidates.
@@ -96,10 +100,15 @@ pub(crate) enum Subscription {
     #[serde(rename = "extHip3MarkPrices", rename_all = "camelCase")]
     Hip3MarkPrices { coin: String },
     /// `extHip3ExternalQuotes`: one HIP-3 coin's external quotes - Binance's `TRADIFI_PERPETUAL` contract, the SIP or
-    /// BOATS quote - and its normal basis to each every 50 ms (hyperliquid-trade design 000664, 000669); needs
-    /// `--hip3-external-quotes`.
+    /// BOATS quote - and its normal basis to each (hyperliquid-trade design 000664, 000669): a tick every 5 ms, a frame
+    /// when a leg's decision changes and every 50 ms (design 000673); needs `--hip3-external-quotes`.
     #[serde(rename = "extHip3ExternalQuotes", rename_all = "camelCase")]
     Hip3ExternalQuotes { coin: String },
+    /// `extExternalQuotes`: one main-dex coin's perp venue quotes, their medians and its normal basis to them, apart
+    /// from the node (hyperliquid-trade design 000673): a tick every 5 ms, a frame when its decision changes and every
+    /// 50 ms; needs `--local-marks`.
+    #[serde(rename = "extExternalQuotes", rename_all = "camelCase")]
+    ExternalQuotes { coin: String },
     /// `extPendingBbo`: one coin's best levels as the mempool's pending actions will leave the book, beside the
     /// confirmed ones (hyperliquid-trade design 000604 section 4); needs `--pending-book`.
     #[serde(rename = "extPendingBbo")]
@@ -209,9 +218,11 @@ impl Subscription {
             }
             // Coins of the account anchor's universe, or of the local marks' sources, which the book universe does not
             // bound (it is market-filtered): an unknown coin is refused when the subscription takes its first frame.
-            Self::CoinPositions { coin } | Self::MarkPrices { coin } | Self::Hip3MarkPrices { coin } | Self::Hip3ExternalQuotes { coin } => {
-                !coin.is_empty()
-            }
+            Self::CoinPositions { coin }
+            | Self::MarkPrices { coin }
+            | Self::Hip3MarkPrices { coin }
+            | Self::Hip3ExternalQuotes { coin }
+            | Self::ExternalQuotes { coin } => !coin.is_empty(),
             // checked against the forced flow's rules when the subscription takes its first frames
             Self::ForcedFlow(_) => true,
             Self::LiquidationCandidates { coin, max_distance_bps } => {
@@ -253,6 +264,7 @@ impl Subscription {
             Self::MarkPrices { .. } => EXT_MARK_PRICES,
             Self::Hip3MarkPrices { .. } => EXT_HIP3_MARK_PRICES,
             Self::Hip3ExternalQuotes { .. } => EXT_HIP3_EXTERNAL_QUOTES,
+            Self::ExternalQuotes { .. } => EXT_EXTERNAL_QUOTES,
             Self::ForcedFlow(_) => EXT_FORCED_FLOW,
             Self::PendingBbo(_) => EXT_PENDING_BBO,
             Self::PendingTrades(_) => EXT_PENDING_TRADES,

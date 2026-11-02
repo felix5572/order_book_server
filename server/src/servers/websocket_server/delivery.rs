@@ -1,5 +1,5 @@
 //! Subscription-owned broadcast lifetimes and bounded per-connection delivery diagnostics.
-use super::Outbound;
+use super::{Outbound, quote_delivery::QuoteDelivery};
 use crate::{
     listeners::order_book::BboUpdate,
     metrics::{CHANNEL_DROPS_TOTAL, CHANNEL_LAG, WS_BROADCAST_SKIPPED_TOTAL, WS_DELIVERY_WAIT},
@@ -99,6 +99,8 @@ pub(super) fn record_lag(lane: &'static str, skipped: u64) {
 pub(super) struct ConnectionDiagnostics {
     id: u64,
     peer: Option<SocketAddr>,
+    /// The external quote frames between the session and the writer (review 000676 r1 P2).
+    pub(super) quotes: QuoteDelivery,
     queue_wait_max_us: AtomicU64,
     socket_write_max_us: AtomicU64,
     last_gap_report: Mutex<Option<Instant>>,
@@ -108,7 +110,7 @@ pub(super) struct ConnectionDiagnostics {
 impl ConnectionDiagnostics {
     pub(super) fn new(peer: Option<SocketAddr>) -> Self {
         static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
-        Self { id: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed), peer,
+        Self { id: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed), peer, quotes: QuoteDelivery::default(),
             queue_wait_max_us: AtomicU64::new(0), socket_write_max_us: AtomicU64::new(0), last_gap_report: Mutex::new(None), last_slow_activity: Mutex::new(None) }
     }
 

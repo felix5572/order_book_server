@@ -4,6 +4,7 @@
 pub(crate) mod compute;
 pub(crate) mod connection;
 pub(crate) mod external_basis;
+pub(crate) mod external_quotes_view;
 pub(crate) mod feeds;
 pub(crate) mod hip3;
 pub(crate) mod owner;
@@ -11,6 +12,7 @@ pub(crate) mod price;
 pub(crate) mod prices_view;
 pub(crate) mod probe;
 pub(crate) mod protocol;
+pub(crate) mod quote_tick;
 pub(crate) mod rest;
 pub(crate) mod slot;
 pub(crate) mod snapshot;

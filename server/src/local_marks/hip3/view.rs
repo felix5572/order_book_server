@@ -13,7 +13,7 @@ use super::{
 };
 use crate::local_marks::{
     price::MAX_PERP_DECIMALS,
-    prices_view::{INTERVAL_MS, LegView, node_progress, price, withheld},
+    prices_view::{LegView, OWNER_INTERVAL_MS, node_progress, price, withheld},
     slot::Validity,
     snapshot::LocalMarksSnapshot,
 };
@@ -126,7 +126,7 @@ impl<'a> Hip3MarksView<'a> {
         Self {
             schema_version: SCHEMA_VERSION,
             coin,
-            interval_ms: INTERVAL_MS,
+            interval_ms: OWNER_INTERVAL_MS,
             published_ts_ms: snapshot.computed_ms,
             node: marks.node.as_ref().map_or_else(withheld, |node| node_view(snapshot, node)),
             local: marks.local.as_ref().map_or_else(withheld, |local| local_view(snapshot, local)),

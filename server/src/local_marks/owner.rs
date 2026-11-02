@@ -4,6 +4,10 @@
 //! The account owner gone (its price channel closed) stops the local marks until restart: every leg is withheld with
 //! the reason, still published each tick. The owner task ending - a panic, an internal error - closes the snapshot
 //! channel: its readers withdraw, and the order book keeps serving.
+//!
+//! The external quote channels' frames are the external quote tick's (`quote_tick`, hyperliquid-trade design 000673),
+//! started beside the owner over its snapshots: it takes the bases the owner publishes, and withdraws both channels
+//! once the owner stops or ends.
 
 use std::{sync::Arc, time::Duration};
 
@@ -17,6 +21,7 @@ use super::{
     feeds::LocalMarkFeeds,
     hip3::external::Hip3ExternalReading,
     now_ms,
+    quote_tick::QuoteTickHandle,
     snapshot::{CoinTable, LocalMarksSnapshot, Tick, assemble},
 };
 use crate::{
@@ -41,15 +46,16 @@ impl BookPrices for Arc<Mutex<OrderBookListener>> {
     }
 }
 
-/// The feeds and the latest snapshot of the owner task.
+/// The feeds and the latest snapshot of the owner task, and the external quote tick over it.
 #[derive(Clone)]
 pub(crate) struct LocalMarks {
     pub(crate) feeds: Arc<LocalMarkFeeds>,
     snapshots: watch::Receiver<Arc<LocalMarksSnapshot>>,
+    pub(crate) quotes: QuoteTickHandle,
 }
 
 impl LocalMarks {
-    /// Spawns the owner task, and a watcher logging its end.
+    /// Spawns the owner task, the external quote tick over its snapshots, and a watcher logging each one's end.
     pub(crate) fn start(feeds: Arc<LocalMarkFeeds>, node_prices: watch::Receiver<NodePrices>, book: impl BookPrices) -> Self {
         let external_coins = feeds.hip3_external.as_ref().map(|external| &external.coins);
         let table = Arc::new(CoinTable::new(&feeds.sources, feeds.hip3.as_deref(), external_coins));
@@ -68,7 +74,8 @@ impl LocalMarks {
             let ended = owner.await;
             error!("local marks: the owner task ended; the marks stay withdrawn until restart: {ended:?}");
         });
-        Self { feeds, snapshots: receiver }
+        let quotes = QuoteTickHandle::start(Arc::clone(&feeds), receiver.clone());
+        Self { feeds, snapshots: receiver, quotes }
     }
 
     /// Every snapshot from now on; its channel closes when the owner task ends.
@@ -89,9 +96,15 @@ pub(crate) const OWNER_TASK_ENDED: &str = "the local marks owner task ended";
 
 #[cfg(test)]
 impl LocalMarks {
-    /// Marks whose snapshots the test publishes.
-    pub(crate) const fn of_snapshots_for_test(feeds: Arc<LocalMarkFeeds>, snapshots: watch::Receiver<Arc<LocalMarksSnapshot>>) -> Self {
-        Self { feeds, snapshots }
+    /// Marks whose snapshots the test publishes, the external quote tick running over them.
+    pub(crate) fn of_snapshots_for_test(feeds: Arc<LocalMarkFeeds>, snapshots: watch::Receiver<Arc<LocalMarksSnapshot>>) -> Self {
+        let quotes = QuoteTickHandle::start(Arc::clone(&feeds), snapshots.clone());
+        Self { feeds, snapshots, quotes }
+    }
+
+    /// Marks whose snapshots and external quote snapshots the test publishes.
+    pub(crate) const fn of_quotes_for_test(feeds: Arc<LocalMarkFeeds>, snapshots: watch::Receiver<Arc<LocalMarksSnapshot>>, quotes: QuoteTickHandle) -> Self {
+        Self { feeds, snapshots, quotes }
     }
 }
 

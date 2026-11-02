@@ -56,7 +56,7 @@ impl AlpacaCredentials {
 
 /// The HIP-3 US stocks' two Alpaca feeds: the SIP's consolidated NBBO in the day sessions, BOATS's quotes overnight
 /// (docs.trade.xyz: "The overnight trading session is provided by Blue Ocean ATS (BOATS)").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum EquityFeed {
     Sip,
     Boats,

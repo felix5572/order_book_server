@@ -238,6 +238,21 @@ impl LocalMarkFeeds {
         self.equity.as_ref().map(|groups| EquityReadings { sip: groups.sip.read(now_ms), boats: groups.boats.read(now_ms) })
     }
 
+    /// The main-dex feed at `reading` in the readings' order (`readings`), its partitions.
+    pub(crate) fn main_feed(&self, reading: usize) -> &FeedSubscriptions {
+        &self.subscriptions[reading]
+    }
+
+    /// The HIP-3 external quotes' Binance partitions; `None` without them.
+    pub(crate) fn hip3_external_feed(&self) -> Option<&FeedSubscriptions> {
+        self.hip3_external.as_ref().map(|feeds| &feeds.subscriptions)
+    }
+
+    /// A HIP-3 US stock feed's partitions; `None` without the SIP feeds.
+    pub(crate) fn equity_feed(&self, feed: EquityFeed) -> Option<&FeedSubscriptions> {
+        self.equity.as_ref().map(|groups| groups.of(feed))
+    }
+
     /// Every feed's reading now, with its markets.
     pub(crate) fn readings(&self, now_ms: u64) -> Vec<(Feed, &FeedMarkets, FeedProjection)> {
         self.subscriptions

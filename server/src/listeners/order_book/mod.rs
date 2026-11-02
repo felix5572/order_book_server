@@ -2149,6 +2149,7 @@ impl ActiveSubs {
             | Subscription::MarkPrices { .. }
             | Subscription::Hip3MarkPrices { .. }
             | Subscription::Hip3ExternalQuotes { .. }
+            | Subscription::ExternalQuotes { .. }
             | Subscription::PendingBbo(_)
             | Subscription::PendingTrades(_)
             | Subscription::ForcedFlow(_) => Vec::new(),

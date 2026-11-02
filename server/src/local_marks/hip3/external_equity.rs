@@ -17,7 +17,9 @@
 //!
 //! The basis: one `ExternalBasisWindow` a coin and feed (`external_basis`' rule: HL's book midpoint over the quote's -
 //! 1), sampled only from a ready leg with HL's book usable at the publish time, so at the night's and the
-//! pre-market's start that feed's window warms up anew.
+//! pre-market's start that feed's window warms up anew. The owner publishes both feeds' bases of each coin it reads
+//! (`EquityBases`), for the external quote tick, which takes the one of its own quote's feed (hyperliquid-trade design
+//! 000673 r4).
 
 use tokio::time::Instant;
 
@@ -30,7 +32,7 @@ use crate::{
     local_marks::{
         external_basis::{self, ExternalBasis, ExternalBasisWindow},
         feeds::EquityReadings,
-        slot::{Quote, Validity},
+        slot::{Entry, Quote, Validity},
         snapshot::Withheld,
     },
     order_book::Px,
@@ -90,6 +92,27 @@ impl EquityBasisWindows {
             EquityFeed::Boats => &mut self.boats,
         }
     }
+
+    /// Each feed's basis as its window publishes it now.
+    pub(crate) fn published(&self) -> EquityBases {
+        EquityBases { sip: self.sip.published(), boats: self.boats.published() }
+    }
+}
+
+/// A coin's basis of each feed, as the owner's tick published it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EquityBases {
+    sip: Result<ExternalBasis, Withheld>,
+    boats: Result<ExternalBasis, Withheld>,
+}
+
+impl EquityBases {
+    pub(crate) const fn of(&self, feed: EquityFeed) -> &Result<ExternalBasis, Withheld> {
+        match feed {
+            EquityFeed::Sip => &self.sip,
+            EquityFeed::Boats => &self.boats,
+        }
+    }
 }
 
 /// What every coin's leg reads at this snapshot.
@@ -113,13 +136,12 @@ pub(crate) fn equity_leg(
     book: Option<(Px, Px)>,
     windows: &mut EquityBasisWindows,
 ) -> Hip3SourceLeg<Hip3EquityLeg> {
-    let market = match place {
-        EquityPlace::Unlisted => return Hip3SourceLeg::Unlisted,
-        EquityPlace::Off => return Hip3SourceLeg::Listed(Err(equity_off(coin))),
-        EquityPlace::Read(market) => market,
+    let market = match equity_market(coin, place) {
+        Ok(market) => market,
+        Err(leg) => return leg,
     };
     let readings = tick.readings.unwrap_or_else(|| unreachable!("a coin read among the SIP feeds' markets has their readings"));
-    let quote = session_quote(coin, readings, market, tick);
+    let quote = session_quote(coin, tick.published_ms, tick.session, |feed| readings.of(feed).entries[market]);
     for feed in EquityFeed::ALL {
         let ready = quote.as_ref().ok().filter(|quote| quote.feed == feed);
         let sample = book.zip(ready).map(|((bid, ask), ready)| external_basis::sample(bid, ask, ready.quote.bid, ready.quote.ask));
@@ -131,15 +153,31 @@ pub(crate) fn equity_leg(
     Hip3SourceLeg::Listed(quote.map(|quote| Hip3EquityLeg { quote, basis: windows.of(quote.feed).published() }))
 }
 
+/// The coin's market among the SIP feeds', or its leg without one: `unlisted` outside the SIP table, `equityOff` in it
+/// while the server runs without the SIP feeds.
+pub(crate) fn equity_market<T>(coin: &str, place: EquityPlace) -> Result<usize, Hip3SourceLeg<T>> {
+    match place {
+        EquityPlace::Unlisted => Err(Hip3SourceLeg::Unlisted),
+        EquityPlace::Off => Err(Hip3SourceLeg::Listed(Err(equity_off(coin)))),
+        EquityPlace::Read(market) => Ok(market),
+    }
+}
+
 fn equity_off(coin: &str) -> Withheld {
     let detail = format!("{coin} is in the HIP-3 SIP sources, but the server runs without --hip3-sip-marks: no SIP or BOATS feed");
     Withheld::unavailable("equityOff", detail)
 }
 
-/// The quote of the session's feed valid at the publish time; why not.
-fn session_quote(coin: &str, readings: &EquityReadings, market: usize, tick: EquityTick<'_>) -> Result<EquityQuote, Withheld> {
-    let published_ms = tick.published_ms;
-    let session = tick.session.ok_or_else(|| {
+/// The quote of the feed of `session` - the relayer's at `published_ms` (`equity_session`) - valid at the publish time,
+/// `observed` giving the coin's entry and validity on a feed judged then; why not: the owner's and the external quote
+/// tick's one rule.
+pub(crate) fn session_quote(
+    coin: &str,
+    published_ms: u64,
+    session: Option<EquitySessionId>,
+    observed: impl FnOnce(EquityFeed) -> (Option<Entry>, Validity),
+) -> Result<EquityQuote, Withheld> {
+    let session = session.ok_or_else(|| {
         let detail = format!(
             "{published_ms} ms is outside the US stocks' quote sessions (New York: 04:00–20:00 Monday to Friday on the SIP, 20:05–04:00 begun \
              Sunday to Thursday on BOATS)"
@@ -148,7 +186,7 @@ fn session_quote(coin: &str, readings: &EquityReadings, market: usize, tick: Equ
     })?;
     let feed = EquityFeed::of(session.session);
     let name = feed.name();
-    let (entry, validity) = readings.of(feed).entries[market];
+    let (entry, validity) = observed(feed);
     if validity != Validity::Valid {
         let received = entry.map_or_else(|| "none received".to_string(), |entry| format!("the last received at {} ms", entry.received_ms));
         return Err(Withheld::unavailable(validity.name(), format!("the {name} quote of {coin} is {} at {published_ms} ms ({received})", validity.name())));

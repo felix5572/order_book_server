@@ -17,13 +17,15 @@ use super::{
     compute::{LocalMark, MarkInputs, local_mark, weighted_median},
     external_basis::{self, ExternalBasis, ExternalBasisWindow},
     hip3::{
-        external::{Hip3ExternalCoin, Hip3ExternalGates, Hip3ExternalReading, Hip3ExternalSnapshot, Hip3ExternalTable, Hip3ExternalWindows, hip3_external},
+        external::{
+            Hip3ExternalCoin, Hip3ExternalGates, Hip3ExternalReading, Hip3ExternalSnapshot, Hip3ExternalTable, Hip3ExternalWindows, hip3_external, received_by,
+        },
         external_coins::Hip3ExternalCoins,
         snapshot::{Hip3CoinMarks, Hip3CoinState, Hip3Gates, Hip3Table, hip3_marks},
         sources::Hip3SipSources,
     },
     price::VenuePrice,
-    slot::Validity,
+    slot::{Entry, Validity},
     subscriptions::FeedProjection,
     sources::{Feed, FeedMarkets, Kind, MarkSources},
 };
@@ -123,6 +125,27 @@ impl ExternalQuotes {
         let (bid, ask) = (median(|quote| quote.bid)?, median(|quote| quote.ask)?);
         Some(Self { bid, ask, venues })
     }
+
+    /// The quotes as of `published_ms`, the time a publish of them carries: withheld (`receivedAfterPublish`,
+    /// `received_by`) when one was received after it - read after the time was taken, or the wall clock stepped back
+    /// -: the main dex's external leg's rule at its publish time, the owner's (`GET /extExternalQuotes`) and the
+    /// external quote tick's (review 000676 r1 P2).
+    pub(crate) fn received_by(self, coin: &str, published_ms: u64) -> Result<Self, Withheld> {
+        for quote in &self.venues {
+            received_by(quote.feed.label(), coin, quote.received_ms, published_ms)?;
+        }
+        Ok(self)
+    }
+}
+
+/// A coin's external quotes and its normal basis to them (design 000594, hyperliquid-trade design 000664, 000673): the
+/// external leg of a main-dex coin (`extExternalQuotes`), the Binance leg of a HIP-3 coin (`extHip3ExternalQuotes`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExternalLeg {
+    pub(crate) quotes: ExternalQuotes,
+    /// Withheld below its minimum samples, or, on the external quote tick, older than it takes the owner's
+    /// (`basisStale`).
+    pub(crate) basis: Result<ExternalBasis, Withheld>,
 }
 
 /// A venue's quote valid now, its listing's multiplier applied.
@@ -160,6 +183,14 @@ impl Coverage {
 pub(crate) struct CoinMarks {
     pub(crate) node: Result<NodeMark, Withheld>,
     pub(crate) local: Result<LocalLeg, Withheld>,
+    /// The perp quotes valid at the tick and their medians, none received after the tick's time (`computed_ms`,
+    /// `ExternalQuotes::received_by`; review 000676 r1 P2), before the node and book gates (hyperliquid-trade design
+    /// 000673 §4): the local leg's own when it is ready and they are - the local leg keeps `extMarkPrices`' time, its
+    /// quotes read after the tick's time as before -; why there are none, the feeds stopped among the reasons.
+    pub(crate) external: Result<ExternalQuotes, Withheld>,
+    /// The coin's normal basis to the perp quotes as its window publishes it at the tick, whatever the gates: the local
+    /// leg's, `GET /extExternalQuotes`', and the external quote tick's (design 000673 r4).
+    pub(crate) external_basis: Result<ExternalBasis, Withheld>,
     pub(crate) oracle_coverage: Coverage,
     pub(crate) external_coverage: Coverage,
 }
@@ -184,6 +215,12 @@ pub(crate) struct BookProgress {
 #[derive(Debug, Clone)]
 pub(crate) struct LocalMarksSnapshot {
     pub(crate) computed_ms: u64,
+    /// The tick's moment on the monotonic clock: every basis of the snapshot is its window's then, the age the external
+    /// quote tick judges it by (hyperliquid-trade design 000673 r4).
+    pub(crate) computed_at: Instant,
+    /// Why every leg reading the feeds is withheld until restart: the feeds stopped, or the account owner is gone. The
+    /// external quote channels are withdrawn on it (design 000673 r4).
+    pub(crate) stopped: Option<String>,
     /// The node price state's progress; why there is none.
     pub(crate) node: Result<NodeProgress, String>,
     /// `None` before the book's first snapshot.
@@ -200,6 +237,11 @@ pub(crate) struct LocalMarksSnapshot {
 }
 
 impl LocalMarksSnapshot {
+    /// The coins of the snapshot, every snapshot of one owner's.
+    pub(crate) const fn table(&self) -> &Arc<CoinTable> {
+        &self.table
+    }
+
     /// The node state a ready node leg of `coin` reads.
     pub(crate) fn node_state(&self, coin: &str) -> Option<&CoinPriceState> {
         self.node_prices.as_ref()?.coins.get(coin)
@@ -324,6 +366,36 @@ impl CoinTable {
     pub(crate) fn book_coins(&self) -> &[Coin] {
         &self.book_coins
     }
+
+    /// The main-dex coins in the sources' order.
+    pub(crate) fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    /// The main-dex coin's place in the table; `None` outside the sources.
+    pub(crate) fn index(&self, coin: &str) -> Option<usize> {
+        self.by_name.get(coin).copied()
+    }
+
+    /// The HIP-3 external quotes' coins; none without them.
+    pub(crate) const fn hip3_external(&self) -> &Hip3ExternalTable {
+        &self.hip3_external
+    }
+
+    /// The main-dex coin's perp listings: each one's feed's place in the readings (`LocalMarkFeeds::readings`) and its
+    /// market among the feed's.
+    pub(crate) fn perp_markets(&self, index: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.listings[index].iter().filter(|listed| listed.feed.kind == Kind::Perp).map(|listed| (listed.reading, listed.market))
+    }
+
+    /// The main-dex coin's perp quotes valid now and their medians (design 000588), `observed` giving a listing's entry
+    /// and validity by its feed's place in the readings and its market: the coin's external leg before any gate, the
+    /// owner's and the external quote tick's one rule (hyperliquid-trade design 000673 §4).
+    pub(crate) fn perp_quotes(&self, index: usize, observed: impl Fn(usize, usize) -> (Option<Entry>, Validity)) -> Result<ExternalQuotes, Withheld> {
+        let coin = &self.names[index];
+        let quotes = valid_quotes(&self.listings[index], Kind::Perp, observed)?;
+        ExternalQuotes::of(quotes).ok_or_else(|| Withheld::unavailable("externalCoverage", format!("no perp venue quotes {coin} now")))
+    }
 }
 
 /// What the local marks' owner keeps across ticks, by the table's coins.
@@ -367,14 +439,14 @@ pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, state: &mut Owne
     let book_withheld = book_withheld_at(tick, tick.now_ms);
     let stopped = tick.stopped.as_ref().map(|reason| Withheld::unavailable("stopped", reason.clone()));
     let local_withheld = stopped.clone().or_else(|| node_withheld.clone()).or_else(|| book_withheld.clone());
-    // the basis reads the book and the venues, not the node state (design 000594)
-    let basis_inputs = stopped.is_none() && book_withheld.is_none();
-    let coins = state
-        .external_basis
-        .iter_mut()
-        .enumerate()
-        .map(|(index, basis)| coin_marks(table, index, tick, node_withheld.as_ref(), local_withheld.as_ref(), basis_inputs, basis))
-        .collect();
+    let coin_gates = CoinGates {
+        node: node_withheld.as_ref(),
+        local: local_withheld.as_ref(),
+        stopped: stopped.as_ref(),
+        // the basis reads the book and the venues, not the node state (design 000594)
+        basis_inputs: stopped.is_none() && book_withheld.is_none(),
+    };
+    let coins = state.external_basis.iter_mut().enumerate().map(|(index, basis)| coin_marks(table, index, tick, coin_gates, basis)).collect();
     let gates = Hip3Gates { node: node_withheld.as_ref(), book: book_withheld.as_ref(), stopped: stopped.as_ref() };
     let hip3 = hip3_marks(&table.hip3, tick, table.names.len(), gates, &mut state.hip3);
     // the external quotes' basis samples the book as of their own publish time, later than the tick's (review 000665 r1 P2)
@@ -384,6 +456,8 @@ pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, state: &mut Owne
     });
     LocalMarksSnapshot {
         computed_ms: tick.now_ms,
+        computed_at: tick.instant,
+        stopped: tick.stopped.clone(),
         node: tick.node.as_ref().map(|prices| NodeProgress { seed_height: prices.seed_height, height: prices.height, block_time_ms: prices.block_time_ms }).map_err(Clone::clone),
         book: tick.book.map(|book| BookProgress { time_ms: book.time, height: book.height, trusted: book.trusted }),
         node_prices: tick.node.as_ref().ok().map(Arc::clone),
@@ -419,16 +493,19 @@ fn book_withheld_at(tick: &Tick<'_>, now_ms: u64) -> Option<Withheld> {
         .then(|| Withheld::stale("bookProgress", format!("the HL book's block {} is {lag_ms} ms behind the local clock", book.height)))
 }
 
-/// `basis_inputs`: the book and the feeds usable this tick, whatever the node state.
-fn coin_marks(
-    table: &CoinTable,
-    index: usize,
-    tick: &Tick<'_>,
-    node_withheld: Option<&Withheld>,
-    local_withheld: Option<&Withheld>,
+/// What gates every main-dex coin's legs at this tick.
+#[derive(Debug, Clone, Copy)]
+struct CoinGates<'a> {
+    node: Option<&'a Withheld>,
+    /// The stop's, the node's or the book's: the local leg's.
+    local: Option<&'a Withheld>,
+    /// The feeds stopped or the account owner gone: the external quotes' (`CoinMarks::external`).
+    stopped: Option<&'a Withheld>,
+    /// The book and the feeds usable this tick, whatever the node state: the basis samples'.
     basis_inputs: bool,
-    basis: &mut ExternalBasisWindow,
-) -> CoinMarks {
+}
+
+fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, gates: CoinGates<'_>, basis: &mut ExternalBasisWindow) -> CoinMarks {
     let coin = table.names[index].as_str();
     let listings = &table.listings[index];
     let (mut oracle_coverage, mut external_coverage) = (Coverage::default(), Coverage::default());
@@ -440,9 +517,10 @@ fn coin_marks(
             Kind::Equity | Kind::EquityOvernight | Kind::Hip3Perp => unreachable!("a main-dex coin lists no Alpaca or HIP-3 market (`Feed::ALL`)"),
         }
     }
-    let perps = valid_quotes(listings, tick, Kind::Perp).map(ExternalQuotes::of);
-    basis.observe(tick.instant, basis_inputs.then(|| basis_sample(tick, index, &perps)).flatten());
-    let state = match (node_withheld, tick.node) {
+    let perps = table.perp_quotes(index, observed_at(tick));
+    basis.observe(tick.instant, gates.basis_inputs.then(|| basis_sample(tick, index, perps.as_ref().ok())).flatten());
+    let external_basis = basis.published();
+    let state = match (gates.node, tick.node) {
         (Some(withheld), _) => Err(withheld.clone()),
         (None, Ok(prices)) => prices.coins.get(coin).ok_or_else(|| {
             let detail = format!("the node replay does not claim {coin}: unsupported until the next checkpoint seed, or not listed");
@@ -464,35 +542,39 @@ fn coin_marks(
         emas: state.emas,
         last_trade: state.last_trade,
     });
-    let local = match (local_withheld, state) {
+    let local = match (gates.local, state) {
         (Some(withheld), _) => Err(withheld.clone()),
         (None, Err(withheld)) => Err(withheld),
-        (None, Ok(state)) => local_leg(coin, listings, tick, index, state, perps, basis.published()),
+        (None, Ok(state)) => local_leg(coin, listings, tick, index, state, perps.clone(), external_basis.clone()),
     };
-    CoinMarks { node, local, oracle_coverage, external_coverage }
+    let external = gates.stopped.map_or_else(|| perps.and_then(|quotes| quotes.received_by(coin, tick.now_ms)), |stopped| Err(stopped.clone()));
+    CoinMarks { node, local, external, external_basis, oracle_coverage, external_coverage }
+}
+
+/// A listing's entry and validity in the tick's readings, by its feed's place there and its market.
+fn observed_at<'t>(tick: &'t Tick<'_>) -> impl Fn(usize, usize) -> (Option<Entry>, Validity) + 't {
+    |reading, market| tick.readings[reading].2.entries[market]
 }
 
 /// This tick's basis sample of the coin: its HL book's two sides against the perp quotes valid now; `None` without
 /// either.
-fn basis_sample(tick: &Tick<'_>, index: usize, perps: &Result<Option<ExternalQuotes>, Withheld>) -> Option<f64> {
+fn basis_sample(tick: &Tick<'_>, index: usize, perps: Option<&ExternalQuotes>) -> Option<f64> {
     let book = tick.book.unwrap_or_else(|| unreachable!("the book is read before a basis sample"));
     let (Some(bid), Some(ask)) = book.prices[index] else {
         return None;
     };
-    let Ok(Some(quotes)) = perps else {
-        return None;
-    };
+    let quotes = perps?;
     Some(external_basis::sample(bid, ask, quotes.bid, quotes.ask))
 }
 
-/// `perps`: the coin's perp quotes valid now, `None` without one.
+/// `perps`: the coin's perp quotes valid now (`CoinTable::perp_quotes`).
 fn local_leg(
     coin: &str,
     listings: &[ListedMarket],
     tick: &Tick<'_>,
     index: usize,
     node: &CoinPriceState,
-    perps: Result<Option<ExternalQuotes>, Withheld>,
+    perps: Result<ExternalQuotes, Withheld>,
     external_basis: Result<ExternalBasis, Withheld>,
 ) -> Result<LocalLeg, Withheld> {
     if !node.reference_modes.ordinary() {
@@ -504,9 +586,9 @@ fn local_leg(
         return Err(Withheld::unavailable("hlBook", format!("the HL book of {coin} has an empty side")));
     };
     let (bid, ask) = (book_units(bid, node.size_decimals)?, book_units(ask, node.size_decimals)?);
-    let oracle = mid_median(&valid_quotes(listings, tick, Kind::Spot)?, node.size_decimals)?
+    let oracle = mid_median(&valid_quotes(listings, Kind::Spot, observed_at(tick))?, node.size_decimals)?
         .ok_or_else(|| Withheld::unavailable("oracleCoverage", format!("no spot venue quotes {coin} now")))?;
-    let external_quotes = perps?.ok_or_else(|| Withheld::unavailable("externalCoverage", format!("no perp venue quotes {coin} now")))?;
+    let external_quotes = perps?;
     let external = mid_median(&external_quotes.venues, node.size_decimals)?.unwrap_or_else(|| unreachable!("the external quotes hold a quote"));
     let inputs = MarkInputs { node, mark_cache, bid, ask, oracle, external, now_ns: tick.now_ms * 1_000_000 };
     let mark = local_mark(inputs).map_err(|err| Withheld::unavailable("calculation", format!("{coin}: {err}")))?;
@@ -517,11 +599,12 @@ fn calculation(detail: String) -> Withheld {
     Withheld::unavailable("calculation", detail)
 }
 
-/// The kind's venues quoting now, in the listings' order.
-fn valid_quotes(listings: &[ListedMarket], tick: &Tick<'_>, kind: Kind) -> Result<Vec<VenueQuote>, Withheld> {
+/// The kind's venues quoting now, in the listings' order, `observed` giving a listing's entry and validity by its
+/// feed's place in the readings and its market.
+fn valid_quotes(listings: &[ListedMarket], kind: Kind, observed: impl Fn(usize, usize) -> (Option<Entry>, Validity)) -> Result<Vec<VenueQuote>, Withheld> {
     let mut quotes = Vec::new();
     for listed in listings.iter().filter(|listed| listed.feed.kind == kind) {
-        let (entry, validity) = tick.readings[listed.reading].2.entries[listed.market];
+        let (entry, validity) = observed(listed.reading, listed.market);
         if validity != Validity::Valid {
             continue;
         }
@@ -708,8 +791,18 @@ pub(crate) mod tests {
 
         /// A tick at `now_ms` and `instant` of the owner's `state`.
         pub(crate) fn snapshot_at(&self, state: &mut OwnerState, now_ms: u64, instant: Instant) -> LocalMarksSnapshot {
+            self.snapshot_of(state, now_ms, instant, None)
+        }
+
+        /// A first tick with the feeds stopped for `reason`.
+        pub(crate) fn snapshot_stopped(&self, now_ms: u64, reason: &str) -> LocalMarksSnapshot {
+            self.snapshot_of(&mut self.owner_state(), now_ms, Instant::now(), Some(reason))
+        }
+
+        fn snapshot_of(&self, state: &mut OwnerState, now_ms: u64, instant: Instant, stopped: Option<&str>) -> LocalMarksSnapshot {
             let readings: Vec<_> = self.sources.feeds().zip(&self.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
-            let tick = Tick { now_ms, instant, stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, equity: None, hip3_external: None };
+            let stopped = stopped.map(str::to_string);
+            let tick = Tick { now_ms, instant, stopped, node: &self.node, book: self.book.as_ref(), readings: &readings, equity: None, hip3_external: None };
             assemble(&self.table, &tick, state)
         }
 
@@ -885,6 +978,39 @@ pub(crate) mod tests {
         assert_eq!(basis.samples, 120);
         assert!((basis.ratio - (100_002.0 / 100_004.0 - 1.0)).abs() < 1e-15, "{}", basis.ratio);
         assert_eq!(state.external_basis[1].published().unwrap_err().detail, "0 of the 120 samples needed over the last 600 s", "ETH has no book");
+    }
+
+    /// Hyperliquid-trade design 000673 §4, r2: the external leg and its basis stand before the node's and the book's
+    /// gates - the node behind withholds the local leg, not the perp quotes nor the basis, which publishes from its
+    /// 120th sample -, the local leg carrying the same quotes once ready; the feeds stopped withhold the quotes, the
+    /// basis still the window's.
+    #[test]
+    fn the_external_leg_and_its_basis_stand_apart_from_the_node() {
+        let mut world = World::new();
+        let mut state = world.owner_state();
+        let start = Instant::now();
+        let at = |second: u64| start + Duration::from_secs(second);
+        let node_behind = NOW_MS - 500 + MAX_PROGRESS_LAG_MS + 1;
+        world.book.as_mut().unwrap().time = node_behind - 400;
+        let behind = (0..120).map(|second| world.snapshot_at(&mut state, node_behind, at(second))).last().unwrap();
+        let btc = behind.coin("BTC").unwrap();
+        assert_eq!(btc.local.as_ref().unwrap_err().code, "nodeProgress");
+        let quotes = btc.external.as_ref().unwrap();
+        assert_eq!((quotes.bid, quotes.ask), (price("100003.95"), price("100004.05")));
+        assert_eq!(btc.external_basis.as_ref().unwrap().samples, 120);
+        assert_eq!((behind.computed_at, behind.stopped.as_deref()), (at(119), None));
+        world.book.as_mut().unwrap().time = NOW_MS - 400;
+        let ready = world.snapshot_at(&mut state, NOW_MS, at(120));
+        let btc = ready.coin("BTC").unwrap();
+        let local = btc.local.as_ref().unwrap();
+        assert_eq!((&local.external_quotes, &local.external_basis), (btc.external.as_ref().unwrap(), &btc.external_basis));
+        let stopped = world.snapshot_stopped(NOW_MS, "the perp_okx task failed");
+        let btc = stopped.coin("BTC").unwrap();
+        assert_eq!((btc.external.as_ref().unwrap_err().code, stopped.stopped.as_deref()), ("stopped", Some("the perp_okx task failed")));
+        assert_eq!(btc.external_basis.as_ref().unwrap_err().code, "externalBasisSamples", "the window's, not withheld for the stop");
+        world.set(Feed { kind: Kind::Perp, venue: Venue::Binance }, "BTC", Validity::NotConnected);
+        let none = world.snapshot(NOW_MS);
+        assert_eq!(none.coin("BTC").unwrap().external.as_ref().unwrap_err().detail, "no perp venue quotes BTC now");
     }
 
     /// Design 000594: no sample without the book fresh and trusted with both sides, a perp quote and the feeds running.

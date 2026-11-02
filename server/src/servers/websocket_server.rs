@@ -1,13 +1,16 @@
 mod coin_positions;
 mod delivery;
+mod external_quotes;
 mod forced_flow;
 mod liquidation_candidates;
 mod mark_inputs;
 mod mark_prices;
 mod pending_book;
+mod quote_delivery;
 
 use delivery::{BboDelivery, ConnectionDiagnostics, UserFillsDelivery, record_lag};
 use coin_positions::{AccountsSession, coin_positions_handler};
+use external_quotes::ExternalQuotesSession;
 use mark_prices::{MarkPricesSession, mark_prices_handler, reference_caches_handler};
 use pending_book::PendingBookSession;
 
@@ -25,6 +28,7 @@ use crate::{
         feeds::{EquityFeedsConfig, Hip3ExternalConfig, LocalMarkFeeds},
         hip3::{external_sources::Hip3ExternalSources, protocol::AlpacaCredentials, sources::Hip3SipSources},
         owner::LocalMarks,
+        quote_tick::snapshot::{QuoteChannel, QuoteSnapshot},
         sources::MarkSources,
     },
     metrics::{
@@ -39,7 +43,7 @@ use crate::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
         subscription::{
-            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_FORCED_FLOW, EXT_FORCED_FLOW_PATH, EXT_MARK_INPUTS_PATH, EXT_HIP3_EXTERNAL_QUOTES_PATH, EXT_HIP3_MARK_PRICES_PATH, EXT_MARK_PRICES_PATH, EXT_MARK_REFERENCE_CACHES_PATH, EXT_LIQUIDATION_CANDIDATES,
+            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_FORCED_FLOW, EXT_FORCED_FLOW_PATH, EXT_MARK_INPUTS_PATH, EXT_EXTERNAL_QUOTES_PATH, EXT_HIP3_EXTERNAL_QUOTES_PATH, EXT_HIP3_MARK_PRICES_PATH, EXT_MARK_PRICES_PATH, EXT_MARK_REFERENCE_CACHES_PATH, EXT_LIQUIDATION_CANDIDATES,
             OrderUpdate, ServerResponse, Subscription, SubscriptionManager, UserFills,
         },
     },
@@ -325,7 +329,11 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
             })
             .route(EXT_HIP3_EXTERNAL_QUOTES_PATH, {
                 let marks = marks.clone();
-                get(move |query| mark_prices::hip3_external_quotes_handler(query, marks.clone()))
+                get(move |query| external_quotes::hip3_external_quotes_handler(query, marks.clone()))
+            })
+            .route(EXT_EXTERNAL_QUOTES_PATH, {
+                let marks = marks.clone();
+                get(move |query| external_quotes::external_quotes_handler(query, marks.clone()))
             })
             .route(EXT_MARK_PRICES_PATH, get(move |query| mark_prices_handler(query, marks.clone()))),
         None => app,
@@ -644,6 +652,7 @@ async fn handle_socket(
     // Joined at connect time, like the book's broadcast above.
     let mut coin_positions = accounts.map(|accounts| AccountsSession::new(accounts, book_trust.clone()));
     let mut mark_prices = local_marks.as_ref().map(MarkPricesSession::new);
+    let mut external_quotes = local_marks.as_ref().map(ExternalQuotesSession::new);
     let mut pending_book = pending_book.map(PendingBookSession::new);
 
     // Split the socket into an owned write half (driven by the writer task) and
@@ -678,6 +687,7 @@ async fn handle_socket(
             &mut sub_guards,
             &mut coin_positions,
             &mut mark_prices,
+            &mut external_quotes,
             &mut pending_book,
             &listener,
             &l4_cache,
@@ -744,6 +754,7 @@ async fn run_session(
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
     coin_positions: &mut Option<AccountsSession>,
     mark_prices: &mut Option<MarkPricesSession>,
+    external_quotes: &mut Option<ExternalQuotesSession>,
     pending_book: &mut Option<PendingBookSession>,
     listener: &Arc<Mutex<OrderBookListener>>,
     l4_cache: &Arc<L4SnapshotCache>,
@@ -904,7 +915,7 @@ async fn run_session(
                             outbound.diagnostics, internal_message_rx.len(), last_market_receive.elapsed().as_millis(), outbound.pending(), manager.subscriptions().len(), affected.len());
                         }
                         for sub in affected.iter().cloned() {
-                            alive &= receive_client_message(outbound, manager, ClientMessage::Unsubscribe { subscription: sub }, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, pending_book, user_fills, bbo_delivery).await;
+                            alive &= receive_client_message(outbound, manager, ClientMessage::Unsubscribe { subscription: sub }, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, external_quotes, pending_book, user_fills, bbo_delivery).await;
                         }
                         if !affected.is_empty() {
                             alive &= outbound.send_message(ServerResponse::Error("Market event subscriptions withdrawn after a broadcast gap; resubscribe and reconcile missing events".to_string())).await;
@@ -935,7 +946,7 @@ async fn run_session(
                         bbo_delivery.lagged(n, outbound);
                         let affected: Vec<_> = manager.subscriptions().iter().filter(|s| matches!(s, Subscription::Bbo { .. })).cloned().collect();
                         for sub in affected {
-                            alive &= receive_client_message(outbound, manager, ClientMessage::Unsubscribe { subscription: sub }, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, pending_book, user_fills, bbo_delivery).await;
+                            alive &= receive_client_message(outbound, manager, ClientMessage::Unsubscribe { subscription: sub }, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, external_quotes, pending_book, user_fills, bbo_delivery).await;
                         }
                         alive &= outbound.send_message(ServerResponse::Error("BBO subscriptions withdrawn after a broadcast gap; resubscribe for current prices".to_string())).await;
                     }
@@ -978,6 +989,13 @@ async fn run_session(
             snapshot = next_mark_prices(mark_prices) => {
                 let _activity = outbound.diagnostics.activity("local_marks");
                 if let Some(session) = mark_prices.as_mut() {
+                    alive &= session.on_snapshot(outbound, manager, snapshot).await;
+                }
+            }
+
+            snapshot = next_external_quotes(external_quotes) => {
+                let _activity = outbound.diagnostics.activity("external_quotes");
+                if let Some(session) = external_quotes.as_mut() {
                     alive &= session.on_snapshot(outbound, manager, snapshot).await;
                 }
             }
@@ -1062,7 +1080,7 @@ async fn run_session(
                                         alive &= outbound.send_pong();
                                     }
                                     _ => {
-                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, pending_book, user_fills, bbo_delivery).await;
+                                        alive &= receive_client_message(outbound, manager, value, universe.as_ref(), listener.clone(), l4_cache, book_trust, bbo_only, last_l2, last_bbo, active_l2_params, l2_param_guards, active_subs, sub_guards, coin_positions, mark_prices, external_quotes, pending_book, user_fills, bbo_delivery).await;
                                     }
                                 }
                             }
@@ -1112,6 +1130,7 @@ async fn receive_client_message(
     sub_guards: &mut HashMap<Subscription, Vec<ActiveSubGuard>>,
     coin_positions: &mut Option<AccountsSession>,
     mark_prices: &mut Option<MarkPricesSession>,
+    external_quotes: &mut Option<ExternalQuotesSession>,
     pending_book: &mut Option<PendingBookSession>,
     user_fills: &mut UserFillsDelivery,
     bbo_delivery: &mut BboDelivery,
@@ -1120,14 +1139,19 @@ async fn receive_client_message(
         ClientMessage::Unsubscribe { subscription } | ClientMessage::Subscribe { subscription } => subscription.clone(),
         ClientMessage::Ping => unreachable!("Ping is handled before receive_client_message"),
     };
+    let quote_channel = match &subscription {
+        Subscription::ExternalQuotes { coin } => Some((QuoteChannel::Main, coin)),
+        Subscription::Hip3ExternalQuotes { coin } => Some((QuoteChannel::Hip3, coin)),
+        _ => None,
+    };
     // BBO-only mode rejects non-BBO subs up-front, before validation, so the
     // operator sees a single clear "denied" message in the log instead of "valid
     // subscription" then a rejection.
     if bbo_only && !matches!(&subscription, Subscription::Bbo { .. }) {
-        // the HIP-3 external quotes answer as with their switch off, the one refusal a client takes for the channel's
-        // absence (hyperliquid-trade design 000664 r4); any other is a session error to it
-        if matches!(subscription, Subscription::Hip3ExternalQuotes { .. }) {
-            return outbound.send_frame(mark_prices::hip3_external_not_enabled()).await;
+        // the external quotes answer as with their channel off, the one refusal a client takes for the channel's
+        // absence (hyperliquid-trade design 000664 r4, 000673); any other is a session error to it
+        if let Some((channel, _)) = quote_channel {
+            return outbound.send_frame(external_quotes::not_enabled(channel)).await;
         }
         let refused = "BBO-only mode: L2/L4/Trades subscriptions disabled. Only BBO subscriptions allowed.".to_string();
         return outbound.send_message(ServerResponse::Error(refused)).await;
@@ -1155,13 +1179,18 @@ async fn receive_client_message(
     if let Some((market, coin)) = match &subscription {
         Subscription::MarkPrices { coin } => Some((mark_prices::Market::Main, coin)),
         Subscription::Hip3MarkPrices { coin } => Some((mark_prices::Market::Hip3, coin)),
-        Subscription::Hip3ExternalQuotes { coin } => Some((mark_prices::Market::Hip3External, coin)),
         _ => None,
     } {
         let Some(session) = mark_prices.as_mut() else {
             return mark_prices::refuse_without_local_marks(outbound, market).await;
         };
         return session.on_client_message(outbound, manager, client_message, market, coin).await;
+    }
+    if let Some((channel, coin)) = quote_channel {
+        let Some(session) = external_quotes.as_mut() else {
+            return outbound.send_frame(external_quotes::not_enabled(channel)).await;
+        };
+        return session.on_client_message(outbound, manager, client_message, channel, coin).await;
     }
     if matches!(subscription, Subscription::PendingBbo(_) | Subscription::PendingTrades(_)) {
         let Some(session) = pending_book.as_mut() else {
@@ -1293,6 +1322,14 @@ async fn next_pending_book(
     }
 }
 
+/// The external quote tick's next snapshot of a connection; pending forever without `--local-marks`. Cancel-safe.
+async fn next_external_quotes(session: &mut Option<ExternalQuotesSession>) -> std::result::Result<Arc<QuoteSnapshot>, tokio::sync::watch::error::RecvError> {
+    match session {
+        Some(session) => session.next().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The next local marks snapshot of a connection; pending forever without `--local-marks`. Cancel-safe.
 async fn next_mark_prices(
     session: &mut Option<MarkPricesSession>,
@@ -1411,26 +1448,41 @@ impl Outbound {
     }
 
     async fn send_payload(&self, payload: bytes::Bytes) -> bool {
+        let Some(slot) = self.data_slot().await else { return false };
+        self.enqueue(slot, payload);
+        true
+    }
+
+    /// A free slot of the data queue, waited for while it is full; `None` when the connection is doomed - the writer
+    /// gone, or no slot within `WS_SEND_TIMEOUT`. A frame that must be judged with its slot in hand takes one so
+    /// (`quote_delivery::send_quote`, review 000676 r2 P1).
+    async fn data_slot(&self) -> Option<mpsc::Permit<'_, bytes::Bytes>> {
         // No timer/diagnostic allocation on an uncongested queue. When full, keep the
         // same five-second budget and record actual waiting separately from socket IO.
-        let payload = match self.data_tx.try_send(payload) {
-            Ok(()) => return true,
-            Err(mpsc::error::TrySendError::Closed(_)) => return false,
-            Err(mpsc::error::TrySendError::Full(payload)) => payload,
-        };
+        match self.data_tx.try_reserve() {
+            Ok(slot) => return Some(slot),
+            Err(mpsc::error::TrySendError::Closed(())) => return None,
+            Err(mpsc::error::TrySendError::Full(())) => {}
+        }
         let started = Instant::now();
-        let result = tokio::time::timeout(WS_SEND_TIMEOUT, self.data_tx.send(payload)).await;
+        let result = tokio::time::timeout(WS_SEND_TIMEOUT, self.data_tx.reserve()).await;
         self.diagnostics.queue_wait(started.elapsed());
         match result {
-            Ok(Ok(())) => true,
-            Ok(Err(_)) => false,
+            Ok(Ok(slot)) => Some(slot),
+            Ok(Err(_)) => None,
             Err(_) => {
                 error!("Outbound queue timeout: {} waited_ms={} pending={} capacity={}; dropping slow client",
                     self.diagnostics, started.elapsed().as_millis(), self.pending(), self.data_tx.max_capacity());
                 WS_SEND_ERRORS_TOTAL.inc();
-                false
+                None
             }
         }
+    }
+
+    /// The payload into its slot: the queue's next data frame, its place counted (`quote_delivery`).
+    fn enqueue(&self, slot: mpsc::Permit<'_, bytes::Bytes>, payload: bytes::Bytes) {
+        slot.send(payload);
+        self.diagnostics.quotes.payload_enqueued();
     }
 
     /// Enqueue a pong reply. Synchronous and independent of any data backlog:
@@ -1464,15 +1516,16 @@ where
     let mut data_open = true;
     let mut pong_open = true;
     while data_open || pong_open {
-        let frame = select! {
+        // a data frame may be an external quote frame, known by its place in the queue (`quote_delivery`)
+        let (frame, quote) = select! {
             biased;
 
             pong = pong_rx.recv(), if pong_open => match pong {
-                Some(frame) => frame,
+                Some(frame) => (frame, None),
                 None => { pong_open = false; continue; }
             },
             data = data_rx.recv(), if data_open => match data {
-                Some(frame) => frame,
+                Some(frame) => (frame, diagnostics.quotes.taken(Instant::now())),
                 None => { data_open = false; continue; }
             },
         };
@@ -1480,7 +1533,12 @@ where
         let result = tokio::time::timeout(WS_SEND_TIMEOUT, sink.send(Frame::text(frame))).await;
         diagnostics.socket_write(started.elapsed());
         match result {
-            Ok(Ok(())) => MESSAGES_SENT_TOTAL.inc(),
+            Ok(Ok(())) => {
+                MESSAGES_SENT_TOTAL.inc();
+                if let Some(quote) = quote {
+                    quote.written(Instant::now(), quote_delivery::wall_us());
+                }
+            }
             Ok(Err(err)) => {
                 error!("WebSocket send failed: {diagnostics} error={err} pending={}", data_rx.len());
                 WS_SEND_ERRORS_TOTAL.inc();
@@ -2289,6 +2347,41 @@ mod tests {
         assert!(!outbound.send_payload(bytes::Bytes::from_static(b"y")).await);
     }
 
+    /// Review 000676 r1 P2: an external quote frame counts as written, and its bytes, only once the writer's socket
+    /// write succeeded: none for one enqueued whose write timed out; one for one written after another channel's frame.
+    #[tokio::test(start_paused = true)]
+    async fn test_an_external_quote_frame_counts_as_written_after_its_write() {
+        use crate::{
+            local_marks::quote_tick::snapshot::{QuoteChannel, QuoteEntry},
+            metrics::{EXTERNAL_QUOTE_WS_WRITTEN_BYTES_TOTAL, EXTERNAL_QUOTE_WS_WRITTEN_FRAMES_TOTAL},
+        };
+        // no other test writes a quote frame through a writer
+        let written = || {
+            let channel = [QuoteChannel::Hip3.name()];
+            (EXTERNAL_QUOTE_WS_WRITTEN_FRAMES_TOTAL.with_label_values(&channel).get(), EXTERNAL_QUOTE_WS_WRITTEN_BYTES_TOTAL.with_label_values(&channel).get())
+        };
+        let entry = QuoteEntry { version: 1, epoch: 1, frame: bytes::Bytes::from_static(b"gold"), sample: None };
+        let before = written();
+        let (data_tx, data_rx) = mpsc::channel(1);
+        let (pong_tx, pong_rx) = mpsc::channel(1);
+        let outbound = Outbound::for_test(data_tx, pong_tx);
+        let writer = tokio::spawn(write_task(StuckSink, data_rx, pong_rx, Arc::clone(&outbound.diagnostics)));
+        assert_eq!(quote_delivery::send_quote(&outbound, QuoteChannel::Hip3, &entry, || false).await, quote_delivery::Handed::Enqueued);
+        writer.await.unwrap();
+        assert_eq!(written(), before, "enqueued, its write timed out");
+        let (data_tx, data_rx) = mpsc::channel(4);
+        let (pong_tx, pong_rx) = mpsc::channel(1);
+        let outbound = Outbound::for_test(data_tx, pong_tx);
+        assert!(outbound.send_frame(bytes::Bytes::from_static(b"l2")).await);
+        assert_eq!(quote_delivery::send_quote(&outbound, QuoteChannel::Hip3, &entry, || false).await, quote_delivery::Handed::Enqueued);
+        let diagnostics = Arc::clone(&outbound.diagnostics);
+        drop(outbound);
+        let sink = RecordingSink::default();
+        write_task(sink.clone(), data_rx, pong_rx, diagnostics).await;
+        assert_eq!(sink.0.lock().unwrap().len(), 2);
+        assert_eq!(written(), (before.0 + 1, before.1 + 4));
+    }
+
     #[test]
     fn test_l2_cache_key_distinguishes_n_levels() {
         // Two subscriptions differing only in nLevels MUST have distinct keys:
@@ -2485,7 +2578,8 @@ mod tests {
     /// Review 000665 r1 P2, design 000669 r2 1.4: at the real dispatch, `extHip3ExternalQuotes` answers a subscribe and
     /// an unsubscribe with its "not enabled" without the local marks, in BBO-only mode and with the local marks but its
     /// switch off, and with its "not in the sources" for a coin of neither table; each its text as before with
-    /// `"schemaVersion":2` beside it, byte for byte; the connection stays up.
+    /// `"schemaVersion":2` beside it, byte for byte; `extExternalQuotes` (design 000673) alike without the local marks,
+    /// in BBO-only mode and for a coin outside the local marks' sources, `"schemaVersion":1`; the connection stays up.
     #[tokio::test]
     #[allow(clippy::future_not_send)]
     async fn test_hip3_external_quotes_refusals_carry_the_schema_at_the_dispatch() {
@@ -2505,21 +2599,26 @@ mod tests {
         let embedded = Hip3ExternalConfig {
             sources: Arc::new(Hip3ExternalSources::embedded().unwrap()), sip_sources: Arc::new(Hip3SipSources::embedded().unwrap()), quote_max_age_ms: 60_000,
         };
+        let (hip3, main) = ("extHip3ExternalQuotes", "extExternalQuotes");
+        let main_off = "extExternalQuotes needs the server started with --local-marks";
         let cases = [
-            (None, false, "xyz:TSLA", not_enabled),
-            (None, true, "xyz:TSLA", not_enabled),
-            (Some(marks(None)), false, "xyz:TSLA", not_enabled),
-            (Some(marks(Some(embedded))), false, "xyz:KIOXIA", outside),
+            (None, false, hip3, "xyz:TSLA", not_enabled, 2),
+            (None, true, hip3, "xyz:TSLA", not_enabled, 2),
+            (Some(marks(None)), false, hip3, "xyz:TSLA", not_enabled, 2),
+            (Some(marks(Some(embedded))), false, hip3, "xyz:KIOXIA", outside, 2),
+            (None, false, main, "BTC", main_off, 1),
+            (None, true, main, "BTC", main_off, 1),
+            (Some(marks(None)), false, main, "KIOXIA", "extExternalQuotes KIOXIA is not in the local marks' sources", 1),
         ];
-        for (local_marks, bbo_only, coin, text) in cases {
+        for (local_marks, bbo_only, channel, coin, text, schema) in cases {
             let session = local_marks.is_some();
             let (mut ws, server) = test_server_with_marks(None, local_marks, bbo_only).await;
             for method in ["subscribe", "unsubscribe"] {
-                let message = format!(r#"{{"method":"{method}","subscription":{{"type":"extHip3ExternalQuotes","coin":"{coin}"}}}}"#);
+                let message = format!(r#"{{"method":"{method}","subscription":{{"type":"{channel}","coin":"{coin}"}}}}"#);
                 ws.send(Frame::text(message.into_bytes())).await.unwrap();
                 let frame = tokio::time::timeout(Duration::from_secs(2), ws.next()).await.unwrap().unwrap();
-                let expected = format!(r#"{{"channel":"error","data":"{text}","schemaVersion":2}}"#);
-                assert_eq!(std::str::from_utf8(frame.payload()).unwrap(), expected, "{method}, BBO-only {bbo_only}, local marks {session}");
+                let expected = format!(r#"{{"channel":"error","data":"{text}","schemaVersion":{schema}}}"#);
+                assert_eq!(std::str::from_utf8(frame.payload()).unwrap(), expected, "{channel} {method}, BBO-only {bbo_only}, local marks {session}");
             }
             ws.send(Frame::text(r#"{"method":"ping"}"#.as_bytes().to_vec())).await.unwrap();
             assert_eq!(next_json(&mut ws).await["channel"], "pong", "the connection stays up");

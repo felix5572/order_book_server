@@ -80,6 +80,19 @@ impl FeedSubscriptions {
     pub(crate) fn copy(&self) -> FeedCopy {
         FeedCopy { parts: self.subscriptions.iter().map(|part| (part.shard, part.markets.symbols.len(), part.slot.copy())).collect() }
     }
+
+    /// The partition holding the feed's `market` (its index in the feed's market order) and the market's index there.
+    pub(crate) fn part_of(&self, market: usize) -> (&Subscription, usize) {
+        let mut first = 0;
+        for part in &self.subscriptions {
+            let end = first + part.markets.symbols.len();
+            if market < end {
+                return (part.as_ref(), market - first);
+            }
+            first = end;
+        }
+        unreachable!("{} market {market} is past its partitions' {first}", self.feed.label())
+    }
 }
 
 /// A feed's partitions copied at one moment (`SlotCopy`), by shard: (shard, markets, copy).

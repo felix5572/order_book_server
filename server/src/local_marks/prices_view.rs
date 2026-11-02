@@ -27,8 +27,12 @@ use crate::accounts::marks::{
 };
 
 pub(crate) const SCHEMA_VERSION: u32 = 2;
-/// The owner's tick: a frame of every subscribed coin each tick.
-pub(crate) const INTERVAL_MS: u64 = 50;
+/// The owner's tick: a frame of every subscribed coin each tick, on the mark channels; and the HTTP views', the
+/// external quote channels' among them, which read the owner's snapshot.
+pub(crate) const OWNER_INTERVAL_MS: u64 = 50;
+/// The external quote tick's (`quote_tick`, hyperliquid-trade design 000673 r4): the two external quote channels' WS
+/// frames, published as a coin's decision changes and as a heartbeat, never more often.
+pub(crate) const QUOTE_TICK_INTERVAL_MS: u64 = 5;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -166,9 +170,48 @@ pub(crate) struct ExternalBasisView {
     samples: usize,
 }
 
-/// The basis, or why it is withheld (`extMarkPrices`' local leg, `extHip3ExternalQuotes`).
+/// The basis, or why it is withheld (`extMarkPrices`' local leg, `extHip3ExternalQuotes`, `extExternalQuotes`).
 pub(crate) fn external_basis_view(basis: &Result<ExternalBasis, Withheld>) -> LegView<ExternalBasisView> {
     basis.as_ref().map_or_else(withheld, |basis| LegView::Ready(ExternalBasisView { ratio: basis.ratio, samples: basis.samples }))
+}
+
+/// The external quotes and the basis to them, as `extMarkPrices`' local leg names them, in its order: the external
+/// leg of `extExternalQuotes` (hyperliquid-trade design 000673 §4) and the Binance leg of `extHip3ExternalQuotes`. The
+/// external bid and ask are the quotes' weighted medians (one venue: its quote), exact, the listings' multipliers
+/// applied, off HL's price grid.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExternalView {
+    external_bid_px: String,
+    external_ask_px: String,
+    external_quotes: BTreeMap<&'static str, ExternalQuoteView>,
+    external_basis: LegView<ExternalBasisView>,
+}
+
+/// `quotes` and `basis` as `extMarkPrices`' local leg writes them, field for field (`local_view`).
+pub(crate) fn external_view(quotes: &ExternalQuotes, basis: &Result<ExternalBasis, Withheld>) -> ExternalView {
+    ExternalView {
+        external_bid_px: quotes.bid.to_string(),
+        external_ask_px: quotes.ask.to_string(),
+        external_quotes: external_quotes(quotes),
+        external_basis: external_basis_view(basis),
+    }
+}
+
+/// `{"channel":"error","data":<text>,"schemaVersion":<schema>}`: a refusal of an external quote channel, its text
+/// beside its schema (hyperliquid-trade design 000669 r2 1.4, 000673 r3 §3), so a reader of either schema reads the
+/// text as before and knows the server's schema.
+#[expect(clippy::expect_used, reason = "a string and a number only; serializing cannot fail")]
+pub(crate) fn versioned_refusal(text: &str, schema_version: u32) -> bytes::Bytes {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Refusal<'a> {
+        channel: &'static str,
+        data: &'a str,
+        schema_version: u32,
+    }
+    let refusal = Refusal { channel: "error", data: text, schema_version };
+    bytes::Bytes::from(serde_json::to_vec(&refusal).expect("a serializable DTO"))
 }
 
 #[derive(Serialize)]
@@ -202,7 +245,7 @@ impl<'a> CoinMarksView<'a> {
         Self {
             schema_version: SCHEMA_VERSION,
             coin,
-            interval_ms: INTERVAL_MS,
+            interval_ms: OWNER_INTERVAL_MS,
             published_ts_ms: snapshot.computed_ms,
             node: marks.node.as_ref().map_or_else(withheld, |node| node_view(snapshot, node)),
             local: marks.local.as_ref().map_or_else(withheld, |local| local_view(snapshot, local)),

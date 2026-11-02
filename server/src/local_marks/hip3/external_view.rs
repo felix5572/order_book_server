@@ -12,18 +12,20 @@
 //!
 //! The channel's refusals - not enabled, a coin outside it - keep their text and carry `schemaVersion` beside it
 //! (`refusal_wire`): a schema 1 client reads them as before, a schema 2 client knows the server's.
-
-use std::collections::BTreeMap;
+//!
+//! The WS frames are the external quote tick's (`quote_tick`, hyperliquid-trade design 000673 r4), `intervalMs` 5: a
+//! tick every 5 ms, a coin's frame when a decision field of a leg changed, and every coin's every 50 ms (the
+//! heartbeat). `GET /extHip3ExternalQuotes` reads the owner's snapshot, every 50 ms, `intervalMs` 50.
 
 use serde::Serialize;
 
 use super::{
-    external::{Hip3ExternalCoin, Hip3ExternalLeg, Hip3SourceLeg},
+    external::{Hip3ExternalCoin, Hip3SourceLeg},
     external_equity::Hip3EquityLeg,
 };
 use crate::local_marks::{
-    prices_view::{ExternalBasisView, ExternalQuoteView, INTERVAL_MS, LegView, external_basis_view, external_quotes, withheld},
-    snapshot::LocalMarksSnapshot,
+    prices_view::{ExternalBasisView, ExternalView, LegView, OWNER_INTERVAL_MS, external_basis_view, external_view, versioned_refusal, withheld},
+    snapshot::{ExternalLeg, LocalMarksSnapshot},
 };
 
 pub(crate) const SCHEMA_VERSION: u32 = 2;
@@ -40,17 +42,6 @@ pub(crate) struct Hip3ExternalView<'a> {
     equity: LegView<EquityView>,
 }
 
-/// The external bid and ask (one venue: its quote, exact, its multiplier applied, off HL's price grid), the quote, and
-/// the coin's normal basis to it.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExternalView {
-    external_bid_px: String,
-    external_ask_px: String,
-    external_quotes: BTreeMap<&'static str, ExternalQuoteView>,
-    external_basis: LegView<ExternalBasisView>,
-}
-
 /// The US stock quote of the feed counting now, exact as sent (multiplier 1, off HL's grid), and the coin's normal
 /// basis to its midpoint on that feed.
 #[derive(Serialize)]
@@ -65,16 +56,22 @@ struct EquityView {
 }
 
 impl<'a> Hip3ExternalView<'a> {
-    /// `snapshot` runs with the external quotes, `legs` its coin's.
+    /// The owner's snapshot's (`GET /extHip3ExternalQuotes`): `snapshot` runs with the external quotes, `legs` its
+    /// coin's.
     pub(crate) fn of(snapshot: &'a LocalMarksSnapshot, coin: &'a str, legs: &Hip3ExternalCoin) -> Self {
         let external = snapshot.hip3_external().unwrap_or_else(|| unreachable!("a coin's legs are of a snapshot with the external quotes"));
+        Self::new(coin, OWNER_INTERVAL_MS, external.published_ms, external.quote_max_age_ms, legs)
+    }
+
+    /// The coin's `legs` judged at `published_ms`, of a publisher of `interval_ms`.
+    pub(crate) fn new(coin: &'a str, interval_ms: u64, published_ms: u64, quote_max_age_ms: u64, legs: &Hip3ExternalCoin) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             coin,
-            interval_ms: INTERVAL_MS,
-            published_ts_ms: external.published_ms,
-            quote_max_age_ms: external.quote_max_age_ms,
-            external: leg_view(&legs.external, external_view),
+            interval_ms,
+            published_ts_ms: published_ms,
+            quote_max_age_ms,
+            external: leg_view(&legs.external, |leg: &ExternalLeg| external_view(&leg.quotes, &leg.basis)),
             equity: leg_view(&legs.equity, equity_view),
         }
     }
@@ -94,32 +91,14 @@ impl<'a> Hip3ExternalView<'a> {
 
 /// `{"channel":"error","data":<text>,"schemaVersion":2}`: a refusal of the channel - not enabled, a coin outside it -,
 /// its text as the server always answered it, its schema beside it (design 000669 r2 1.4).
-#[expect(clippy::expect_used, reason = "a string and a number only; serializing cannot fail")]
 pub(crate) fn refusal_wire(text: &str) -> bytes::Bytes {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Refusal<'a> {
-        channel: &'static str,
-        data: &'a str,
-        schema_version: u32,
-    }
-    let refusal = Refusal { channel: "error", data: text, schema_version: SCHEMA_VERSION };
-    bytes::Bytes::from(serde_json::to_vec(&refusal).expect("a serializable DTO"))
+    versioned_refusal(text, SCHEMA_VERSION)
 }
 
 fn leg_view<T, V>(leg: &Hip3SourceLeg<T>, ready: impl FnOnce(&T) -> V) -> LegView<V> {
     match leg {
         Hip3SourceLeg::Unlisted => LegView::Unlisted,
         Hip3SourceLeg::Listed(leg) => leg.as_ref().map_or_else(withheld, |leg| LegView::Ready(ready(leg))),
-    }
-}
-
-fn external_view(leg: &Hip3ExternalLeg) -> ExternalView {
-    ExternalView {
-        external_bid_px: leg.quotes.bid.to_string(),
-        external_ask_px: leg.quotes.ask.to_string(),
-        external_quotes: external_quotes(&leg.quotes),
-        external_basis: external_basis_view(&leg.basis),
     }
 }
 

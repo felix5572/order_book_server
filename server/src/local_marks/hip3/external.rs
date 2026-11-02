@@ -13,12 +13,16 @@
 //! its connection down. The US stock feeds' readings are the tick's, read before that copy. A sample is taken only from
 //! a quote valid then and HL's book usable (read, trusted, not behind) at the publish time; the book behind withholds
 //! no quote - it is not one of their inputs - but takes no sample.
+//!
+//! The external quote tick (`quote_tick`, hyperliquid-trade design 000673) judges each leg's quote by the same rules
+//! (`binance_quote`, `external_equity::session_quote`) at its own publish time, and takes the bases the owner publishes
+//! here (`Hip3ExternalBases`): its windows are moved by the owner only.
 
 use std::sync::Arc;
 
 use super::{
     external_coins::{BinanceListing, Hip3ExternalCoins},
-    external_equity::{EquityBasisWindows, EquityPlace, EquityTick, Hip3EquityLeg, equity_leg},
+    external_equity::{EquityBases, EquityBasisWindows, EquityPlace, EquityTick, Hip3EquityLeg, equity_leg},
     session::equity_session,
     snapshot::Hip3Table,
 };
@@ -26,8 +30,8 @@ use crate::{
     local_marks::{
         external_basis::{self, ExternalBasis, ExternalBasisWindow},
         price::VenuePrice,
-        slot::Validity,
-        snapshot::{ExternalQuotes, Tick, VenueQuote, Withheld},
+        slot::{Entry, Validity},
+        snapshot::{ExternalLeg, ExternalQuotes, Tick, VenueQuote, Withheld},
         sources::Feed,
         subscriptions::FeedProjection,
     },
@@ -70,6 +74,16 @@ impl Hip3ExternalTable {
         self.coins.index(coin)
     }
 
+    /// The coin's Binance contract; `None` where Binance's table lists none.
+    pub(crate) fn binance(&self, index: usize) -> Option<BinanceListing> {
+        self.coins.binance(index)
+    }
+
+    /// The coin's place among the SIP feeds' markets.
+    pub(crate) fn equity_place(&self, index: usize) -> EquityPlace {
+        self.equity[index]
+    }
+
     /// Each coin's place in the book read.
     #[cfg(test)]
     pub(crate) fn book_indices(&self) -> &[usize] {
@@ -101,19 +115,20 @@ pub(crate) enum Hip3SourceLeg<T> {
     Listed(Result<T, Withheld>),
 }
 
-/// A coin's Binance quote and its normal basis to it.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Hip3ExternalLeg {
-    pub(crate) quotes: ExternalQuotes,
-    /// Withheld below its minimum samples.
-    pub(crate) basis: Result<ExternalBasis, Withheld>,
-}
-
-/// A coin's two legs: `external`, Binance's; `equity`, the SIP's or BOATS's.
+/// A coin's two legs: `external`, Binance's quote and its basis; `equity`, the SIP's or BOATS's.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Hip3ExternalCoin {
-    pub(crate) external: Hip3SourceLeg<Hip3ExternalLeg>,
+    pub(crate) external: Hip3SourceLeg<ExternalLeg>,
     pub(crate) equity: Hip3SourceLeg<Hip3EquityLeg>,
+}
+
+/// A coin's bases as its windows publish them at the owner's tick, whatever its quotes and the feeds' stop: Binance's
+/// where Binance lists it, each US stock feed's where the SIP feeds read it - the external quote tick's, which judges
+/// its own quotes and samples nothing (hyperliquid-trade design 000673 r4).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Hip3ExternalBases {
+    pub(crate) binance: Option<Result<ExternalBasis, Withheld>>,
+    pub(crate) equity: Option<EquityBases>,
 }
 
 /// One snapshot's legs of every coin, in the table's order.
@@ -123,6 +138,8 @@ pub(crate) struct Hip3ExternalSnapshot {
     /// The Binance feed's age limit, its frames' `quoteMaxAgeMs`.
     pub(crate) quote_max_age_ms: u64,
     pub(crate) coins: Vec<Hip3ExternalCoin>,
+    /// Each coin's bases, in the table's order.
+    pub(crate) bases: Vec<Hip3ExternalBases>,
 }
 
 /// A coin's basis windows across ticks: Binance's, and one a US stock feed.
@@ -153,7 +170,7 @@ pub(crate) fn hip3_external(
     assert_eq!(reading.projection.entries.len(), table.coins.binance_markets(), "one Binance market per coin it lists");
     let published_ms = reading.published_ms;
     let equity_tick = EquityTick { readings: tick.equity, published_ms, session: equity_session(published_ms), instant: tick.instant };
-    let coins = windows
+    let (coins, bases) = windows
         .iter_mut()
         .enumerate()
         .map(|(index, windows)| {
@@ -161,10 +178,14 @@ pub(crate) fn hip3_external(
             let book = sampled_book(tick, gates, table.book_indices[index]);
             let external = external_leg(coin, table.coins.binance(index), tick, reading, gates.stopped, book, &mut windows.external);
             let equity = equity_leg(coin, table.equity[index], equity_tick, gates.stopped, book, &mut windows.equity);
-            Hip3ExternalCoin { external, equity }
+            let bases = Hip3ExternalBases {
+                binance: table.coins.binance(index).map(|_| windows.external.published()),
+                equity: matches!(table.equity[index], EquityPlace::Read(_)).then(|| windows.equity.published()),
+            };
+            (Hip3ExternalCoin { external, equity }, bases)
         })
-        .collect();
-    Hip3ExternalSnapshot { published_ms, quote_max_age_ms: reading.quote_max_age_ms, coins }
+        .unzip();
+    Hip3ExternalSnapshot { published_ms, quote_max_age_ms: reading.quote_max_age_ms, coins, bases }
 }
 
 /// HL's two sides of the coin when this tick may sample them: the feeds running, the book usable at the publish time,
@@ -187,27 +208,28 @@ fn external_leg(
     stopped: Option<&Withheld>,
     book: Option<(Px, Px)>,
     window: &mut ExternalBasisWindow,
-) -> Hip3SourceLeg<Hip3ExternalLeg> {
+) -> Hip3SourceLeg<ExternalLeg> {
     let Some(listing) = listing else { return Hip3SourceLeg::Unlisted };
-    let quotes = coin_quotes(coin, listing, reading);
+    let quotes = binance_quote(coin, listing, reading.projection.entries[listing.market], reading.published_ms);
     let sample = book.zip(quotes.as_ref().ok()).map(|((bid, ask), quotes)| external_basis::sample(bid, ask, quotes.bid, quotes.ask));
     window.observe(tick.instant, sample);
     if let Some(stopped) = stopped {
         return Hip3SourceLeg::Listed(Err(stopped.clone()));
     }
-    Hip3SourceLeg::Listed(quotes.map(|quotes| Hip3ExternalLeg { quotes, basis: window.published() }))
+    Hip3SourceLeg::Listed(quotes.map(|quotes| ExternalLeg { quotes, basis: window.published() }))
 }
 
-/// The coin's quote valid at the publish time, its multiplier applied; why not.
-fn coin_quotes(coin: &str, listing: BinanceListing, reading: &Hip3ExternalReading) -> Result<ExternalQuotes, Withheld> {
-    let (entry, validity) = reading.projection.entries[listing.market];
+/// The coin's Binance quote valid at `published_ms`, its multiplier applied, from its market's entry and validity
+/// judged then (`observed`); why not: the owner's and the external quote tick's one rule.
+pub(crate) fn binance_quote(coin: &str, listing: BinanceListing, observed: (Option<Entry>, Validity), published_ms: u64) -> Result<ExternalQuotes, Withheld> {
+    let (entry, validity) = observed;
     if validity != Validity::Valid {
         let received = entry.map_or_else(|| "none received".to_string(), |entry| format!("the last received at {} ms", entry.received_ms));
-        let detail = format!("the {} quote of {coin} is {} at {} ms ({received})", Feed::HIP3_EXTERNAL.label(), validity.name(), reading.published_ms);
+        let detail = format!("the {} quote of {coin} is {} at {published_ms} ms ({received})", Feed::HIP3_EXTERNAL.label(), validity.name());
         return Err(Withheld::unavailable(validity.name(), detail));
     }
     let entry = entry.unwrap_or_else(|| unreachable!("a valid entry holds a quote"));
-    received_by(Feed::HIP3_EXTERNAL.label(), coin, entry.received_ms, reading.published_ms)?;
+    received_by(Feed::HIP3_EXTERNAL.label(), coin, entry.received_ms, published_ms)?;
     let quote = entry.quote.unwrap_or_else(|| unreachable!("a valid entry holds a quote"));
     let multiplier = listing.multiplier;
     let scaled = |px: VenuePrice| {
@@ -219,8 +241,9 @@ fn coin_quotes(coin: &str, listing: BinanceListing, reading: &Hip3ExternalReadin
 
 /// A quote received after the publish time - the wall clock stepped back between the tick's reads - is no quote as of
 /// it: neither leg publishes a `receivedTsMs` after `publishedTsMs` (design 000669 r3 §2.1), the leg withheld this tick,
-/// its basis not sampled, the other leg judged alone (review 000672 P2).
-pub(super) fn received_by(feed: &str, coin: &str, received_ms: u64, published_ms: u64) -> Result<(), Withheld> {
+/// its basis not sampled, the other leg judged alone (review 000672 P2). The external quote tick holds each main-dex
+/// venue's quote so too (hyperliquid-trade design 000673).
+pub(crate) fn received_by(feed: &str, coin: &str, received_ms: u64, published_ms: u64) -> Result<(), Withheld> {
     if received_ms <= published_ms {
         return Ok(());
     }
@@ -268,7 +291,7 @@ mod tests {
     }
 
     /// The coin's Binance leg, listed.
-    fn external(coin: &Hip3ExternalCoin) -> &Result<Hip3ExternalLeg, Withheld> {
+    fn external(coin: &Hip3ExternalCoin) -> &Result<ExternalLeg, Withheld> {
         let Hip3SourceLeg::Listed(leg) = &coin.external else { panic!("unlisted: {coin:?}") };
         leg
     }

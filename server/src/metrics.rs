@@ -848,6 +848,69 @@ lazy_static! {
 }
 
 
+// The external quote tick's (hyperliquid-trade design 000673 §7, r4), in a block of their own.
+lazy_static! {
+    /// The external quote tick's work per tick: the subscribed coins' partitions copied, their legs judged, the frames
+    /// due serialized and published.
+    pub static ref EXTERNAL_QUOTE_TICK_SECONDS: Histogram = Histogram::with_opts(
+        HistogramOpts::new("orderbook_external_quote_tick_seconds", "External quote tick work per tick")
+            .buckets(vec![0.00001, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.05])
+    ).expect("metric can be created");
+
+    /// How late each tick woke after the time its interval scheduled it (the tick's drift).
+    pub static ref EXTERNAL_QUOTE_TICK_DRIFT_SECONDS: Histogram = Histogram::with_opts(
+        HistogramOpts::new("orderbook_external_quote_tick_drift_seconds", "External quote tick wake-up after its scheduled time")
+            .buckets(vec![0.00001, 0.0001, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.05, 0.1])
+    ).expect("metric can be created");
+
+    /// The coins each tick published for a changed decision or a new subscription epoch, the heartbeat's apart.
+    pub static ref EXTERNAL_QUOTE_TICK_CHANGED_COINS: Histogram = Histogram::with_opts(
+        HistogramOpts::new("orderbook_external_quote_tick_changed_coins", "Coins an external quote tick published for a change")
+            .buckets(vec![0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0])
+    ).expect("metric can be created");
+
+    /// The coins the last tick judged: those with a subscriber on either channel.
+    pub static ref EXTERNAL_QUOTE_TICK_SUBSCRIBED_COINS: IntGauge = IntGauge::new(
+        "orderbook_external_quote_tick_subscribed_coins",
+        "Coins with an external quote subscriber the last tick judged"
+    ).expect("metric can be created");
+
+    /// The frames the tick published, by channel and cause (`changed`, `first`: a subscription epoch's, `heartbeat`).
+    pub static ref EXTERNAL_QUOTE_PUBLISHED_FRAMES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_external_quote_published_frames_total", "External quote frames published, by channel and cause"),
+        &["channel", "cause"]
+    ).expect("metric can be created");
+
+    /// The external quote frames the WS sessions handed to their connections' queues and the queues accepted, by
+    /// channel (review 000676 r1 P2: published, enqueued and written counted apart).
+    pub static ref EXTERNAL_QUOTE_WS_ENQUEUED_FRAMES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_external_quote_ws_enqueued_frames_total", "External quote frames accepted by WS connection queues, by channel"),
+        &["channel"]
+    ).expect("metric can be created");
+
+    /// The external quote frames, and their bytes, the WS connections' writers wrote to their sockets, counted once
+    /// the write succeeded, by channel.
+    pub static ref EXTERNAL_QUOTE_WS_WRITTEN_FRAMES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_external_quote_ws_written_frames_total", "External quote frames written to WS sockets, by channel"),
+        &["channel"]
+    ).expect("metric can be created");
+
+    pub static ref EXTERNAL_QUOTE_WS_WRITTEN_BYTES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_external_quote_ws_written_bytes_total", "External quote frame bytes written to WS sockets, by channel"),
+        &["channel"]
+    ).expect("metric can be created");
+
+    /// The sampled change frames' way out, by channel and stage (`receipt_to_publish`, once a frame;
+    /// `publish_to_enqueue`, `queue`, `write`, `receipt_to_written`, each connection that wrote it), at most 10
+    /// frames a channel a second: `websocket_server::quote_delivery`.
+    pub static ref EXTERNAL_QUOTE_SAMPLE_SECONDS: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("orderbook_external_quote_sample_seconds", "Sampled external quote change frames' time by stage")
+            .buckets(vec![0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0, 5.0]),
+        &["channel", "stage"]
+    ).expect("metric can be created");
+}
+
+
 // The node marks' trailing stops, in a block of their own (the accounts block is at the macro recursion limit).
 lazy_static! {
     // ==================== NODE MARKS: TRAILING STOPS (batch 2n-1, hyperliquid-trade design 000659) ====================
@@ -1240,6 +1303,15 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_UNKNOWN_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_STOPPED.clone())).ok();
+    REGISTRY.register(Box::new(EXTERNAL_QUOTE_TICK_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(EXTERNAL_QUOTE_TICK_DRIFT_SECONDS.clone())).ok();
+    REGISTRY.register(Box::new(EXTERNAL_QUOTE_TICK_CHANGED_COINS.clone())).ok();
+    REGISTRY.register(Box::new(EXTERNAL_QUOTE_TICK_SUBSCRIBED_COINS.clone())).ok();
+    REGISTRY.register(Box::new(EXTERNAL_QUOTE_PUBLISHED_FRAMES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(EXTERNAL_QUOTE_WS_ENQUEUED_FRAMES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(EXTERNAL_QUOTE_WS_WRITTEN_FRAMES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(EXTERNAL_QUOTE_WS_WRITTEN_BYTES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(EXTERNAL_QUOTE_SAMPLE_SECONDS.clone())).ok();
 
     // File watcher metrics
     REGISTRY.register(Box::new(FILE_EVENTS_TOTAL.clone())).ok();
