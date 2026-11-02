@@ -53,6 +53,11 @@ use crate::{
 pub(crate) const SLOT_MS: u64 = 30_000;
 /// A TWAP activated at once: slot 0 is due 1 s after its start (one waiting for its trigger: at its activation).
 const FIRST_SLOT_MS: u64 = 1_000;
+/// A second's first block comes this far past the second's start or later in half the seconds (bm 11-02 block logs,
+/// 11,863 seconds: p10/p50/p90 7/35/67 ms; at or past 35 ms 51.0%, past 40 ms 43.5%): a suborder due within it past a
+/// second's start more likely runs in that second's first block than in the next one's, and is predicted there (batch
+/// 2q, user 11-02: by the likelier, the block's time not known ahead of it).
+const LIKELY_FIRST_BLOCK_MS: u64 = 35;
 /// Applied events kept for a newer anchor's replay: an anchor comes every ~12 minutes, parsed in a few.
 const RETAIN_MS: u64 = 30 * 60 * 1_000;
 /// Heights held above the complete height at most, each of block log reads and of staged events (~20 minutes of
@@ -97,6 +102,9 @@ struct Twap {
     randomize: bool,
     limit_px: Option<Px>,
     floor: FloorEstimate,
+    /// The earliest slot still to send: past each slot a fill of it shows run, a checkpoint's the slot of its next due
+    /// time `n` (review 000675 r1-r2 P2) - a first block at a run slot's due time does not send it again.
+    next_slot: u64,
 }
 
 /// A TWAP's suborder floor as estimated: a size seen above the deficit at two slots.
@@ -420,6 +428,7 @@ impl TwapBook {
             randomize: activation.randomize,
             limit_px,
             floor: FloorEstimate::default(),
+            next_slot: 0,
         })
     }
 
@@ -575,6 +584,7 @@ impl Twap {
             if self.past_reach(slot, size) && size < rest {
                 self.floor.observe(slot, size);
             }
+            self.next_slot = self.next_slot.max(slot + 1);
         }
         self.executed = self.executed.saturating_add(size);
     }
@@ -591,13 +601,15 @@ impl Twap {
         taken > u128::from(self.total) * (5 * u128::from(slot + self.count_offset) + 1)
     }
 
-    /// The suborder of its first slot due at or after `first_of_second_ms`, when due by `boundary_ms`: the next
-    /// second's first block, at or past it, runs it (one due later in that second runs there only when due before the
-    /// block's time, not known ahead of it - research `mempool_pending_book_20261031`).
+    /// The suborder of its first slot due at or after `first_of_second_ms`, from its next to send, when due by
+    /// `boundary_ms` or within `LIKELY_FIRST_BLOCK_MS` past it: the next second's first block, at or past it, runs it -
+    /// one due past the second's start runs there only when due by the block's time, not known ahead of it, so by the
+    /// likelier (batch 2q); that block coming before it, the next second's runs it, predicted on the basis of that
+    /// block (research `mempool_pending_book_20261031`).
     fn slice(&self, twap_id: u64, first_of_second_ms: u64, boundary_ms: u64) -> Option<TwapSlice> {
-        let slot = first_of_second_ms.saturating_sub(self.origin_ms).div_ceil(SLOT_MS);
+        let slot = first_of_second_ms.saturating_sub(self.origin_ms).div_ceil(SLOT_MS).max(self.next_slot);
         let due_ms = self.due_ms(slot);
-        if slot >= self.slots || due_ms > boundary_ms {
+        if slot >= self.slots || due_ms > boundary_ms + LIKELY_FIRST_BLOCK_MS {
             return None;
         }
         let deficit = self.target(slot).checked_sub(self.executed).filter(|deficit| *deficit > 0)?;
@@ -649,6 +661,7 @@ fn seeded(seed: &CheckpointTwap, market: SeedMarket) -> Result<Twap, &'static st
         randomize: seed.randomize,
         limit_px,
         floor: FloorEstimate::default(),
+        next_slot,
     })
 }
 
@@ -928,7 +941,7 @@ mod tests {
     fn a_randomized_reach_is_one_fraction() {
         let mut twap = Twap {
             user: USER, coin: Coin::new("HYPE"), is_buy: true, total: 160, executed: 0, lot: 10, slots: 17, origin_ms: 0, count_offset: 1,
-            randomize: true, limit_px: None, floor: FloorEstimate::default(),
+            randomize: true, limit_px: None, floor: FloorEstimate::default(), next_slot: 0,
         };
         for slot in 0..3 {
             twap.filled(slot * SLOT_MS, 10);
@@ -963,19 +976,61 @@ mod tests {
         assert_eq!(harness.due_sizes(slot9 - 1), [(7, 9, 10 * LOT)]);
     }
 
-    /// A slot due at the second's start runs in that second's first block, its time at or past it: predicted on the
-    /// block before; one due 1 ms later waits for the next second's.
+    /// A slot due at the second's start runs in that second's first block, its time at or past it; one due up to
+    /// `LIKELY_FIRST_BLOCK_MS` past the start more likely so (batch 2q): each predicted on the block before; one due
+    /// later waits for the next second's. That first block here at the second's start, before the two due past it,
+    /// they run in the next second's, predicted on the block before it with the third.
     #[test]
-    fn a_slot_due_at_the_second_runs_in_its_first_block() {
+    fn a_slot_due_at_or_just_past_the_second_is_predicted_in_its_first_block() {
         let mut harness = Harness::anchored(Vec::new());
         activate(&mut harness, 7, 110 * ONE, 5, 10);
-        let later = activation(8, 110 * ONE, 5, time_ms(10) + 1);
-        harness.book.on_statuses(10, vec![TwapEvent::Activated(later)]);
+        for (twap_id, past_ms) in [(8, 1), (10, LIKELY_FIRST_BLOCK_MS), (11, LIKELY_FIRST_BLOCK_MS + 1)] {
+            harness.book.on_statuses(10, vec![TwapEvent::Activated(activation(twap_id, 110 * ONE, 5, time_ms(10) + past_ms))]);
+        }
         harness.through(19).unwrap();
-        assert_eq!(harness.due_sizes(19), [(7, 0, 10 * ONE)], "due at {}", time_ms(20));
+        assert_eq!(harness.due_sizes(19), [(7, 0, 10 * ONE), (8, 0, 10 * ONE), (10, 0, 10 * ONE)], "the second from {}", time_ms(20));
         harness.book.on_fills(20, vec![fill(7, 1, 10 * ONE)]);
         harness.through(29).unwrap();
-        assert_eq!(harness.due_sizes(29), [(8, 0, 10 * ONE)]);
+        assert_eq!(harness.due_sizes(29), [(8, 0, 10 * ONE), (10, 0, 10 * ONE), (11, 0, 10 * ONE)]);
+    }
+
+    /// Review 000675 r1-r2 P2: slot 0 due at second 2's start, its first block's time, filled 4 of 10 there - the slot
+    /// ran, not predicted again in the next second, slot 1 taking its deficit, 20 - 4 -, followed on, or from a
+    /// checkpoint then or after (its `n` slot 1's due time) replacing it, or first followed from that checkpoint.
+    #[test]
+    fn a_slot_run_in_part_at_its_due_time_is_not_predicted_again() {
+        let seed = CheckpointTwap {
+            id: 7,
+            user: USER,
+            asset: HYPE,
+            is_buy: true,
+            total: 11_000,
+            executed: 400,
+            duration_s: 300,
+            start_ms: time_ms(10),
+            next_due_ms: time_ms(20) + SLOT_MS,
+            slot_count: 2,
+            randomize: false,
+            reduce_only: false,
+            limit_px_raw: None,
+        };
+        for (path, activated, anchor_height) in [("followed on", true, None), ("checkpoint 20", true, Some(20)), ("checkpoint 25", true, Some(25)), ("first from checkpoint 20", false, Some(20))] {
+            let mut harness = Harness::anchored(Vec::new());
+            if activated {
+                activate(&mut harness, 7, 110 * ONE, 5, 10);
+                harness.through(19).unwrap();
+                assert_eq!(harness.due_sizes(19), [(7, 0, 10 * ONE)]);
+                harness.book.on_fills(20, vec![fill(7, 1, 4 * ONE)]);
+            }
+            if let Some(height) = anchor_height {
+                harness.book.on_anchor(anchor(height, vec![seed.clone()]));
+            }
+            harness.through(29).unwrap();
+            assert_eq!((harness.book.executed(7), harness.due_sizes(29)), (Some(4 * ONE), vec![]), "{path}");
+            let slot1 = first_block_after(time_ms(20) + SLOT_MS - 1);
+            harness.through(slot1 - 1).unwrap();
+            assert_eq!(harness.due_sizes(slot1 - 1), [(7, 1, 16 * ONE)], "{path}");
+        }
     }
 
     /// A newer anchor replaces the state and replays the events after it; a TWAP the same parent keeps its floor.

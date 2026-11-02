@@ -808,14 +808,17 @@ impl Shadow {
     }
 
     /// The suborders due as of `due_of`, when it is not what they stand on: none while `None`. The coins whose
-    /// suborders changed.
+    /// suborders changed - into a new second, every coin holding one: its cut moved with the second, the same suborder
+    /// going on to it as its first block came before it due (review 000675 r1 P1).
     fn due_anew(&mut self, due_of: Option<(u64, u64)>, basis_ms: u64) -> HashSet<Coin> {
         if due_of == self.due_of {
             return HashSet::new();
         }
         let known = due_of.is_some();
         let due = if known { self.twaps.due(basis_ms) } else { DueSlices::default() };
-        let mut affected: HashSet<Coin> = due.iter().filter(|(coin, slices)| self.due.get(*coin) != Some(slices)).map(|(coin, _)| coin.clone()).collect();
+        let second_moved = due_of.map(|(_, second)| second) != self.due_of.map(|(_, second)| second);
+        let mut affected: HashSet<Coin> =
+            due.iter().filter(|(coin, slices)| second_moved || self.due.get(*coin) != Some(slices)).map(|(coin, _)| coin.clone()).collect();
         affected.extend(self.due.keys().filter(|coin| !due.contains_key(*coin)).cloned());
         for coin in due.keys() {
             self.coins.entry(coin.clone()).or_default();
@@ -2781,6 +2784,34 @@ pub(crate) mod tests {
             })
             .collect();
         assert_eq!(order, ["BTC 970", "ETH 975", "twap 7 @ 101", "twap 8 @ 101", "twap 8 @ 102", "twap 6 @ 101", "ETH 990", "BTC 980"]);
+    }
+
+    /// Review 000675 r1 P1: slot 0 due at 4,035 ms - past second 4's start, likely run in its first block (batch 2q) -,
+    /// an ALO selling 1 at 100 seen at 3,990 ms, past that second's cut (3,980): the suborder takes 0.1 at 101, the
+    /// ALO rests after it. Second 4's first block at 4,000 ms, before it due, the slot goes on to second 5, its cut
+    /// 4,980: the TWAP streams proven before the replica confirms that block, the coin is replayed - the ALO rests
+    /// first and the suborder takes 0.1 of it.
+    #[test]
+    fn a_suborder_going_on_to_the_next_second_is_replayed_at_its_cut() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        let mut anchor = twap_anchor(harness.height);
+        let twap = &mut Arc::make_mut(&mut anchor).twaps[0];
+        (twap.start_ms, twap.next_due_ms) = (3_035, 4_035);
+        drop(harness.shadow.on_anchor(anchor, Some(&harness.replica)));
+        drop(harness.twaps_known_now());
+        drop(harness.line(3_990, 1, vec![alo_ask("100", "0x0a")]));
+        assert_eq!(harness.bbo().1, Some(level("100", "1", 1)), "the suborder took 0.1 at 101 before the ALO rested");
+        while block_time_ms(harness.height) < 3_900 {
+            drop(harness.block(&[], vec![], vec![]));
+        }
+        drop(harness.log(&[]));
+        drop(harness.prove_twaps());
+        let step = harness.confirm(vec![], vec![]);
+        assert_eq!(block_time_ms(harness.height), 4_000);
+        assert!(harness.shadow.twaps_known());
+        assert!(step.changed.contains(&Coin::new(BTC)));
+        assert_eq!(harness.bbo().1, Some(level("100", "0.9", 1)), "the ALO before the suborder now");
     }
 
     /// Batch 2i (design 000631 r2): the next height not proven yet, the suborders of the second stand - no replay, the
