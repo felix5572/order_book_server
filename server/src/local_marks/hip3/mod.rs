@@ -10,6 +10,8 @@ pub(crate) mod carry;
 pub(crate) mod compute;
 pub(crate) mod ema;
 pub(crate) mod external;
+pub(crate) mod external_coins;
+pub(crate) mod external_equity;
 pub(crate) mod external_sources;
 pub(crate) mod external_view;
 pub(crate) mod protocol;

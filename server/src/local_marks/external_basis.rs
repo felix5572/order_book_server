@@ -15,7 +15,7 @@ use std::{collections::VecDeque, time::Duration};
 
 use tokio::time::Instant;
 
-use super::snapshot::{ExternalQuotes, Withheld};
+use super::{price::VenuePrice, snapshot::Withheld};
 use crate::order_book::Px;
 
 pub(crate) const WINDOW: Duration = Duration::from_secs(600);
@@ -31,12 +31,13 @@ pub(crate) struct ExternalBasis {
     pub(crate) samples: usize,
 }
 
-/// HL's book midpoint over the external bid and ask medians' midpoint - 1.
-pub(crate) fn sample(bid: Px, ask: Px, external: &ExternalQuotes) -> f64 {
+/// HL's book midpoint over the external bid and ask's midpoint - 1: the main dex's and the HIP-3 Binance leg's
+/// medians, the HIP-3 US stock leg's quote.
+pub(crate) fn sample(bid: Px, ask: Px, external_bid: VenuePrice, external_ask: VenuePrice) -> f64 {
     #[expect(clippy::cast_precision_loss, reason = "book prices are below 2^53")]
     let book_mid = f64::midpoint(bid.value() as f64, ask.value() as f64) / BOOK_PRICE_SCALE;
-    let external_mid = f64::midpoint(external.bid.to_f64(), external.ask.to_f64());
-    book_mid / external_mid - 1.0
+    let external_midpoint = f64::midpoint(external_bid.to_f64(), external_ask.to_f64());
+    book_mid / external_midpoint - 1.0
 }
 
 /// One coin's samples of the last `WINDOW` by the monotonic clock and their median: the local marks owner's across
@@ -90,7 +91,6 @@ impl ExternalBasisWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_marks::price::VenuePrice;
 
     /// `count` samples of `ratio`, a second apart from `start`; the instant after the last.
     fn fill(window: &mut ExternalBasisWindow, start: Instant, count: u32, ratio: f64) -> Instant {
@@ -166,8 +166,7 @@ mod tests {
     #[test]
     fn a_sample_is_the_book_midpoint_over_the_external_midpoint() {
         let price = |text| VenuePrice::parse(text).unwrap();
-        let external = ExternalQuotes { bid: price("99.9"), ask: price("100.1"), venues: Vec::new() };
-        let ratio = sample(Px::new(10_000_000_000), Px::new(10_020_000_000), &external);
+        let ratio = sample(Px::new(10_000_000_000), Px::new(10_020_000_000), price("99.9"), price("100.1"));
         assert!((ratio - 0.001).abs() < 1e-15, "{ratio}");
     }
 }

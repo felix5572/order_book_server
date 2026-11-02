@@ -9,6 +9,9 @@
 //! A session is one day's (an overnight session the day its evening begins): the offset carry starts over in each.
 //! Holidays and early closes are not encoded: with the relayer's external price equal to its oracle and a fresh quote
 //! this is an observation gate, not proof that the market is open.
+//!
+//! A quote's own session, by its exchange time, is the venue's (`venue_session`, hyperliquid-trade design 000669 r1
+//! 1.3): the same, but BOATS's overnight from 20:00, when it opens, not from the relayer's 20:05.
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday};
 
@@ -35,8 +38,19 @@ pub(crate) struct EquitySessionId {
     pub(crate) session: EquitySession,
 }
 
-/// The session unix ms `utc_ms` is in; `None` outside every session.
+/// The session unix ms `utc_ms` is in, as the relayer covers it; `None` outside every session.
 pub(crate) fn equity_session(utc_ms: u64) -> Option<EquitySessionId> {
+    session_at(utc_ms, OVERNIGHT_OPEN_MINUTE)
+}
+
+/// The session a venue quoting at unix ms `utc_ms` (its exchange time) quotes in: the SIP's day sessions, BOATS's
+/// overnight from 20:00 (its quote of 20:02 is the night's); `None` outside every session.
+pub(crate) fn venue_session(utc_ms: u64) -> Option<EquitySessionId> {
+    session_at(utc_ms, POST_CLOSE_MINUTE)
+}
+
+/// The session `utc_ms` is in, the overnight session starting at `overnight_open_minute`.
+fn session_at(utc_ms: u64, overnight_open_minute: u32) -> Option<EquitySessionId> {
     let utc = i64::try_from(utc_ms).ok().and_then(DateTime::from_timestamp_millis)?.naive_utc();
     let local = utc + chrono::Duration::hours(new_york_offset_hours(utc));
     let (date, minute) = (local.date(), minute_of_day(local.time()));
@@ -45,7 +59,7 @@ pub(crate) fn equity_session(utc_ms: u64) -> Option<EquitySessionId> {
         _ if minute < REGULAR_OPEN_MINUTE => EquitySession::Pre,
         _ if minute < REGULAR_CLOSE_MINUTE => EquitySession::Regular,
         _ if minute < POST_CLOSE_MINUTE => EquitySession::Post,
-        _ if minute < OVERNIGHT_OPEN_MINUTE => return None,
+        _ if minute < overnight_open_minute => return None,
         _ => return overnight_begun(date),
     };
     (!matches!(date.weekday(), Weekday::Sat | Weekday::Sun)).then_some(EquitySessionId { date, session })
@@ -137,6 +151,25 @@ mod tests {
         assert_eq!(session("2026-11-02T01:05:00Z"), Some((day(11, 1), EquitySession::Overnight)));
         assert_eq!(session("2026-11-02T08:59:59Z"), Some((day(11, 1), EquitySession::Overnight)), "03:59:59 EST");
         assert_eq!(session("2026-11-02T09:00:00Z"), Some((day(11, 2), EquitySession::Pre)));
+    }
+
+    /// Design 000669 r1 1.3: a quote's session is the venue's, BOATS's overnight from 20:00; the night across midnight
+    /// is the evening's, Friday's and Saturday's evenings none; the day sessions are the relayer's.
+    #[test]
+    fn a_venue_quotes_overnight_from_20_00() {
+        let venue = |text: &str| venue_session(ms(text)).map(|id| (id.date, id.session));
+        // Tuesday 2026-10-27 20:00 EDT is Wednesday 00:00 UTC
+        assert_eq!(venue("2026-10-27T23:59:59.999Z"), Some((day(10, 27), EquitySession::Post)));
+        assert_eq!(venue("2026-10-28T00:00:00Z"), Some((day(10, 27), EquitySession::Overnight)), "20:00: BOATS opens");
+        assert_eq!(session("2026-10-28T00:02:00Z"), None, "20:02: the relayer covers no session yet");
+        assert_eq!(venue("2026-10-28T00:02:00Z"), session("2026-10-28T00:05:00Z"), "20:02's quote is of the night 20:05 starts");
+        assert_eq!(venue("2026-10-28T07:59:59.999Z"), Some((day(10, 27), EquitySession::Overnight)), "03:59 Wednesday: Tuesday's night");
+        assert_eq!(venue("2026-10-28T08:00:00Z"), Some((day(10, 28), EquitySession::Pre)));
+        assert_eq!(venue("2026-10-28T13:30:00Z"), session("2026-10-28T13:30:00Z"));
+        // Friday 2026-10-30 20:00 EDT, Saturday 01:00, Sunday 2026-11-01 20:00 EST
+        assert_eq!(venue("2026-10-31T00:00:00Z"), None, "Friday 20:00");
+        assert_eq!(venue("2026-10-31T05:00:00Z"), None, "Saturday 01:00");
+        assert_eq!(venue("2026-11-02T01:00:00Z"), Some((day(11, 1), EquitySession::Overnight)), "Sunday 20:00 EST");
     }
 
     #[test]

@@ -51,6 +51,9 @@ pub(crate) enum LegView<T> {
     Unavailable { reason_code: &'static str, reason: String },
     #[serde(rename_all = "camelCase")]
     Stale { reason_code: &'static str, reason: String },
+    /// `{"status":"unlisted"}`: the coin is not in this leg's source table - never a price, not an unknown one
+    /// (`extHip3ExternalQuotes` schema 2, hyperliquid-trade design 000669 r1 1.2); no other channel's leg is.
+    Unlisted,
 }
 
 /// The replay's state of the coin at the node state's height: what the next `SetGlobalAction` takes, the stored oracle

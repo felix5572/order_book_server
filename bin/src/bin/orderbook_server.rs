@@ -127,14 +127,15 @@ struct Args {
     #[arg(long, default_value = "false")]
     hip3_sip_marks: bool,
 
-    /// HIP-3 external quotes (hyperliquid-trade design 000664; needs --local-marks and
-    /// --hip3-external-quote-max-age-ms): Binance's `TRADIFI_PERPETUAL` contracts of the coins in
-    /// server/data/hip3_external_sources.json, in connections of their own, each coin's external bid and ask and its
-    /// normal basis to them; served at GET /extHip3ExternalQuotes and the extHip3ExternalQuotes subscription.
+    /// HIP-3 external quotes (hyperliquid-trade design 000664, 000669; needs --local-marks and
+    /// --hip3-external-quote-max-age-ms), for the coins of the Binance and SIP source tables in server/data: Binance's
+    /// `TRADIFI_PERPETUAL` contracts, in connections of their own, each coin's external bid and ask and its normal
+    /// basis to them; and the SIP or BOATS quote of a SIP coin and its basis, from the --hip3-sip-marks feeds (off
+    /// without them); served at GET /extHip3ExternalQuotes and the extHip3ExternalQuotes subscription (schema 2).
     #[arg(long, default_value = "false", requires = "hip3_external_quote_max_age_ms")]
     hip3_external_quotes: bool,
 
-    /// The HIP-3 external quotes' age limit: a coin's quote older than this many ms is withheld (`expired`).
+    /// The HIP-3 external quotes' age limit: a coin's Binance quote older than this many ms is withheld (`expired`).
     #[arg(long, requires = "hip3_external_quotes")]
     hip3_external_quote_max_age_ms: Option<u64>,
 
@@ -292,7 +293,7 @@ async fn main() -> Result<()> {
         println!("  HIP-3 US stock marks: ON (Alpaca SIP and BOATS feeds, GET /extHip3MarkPrices)");
     }
     if let Some(quote_max_age_ms) = config.hip3_external_quote_max_age_ms {
-        println!("  HIP-3 external quotes: ON (Binance TradFi perpetuals, quote age limit {quote_max_age_ms} ms, GET /extHip3ExternalQuotes)");
+        println!("  HIP-3 external quotes: ON (Binance TradFi perpetuals, quote age limit {quote_max_age_ms} ms; SIP/BOATS of the SIP coins; GET /extHip3ExternalQuotes)");
     }
     if config.no_resync {
         println!("  Re-sync: DISABLED (--no-resync) — drift tolerated, book will NOT self-heal");

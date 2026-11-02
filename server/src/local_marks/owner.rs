@@ -51,8 +51,8 @@ pub(crate) struct LocalMarks {
 impl LocalMarks {
     /// Spawns the owner task, and a watcher logging its end.
     pub(crate) fn start(feeds: Arc<LocalMarkFeeds>, node_prices: watch::Receiver<NodePrices>, book: impl BookPrices) -> Self {
-        let external_sources = feeds.hip3_external.as_ref().map(|external| &*external.sources);
-        let table = Arc::new(CoinTable::new(&feeds.sources, feeds.hip3.as_deref(), external_sources));
+        let external_coins = feeds.hip3_external.as_ref().map(|external| &external.coins);
+        let table = Arc::new(CoinTable::new(&feeds.sources, feeds.hip3.as_deref(), external_coins));
         let now_ms = now_ms();
         let readings = feeds.readings(now_ms);
         let equity = feeds.equity_readings(now_ms);
@@ -129,8 +129,10 @@ async fn run_owner(
     }
 }
 
-/// The HIP-3 external quotes' reading of this tick, last of its reads: the partitions copied, then the publish time
-/// taken and their validity judged at it (hyperliquid-trade design 000664 r4); `None` without them.
+/// The HIP-3 external quotes' reading of this tick, last of its reads - after the US stock feeds' (`equity_readings`),
+/// whose quotes the US stock leg judges at the same publish time (design 000669 r1 1.3) -: the Binance partitions
+/// copied, then the publish time taken and their validity judged at it (hyperliquid-trade design 000664 r4), so no
+/// quote of either leg was received after it; `None` without them.
 fn hip3_external_reading(feeds: &LocalMarkFeeds) -> Option<Hip3ExternalReading> {
     let external = feeds.hip3_external.as_ref()?;
     let copy = external.copy();

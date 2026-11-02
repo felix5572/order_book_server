@@ -444,17 +444,19 @@ fn start_local_marks(
     let accounts = accounts.ok_or("--local-marks needs --accounts: the local marks read the node replica of the account view")?;
     let sources = MarkSources::embedded()?;
     info!("Local marks: {} coins, venue feeds starting", sources.coins().count());
+    // one SIP table, loaded once: the SIP feeds' markets and the external quotes' coins (design 000669 r1 1.1)
+    let sip_sources = Arc::new(Hip3SipSources::embedded()?);
     let equity = if config.hip3_sip_marks {
-        let sources = Hip3SipSources::embedded()?;
-        info!("HIP-3 US stock marks: {} coins, the Alpaca SIP and BOATS feeds starting", sources.coins().count());
-        Some(EquityFeedsConfig { sources: Arc::new(sources), credentials: AlpacaCredentials::from_env()? })
+        info!("HIP-3 US stock marks: {} coins, the Alpaca SIP and BOATS feeds starting", sip_sources.coins().count());
+        Some(EquityFeedsConfig { sources: Arc::clone(&sip_sources), credentials: AlpacaCredentials::from_env()? })
     } else {
         None
     };
     let hip3_external = config.hip3_external_quote_max_age_ms.map(|quote_max_age_ms| {
         let sources = Hip3ExternalSources::embedded()?;
-        info!("HIP-3 external quotes: {} coins, Binance's TradFi perpetuals, a quote withheld past {quote_max_age_ms} ms", sources.coins().count());
-        Ok::<_, String>(Hip3ExternalConfig { sources: Arc::new(sources), quote_max_age_ms })
+        let (binance, sip, feeds) = (sources.coins().count(), sip_sources.coins().count(), if config.hip3_sip_marks { "on" } else { "off" });
+        info!("HIP-3 external quotes: {binance} Binance TradFi perpetuals (a quote withheld past {quote_max_age_ms} ms) and {sip} SIP coins (SIP/BOATS feeds {feeds})");
+        Ok::<_, String>(Hip3ExternalConfig { sources: Arc::new(sources), sip_sources: Arc::clone(&sip_sources), quote_max_age_ms })
     });
     let feeds = Arc::new(LocalMarkFeeds::start(Arc::new(sources), equity, hip3_external.transpose()?));
     Ok(Some(LocalMarks::start(feeds, accounts.node_prices(), Arc::clone(listener))))
@@ -1124,11 +1126,10 @@ async fn receive_client_message(
     if bbo_only && !matches!(&subscription, Subscription::Bbo { .. }) {
         // the HIP-3 external quotes answer as with their switch off, the one refusal a client takes for the channel's
         // absence (hyperliquid-trade design 000664 r4); any other is a session error to it
-        let refused = if matches!(subscription, Subscription::Hip3ExternalQuotes { .. }) {
-            mark_prices::hip3_external_not_enabled()
-        } else {
-            "BBO-only mode: L2/L4/Trades subscriptions disabled. Only BBO subscriptions allowed.".to_string()
-        };
+        if matches!(subscription, Subscription::Hip3ExternalQuotes { .. }) {
+            return outbound.send_frame(mark_prices::hip3_external_not_enabled()).await;
+        }
+        let refused = "BBO-only mode: L2/L4/Trades subscriptions disabled. Only BBO subscriptions allowed.".to_string();
         return outbound.send_message(ServerResponse::Error(refused)).await;
     }
     // this is used for display purposes only, hence unwrap_or_default. It also shouldn't fail
@@ -1158,7 +1159,7 @@ async fn receive_client_message(
         _ => None,
     } {
         let Some(session) = mark_prices.as_mut() else {
-            return outbound.send_message(ServerResponse::Error(mark_prices::refusal_without_local_marks(market))).await;
+            return mark_prices::refuse_without_local_marks(outbound, market).await;
         };
         return session.on_client_message(outbound, manager, client_message, market, coin).await;
     }
@@ -2367,6 +2368,15 @@ mod tests {
 
     /// A server of the test book, without the local marks or the pending book, BBO-only or not, and a client of it.
     async fn test_server(accounts: Option<AccountsHandle>, bbo_only: bool) -> (yawc::TcpWebSocket, tokio::task::JoinHandle<()>) {
+        test_server_with_marks(accounts, None, bbo_only).await
+    }
+
+    /// The same with the local marks `local_marks`.
+    async fn test_server_with_marks(
+        accounts: Option<AccountsHandle>,
+        local_marks: Option<LocalMarks>,
+        bbo_only: bool,
+    ) -> (yawc::TcpWebSocket, tokio::task::JoinHandle<()>) {
         let (tx, _rx) = channel(32);
         let mut state = OrderBookListener::new(Some(tx.clone()), false, ActiveL2Params::new(), (true, true, true));
         state.init_from_snapshot(btc_bid_snapshot(PX_100), 10);
@@ -2376,9 +2386,9 @@ mod tests {
         let app = Router::new().route(
             "/ws",
             get(move |incoming| {
-                let (listener, tx, cache, trust, accounts) =
-                    (listener.clone(), tx.clone(), cache.clone(), trust.clone(), accounts.clone());
-                async move { ws_handler(incoming, tx, listener, cache, trust, accounts, None, None, bbo_only, 0, 0, yawc::Options::default(), None) }
+                let (listener, tx, cache, trust, accounts, marks) =
+                    (listener.clone(), tx.clone(), cache.clone(), trust.clone(), accounts.clone(), local_marks.clone());
+                async move { ws_handler(incoming, tx, listener, cache, trust, accounts, marks, None, bbo_only, 0, 0, yawc::Options::default(), None) }
             }),
         );
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2472,20 +2482,44 @@ mod tests {
         server.abort();
     }
 
-    /// Review 000665 r1 P2: without the local marks, and in BBO-only mode, `extHip3ExternalQuotes` answers a subscribe
-    /// and an unsubscribe with its "not enabled" - the one refusal a client takes for the channel's absence -, at the real
-    /// dispatch; the connection stays up.
+    /// Review 000665 r1 P2, design 000669 r2 1.4: at the real dispatch, `extHip3ExternalQuotes` answers a subscribe and
+    /// an unsubscribe with its "not enabled" without the local marks, in BBO-only mode and with the local marks but its
+    /// switch off, and with its "not in the sources" for a coin of neither table; each its text as before with
+    /// `"schemaVersion":2` beside it, byte for byte; the connection stays up.
     #[tokio::test]
     #[allow(clippy::future_not_send)]
-    async fn test_hip3_external_quotes_answer_not_enabled_without_the_local_marks_or_in_bbo_only() {
+    async fn test_hip3_external_quotes_refusals_carry_the_schema_at_the_dispatch() {
+        use crate::local_marks::{
+            feeds::{Hip3ExternalConfig, LocalMarkFeeds},
+            snapshot::tests::{NOW_MS, World},
+        };
         let not_enabled = "extHip3ExternalQuotes is not enabled (the server runs with --hip3-external-quotes?)";
-        for bbo_only in [false, true] {
-            let (mut ws, server) = test_server(None, bbo_only).await;
+        let outside = "extHip3ExternalQuotes xyz:KIOXIA is not in the HIP-3 external quote sources";
+        let world = World::new();
+        let (_snapshots, receiver) = tokio::sync::watch::channel(Arc::new(world.snapshot(NOW_MS)));
+        let sources = Arc::new(world.sources);
+        let marks = |external: Option<Hip3ExternalConfig>| {
+            let feeds = LocalMarkFeeds::idle_with_external_for_test(Arc::clone(&sources), None, external);
+            LocalMarks::of_snapshots_for_test(Arc::new(feeds), receiver.clone())
+        };
+        let embedded = Hip3ExternalConfig {
+            sources: Arc::new(Hip3ExternalSources::embedded().unwrap()), sip_sources: Arc::new(Hip3SipSources::embedded().unwrap()), quote_max_age_ms: 60_000,
+        };
+        let cases = [
+            (None, false, "xyz:TSLA", not_enabled),
+            (None, true, "xyz:TSLA", not_enabled),
+            (Some(marks(None)), false, "xyz:TSLA", not_enabled),
+            (Some(marks(Some(embedded))), false, "xyz:KIOXIA", outside),
+        ];
+        for (local_marks, bbo_only, coin, text) in cases {
+            let session = local_marks.is_some();
+            let (mut ws, server) = test_server_with_marks(None, local_marks, bbo_only).await;
             for method in ["subscribe", "unsubscribe"] {
-                let message = format!(r#"{{"method":"{method}","subscription":{{"type":"extHip3ExternalQuotes","coin":"xyz:TSLA"}}}}"#);
+                let message = format!(r#"{{"method":"{method}","subscription":{{"type":"extHip3ExternalQuotes","coin":"{coin}"}}}}"#);
                 ws.send(Frame::text(message.into_bytes())).await.unwrap();
-                let refused = next_json(&mut ws).await;
-                assert_eq!((refused["channel"].as_str(), refused["data"].as_str()), (Some("error"), Some(not_enabled)), "{method}, BBO-only {bbo_only}");
+                let frame = tokio::time::timeout(Duration::from_secs(2), ws.next()).await.unwrap().unwrap();
+                let expected = format!(r#"{{"channel":"error","data":"{text}","schemaVersion":2}}"#);
+                assert_eq!(std::str::from_utf8(frame.payload()).unwrap(), expected, "{method}, BBO-only {bbo_only}, local marks {session}");
             }
             ws.send(Frame::text(r#"{"method":"ping"}"#.as_bytes().to_vec())).await.unwrap();
             assert_eq!(next_json(&mut ws).await["channel"], "pong", "the connection stays up");

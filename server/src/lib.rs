@@ -82,10 +82,10 @@ pub struct ServerConfig {
     /// Run the HIP-3 US stocks' local marks (design 000535, 000543; needs `local_marks`): the Alpaca SIP and BOATS
     /// feeds, their key from the environment.
     pub hip3_sip_marks: bool,
-    /// Run the HIP-3 external quotes (hyperliquid-trade design 000664; needs `local_marks`), each quote withheld once
-    /// older than this many ms: Binance's `TRADIFI_PERPETUAL` contracts of the coins in
-    /// `server/data/hip3_external_sources.json`, served on `extHip3ExternalQuotes` and `GET /extHip3ExternalQuotes`.
-    /// `None`: off.
+    /// Run the HIP-3 external quotes (hyperliquid-trade design 000664, 000669; needs `local_marks`), each Binance quote
+    /// withheld once older than this many ms: Binance's `TRADIFI_PERPETUAL` contracts of the coins in
+    /// `server/data/hip3_external_sources.json` and the SIP coins' quotes of the `hip3_sip_marks` feeds, served on
+    /// `extHip3ExternalQuotes` and `GET /extHip3ExternalQuotes`. `None`: off.
     pub hip3_external_quote_max_age_ms: Option<u64>,
     /// Run the pending book (hyperliquid-trade design 000604): a replica of the book on its own thread, fed by the
     /// listener, and the node's mempool read on the same thread (needs `accounts`, whose anchor names its asset ids).

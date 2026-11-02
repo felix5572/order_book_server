@@ -95,8 +95,9 @@ pub(crate) enum Subscription {
     /// `--hip3-sip-marks`.
     #[serde(rename = "extHip3MarkPrices", rename_all = "camelCase")]
     Hip3MarkPrices { coin: String },
-    /// `extHip3ExternalQuotes`: one HIP-3 coin's external quote (Binance's `TRADIFI_PERPETUAL` contract) and its normal
-    /// basis every 50 ms (hyperliquid-trade design 000664); needs `--hip3-external-quotes`.
+    /// `extHip3ExternalQuotes`: one HIP-3 coin's external quotes - Binance's `TRADIFI_PERPETUAL` contract, the SIP or
+    /// BOATS quote - and its normal basis to each every 50 ms (hyperliquid-trade design 000664, 000669); needs
+    /// `--hip3-external-quotes`.
     #[serde(rename = "extHip3ExternalQuotes", rename_all = "camelCase")]
     Hip3ExternalQuotes { coin: String },
     /// `extPendingBbo`: one coin's best levels as the mempool's pending actions will leave the book, beside the

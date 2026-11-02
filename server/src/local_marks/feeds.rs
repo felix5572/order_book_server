@@ -23,6 +23,7 @@ use tokio::{
 use super::{
     connection::{ConnectionEnd, FeedError, Timeouts, run_connection},
     hip3::{
+        external_coins::Hip3ExternalCoins,
         external_sources::Hip3ExternalSources,
         protocol::{AlpacaCredentials, EquityFeed, alpaca_session},
         sources::Hip3SipSources,
@@ -55,26 +56,28 @@ pub(crate) struct EquityFeedsConfig {
     pub(crate) credentials: AlpacaCredentials,
 }
 
-/// The HIP-3 external quotes' configuration (hyperliquid-trade design 000664): their markets and each quote's age
-/// limit.
+/// The HIP-3 external quotes' configuration (hyperliquid-trade design 000664, 000669): Binance's markets, each
+/// quote's age limit, and the SIP table - the SIP feeds' when they run, loaded once - whose coins are the channel's
+/// too, with or without those feeds.
 pub(crate) struct Hip3ExternalConfig {
     pub(crate) sources: Arc<Hip3ExternalSources>,
+    pub(crate) sip_sources: Arc<Hip3SipSources>,
     pub(crate) quote_max_age_ms: u64,
 }
 
 /// The HIP-3 external quotes' feed: Binance's `TRADIFI_PERPETUAL` contracts in partitions of their own, apart from the
 /// main-dex perps', a coin's quote withheld once older than `quote_max_age_ms` (`Validity::Expired`) - a coin silent
-/// while its partition's others quote is withheld alone.
+/// while its partition's others quote is withheld alone; and the channel's coins, the union of both tables.
 pub(crate) struct Hip3ExternalFeeds {
-    pub(crate) sources: Arc<Hip3ExternalSources>,
+    pub(crate) coins: Arc<Hip3ExternalCoins>,
     pub(crate) quote_max_age_ms: u64,
     subscriptions: FeedSubscriptions,
 }
 
 impl Hip3ExternalFeeds {
-    fn new(Hip3ExternalConfig { sources, quote_max_age_ms }: Hip3ExternalConfig) -> Self {
+    fn new(Hip3ExternalConfig { sources, sip_sources, quote_max_age_ms }: Hip3ExternalConfig) -> Self {
         let subscriptions = FeedSubscriptions::with_expiry(Feed::HIP3_EXTERNAL, &sources.markets, Some(quote_max_age_ms));
-        Self { sources, quote_max_age_ms, subscriptions }
+        Self { coins: Arc::new(Hip3ExternalCoins::new(&sources, &sip_sources)), quote_max_age_ms, subscriptions }
     }
 
     /// The partitions as they stand, their quotes' validity judged at the snapshot's publish time taken after (design
@@ -216,6 +219,12 @@ impl LocalMarkFeeds {
     #[cfg(test)]
     pub(crate) fn hip3_external_parts_for_test(&self) -> &[Arc<Subscription>] {
         self.hip3_external.as_ref().map_or(&[], |feeds| &feeds.subscriptions.subscriptions)
+    }
+
+    /// The HIP-3 US stock feed's partitions, for a test to write in.
+    #[cfg(test)]
+    pub(crate) fn equity_parts_for_test(&self, feed: EquityFeed) -> &[Arc<Subscription>] {
+        self.equity.as_ref().map_or(&[], |groups| &groups.of(feed).subscriptions)
     }
 
 
