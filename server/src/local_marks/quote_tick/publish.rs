@@ -1,9 +1,11 @@
 //! Which coins an external quote tick publishes (hyperliquid-trade design 000673 r4, r3 P2). Each tick judges every
 //! subscribed coin anew at its publish time, but a coin's frame goes out only:
 //! - when its decision fingerprint changed (`Fingerprint`): per leg, its status and reason code, its source - the
-//!   venues the main dex's medians took, the US stock's feed -, its bid and ask, and its basis' status and ratio; not
-//!   for the times a frame carries (`publishedTsMs`, `receivedTsMs`, `quoteTsMs`) nor its reasons' text, which the next
-//!   change or heartbeat brings;
+//!   venues the main dex's medians took, the US stock's feed -, its bid and ask, and its basis' status and ratio; a
+//!   main-dex coin's also Binance's own bid and ask, exact, when it quotes, and each quoting venue's own basis' status
+//!   and ratio (hyperliquid-trade design 000681 r2: Binance alone moving is a cancel's signal, the medians unmoved);
+//!   not for the times a frame carries (`publishedTsMs`, `receivedTsMs`, `quoteTsMs`) nor its reasons' text, which the
+//!   next change or heartbeat brings;
 //! - on the first tick of a subscription epoch, whatever the fingerprint (`subscribers`);
 //! - for every subscribed coin every `HEARTBEAT_TICKS` ticks (the heartbeat, 50 ms).
 //!
@@ -11,11 +13,12 @@
 //! rising, so a coin's frames rise in version.
 //!
 //! A frame published because a leg's quote moved - ready now, and not before, or from other sources, or at another
-//! bid or ask - may be sampled for the timing of its way out (`QuoteSample`, review 000676 r1 P2): at most one a
-//! channel every `SAMPLE_INTERVAL`, its start the newest receipt among the moved legs' quotes received since the last
-//! tick's publish time - a quote this tick is the first to judge. A move with none such - a venue gone or expired, an
-//! old quote valid again (review 000676 r2 P2), the basis or a withheld leg's reason alone - is published and counted
-//! as any, but not sampled, and takes no sample's place: its newest receipt may be long past.
+//! bid or ask, a main-dex coin's Binance quote among them - may be sampled for the timing of its way out
+//! (`QuoteSample`, review 000676 r1 P2): at most one a channel every `SAMPLE_INTERVAL`, its start the newest receipt
+//! among the moved legs' quotes received since the last tick's publish time - a quote this tick is the first to judge.
+//! A move with none such - a venue gone or expired, an old quote valid again (review 000676 r2 P2), the basis or a
+//! withheld leg's reason alone - is published and counted as any, but not sampled, and takes no sample's place: its
+//! newest receipt may be long past.
 
 use std::time::Duration;
 
@@ -32,7 +35,7 @@ use crate::local_marks::{
         protocol::EquityFeed,
     },
     price::VenuePrice,
-    snapshot::{ExternalLeg, Status, Withheld},
+    snapshot::{ExternalLeg, MainExternalLeg, Status, VenueBasis, Withheld},
     sources::Venue,
 };
 
@@ -45,7 +48,7 @@ pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 /// A coin's legs as one tick judged them.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Evaluated {
-    Main(Result<ExternalLeg, Withheld>),
+    Main(Result<MainExternalLeg, Withheld>),
     Hip3(Hip3ExternalCoin),
 }
 
@@ -72,7 +75,9 @@ impl Cause {
 /// What a coin's frame decides on.
 #[derive(Debug, Clone, PartialEq)]
 enum Fingerprint {
-    Main(LegFingerprint),
+    /// `binance`: Binance's own bid and ask, exact (the listing's multiplier applied), while it quotes; `venue_bases`:
+    /// each quoting venue's own basis, in the quotes' order.
+    Main { leg: LegFingerprint, binance: Option<(VenuePrice, VenuePrice)>, venue_bases: Vec<(Venue, BasisFingerprint)> },
     Hip3 { external: LegFingerprint, equity: LegFingerprint },
 }
 
@@ -100,14 +105,28 @@ enum BasisFingerprint {
 impl Fingerprint {
     fn of(legs: &Evaluated) -> Self {
         match legs {
-            Evaluated::Main(leg) => Self::Main(listed(leg.as_ref(), external_leg)),
+            Evaluated::Main(Err(withheld)) => Self::Main { leg: withheld_leg(withheld), binance: None, venue_bases: Vec::new() },
+            Evaluated::Main(Ok(main)) => Self::main(main),
             Evaluated::Hip3(coin) => Self::Hip3 { external: source_leg(&coin.external, external_leg), equity: source_leg(&coin.equity, equity_leg) },
         }
     }
 }
 
+impl Fingerprint {
+    fn main(main: &MainExternalLeg) -> Self {
+        let quotes = &main.external.quotes;
+        let binance = quotes.venues.iter().find(|quote| quote.feed.venue == Venue::Binance).map(|quote| (quote.bid, quote.ask));
+        let venue_bases = main.venue_bases.iter().map(|VenueBasis { venue, basis: venue_basis }| (*venue, basis(venue_basis))).collect();
+        Self::Main { leg: external_leg(&main.external), binance, venue_bases }
+    }
+}
+
+const fn withheld_leg(withheld: &Withheld) -> LegFingerprint {
+    LegFingerprint::Withheld { status: withheld.status, code: withheld.code }
+}
+
 fn listed<T>(leg: Result<&T, &Withheld>, ready: impl FnOnce(&T) -> LegFingerprint) -> LegFingerprint {
-    leg.map_or_else(|withheld| LegFingerprint::Withheld { status: withheld.status, code: withheld.code }, ready)
+    leg.map_or_else(withheld_leg, ready)
 }
 
 fn source_leg<T>(leg: &Hip3SourceLeg<T>, ready: impl FnOnce(&T) -> LegFingerprint) -> LegFingerprint {
@@ -154,12 +173,20 @@ const fn ready<T>(leg: &Hip3SourceLeg<T>) -> Option<&T> {
 
 /// The newest receipt after `since_ms` - the last tick's publish time, every quote received by then judged already -
 /// among the quotes of the legs whose quote moved from `was` to `now`; `None` when none moved, or none of their quotes
-/// is that new.
+/// is that new. A main-dex coin's medians moved: their quotes' newest; Binance's own bid or ask moved: Binance's
+/// quote's receipt alone - another venue's same quote received anew is not its start (review 000683 r1) -; both: the
+/// newer.
 fn moved_received_ms(legs: &Evaluated, was: &Fingerprint, now: &Fingerprint, since_ms: u64) -> Option<u64> {
     let fresh = |received_ms: u64| (received_ms > since_ms).then_some(received_ms);
     let newest = |leg: &ExternalLeg| leg.quotes.venues.iter().filter_map(|quote| fresh(quote.received_ms)).max();
     match (legs, was, now) {
-        (Evaluated::Main(leg), Fingerprint::Main(was), Fingerprint::Main(now)) => moved(was, now).then(|| leg.as_ref().ok().and_then(newest)).flatten(),
+        (Evaluated::Main(leg), Fingerprint::Main { leg: was, binance: was_binance, .. }, Fingerprint::Main { leg: now, binance, .. }) => {
+            let external = &leg.as_ref().ok()?.external;
+            let medians = moved(was, now).then(|| newest(external)).flatten();
+            let binance_quote = || external.quotes.venues.iter().find(|quote| quote.feed.venue == Venue::Binance).and_then(|quote| fresh(quote.received_ms));
+            let binance = (was_binance != binance).then(binance_quote).flatten();
+            medians.max(binance)
+        }
         (Evaluated::Hip3(coin), Fingerprint::Hip3 { external: was_external, equity: was_equity }, Fingerprint::Hip3 { external, equity }) => {
             let binance = moved(was_external, external).then(|| ready(&coin.external).and_then(newest)).flatten();
             let stock = moved(was_equity, equity).then(|| ready(&coin.equity).and_then(|leg| fresh(leg.quote.received_ms))).flatten();
@@ -275,4 +302,44 @@ fn cause(was: Option<&Fingerprint>, fingerprint: &Fingerprint, heartbeat: bool) 
         return Some(Cause::Changed);
     }
     heartbeat.then_some(Cause::Heartbeat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local_marks::{
+        snapshot::{ExternalQuotes, VenueQuote},
+        sources::{Feed, Kind},
+    };
+
+    fn price(text: &str) -> VenuePrice {
+        VenuePrice::parse(text).unwrap()
+    }
+
+    /// AVAX on Binance and OKX, each at `bid` / 8.501 received at `received_ms`, Binance's basis `binance_basis`.
+    fn avax(binance_bid: &str, received_ms: u64, binance_basis: Result<ExternalBasis, Withheld>) -> Evaluated {
+        let quote = |venue, bid| VenueQuote { feed: Feed { kind: Kind::Perp, venue }, bid: price(bid), ask: price("8.501"), received_ms };
+        let quotes = ExternalQuotes::of(vec![quote(Venue::Binance, binance_bid), quote(Venue::Okx, "8.5")]).unwrap();
+        let okx = Ok(ExternalBasis { ratio: -0.0002, samples: 120 });
+        let venue_bases = vec![VenueBasis { venue: Venue::Binance, basis: binance_basis }, VenueBasis { venue: Venue::Okx, basis: okx }];
+        Evaluated::Main(Ok(MainExternalLeg { external: ExternalLeg { quotes, basis: Ok(ExternalBasis { ratio: -0.0001, samples: 120 }) }, venue_bases }))
+    }
+
+    /// Hyperliquid-trade design 000681 r2: a main-dex coin's fingerprint holds Binance's own bid and ask, exact, and
+    /// each quoting venue's basis' status and ratio - a change of any is a frame -, not the quotes' receipt times nor
+    /// a basis' sample count.
+    #[test]
+    fn the_main_fingerprint_holds_binances_quote_and_each_venues_basis() {
+        let ready = |ratio: f64, samples: usize| Ok(ExternalBasis { ratio, samples });
+        let fingerprint = |legs: &Evaluated| Fingerprint::of(legs);
+        let base = fingerprint(&avax("8.5", 1_000, ready(0.0001, 120)));
+        assert_eq!(fingerprint(&avax("8.5", 1_005, ready(0.0001, 121))), base, "a receipt or a sample count alone");
+        assert_ne!(fingerprint(&avax("8.4999", 1_000, ready(0.0001, 120))), base, "Binance's bid, the medians unmoved");
+        assert_ne!(fingerprint(&avax("8.5", 1_000, ready(0.00011, 120))), base, "Binance's basis' ratio");
+        let stale = Err(Withheld::unavailable("basisStale", "computed 201 ms ago"));
+        assert_ne!(fingerprint(&avax("8.5", 1_000, stale.clone())), base, "Binance's basis' status");
+        assert_eq!(fingerprint(&avax("8.5", 1_000, stale)), fingerprint(&avax("8.5", 1_000, Err(Withheld::unavailable("basisStale", "computed 206 ms ago")))), "its reason's text alone");
+        let Fingerprint::Main { binance, .. } = &base else { unreachable!() };
+        assert_eq!(*binance, Some((price("8.5"), price("8.501"))));
+    }
 }

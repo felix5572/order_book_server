@@ -1,4 +1,4 @@
-//! The external quote channels' side of a WS connection - `extExternalQuotes` (the main-dex coins', schema 1) and
+//! The external quote channels' side of a WS connection - `extExternalQuotes` (the main-dex coins', schema 2) and
 //! `extHip3ExternalQuotes` (the HIP-3 coins', schema 2; hyperliquid-trade design 000673 r3 §3, r4 首帧) - and the
 //! `GET /extExternalQuotes` and `GET /extHip3ExternalQuotes` handlers.
 //!
@@ -246,7 +246,7 @@ async fn send_due(
     Some(handed)
 }
 
-/// `GET /extExternalQuotes[?coin=]`: the main-dex coins' external legs (schema 1) of the owner's snapshot, answered as
+/// `GET /extExternalQuotes[?coin=]`: the main-dex coins' external legs (schema 2) of the owner's snapshot, answered as
 /// `GET /extMarkPrices`; 404 for a coin outside the sources, with the WS refusal's text; 503 once the owner task ended.
 #[expect(clippy::unused_async, reason = "an axum handler")]
 pub(super) async fn external_quotes_handler(
@@ -374,7 +374,7 @@ mod tests {
         let refusal = |text: &str| serde_json::json!({"channel": "error", "data": text, "schemaVersion": 2});
         let (outbound, mut sent) = outbound();
         assert_eq!(&not_enabled(QuoteChannel::Hip3)[..], format!(r#"{{"channel":"error","data":"{OFF}","schemaVersion":2}}"#).as_bytes());
-        let main_off = r#"{"channel":"error","data":"extExternalQuotes needs the server started with --local-marks","schemaVersion":1}"#;
+        let main_off = r#"{"channel":"error","data":"extExternalQuotes needs the server started with --local-marks","schemaVersion":2}"#;
         assert_eq!(&not_enabled(QuoteChannel::Main)[..], main_off.as_bytes());
         assert!(super::super::mark_prices::refuse_without_local_marks(&outbound, super::super::mark_prices::Market::Hip3).await);
         let other = serde_json::json!({"channel": "error", "data": "extHip3MarkPrices needs the server started with --local-marks"});
@@ -388,7 +388,7 @@ mod tests {
         }
         for subscribe in [true, false, false] {
             assert!(session.on_client_message(&outbound, &mut manager, main("HYPE", subscribe), QuoteChannel::Main, "HYPE").await);
-            let expected = r#"{"channel":"error","data":"extExternalQuotes HYPE is not in the local marks' sources","schemaVersion":1}"#;
+            let expected = r#"{"channel":"error","data":"extExternalQuotes HYPE is not in the local marks' sources","schemaVersion":2}"#;
             assert_eq!(&sent.recv().await.unwrap()[..], expected.as_bytes());
         }
         assert!(session.on_client_message(&outbound, &mut manager, main("BTC", false), QuoteChannel::Main, "BTC").await);
@@ -516,7 +516,7 @@ mod tests {
         assert!(session.on_client_message(&outbound, &mut manager, main("BTC", true), QuoteChannel::Main, "BTC").await);
         assert_eq!(json(&sent.recv().await.unwrap())["channel"], "subscriptionResponse");
         let first = next_frame(&mut session, &outbound, &mut manager, &mut sent).await;
-        assert_eq!((first["channel"].as_str(), first["data"]["schemaVersion"].as_u64(), first["data"]["intervalMs"].as_u64()), (Some("extExternalQuotes"), Some(1), Some(5)));
+        assert_eq!((first["channel"].as_str(), first["data"]["schemaVersion"].as_u64(), first["data"]["intervalMs"].as_u64()), (Some("extExternalQuotes"), Some(2), Some(5)));
         assert_eq!(first["data"]["external"]["reasonCode"], "externalCoverage");
         // the sources' feeds: spot Kraken, then perp Gate
         let (part, index) = feeds.main_feed(1).part_of(0);
@@ -530,7 +530,9 @@ mod tests {
             }
         };
         assert_eq!((ready["external"]["externalBidPx"].as_str(), ready["external"]["externalAskPx"].as_str()), (Some("100000"), Some("100000.5")));
-        assert_eq!(ready["external"]["externalQuotes"], serde_json::json!({"gate": {"bidPx": "100000", "askPx": "100000.5", "receivedTsMs": received_ms}}));
+        let basis = ready["external"]["externalQuotes"]["gate"]["basis"].clone();
+        assert_eq!(basis["reasonCode"], "externalBasisSamples", "Gate's own basis: {basis}");
+        assert_eq!(ready["external"]["externalQuotes"], serde_json::json!({"gate": {"bidPx": "100000", "askPx": "100000.5", "receivedTsMs": received_ms, "basis": basis}}));
         assert!(received_ms <= ready["publishedTsMs"].as_u64().unwrap());
     }
 
@@ -791,7 +793,7 @@ mod tests {
         assert_eq!((status, outside["error"].as_str()), (axum::http::StatusCode::NOT_FOUND, Some("extHip3ExternalQuotes xyz:KIOXIA is not in the HIP-3 external quote sources")));
     }
 
-    /// `GET /extExternalQuotes`: every main-dex coin's external leg of the owner's snapshot (schema 1, `intervalMs`
+    /// `GET /extExternalQuotes`: every main-dex coin's external leg of the owner's snapshot (schema 2, `intervalMs`
     /// 50), with no WS subscriber; a coin outside the sources 404 with the WS refusal's text; 503 once the owner ended.
     #[tokio::test]
     async fn the_external_quotes_http_view_answers_200_404_and_503() {
@@ -802,7 +804,8 @@ mod tests {
         let (status, btc) = get(Handler::Main, &marks, Some("BTC")).await;
         assert_eq!(status, axum::http::StatusCode::OK);
         let btc = &btc[0];
-        assert_eq!((btc["schemaVersion"].as_u64(), btc["intervalMs"].as_u64(), btc["publishedTsMs"].as_u64()), (Some(1), Some(50), Some(NOW_MS)));
+        assert_eq!((btc["schemaVersion"].as_u64(), btc["intervalMs"].as_u64(), btc["publishedTsMs"].as_u64()), (Some(2), Some(50), Some(NOW_MS)));
+        assert_eq!(btc["external"]["externalQuotes"]["binance"]["basis"]["reasonCode"], "externalBasisSamples", "each venue's basis in the rows too");
         assert_eq!((btc["external"]["status"].as_str(), btc["external"]["externalBidPx"].as_str()), (Some("ready"), Some("100003.95")));
         let (status, outside) = get(Handler::Main, &marks, Some("HYPE")).await;
         assert_eq!((status, outside["error"].as_str()), (axum::http::StatusCode::NOT_FOUND, Some("extExternalQuotes HYPE is not in the local marks' sources")));

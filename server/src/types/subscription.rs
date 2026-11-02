@@ -104,9 +104,9 @@ pub(crate) enum Subscription {
     /// when a leg's decision changes and every 50 ms (design 000673); needs `--hip3-external-quotes`.
     #[serde(rename = "extHip3ExternalQuotes", rename_all = "camelCase")]
     Hip3ExternalQuotes { coin: String },
-    /// `extExternalQuotes`: one main-dex coin's perp venue quotes, their medians and its normal basis to them, apart
-    /// from the node (hyperliquid-trade design 000673): a tick every 5 ms, a frame when its decision changes and every
-    /// 50 ms; needs `--local-marks`.
+    /// `extExternalQuotes`: one main-dex coin's perp venue quotes, their medians and its normal basis to them, each
+    /// venue's own basis beside its quote (schema 2, hyperliquid-trade design 000681), apart from the node (design
+    /// 000673): a tick every 5 ms, a frame when its decision changes and every 50 ms; needs `--local-marks`.
     #[serde(rename = "extExternalQuotes", rename_all = "camelCase")]
     ExternalQuotes { coin: String },
     /// `extPendingBbo`: one coin's best levels as the mempool's pending actions will leave the book, beside the

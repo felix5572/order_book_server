@@ -27,7 +27,7 @@ use super::{
     price::VenuePrice,
     slot::{Entry, Validity},
     subscriptions::FeedProjection,
-    sources::{Feed, FeedMarkets, Kind, MarkSources},
+    sources::{Feed, FeedMarkets, Kind, MarkSources, Venue},
 };
 use crate::{
     accounts::{
@@ -148,6 +148,44 @@ pub(crate) struct ExternalLeg {
     pub(crate) basis: Result<ExternalBasis, Withheld>,
 }
 
+/// A venue's own normal basis to its perp quote (hyperliquid-trade design 000681): the median basis' rule
+/// (`external_basis`) on that venue's quote alone, a window a perp listing of the coin, kept by the venue whether it
+/// quotes or not.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VenueBasis {
+    pub(crate) venue: Venue,
+    /// Withheld below its minimum samples, or, on the external quote tick, older than it takes the owner's
+    /// (`basisStale`).
+    pub(crate) basis: Result<ExternalBasis, Withheld>,
+}
+
+/// A main-dex coin's external leg as `extExternalQuotes` (schema 2) publishes it (hyperliquid-trade design 000681):
+/// the perp quotes and their medians' basis, and each quoting venue's own basis, in the quotes' order.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MainExternalLeg {
+    pub(crate) external: ExternalLeg,
+    /// One a venue of `external.quotes.venues`, in its order.
+    pub(crate) venue_bases: Vec<VenueBasis>,
+}
+
+impl MainExternalLeg {
+    /// The leg of `quotes` and their medians' `basis`, each quoting venue's basis that of `venue_bases` - every perp
+    /// listing's, the owner's - as `taken` takes it: the owner's HTTP rows as they are, the quote tick by their age.
+    pub(crate) fn of(
+        quotes: ExternalQuotes,
+        basis: Result<ExternalBasis, Withheld>,
+        venue_bases: &[VenueBasis],
+        taken: impl Fn(&Result<ExternalBasis, Withheld>) -> Result<ExternalBasis, Withheld>,
+    ) -> Self {
+        let basis_of = |venue: Venue| {
+            let owned = venue_bases.iter().find(|owned| owned.venue == venue).unwrap_or_else(|| unreachable!("a basis of each perp listing, {venue:?}'s among them"));
+            VenueBasis { venue, basis: taken(&owned.basis) }
+        };
+        let quoting = quotes.venues.iter().map(|quote| basis_of(quote.feed.venue)).collect();
+        Self { external: ExternalLeg { quotes, basis: taken(&basis) }, venue_bases: quoting }
+    }
+}
+
 /// A venue's quote valid now, its listing's multiplier applied.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct VenueQuote {
@@ -191,6 +229,9 @@ pub(crate) struct CoinMarks {
     /// The coin's normal basis to the perp quotes as its window publishes it at the tick, whatever the gates: the local
     /// leg's, `GET /extExternalQuotes`', and the external quote tick's (design 000673 r4).
     pub(crate) external_basis: Result<ExternalBasis, Withheld>,
+    /// Each perp listing's venue's own basis (design 000681), in the listings' order, as their windows publish them at
+    /// the tick, whatever the gates: `extExternalQuotes`' (schema 2), the HTTP rows' and the quote tick's.
+    pub(crate) venue_bases: Vec<VenueBasis>,
     pub(crate) oracle_coverage: Coverage,
     pub(crate) external_coverage: Coverage,
 }
@@ -359,7 +400,8 @@ impl CoinTable {
     pub(crate) fn owner_state(&self) -> OwnerState {
         let hip3 = vec![Hip3CoinState::default(); self.hip3.names().len()];
         let hip3_external = vec![Hip3ExternalWindows::default(); self.hip3_external.names().len()];
-        OwnerState { hip3, external_basis: vec![ExternalBasisWindow::default(); self.names.len()], hip3_external }
+        let venue_basis = (0..self.names.len()).map(|index| vec![ExternalBasisWindow::default(); self.perp_markets(index).count()]).collect();
+        OwnerState { hip3, external_basis: vec![ExternalBasisWindow::default(); self.names.len()], venue_basis, hip3_external }
     }
 
     /// The coins to read from the HL book, in the table's order.
@@ -392,9 +434,7 @@ impl CoinTable {
     /// and validity by its feed's place in the readings and its market: the coin's external leg before any gate, the
     /// owner's and the external quote tick's one rule (hyperliquid-trade design 000673 §4).
     pub(crate) fn perp_quotes(&self, index: usize, observed: impl Fn(usize, usize) -> (Option<Entry>, Validity)) -> Result<ExternalQuotes, Withheld> {
-        let coin = &self.names[index];
-        let quotes = valid_quotes(&self.listings[index], Kind::Perp, observed)?;
-        ExternalQuotes::of(quotes).ok_or_else(|| Withheld::unavailable("externalCoverage", format!("no perp venue quotes {coin} now")))
+        external_quotes(&self.names[index], valid_quotes(&self.listings[index], Kind::Perp, observed))
     }
 }
 
@@ -405,6 +445,9 @@ pub(crate) struct OwnerState {
     pub(crate) hip3: Vec<Hip3CoinState>,
     /// Each main-dex coin's basis samples (design 000594).
     pub(crate) external_basis: Vec<ExternalBasisWindow>,
+    /// Each main-dex coin's venues' own basis samples (hyperliquid-trade design 000681): a window a perp listing, in
+    /// the coin's listings' order - the venue's own, never a place among the venues quoting now.
+    pub(crate) venue_basis: Vec<Vec<ExternalBasisWindow>>,
     /// Each HIP-3 external coin's basis samples, of each of its legs (design 000664, 000669).
     pub(crate) hip3_external: Vec<Hip3ExternalWindows>,
 }
@@ -446,7 +489,8 @@ pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, state: &mut Owne
         // the basis reads the book and the venues, not the node state (design 000594)
         basis_inputs: stopped.is_none() && book_withheld.is_none(),
     };
-    let coins = state.external_basis.iter_mut().enumerate().map(|(index, basis)| coin_marks(table, index, tick, coin_gates, basis)).collect();
+    let windows = state.external_basis.iter_mut().zip(state.venue_basis.iter_mut());
+    let coins = windows.enumerate().map(|(index, (basis, venue_windows))| coin_marks(table, index, tick, coin_gates, basis, venue_windows)).collect();
     let gates = Hip3Gates { node: node_withheld.as_ref(), book: book_withheld.as_ref(), stopped: stopped.as_ref() };
     let hip3 = hip3_marks(&table.hip3, tick, table.names.len(), gates, &mut state.hip3);
     // the external quotes' basis samples the book as of their own publish time, later than the tick's (review 000665 r1 P2)
@@ -505,7 +549,15 @@ struct CoinGates<'a> {
     basis_inputs: bool,
 }
 
-fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, gates: CoinGates<'_>, basis: &mut ExternalBasisWindow) -> CoinMarks {
+/// `basis`: the coin's medians' basis window; `venue_windows`: its perp listings' venues', in the listings' order.
+fn coin_marks(
+    table: &CoinTable,
+    index: usize,
+    tick: &Tick<'_>,
+    gates: CoinGates<'_>,
+    basis: &mut ExternalBasisWindow,
+    venue_windows: &mut [ExternalBasisWindow],
+) -> CoinMarks {
     let coin = table.names[index].as_str();
     let listings = &table.listings[index];
     let (mut oracle_coverage, mut external_coverage) = (Coverage::default(), Coverage::default());
@@ -517,9 +569,12 @@ fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, gates: CoinGates
             Kind::Equity | Kind::EquityOvernight | Kind::Hip3Perp => unreachable!("a main-dex coin lists no Alpaca or HIP-3 market (`Feed::ALL`)"),
         }
     }
-    let perps = table.perp_quotes(index, observed_at(tick));
-    basis.observe(tick.instant, gates.basis_inputs.then(|| basis_sample(tick, index, perps.as_ref().ok())).flatten());
+    let perp_listed: Vec<_> = listed_quotes(listings, Kind::Perp, observed_at(tick)).collect();
+    let perps = external_quotes(coin, perp_listed.iter().filter_map(|(_, quote)| quote.clone().transpose()).collect());
+    let book = sampled_book(tick, index, gates.basis_inputs);
+    basis.observe(tick.instant, book.zip(perps.as_ref().ok()).map(|((bid, ask), quotes)| external_basis::sample(bid, ask, quotes.bid, quotes.ask)));
     let external_basis = basis.published();
+    let venue_bases = venue_bases(tick, book, &perp_listed, venue_windows);
     let state = match (gates.node, tick.node) {
         (Some(withheld), _) => Err(withheld.clone()),
         (None, Ok(prices)) => prices.coins.get(coin).ok_or_else(|| {
@@ -548,7 +603,27 @@ fn coin_marks(table: &CoinTable, index: usize, tick: &Tick<'_>, gates: CoinGates
         (None, Ok(state)) => local_leg(coin, listings, tick, index, state, perps.clone(), external_basis.clone()),
     };
     let external = gates.stopped.map_or_else(|| perps.and_then(|quotes| quotes.received_by(coin, tick.now_ms)), |stopped| Err(stopped.clone()));
-    CoinMarks { node, local, external, external_basis, oracle_coverage, external_coverage }
+    CoinMarks { node, local, external, external_basis, venue_bases, oracle_coverage, external_coverage }
+}
+
+/// Each perp listing's venue basis: its window moves - the samples past `WINDOW` leaving whether or not one enters -,
+/// with this tick's sample when `book` (HL's two sides, when they may be sampled) is given and the venue's quote is
+/// valid now (`perp_listed`, `listed_quotes`' rule, its multiplier applied); each window the listing's, by its place in
+/// the listings, whichever venues quote now (review 000681 r1).
+fn venue_bases(
+    tick: &Tick<'_>,
+    book: Option<(Px, Px)>,
+    perp_listed: &[(Feed, Result<Option<VenueQuote>, Withheld>)],
+    windows: &mut [ExternalBasisWindow],
+) -> Vec<VenueBasis> {
+    assert_eq!(perp_listed.len(), windows.len(), "one venue basis window per perp listing");
+    let listed = perp_listed.iter().zip(windows);
+    let venue_basis = |((feed, quote), window): (&(Feed, Result<Option<VenueQuote>, Withheld>), &mut ExternalBasisWindow)| {
+        let quote = quote.as_ref().ok().copied().flatten();
+        window.observe(tick.instant, book.zip(quote).map(|((bid, ask), quote)| external_basis::sample(bid, ask, quote.bid, quote.ask)));
+        VenueBasis { venue: feed.venue, basis: window.published() }
+    };
+    listed.map(venue_basis).collect()
 }
 
 /// A listing's entry and validity in the tick's readings, by its feed's place there and its market.
@@ -556,15 +631,15 @@ fn observed_at<'t>(tick: &'t Tick<'_>) -> impl Fn(usize, usize) -> (Option<Entry
     |reading, market| tick.readings[reading].2.entries[market]
 }
 
-/// This tick's basis sample of the coin: its HL book's two sides against the perp quotes valid now; `None` without
-/// either.
-fn basis_sample(tick: &Tick<'_>, index: usize, perps: Option<&ExternalQuotes>) -> Option<f64> {
-    let book = tick.book.unwrap_or_else(|| unreachable!("the book is read before a basis sample"));
-    let (Some(bid), Some(ask)) = book.prices[index] else {
+/// HL's two sides of the coin when this tick may sample them (`usable`: the book and the feeds usable, whatever the
+/// node state): the basis samples' book, the medians' and each venue's; `None` without it or with a side empty.
+fn sampled_book(tick: &Tick<'_>, index: usize, usable: bool) -> Option<(Px, Px)> {
+    if !usable {
         return None;
-    };
-    let quotes = perps?;
-    Some(external_basis::sample(bid, ask, quotes.bid, quotes.ask))
+    }
+    let book = tick.book.unwrap_or_else(|| unreachable!("the book is read before a basis sample"));
+    let (bid, ask) = book.prices[index];
+    bid.zip(ask)
 }
 
 /// `perps`: the coin's perp quotes valid now (`CoinTable::perp_quotes`).
@@ -599,23 +674,40 @@ fn calculation(detail: String) -> Withheld {
     Withheld::unavailable("calculation", detail)
 }
 
+/// The perp quotes valid now and their medians; `externalCoverage` without one.
+fn external_quotes(coin: &str, valid: Result<Vec<VenueQuote>, Withheld>) -> Result<ExternalQuotes, Withheld> {
+    ExternalQuotes::of(valid?).ok_or_else(|| Withheld::unavailable("externalCoverage", format!("no perp venue quotes {coin} now")))
+}
+
 /// The kind's venues quoting now, in the listings' order, `observed` giving a listing's entry and validity by its
 /// feed's place in the readings and its market.
 fn valid_quotes(listings: &[ListedMarket], kind: Kind, observed: impl Fn(usize, usize) -> (Option<Entry>, Validity)) -> Result<Vec<VenueQuote>, Withheld> {
-    let mut quotes = Vec::new();
-    for listed in listings.iter().filter(|listed| listed.feed.kind == kind) {
-        let (entry, validity) = observed(listed.reading, listed.market);
-        if validity != Validity::Valid {
-            continue;
-        }
-        let entry = entry.unwrap_or_else(|| unreachable!("a valid entry holds a quote"));
-        let quote = entry.quote.unwrap_or_else(|| unreachable!("a valid entry holds a quote"));
-        let scaled = |px: VenuePrice| {
-            px.scaled(listed.multiplier).ok_or_else(|| calculation(format!("{} price {px} × {} is out of range", listed.feed.label(), listed.multiplier)))
-        };
-        quotes.push(VenueQuote { feed: listed.feed, bid: scaled(quote.bid)?, ask: scaled(quote.ask)?, received_ms: entry.received_ms });
+    listed_quotes(listings, kind, observed).filter_map(|(_, quote)| quote.transpose()).collect()
+}
+
+/// Each listing of the kind in the listings' order, its feed and its venue's quote valid now - its multiplier
+/// applied -, `None` when not valid: the one rule of which quotes count (`valid_quotes`) and of each perp venue's own
+/// basis samples (`venue_bases`).
+fn listed_quotes<'l>(
+    listings: &'l [ListedMarket],
+    kind: Kind,
+    observed: impl Fn(usize, usize) -> (Option<Entry>, Validity) + 'l,
+) -> impl Iterator<Item = (Feed, Result<Option<VenueQuote>, Withheld>)> + 'l {
+    let listed = listings.iter().filter(move |listed| listed.feed.kind == kind);
+    listed.map(move |listed| (listed.feed, listed_quote(listed, observed(listed.reading, listed.market))))
+}
+
+/// The listing's quote valid now, its multiplier applied; `None` when its entry is not valid.
+fn listed_quote(listed: &ListedMarket, (entry, validity): (Option<Entry>, Validity)) -> Result<Option<VenueQuote>, Withheld> {
+    if validity != Validity::Valid {
+        return Ok(None);
     }
-    Ok(quotes)
+    let entry = entry.unwrap_or_else(|| unreachable!("a valid entry holds a quote"));
+    let quote = entry.quote.unwrap_or_else(|| unreachable!("a valid entry holds a quote"));
+    let scaled = |px: VenuePrice| {
+        px.scaled(listed.multiplier).ok_or_else(|| calculation(format!("{} price {px} × {} is out of range", listed.feed.label(), listed.multiplier)))
+    };
+    Ok(Some(VenueQuote { feed: listed.feed, bid: scaled(quote.bid)?, ask: scaled(quote.ask)?, received_ms: entry.received_ms }))
 }
 
 /// The weighted median of the quotes' midpoints, in the coin's price units; `None` without a quote.
@@ -998,6 +1090,7 @@ pub(crate) mod tests {
         let quotes = btc.external.as_ref().unwrap();
         assert_eq!((quotes.bid, quotes.ask), (price("100003.95"), price("100004.05")));
         assert_eq!(btc.external_basis.as_ref().unwrap().samples, 120);
+        assert_eq!(btc.venue_bases.iter().map(|venue| (venue.venue, venue.basis.as_ref().unwrap().samples)).collect::<Vec<_>>(), [(Venue::Binance, 120)], "each venue's too (design 000681)");
         assert_eq!((behind.computed_at, behind.stopped.as_deref()), (at(119), None));
         world.book.as_mut().unwrap().time = NOW_MS - 400;
         let ready = world.snapshot_at(&mut state, NOW_MS, at(120));
@@ -1011,6 +1104,143 @@ pub(crate) mod tests {
         world.set(Feed { kind: Kind::Perp, venue: Venue::Binance }, "BTC", Validity::NotConnected);
         let none = world.snapshot(NOW_MS);
         assert_eq!(none.coin("BTC").unwrap().external.as_ref().unwrap_err().detail, "no perp venue quotes BTC now");
+    }
+
+    /// User 2026-11-02, review 000683 r2: BTC's one perp venue at 50,000 against HL's 100,002 - a basis of +100% -:
+    /// `extMarkPrices`' local leg stays ready with its external quote, its `externalBasis` alone withheld
+    /// (`externalBasisOutOfRange`), as the medians' and Binance's own in the snapshot; ETH's frame as it was.
+    #[test]
+    fn a_basis_past_ten_percent_is_withheld_in_the_local_leg() {
+        let mut world = World::new();
+        let eth_before = {
+            let snapshot = world.snapshot(NOW_MS);
+            super::super::prices_view::CoinMarksView::of(&snapshot, "ETH", snapshot.coin("ETH").unwrap()).to_wire()
+        };
+        world.quote(Feed { kind: Kind::Perp, venue: Venue::Binance }, "BTC", ("50000", "50001"), NOW_MS);
+        let mut state = world.owner_state();
+        let start = Instant::now();
+        let snapshot = (0..120).map(|second| world.snapshot_at(&mut state, NOW_MS, start + Duration::from_secs(second))).last().unwrap();
+        let btc = snapshot.coin("BTC").unwrap();
+        assert_eq!((btc.external_basis.as_ref().unwrap_err().code, btc.venue_bases[0].basis.as_ref().unwrap_err().code), ("externalBasisOutOfRange", "externalBasisOutOfRange"));
+        let frame: serde_json::Value = serde_json::from_slice(&super::super::prices_view::CoinMarksView::of(&snapshot, "BTC", btc).to_wire()).unwrap();
+        let local = &frame["data"]["local"];
+        assert_eq!((local["status"].as_str(), local["externalBidPx"].as_str()), (Some("ready"), Some("50000")), "{local}");
+        assert_eq!((local["externalBasis"]["status"].as_str(), local["externalBasis"]["reasonCode"].as_str()), (Some("unavailable"), Some("externalBasisOutOfRange")));
+        assert_eq!(super::super::prices_view::CoinMarksView::of(&snapshot, "ETH", snapshot.coin("ETH").unwrap()).to_wire(), eth_before);
+    }
+
+    /// Hyperliquid-trade design 000681: a venue's basis follows the median basis' rule - a sample a second, published
+    /// from the 120th, the samples of the last 600 s -: BTC's one perp venue gives its medians' basis tick for tick,
+    /// the ticks between the seconds sampling nothing.
+    #[test]
+    fn a_single_venues_basis_is_its_medians() {
+        let world = World::new();
+        let mut state = world.owner_state();
+        let start = Instant::now();
+        let mut last = None;
+        for tick in 0..(120 * 4) {
+            let snapshot = world.snapshot_at(&mut state, NOW_MS, start + Duration::from_millis(250 * tick));
+            let btc = snapshot.coin("BTC").unwrap();
+            assert_eq!(btc.venue_bases, [VenueBasis { venue: Venue::Binance, basis: btc.external_basis.clone() }], "tick {tick}");
+            last = Some(btc.external_basis.clone());
+        }
+        assert_eq!(last.unwrap().unwrap().samples, 120, "a sample a second, 0 to 119 s");
+    }
+
+    /// Hyperliquid-trade design 000681, review 000681 r1-r2: each perp listing's venue keeps its own basis window,
+    /// sampled from its own quote (its multiplier applied) while valid - Binance, OKX and Bybit each their own ratio
+    /// from the 120th sample, the medians' their own. Binance gone for 601 s: its window empties - its samples leave
+    /// though none enters - while OKX's and Bybit's keep theirs, never moved into Binance's place; back, Binance
+    /// publishes again only from its 120th new sample.
+    #[test]
+    fn each_venue_keeps_its_own_basis_window() {
+        let perp = |venue| Feed { kind: Kind::Perp, venue };
+        let mut world = World::of(THREE_PERPS);
+        world.quote(perp(Venue::Binance), "BTC", ("100003", "100005"), NOW_MS - 30);
+        world.quote(perp(Venue::Okx), "BTC", ("100001", "100009"), NOW_MS - 20);
+        world.quote(perp(Venue::Bybit), "BTC", ("100.006", "100.00624"), NOW_MS - 10);
+        let mut state = world.owner_state();
+        let start = Instant::now();
+        let mut tick = |world: &World, seconds: std::ops::RangeInclusive<u64>| {
+            seconds.map(|second| world.snapshot_at(&mut state, NOW_MS, start + Duration::from_secs(second))).last().unwrap()
+        };
+        // HL's book midpoint 100,002 over each venue's midpoint - 1
+        let ratio = |mid: f64| 100_002.0 / mid - 1.0;
+        let (binance, okx, bybit) = (ratio(100_004.0), ratio(100_005.0), ratio(f64::midpoint(100_006.0, 100_006.24)));
+        let bases = |snapshot: &LocalMarksSnapshot| {
+            snapshot.coin("BTC").unwrap().venue_bases.iter().map(|venue| (venue.venue, venue.basis.clone().map(|basis| (basis.ratio, basis.samples)).map_err(|withheld| withheld.detail))).collect::<Vec<_>>()
+        };
+        let close = |found: &Result<(f64, usize), String>, ratio: f64| found.as_ref().is_ok_and(|(found, _)| (found - ratio).abs() < 1e-12);
+        let first = tick(&world, 0..=0);
+        let one = Err("1 of the 120 samples needed over the last 600 s".to_string());
+        assert_eq!(bases(&first), [(Venue::Binance, one.clone()), (Venue::Okx, one.clone()), (Venue::Bybit, one)]);
+        let ready = bases(&tick(&world, 1..=119));
+        assert!(ready.iter().all(|(_, basis)| basis.as_ref().is_ok_and(|(_, samples)| *samples == 120)), "{ready:?}");
+        assert!(close(&ready[0].1, binance) && close(&ready[1].1, okx) && close(&ready[2].1, bybit), "{ready:?}");
+        world.set(perp(Venue::Binance), "BTC", Validity::NotConnected);
+        let gone = tick(&world, 120..=720);
+        let gone_bases = bases(&gone);
+        assert_eq!(gone_bases[0], (Venue::Binance, Err("0 of the 120 samples needed over the last 600 s".to_string())), "its last sample 601 s old");
+        assert!(close(&gone_bases[1].1, okx) && close(&gone_bases[2].1, bybit), "{gone_bases:?}");
+        assert_eq!(gone.coin("BTC").unwrap().external.as_ref().unwrap().venues.len(), 2, "OKX and Bybit quote");
+        world.quote(perp(Venue::Binance), "BTC", ("100003", "100005"), NOW_MS - 30);
+        assert_eq!(bases(&tick(&world, 721..=721))[0].1, Err("1 of the 120 samples needed over the last 600 s".to_string()));
+        assert_eq!(bases(&tick(&world, 722..=839))[0].1, Err("119 of the 120 samples needed over the last 600 s".to_string()));
+        let back = bases(&tick(&world, 840..=840));
+        assert!(close(&back[0].1, binance) && back[0].1.as_ref().unwrap().1 == 120, "{back:?}");
+        assert!(close(&back[1].1, okx) && close(&back[2].1, bybit), "{back:?}");
+    }
+
+    /// Review 000681 r2's cost: an owner tick over the embedded sources - 176 coins, 832 perp listings, each venue's
+    /// window and each coin's medians' full, 600 samples -, every market quoting and the book read, the node state
+    /// unavailable (no local leg computed); the ticks taking a sample (one a second) and the ticks between, and the
+    /// 832 venue windows' round alone. Run alone, in release:
+    /// `cargo test --release -p server --lib -- --ignored --nocapture an_owner_tick_over_832_full_venue_windows`.
+    #[test]
+    #[ignore = "a timing: run alone, in release"]
+    fn an_owner_tick_over_832_full_venue_windows() {
+        let sources = MarkSources::embedded().unwrap();
+        let table = Arc::new(CoinTable::new(&sources, None, None));
+        let listings: usize = (0..table.names.len()).map(|index| table.perp_markets(index).count()).sum();
+        let quote = (Some(Entry::for_test(Some(Quote { bid: price("100"), ask: price("100.1") }), NOW_MS, 1)), Validity::Valid);
+        let readings: Vec<_> = sources
+            .feeds()
+            .map(|(feed, markets)| (feed, markets, FeedProjection { connections: Vec::new(), messages: 1, entries: vec![quote; markets.symbols.len()] }))
+            .collect();
+        let node: NodePrices = Err("no node state in this timing".to_string());
+        let mut state = table.owner_state();
+        let start = Instant::now();
+        let mut tick = |at: Duration, wobble: u64| {
+            let bid = 10_000_000_000 + wobble * 1_000_000;
+            let side = (Some(Px::new(bid)), Some(Px::new(bid + 20_000_000)));
+            let book = BestPricesAt { time: NOW_MS, height: 1, trusted: true, prices: vec![side; table.book_coins().len()] };
+            let tick = Tick { now_ms: NOW_MS, instant: start + at, stopped: None, node: &node, book: Some(&book), readings: &readings, equity: None, hip3_external: None };
+            let began = std::time::Instant::now();
+            let snapshot = assemble(&table, &tick, &mut state);
+            (began.elapsed(), snapshot)
+        };
+        for second in 0..600 {
+            tick(Duration::from_secs(second), second % 7);
+        }
+        let sampling: Vec<_> = (600..630).map(|second| tick(Duration::from_secs(second), second % 7)).collect();
+        let full = sampling.last().unwrap().1.coins().all(|(_, marks)| marks.venue_bases.iter().all(|venue| venue.basis.as_ref().is_ok_and(|basis| basis.samples >= 600)));
+        let between: Vec<_> = (1..20).map(|step| tick(Duration::from_secs(629) + Duration::from_millis(50 * step), 3).0).collect();
+        let summary = |mut times: Vec<Duration>| {
+            times.sort();
+            format!("p50 {:?}, max {:?} over {}", times[times.len() / 2], times[times.len() - 1], times.len())
+        };
+        let mut windows = state.venue_basis.concat();
+        let began = std::time::Instant::now();
+        let round: Vec<_> = windows.iter_mut().map(|window| {
+            window.observe(start + Duration::from_secs(631), Some(0.0001));
+            window.published()
+        }).collect();
+        let round_time = began.elapsed();
+        println!("{} coins, {listings} perp listings ({} venue windows), every window full: {full}", table.names.len(), windows.len());
+        println!("owner tick taking a sample: {}", summary(sampling.into_iter().map(|(elapsed, _)| elapsed).collect()));
+        println!("owner tick between samples: {}", summary(between));
+        println!("the {} venue windows' round alone: {round_time:?} ({} published)", windows.len(), round.iter().filter(|basis| basis.is_ok()).count());
+        assert_eq!((listings, full), (832, true));
     }
 
     /// Design 000594: no sample without the book fresh and trusted with both sides, a perp quote and the feeds running.

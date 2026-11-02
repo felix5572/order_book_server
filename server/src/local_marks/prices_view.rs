@@ -175,8 +175,8 @@ pub(crate) fn external_basis_view(basis: &Result<ExternalBasis, Withheld>) -> Le
     basis.as_ref().map_or_else(withheld, |basis| LegView::Ready(ExternalBasisView { ratio: basis.ratio, samples: basis.samples }))
 }
 
-/// The external quotes and the basis to them, as `extMarkPrices`' local leg names them, in its order: the external
-/// leg of `extExternalQuotes` (hyperliquid-trade design 000673 §4) and the Binance leg of `extHip3ExternalQuotes`. The
+/// The external quotes and the basis to them, as `extMarkPrices`' local leg names them, in its order: the Binance leg
+/// of `extHip3ExternalQuotes` (`extExternalQuotes`' schema 2 adds each venue's basis, `external_quotes_view`). The
 /// external bid and ask are the quotes' weighted medians (one venue: its quote), exact, the listings' multipliers
 /// applied, off HL's price grid.
 #[derive(Serialize)]
@@ -438,6 +438,25 @@ mod tests {
         assert!(eth["data"]["local"].get("externalQuotes").is_none(), "a withheld leg has no external quotes");
         assert!(eth["data"]["local"].get("externalBasis").is_none(), "nor a basis");
     }
+
+    /// Hyperliquid-trade design 000681 r2: `extMarkPrices`' frames byte for byte as before each venue's own basis - a
+    /// ready coin's and a withheld one's, the basis withheld and ready.
+    #[test]
+    fn the_frames_are_byte_for_byte_as_before_the_venues_bases() {
+        let world = World::new();
+        let mut state = world.owner_state();
+        let start = tokio::time::Instant::now();
+        let first = world.snapshot_at(&mut state, NOW_MS, start);
+        let wire = |snapshot: &LocalMarksSnapshot, coin: &str| String::from_utf8(CoinMarksView::of(snapshot, coin, snapshot.coin(coin).unwrap()).to_wire().to_vec()).unwrap();
+        assert_eq!(wire(&first, "BTC"), GOLDEN_BTC_FIRST);
+        assert_eq!(wire(&first, "ETH"), GOLDEN_ETH);
+        let ready = (1..120).map(|second| world.snapshot_at(&mut state, NOW_MS, start + std::time::Duration::from_secs(second))).last().unwrap();
+        assert_eq!(wire(&ready, "BTC"), GOLDEN_BTC_READY);
+    }
+
+    const GOLDEN_BTC_FIRST: &str = r#"{"channel":"extMarkPrices","data":{"schemaVersion":2,"coin":"BTC","intervalMs":50,"publishedTsMs":1000000,"node":{"status":"ready","markPx":"100020","markTimeNs":999000000000,"markUpdate":"setGlobal","storedOraclePx":"100000","submittedOraclePx":"100001","submittedMarkPx":"100021","spotCachePx":"100005","spotCacheNextRefreshMs":1002000,"markCachePx":"100010","markCacheNextRefreshMs":1002000,"basisEma":{"numerator":0.0,"denominatorS":100.0,"decayParameter":120.0,"samples":1000,"lastSampleTimeNs":999000000000},"localPriceEma":{"numerator":10000.0,"denominatorS":100.0,"decayParameter":120.0,"samples":1000,"lastSampleTimeNs":999000000000},"lastTradePx":"100002","seedHeight":900,"height":1000,"blockTimeMs":999500},"local":{"status":"ready","referenceMarkPx":"100002","submittedMarkPx":"100002","predictedMarkPx":"100002","basisAdjustedOraclePx":"100000.1","localPx":"100002","externalPx":"100004","externalBidPx":"100003.95","externalAskPx":"100004.05","externalQuotes":{"binance":{"bidPx":"100003.95","askPx":"100004.05","receivedTsMs":1000000}},"externalBasis":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"1 of the 120 samples needed over the last 600 s"},"oraclePx":"100000.1","basisRatio":1.9966722129692824e-7,"basisSamples":1001,"bidPx":"100001","askPx":"100003","nodeHeight":1000,"nodeBlockTimeMs":999500,"bookTimeMs":999600,"bookHeight":1001},"oracleCoverage":{"usedVenues":["binance","okx"],"missingVenues":[],"usedWeight":5,"configuredWeight":5},"externalCoverage":{"usedVenues":["binance"],"missingVenues":[],"usedWeight":3,"configuredWeight":3}}}"#;
+    const GOLDEN_ETH: &str = r#"{"channel":"extMarkPrices","data":{"schemaVersion":2,"coin":"ETH","intervalMs":50,"publishedTsMs":1000000,"node":{"status":"unavailable","reasonCode":"nodeCoin","reason":"the node replay does not claim ETH: unsupported until the next checkpoint seed, or not listed"},"local":{"status":"unavailable","reasonCode":"nodeCoin","reason":"the node replay does not claim ETH: unsupported until the next checkpoint seed, or not listed"},"oracleCoverage":{"usedVenues":["binance"],"missingVenues":[],"usedWeight":3,"configuredWeight":3},"externalCoverage":{"usedVenues":["binance"],"missingVenues":[],"usedWeight":3,"configuredWeight":3}}}"#;
+    const GOLDEN_BTC_READY: &str = r#"{"channel":"extMarkPrices","data":{"schemaVersion":2,"coin":"BTC","intervalMs":50,"publishedTsMs":1000000,"node":{"status":"ready","markPx":"100020","markTimeNs":999000000000,"markUpdate":"setGlobal","storedOraclePx":"100000","submittedOraclePx":"100001","submittedMarkPx":"100021","spotCachePx":"100005","spotCacheNextRefreshMs":1002000,"markCachePx":"100010","markCacheNextRefreshMs":1002000,"basisEma":{"numerator":0.0,"denominatorS":100.0,"decayParameter":120.0,"samples":1000,"lastSampleTimeNs":999000000000},"localPriceEma":{"numerator":10000.0,"denominatorS":100.0,"decayParameter":120.0,"samples":1000,"lastSampleTimeNs":999000000000},"lastTradePx":"100002","seedHeight":900,"height":1000,"blockTimeMs":999500},"local":{"status":"ready","referenceMarkPx":"100002","submittedMarkPx":"100002","predictedMarkPx":"100002","basisAdjustedOraclePx":"100000.1","localPx":"100002","externalPx":"100004","externalBidPx":"100003.95","externalAskPx":"100004.05","externalQuotes":{"binance":{"bidPx":"100003.95","askPx":"100004.05","receivedTsMs":1000000}},"externalBasis":{"status":"ready","ratio":-0.000019999200032039255,"samples":120},"oraclePx":"100000.1","basisRatio":1.9966722129692824e-7,"basisSamples":1001,"bidPx":"100001","askPx":"100003","nodeHeight":1000,"nodeBlockTimeMs":999500,"bookTimeMs":999600,"bookHeight":1001},"oracleCoverage":{"usedVenues":["binance","okx"],"missingVenues":[],"usedWeight":5,"configuredWeight":5},"externalCoverage":{"usedVenues":["binance"],"missingVenues":[],"usedWeight":3,"configuredWeight":3}}}"#;
 
     /// Design 000594: from its minimum samples on, the basis is their median and count: BTC's 100,002 / 100,004 - 1.
     #[test]

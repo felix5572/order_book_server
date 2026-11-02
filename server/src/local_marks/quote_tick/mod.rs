@@ -247,7 +247,12 @@ mod tests {
 
     impl Fixture {
         fn new(hip3: bool) -> Self {
-            let sources = Arc::new(MarkSources::parse(MAIN).unwrap());
+            Self::of(MAIN, hip3)
+        }
+
+        /// The same of the main-dex sources `main`.
+        fn of(main: &str, hip3: bool) -> Self {
+            let sources = Arc::new(MarkSources::parse(main).unwrap());
             let sip = Arc::new(Hip3SipSources::parse(SIP).unwrap());
             let binance = Arc::new(Hip3ExternalSources::parse(BINANCE).unwrap());
             let external = hip3.then(|| Hip3ExternalConfig { sources: binance, sip_sources: Arc::clone(&sip), quote_max_age_ms: 60_000 });
@@ -354,6 +359,26 @@ mod tests {
         serde_json::from_slice::<serde_json::Value>(&entry(publication, key).frame).unwrap()["data"].clone()
     }
 
+    /// Hyperliquid-trade design 000681 r2: the tick's `extHip3ExternalQuotes` frames byte for byte as before the main
+    /// dex's venues' own bases - GOLD's Binance leg, TSLA's two legs.
+    #[tokio::test]
+    async fn the_hip3_frames_are_byte_for_byte_as_before_the_venues_bases() {
+        let mut fixture = Fixture::new(true);
+        fixture.binance_quote(0, ("3900", "3901.5"), NOW_MS - 30);
+        fixture.binance_quote(1, ("405.7", "405.8"), NOW_MS - 20);
+        fixture.equity_quote(EquityFeed::Sip, 1, ("405.765", "405.775"), NOW_MS - 1_000, NOW_MS - 920);
+        let start = Instant::now();
+        let owner = fixture.owner(NOW_MS, start, None);
+        let (_gold, _tsla) = (fixture.subscribe(GOLD), fixture.subscribe(TSLA));
+        let tick = fixture.quote_tick(&owner, NOW_MS + 5, start + QUOTE_TICK);
+        let wire = |key| String::from_utf8(entry(&tick, key).frame.to_vec()).unwrap();
+        assert_eq!(wire(GOLD), GOLDEN_GOLD);
+        assert_eq!(wire(TSLA), GOLDEN_TSLA);
+    }
+
+    const GOLDEN_GOLD: &str = r#"{"channel":"extHip3ExternalQuotes","data":{"schemaVersion":2,"coin":"xyz:GOLD","intervalMs":5,"publishedTsMs":1793123462005,"quoteMaxAgeMs":60000,"external":{"status":"ready","externalBidPx":"3900","externalAskPx":"3901.5","externalQuotes":{"binance":{"bidPx":"3900","askPx":"3901.5","receivedTsMs":1793123461970}},"externalBasis":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 120 samples needed over the last 600 s"}},"equity":{"status":"unlisted"}}}"#;
+    const GOLDEN_TSLA: &str = r#"{"channel":"extHip3ExternalQuotes","data":{"schemaVersion":2,"coin":"xyz:TSLA","intervalMs":5,"publishedTsMs":1793123462005,"quoteMaxAgeMs":60000,"external":{"status":"ready","externalBidPx":"405.7","externalAskPx":"405.8","externalQuotes":{"binance":{"bidPx":"405.7","askPx":"405.8","receivedTsMs":1793123461980}},"externalBasis":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 120 samples needed over the last 600 s"}},"equity":{"status":"ready","feed":"sip","bidPx":"405.765","askPx":"405.775","receivedTsMs":1793123461080,"quoteTsMs":1793123461000,"basis":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 120 samples needed over the last 600 s"}}}}"#;
+
     /// Design 000673 §7: the first tick of a subscription publishes the coin's frame (`intervalMs` 5, the tick's
     /// publish time); unchanged it publishes nothing but the heartbeat every 10 ticks; a price change publishes at the
     /// next tick, under a higher version.
@@ -371,7 +396,7 @@ mod tests {
         assert_eq!(published, [(0, vec![(BTC, Cause::First)]), (3, vec![(BTC, Cause::Changed)]), (10, vec![(BTC, Cause::Heartbeat)]), (20, vec![(BTC, Cause::Heartbeat)])]);
         assert!(ticks.iter().enumerate().all(|(index, tick)| tick.snapshot.is_some() == [0, 3, 10, 20].contains(&index)), "no snapshot sent unchanged");
         let first = data(&ticks[0], BTC);
-        assert_eq!((first["schemaVersion"].as_u64(), first["coin"].as_str(), first["intervalMs"].as_u64(), first["publishedTsMs"].as_u64()), (Some(1), Some("BTC"), Some(5), Some(NOW_MS)));
+        assert_eq!((first["schemaVersion"].as_u64(), first["coin"].as_str(), first["intervalMs"].as_u64(), first["publishedTsMs"].as_u64()), (Some(2), Some("BTC"), Some(5), Some(NOW_MS)));
         assert_eq!((first["external"]["externalBidPx"].as_str(), first["external"]["externalAskPx"].as_str()), (Some("100000"), Some("100001")));
         let changed = data(&ticks[3], BTC);
         assert_eq!((changed["external"]["externalBidPx"].as_str(), changed["publishedTsMs"].as_u64()), (Some("100000.1"), Some(NOW_MS + 15)));
@@ -473,6 +498,160 @@ mod tests {
         assert_eq!(ticks[2].samples.iter().map(|(key, sample)| (*key, sample.received_ms)).collect::<Vec<_>>(), [(BTC, NOW_MS + 9)]);
     }
 
+    /// AVAX on its five perp venues, Binance weighing 3 of their 9.
+    const AVAX: &str = r#"{"coins": {"AVAX": {"spot": {"okx": {"symbol": "AVAX-USDT", "pxMultiplier": "1"}}, "perp": {
+        "binance": {"symbol": "AVAXUSDT", "pxMultiplier": "1"}, "okx": {"symbol": "AVAX-USDT-SWAP", "pxMultiplier": "1"},
+        "bybit": {"symbol": "AVAXUSDT", "pxMultiplier": "1"}, "gate": {"symbol": "AVAX_USDT", "pxMultiplier": "1"},
+        "mexc": {"symbol": "AVAX_USDT", "pxMultiplier": "1"}}}}}"#;
+
+    /// Hyperliquid-trade design 000681 r2, review 000681 r1 P1 (live AVAX 2026-11-02 15:58:14): every venue's bid at
+    /// 8.500; Binance alone falls to 8.477 - 3 of the weight 9, the median bid stays 8.500 - and the next tick
+    /// publishes it (Binance's own bid and ask in the fingerprint); back to 8.500 20 ms later, the next tick publishes
+    /// again; its same quote received anew each tick after publishes nothing but the heartbeat. OKX's same quote
+    /// received anew 3 ms after Binance's fall is not the fall's start: its sample starts at Binance's receipt (review
+    /// 000683 r1).
+    #[tokio::test]
+    async fn binance_alone_moving_publishes_the_next_tick() {
+        let mut fixture = Fixture::of(AVAX, false);
+        let avax = QuoteKey { channel: QuoteChannel::Main, index: 0 };
+        let feeds = [Venue::Binance, Venue::Okx, Venue::Bybit, Venue::Gate, Venue::Mexc].map(|venue| Feed { kind: Kind::Perp, venue });
+        let symbols = ["AVAXUSDT", "AVAX-USDT-SWAP", "AVAXUSDT", "AVAX_USDT", "AVAX_USDT"];
+        for (feed, symbol) in feeds.iter().zip(symbols) {
+            fixture.main_quote(*feed, symbol, ("8.5", "8.501"), NOW_MS - 1_000);
+        }
+        let _avax = fixture.subscribe(avax);
+        let ticks = fixture.ticks(Instant::now(), 11, |fixture, tick| match tick {
+            1 => {
+                fixture.main_quote(PERP_BINANCE, "AVAXUSDT", ("8.477", "8.478"), NOW_MS + 1);
+                fixture.main_quote(PERP_OKX, "AVAX-USDT-SWAP", ("8.5", "8.501"), NOW_MS + 4);
+            }
+            5..=9 => fixture.main_quote(PERP_BINANCE, "AVAXUSDT", ("8.5", "8.501"), NOW_MS + 5 * u64::from(tick) - 1),
+            _ => {}
+        });
+        let published: Vec<_> = ticks.iter().enumerate().filter(|(_, tick)| !tick.published.is_empty()).map(|(index, tick)| (index, causes(tick))).collect();
+        assert_eq!(published, [(0, vec![(avax, Cause::First)]), (1, vec![(avax, Cause::Changed)]), (5, vec![(avax, Cause::Changed)]), (10, vec![(avax, Cause::Heartbeat)])]);
+        let (fell, back) = (data(&ticks[1], avax)["external"].clone(), data(&ticks[5], avax)["external"].clone());
+        assert_eq!((fell["externalBidPx"].as_str(), fell["externalQuotes"]["binance"]["bidPx"].as_str()), (Some("8.5"), Some("8.477")), "the median unmoved");
+        assert_eq!((back["externalBidPx"].as_str(), back["externalQuotes"]["binance"]["bidPx"].as_str()), (Some("8.5"), Some("8.5")));
+        assert_eq!(ticks[1].samples.iter().map(|(_, sample)| sample.received_ms).collect::<Vec<_>>(), [NOW_MS + 1], "from Binance's receipt, not OKX's refresh");
+    }
+
+    /// Review 000683 r1: BTC's OKX quoting 10^24 against HL's 100,002 - its basis' median -1 in f64, its side × (1 +
+    /// ratio) no price -; from the 120th sample its basis alone is withheld (`externalBasisOutOfRange`), in the HTTP
+    /// row and the tick's frame alike: its quote still published, Binance's basis and the medians' ready.
+    #[tokio::test]
+    async fn a_venue_basis_out_of_range_is_withheld_alone() {
+        let mut fixture = Fixture::new(false);
+        fixture.main_quote(PERP_BINANCE, "BTCUSDT", ("100000", "100001"), NOW_MS - 200_000);
+        let far = "1000000000000000000000000";
+        fixture.main_quote(PERP_OKX, "BTC-USDT-SWAP", (far, far), NOW_MS - 200_000);
+        let start = Instant::now();
+        let owner = (0..120_u32)
+            .map(|second| {
+                let now_ms = NOW_MS - 119_000 + 1_000 * u64::from(second);
+                let book = fixture.book(now_ms);
+                fixture.owner(now_ms, start + Duration::from_secs(u64::from(second)), Some(&book))
+            })
+            .last()
+            .unwrap();
+        let _btc = fixture.subscribe(BTC);
+        let tick = fixture.quote_tick(&owner, NOW_MS + 5, owner.computed_at + QUOTE_TICK);
+        let row = serde_json::to_value(ExternalQuotesView::of(&owner, "BTC", owner.coin("BTC").unwrap())).unwrap();
+        for external in [&row["external"], &data(&tick, BTC)["external"]] {
+            assert_eq!((external["status"].as_str(), external["externalBidPx"].as_str()), (Some("ready"), Some("100000")), "{external}");
+            assert_eq!((external["externalBasis"]["status"].as_str(), external["externalBasis"]["samples"].as_u64()), (Some("ready"), Some(120)));
+            let (binance, okx) = (&external["externalQuotes"]["binance"], &external["externalQuotes"]["okx"]);
+            assert_eq!((binance["basis"]["status"].as_str(), binance["basis"]["samples"].as_u64()), (Some("ready"), Some(120)));
+            assert_eq!((okx["bidPx"].as_str(), okx["basis"]["status"].as_str(), okx["basis"]["reasonCode"].as_str()), (Some(far), Some("unavailable"), Some("externalBasisOutOfRange")), "{okx}");
+            let reason = "median -1 of 120 samples is past the ±10% a normal basis stays within: its quote is far off HL's";
+            assert_eq!(okx["basis"]["reason"], reason, "{okx}");
+        }
+    }
+
+    /// 120 owner ticks a second apart up to `NOW_MS`, each with the book of every coin at 100,001 / 100,003, `quote`
+    /// run ahead of each with its time: the last snapshot, every window full.
+    fn owner_of_120_samples(fixture: &mut Fixture, quote: impl Fn(&Fixture, u64)) -> LocalMarksSnapshot {
+        let start = Instant::now();
+        (0..120_u32)
+            .map(|second| {
+                let now_ms = NOW_MS - 119_000 + 1_000 * u64::from(second);
+                quote(fixture, now_ms);
+                let book = fixture.book(now_ms);
+                fixture.owner(now_ms, start + Duration::from_secs(u64::from(second)), Some(&book))
+            })
+            .last()
+            .unwrap()
+    }
+
+    /// User 2026-11-02, review 000683 r2: ETH's one perp venue, Binance, at 50,000 against HL's 100,002 - a basis of
+    /// +100% -: its medians' basis and Binance's own are withheld (`externalBasisOutOfRange`) in its frame, its quote
+    /// still published; BTC's bases, about the book, ready.
+    #[tokio::test]
+    async fn a_main_dex_basis_past_ten_percent_is_withheld() {
+        let mut fixture = Fixture::new(false);
+        fixture.btc_quotes(NOW_MS - 200_000);
+        fixture.main_quote(PERP_BINANCE, "ETHUSDT", ("50000", "50001"), NOW_MS - 200_000);
+        let owner = owner_of_120_samples(&mut fixture, |_, _| {});
+        let (_btc, _eth) = (fixture.subscribe(BTC), fixture.subscribe(ETH));
+        let tick = fixture.quote_tick(&owner, NOW_MS + 5, owner.computed_at + QUOTE_TICK);
+        let eth = data(&tick, ETH)["external"].clone();
+        assert_eq!((eth["status"].as_str(), eth["externalBidPx"].as_str()), (Some("ready"), Some("50000")), "{eth}");
+        assert_eq!((eth["externalBasis"]["reasonCode"].as_str(), eth["externalQuotes"]["binance"]["basis"]["reasonCode"].as_str()), (Some("externalBasisOutOfRange"), Some("externalBasisOutOfRange")));
+        let btc = data(&tick, BTC)["external"].clone();
+        let ready = [&btc["externalBasis"], &btc["externalQuotes"]["binance"]["basis"], &btc["externalQuotes"]["okx"]["basis"]].map(|basis| basis["status"].clone());
+        assert_eq!(ready, ["ready", "ready", "ready"], "{btc}");
+    }
+
+    /// User 2026-11-02, review 000683 r2: the HIP-3 legs' bases alike. GOLD's Binance quote and TSLA's SIP quote at
+    /// 50,000 against HL's 100,002 withhold those bases alone (`externalBasisOutOfRange`), their quotes published;
+    /// TSLA's Binance leg and BB's SIP leg, about the book, keep theirs.
+    #[tokio::test]
+    async fn a_hip3_basis_past_ten_percent_is_withheld() {
+        let mut fixture = Fixture::new(true);
+        fixture.equity_quote(EquityFeed::Sip, 0, ("100000", "100001"), NOW_MS - 200_000, NOW_MS - 199_900);
+        fixture.equity_quote(EquityFeed::Sip, 1, ("50000", "50001"), NOW_MS - 200_000, NOW_MS - 199_900);
+        // Binance's quotes expire past 60 s: received anew each second
+        let owner = owner_of_120_samples(&mut fixture, |fixture, now_ms| {
+            fixture.binance_quote(0, ("50000", "50001"), now_ms);
+            fixture.binance_quote(1, ("100000", "100001"), now_ms);
+        });
+        let bb = QuoteKey { channel: QuoteChannel::Hip3, index: 0 };
+        let _guards = [bb, GOLD, TSLA].map(|key| fixture.subscribe(key));
+        let tick = fixture.quote_tick(&owner, NOW_MS + 5, owner.computed_at + QUOTE_TICK);
+        let (gold, tsla, bb) = (data(&tick, GOLD), data(&tick, TSLA), data(&tick, bb));
+        let leg = |leg: &serde_json::Value, basis: &str| (leg["status"].as_str().unwrap().to_string(), leg[basis]["status"].as_str().unwrap().to_string(), leg[basis]["reasonCode"].as_str().map(str::to_string));
+        let out = |status: &str| (status.to_string(), "unavailable".to_string(), Some("externalBasisOutOfRange".to_string()));
+        let kept = |status: &str| (status.to_string(), "ready".to_string(), None);
+        assert_eq!(leg(&gold["external"], "externalBasis"), out("ready"), "{gold}");
+        assert_eq!(leg(&tsla["external"], "externalBasis"), kept("ready"), "{tsla}");
+        assert_eq!(leg(&tsla["equity"], "basis"), out("ready"), "{tsla}");
+        assert_eq!(leg(&bb["equity"], "basis"), kept("ready"), "{bb}");
+        assert_eq!((gold["external"]["externalBidPx"].as_str(), tsla["equity"]["bidPx"].as_str()), (Some("50000"), Some("50000")));
+    }
+
+    /// Design 000681: the schema 2 frame byte for byte - each quoting venue's own basis beside its quote -, and
+    /// `intervalMs` 5.
+    #[tokio::test]
+    async fn the_schema_2_frame_byte_for_byte() {
+        let mut fixture = Fixture::new(false);
+        fixture.btc_quotes(NOW_MS - 10);
+        let start = Instant::now();
+        let owner = fixture.owner(NOW_MS, start, None);
+        let _btc = fixture.subscribe(BTC);
+        let tick = fixture.quote_tick(&owner, NOW_MS + 5, start + QUOTE_TICK);
+        let withheld = r#"{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 120 samples needed over the last 600 s"}"#;
+        let quote = |bid: &str, ask: &str| format!(r#"{{"bidPx":"{bid}","askPx":"{ask}","receivedTsMs":{},"basis":{withheld}}}"#, NOW_MS - 10);
+        let expected = format!(
+            r#"{{"channel":"extExternalQuotes","data":{{"schemaVersion":2,"coin":"BTC","intervalMs":5,"publishedTsMs":{},"external":{{"status":"ready","#,
+            NOW_MS + 5
+        ) + &format!(
+            r#""externalBidPx":"100000","externalAskPx":"100001","externalQuotes":{{"binance":{},"okx":{}}},"externalBasis":{withheld}}}}}}}"#,
+            quote("100000", "100001"),
+            quote("100000.5", "100001.5")
+        );
+        assert_eq!(String::from_utf8(entry(&tick, BTC).frame.to_vec()).unwrap(), expected);
+    }
+
     /// Design 000673 r4: the same SIP quote stamped 09:29:59.980 is TSLA's pre-market leg at 09:29:59.990, and at the
     /// next tick, 09:30:00.010, a pre-market quote in the regular session (`quoteOutsideSession`): published then, not
     /// at the heartbeat.
@@ -516,6 +695,8 @@ mod tests {
         let held = fixture.quote_tick(&owner, published_ms, instant);
         let btc = data(&held, BTC)["external"].clone();
         assert_eq!((btc["externalBasis"]["status"].as_str(), btc["externalBasis"]["samples"].as_u64()), (Some("ready"), Some(120)));
+        let venue_bases = |external: &serde_json::Value, field: &str| ["binance", "okx"].map(|venue| external["externalQuotes"][venue]["basis"][field].clone());
+        assert_eq!(venue_bases(&btc, "samples"), [120, 120], "each venue's own basis, held 200 ms too (design 000681)");
         assert_eq!(data(&held, GOLD)["external"]["externalBasis"]["reasonCode"], "externalBasisSamples");
         assert_eq!(data(&held, TSLA)["equity"]["basis"]["reasonCode"], "externalBasisSamples");
         let (published_ms, instant) = at(201);
@@ -529,6 +710,7 @@ mod tests {
             [&btc["external"]["externalBasis"], &gold["external"]["externalBasis"], &tsla["equity"]["basis"]].map(|basis| basis["reasonCode"].as_str().unwrap().to_string())
         };
         assert_eq!(stale_legs(&stale), ["basisStale"; 3]);
+        assert_eq!(venue_bases(&data(&stale, BTC)["external"], "reasonCode"), ["basisStale", "basisStale"], "each venue's from 201 ms");
         assert!(data(&stale, BTC)["external"]["externalBasis"]["reason"].as_str().unwrap().contains("201 ms ago"));
         let later: Vec<_> = (2..=10_u64).map(|tick| {
             let (published_ms, instant) = at(195 + 5 * tick);
@@ -537,12 +719,14 @@ mod tests {
         assert!(later[..8].iter().all(|tick| tick.published.is_empty()));
         assert_eq!(causes(&later[8]), [(BTC, Cause::Heartbeat), (GOLD, Cause::Heartbeat), (TSLA, Cause::Heartbeat)]);
         assert_eq!(stale_legs(&later[8]), ["basisStale"; 3], "the heartbeat restores no basis");
+        assert_eq!(venue_bases(&data(&later[8], BTC)["external"], "reasonCode"), ["basisStale", "basisStale"], "nor a venue's");
         let (published_ms, instant) = at(250);
         let book = fixture.book(published_ms);
         let anew = fixture.owner(published_ms, instant, Some(&book));
         let restored = fixture.quote_tick(&anew, published_ms + 5, instant + QUOTE_TICK);
         assert!(causes(&restored).contains(&(BTC, Cause::Changed)));
         assert_eq!(data(&restored, BTC)["external"]["externalBasis"]["samples"].as_u64(), Some(120));
+        assert_eq!(venue_bases(&data(&restored, BTC)["external"], "samples"), [120, 120]);
         drop(guards);
     }
 
@@ -638,7 +822,8 @@ mod tests {
         assert_eq!((external["status"].as_str(), external["externalBidPx"].as_str(), external["externalAskPx"].as_str()), (Some("ready"), Some("0.5001"), Some("0.5003")));
         let venues: Vec<_> = external["externalQuotes"].as_object().unwrap().keys().cloned().collect();
         assert_eq!(venues, ["bybit", "mexc"]);
-        assert_eq!(external["externalQuotes"]["mexc"], serde_json::json!({"bidPx": "0.5", "askPx": "0.5002", "receivedTsMs": NOW_MS - 10}));
+        let basis = serde_json::json!({"status": "unavailable", "reasonCode": "externalBasisSamples", "reason": "0 of the 120 samples needed over the last 600 s"});
+        assert_eq!(external["externalQuotes"]["mexc"], serde_json::json!({"bidPx": "0.5", "askPx": "0.5002", "receivedTsMs": NOW_MS - 10, "basis": basis}));
     }
 
     /// Design 000673 §4: the tick's frame writes the external fields as the owner's row of the same quotes and basis,

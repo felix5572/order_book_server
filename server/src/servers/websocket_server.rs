@@ -2579,7 +2579,8 @@ mod tests {
     /// an unsubscribe with its "not enabled" without the local marks, in BBO-only mode and with the local marks but its
     /// switch off, and with its "not in the sources" for a coin of neither table; each its text as before with
     /// `"schemaVersion":2` beside it, byte for byte; `extExternalQuotes` (design 000673) alike without the local marks,
-    /// in BBO-only mode and for a coin outside the local marks' sources, `"schemaVersion":1`; the connection stays up.
+    /// in BBO-only mode and for a coin outside the local marks' sources, `"schemaVersion":2` (design 000681); the
+    /// connection stays up.
     #[tokio::test]
     #[allow(clippy::future_not_send)]
     async fn test_hip3_external_quotes_refusals_carry_the_schema_at_the_dispatch() {
@@ -2606,9 +2607,9 @@ mod tests {
             (None, true, hip3, "xyz:TSLA", not_enabled, 2),
             (Some(marks(None)), false, hip3, "xyz:TSLA", not_enabled, 2),
             (Some(marks(Some(embedded))), false, hip3, "xyz:KIOXIA", outside, 2),
-            (None, false, main, "BTC", main_off, 1),
-            (None, true, main, "BTC", main_off, 1),
-            (Some(marks(None)), false, main, "KIOXIA", "extExternalQuotes KIOXIA is not in the local marks' sources", 1),
+            (None, false, main, "BTC", main_off, 2),
+            (None, true, main, "BTC", main_off, 2),
+            (Some(marks(None)), false, main, "KIOXIA", "extExternalQuotes KIOXIA is not in the local marks' sources", 2),
         ];
         for (local_marks, bbo_only, channel, coin, text, schema) in cases {
             let session = local_marks.is_some();

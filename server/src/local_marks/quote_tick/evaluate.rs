@@ -20,7 +20,7 @@ use crate::local_marks::{
         session::equity_session,
     },
     slot::{Entry, FeedReading, Validity},
-    snapshot::{CoinTable, ExternalLeg, LocalMarksSnapshot, Withheld},
+    snapshot::{CoinTable, ExternalLeg, LocalMarksSnapshot, MainExternalLeg, Withheld},
     subscriptions::FeedSubscriptions,
 };
 
@@ -99,12 +99,14 @@ fn markets(table: &CoinTable, coin: QuoteKey) -> Vec<(FeedRef, usize)> {
 
 /// A main-dex coin's external leg at the tick: its perp quotes valid at the publish time and their medians, each
 /// received by then - else the leg is withheld (`ExternalQuotes::received_by`), as the owner's and a HIP-3 leg are -,
-/// and the owner's basis.
-pub(crate) fn main_leg(table: &CoinTable, index: usize, reading: &QuoteReading<'_>, owner: &LocalMarksSnapshot) -> Result<ExternalLeg, Withheld> {
+/// the owner's basis to the medians and each quoting venue's own (hyperliquid-trade design 000681), each judged by its
+/// age alike.
+pub(crate) fn main_leg(table: &CoinTable, index: usize, reading: &QuoteReading<'_>, owner: &LocalMarksSnapshot) -> Result<MainExternalLeg, Withheld> {
     let coin = &table.names()[index];
     let quotes = table.perp_quotes(index, |feed, market| reading.observed(FeedRef::Main(feed), market))?.received_by(coin, reading.published_ms)?;
     let marks = owner.coin(coin).unwrap_or_else(|| unreachable!("{coin} is of the owner's table"));
-    Ok(ExternalLeg { quotes, basis: owner_basis(&marks.external_basis, owner, reading.instant) })
+    let taken = |basis: &Result<ExternalBasis, Withheld>| owner_basis(basis, owner, reading.instant);
+    Ok(MainExternalLeg::of(quotes, marks.external_basis.clone(), &marks.venue_bases, taken))
 }
 
 /// A HIP-3 coin's two legs at the tick, each with the owner's basis of its source.

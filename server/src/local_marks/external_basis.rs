@@ -10,6 +10,14 @@
 //! and the venues only, not the node state: a node behind still samples. Where HL's price grid is coarse (a tick of 2
 //! bp and more on 28 coins, 72 bp on HMSTR), its book is often one tick wide and the basis has half a tick's precision
 //! (user 2026-10-30: left so).
+//!
+//! Each perp venue of a coin has its own window too (hyperliquid-trade design 000681): the same rule on that venue's
+//! quote alone, its multiplier applied - its lasting offset to HL, Binance's a cancel's reference of its own.
+//!
+//! No basis past `MAX_BASIS_RATIO` either way, nor one not finite, is published - every window's, the main dex's
+//! medians', each venue's, the HIP-3 Binance and US stock legs' (user 2026-11-02, review 000683 r1-r2: a quote far off
+//! HL's, OKX at 10^24 against HL's 100,002, gave a median of -1, an external side × (1 + ratio) at zero): that basis is
+//! withheld, `externalBasisOutOfRange`, its quote and every other leg published as ever.
 
 use std::{collections::VecDeque, time::Duration};
 
@@ -21,6 +29,15 @@ use crate::order_book::Px;
 pub(crate) const WINDOW: Duration = Duration::from_secs(600);
 pub(crate) const MIN_SAMPLES: usize = 120;
 pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+/// The largest basis published, either way: a guard against a quote far off HL's, the user's (2026-11-02: "我最多能接受
+/// 10% 基差当作防呆"). Far past any seen: bm 11-02 17:04Z's live bases reached 47.5 bp over the main dex's 176 coins,
+/// 30 bp over the HIP-3 Binance legs' 92, 36 bp over the SIP legs' 85; the largest ever, HMSTR's +109 bp on 10-30.
+///
+/// It bounds the window's median of the f64 ratios `sample` computes - HL's midpoint over the external midpoint - 1,
+/// each midpoint turned to f64 first -, so only to f64's rounding (about 1e-16 relative): books exactly ±10% apart may
+/// fall on either side. That is meant (review 000683 r3, the coordinator's call): a guard has only to tell a normal
+/// basis (seen at most about 1%) from one far off (well past 10%), not to own the bound's last digit.
+pub(crate) const MAX_BASIS_RATIO: f64 = 0.10;
 /// HL book prices are 1e-8.
 const BOOK_PRICE_SCALE: f64 = 1e8;
 
@@ -77,13 +94,22 @@ impl ExternalBasisWindow {
         (!self.scratch.is_empty()).then(|| *self.scratch.select_nth_unstable_by(middle, f64::total_cmp).1)
     }
 
-    /// The median once the window holds `MIN_SAMPLES`; never a zero for too few.
+    /// The median once the window holds `MIN_SAMPLES` - never a zero for too few (`externalBasisSamples`, judged
+    /// first) - and finite within `MAX_BASIS_RATIO` either way, `MAX_BASIS_RATIO` itself published; else withheld,
+    /// `externalBasisOutOfRange`: every basis' one rule.
     pub(crate) fn published(&self) -> Result<ExternalBasis, Withheld> {
         let samples = self.samples.len();
         let Some(ratio) = self.median.filter(|_| samples >= MIN_SAMPLES) else {
             let detail = format!("{samples} of the {MIN_SAMPLES} samples needed over the last {} s", WINDOW.as_secs());
             return Err(Withheld::unavailable("externalBasisSamples", detail));
         };
+        if !ratio.is_finite() || ratio.abs() > MAX_BASIS_RATIO {
+            let detail = format!(
+                "median {ratio} of {samples} samples is past the ±{}% a normal basis stays within: its quote is far off HL's",
+                MAX_BASIS_RATIO * 100.0
+            );
+            return Err(Withheld::unavailable("externalBasisOutOfRange", detail));
+        }
         Ok(ExternalBasis { ratio, samples })
     }
 }
@@ -160,6 +186,53 @@ mod tests {
             window.observe(start + Duration::from_millis(50 * tick), Some(0.0));
         }
         assert_eq!(window.samples.len(), 3);
+    }
+
+    /// User 2026-11-02, review 000683 r2: a median within ±10% is published, ±0.10 itself included; past it either way,
+    /// at -1 (a quote 10^24 against HL's 100,002 rounds there in f64), infinite or NaN, withheld as out of range with
+    /// its median; too few samples withheld as before, judged first.
+    #[test]
+    fn a_basis_publishes_only_a_finite_median_within_ten_percent() {
+        let published = |count: u32, ratio: f64| {
+            let mut window = ExternalBasisWindow::default();
+            fill(&mut window, Instant::now(), count, ratio);
+            window.published()
+        };
+        for ratio in [0.10, -0.10, 0.0, 0.0999] {
+            assert_eq!(published(120, ratio), Ok(ExternalBasis { ratio, samples: 120 }), "{ratio}");
+        }
+        let book_mid = f64::midpoint(10_000_100_000_000.0, 10_000_300_000_000.0) / BOOK_PRICE_SCALE;
+        assert_eq!(book_mid / 1e24 - 1.0, -1.0, "the review's OKX quote");
+        for ratio in [0.100_000_1, -0.100_000_1, -1.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let withheld = published(120, ratio).unwrap_err();
+            assert_eq!(withheld.code, "externalBasisOutOfRange", "{ratio}");
+            let reason = format!("median {ratio} of 120 samples is past the ±10% a normal basis stays within: its quote is far off HL's");
+            assert_eq!(withheld.detail, reason);
+        }
+        let few = published(119, -1.0).unwrap_err();
+        assert_eq!((few.code, few.detail.as_str()), ("externalBasisSamples", "119 of the 120 samples needed over the last 600 s"), "too few judged first");
+    }
+
+    /// Review 000683 r3: from books through `sample`, the window and `published`: HL at 109.99 and 90.01 against an
+    /// external 100 (±9.99%) publish; at 110.01 and 89.99 (±10.01%) withheld as out of range. Books exactly ±10% apart
+    /// are left unasserted: f64's rounding decides their side (`MAX_BASIS_RATIO`).
+    #[test]
+    fn books_inside_ten_percent_publish_and_past_it_are_withheld() {
+        let external = VenuePrice::parse("100").unwrap();
+        let published = |hl_px: u64| {
+            let ratio = sample(Px::new(hl_px), Px::new(hl_px), external, external);
+            let mut window = ExternalBasisWindow::default();
+            fill(&mut window, Instant::now(), 120, ratio);
+            (ratio, window.published())
+        };
+        for (hl_px, expected) in [(10_999_000_000, 0.0999), (9_001_000_000, -0.0999)] {
+            let (ratio, basis) = published(hl_px);
+            assert!((ratio - expected).abs() < 1e-12, "{hl_px}: {ratio}");
+            assert_eq!(basis, Ok(ExternalBasis { ratio, samples: 120 }), "{hl_px}");
+        }
+        for hl_px in [11_001_000_000, 8_999_000_000] {
+            assert_eq!(published(hl_px).1.unwrap_err().code, "externalBasisOutOfRange", "{hl_px}");
+        }
     }
 
     /// The book 100.0 / 100.2 against the external medians 99.9 / 100.1: 100.1 / 100 - 1.

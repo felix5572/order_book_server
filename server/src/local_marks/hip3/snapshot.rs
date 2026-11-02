@@ -418,6 +418,24 @@ mod tests {
                       "nodeHeight": 1_000, "nodeBlockTimeMs": NOW_MS - 500, "bookTimeMs": NOW_MS - 400, "bookHeight": 1_001}}}));
     }
 
+    /// Hyperliquid-trade design 000681 r2: `extHip3MarkPrices`' frame byte for byte as before the main dex's venues'
+    /// own bases.
+    #[test]
+    fn the_frame_is_byte_for_byte_as_before_the_venues_bases() {
+        let mut world = World::new();
+        let readings: Vec<_> = world.sources.feeds().map(|(feed, markets)| {
+            (feed, markets, FeedProjection { connections: Vec::new(), messages: 0, entries: vec![(None, Validity::NotConnected); markets.symbols.len()] })
+        }).collect();
+        world.instant += Duration::from_millis(50);
+        let tick = Tick { now_ms: NOW_MS, instant: world.instant, stopped: None, node: &world.node, book: world.book.as_ref(), readings: &readings, equity: Some(&world.equity), hip3_external: None };
+        let snapshot = assemble(&world.table, &tick, &mut world.state);
+        let marks = snapshot.hip3_coin("xyz:TSLA").unwrap();
+        let wire = super::super::view::Hip3MarksView::of(&snapshot, "xyz:TSLA", marks).to_wire();
+        assert_eq!(String::from_utf8(wire.to_vec()).unwrap(), GOLDEN_TSLA);
+    }
+
+    const GOLDEN_TSLA: &str = r#"{"channel":"extHip3MarkPrices","data":{"schemaVersion":4,"coin":"xyz:TSLA","intervalMs":50,"publishedTsMs":1793123462000,"node":{"status":"ready","markPx":"405.76","markTimeNs":1793123461500000000,"storedOraclePx":"405.77","storedOracleTimeNs":1793123461500000000,"externalPx":"405.77","lastTradePx":"405.76","seedHeight":900,"height":1000,"blockTimeMs":1793123461500},"local":{"status":"ready","predictedMarkPx":"405.76","oraclePx":"405.77","quoteFeed":"sip","quoteMidPx":"405.77","carriedPx":null,"carryStatus":"warmup","carryPx":null,"carryRho":null,"carryPairs":0.0,"carryOffsetPx":null,"emaPx":"405.75","emaGapPx":-0.02,"emaAnchorTimeMs":1793123461500,"bookPx":"405.76","bidPx":"405.75","askPx":"405.77","quoteBidPx":"405.765","quoteAskPx":"405.775","quoteTimeMs":1793123461000,"quoteReceivedMs":1793123461080,"nodeHeight":1000,"nodeBlockTimeMs":1793123461500,"bookTimeMs":1793123461600,"bookHeight":1001},"quoteFeed":"sip","quoteStatus":"valid"}}"#;
+
     /// Design 000537: the oracle write the node state shows pairs with the carry's last; ready, (1) is the midpoint plus
     /// rho times its offset. TSLA's aggregate 0.300 above the SIP midpoint 405.770 for two minutes of writes: (1) 406.07,
     /// (2) 406.05 with the EMA's -0.020, (3) 405.76: the mark 406.05 (without the carry 405.76).
