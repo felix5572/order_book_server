@@ -866,6 +866,16 @@ lazy_static! {
         Opts::new("orderbook_node_marks_trailing_stops", "Main-dex trailing stops the node marks hold, by state"),
         &["state"]
     ).expect("metric can be created");
+
+    /// Batch 2n-3: the pending book's reads of the account copy's trailing stops at the replica's height - as the copy or
+    /// the replica moves -, by result: `proven` (no mark written between the two: a coin's stops may still be not known -
+    /// set or gone after the replica's height, the mark unclaimed -, `trigger_coins_total{outcome="trailing_unknown"}`
+    /// tells what that cost), or why not (`account_copy_unavailable`, `no_trailing_copy`, `block_log_short`,
+    /// `mark_written`, `refresh_due`).
+    pub static ref PENDING_BOOK_TRAILING_READS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_pending_book_trailing_reads_total", "Pending book reads of the account copy's trailing stops, by result"),
+        &["result"]
+    ).expect("metric can be created");
 }
 
 
@@ -1172,6 +1182,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(NODE_MARKS_AMBIGUOUS_CUTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_TRAILING_LINES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_TRAILING_STOPS.clone())).ok();
+    REGISTRY.register(Box::new(PENDING_BOOK_TRAILING_READS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LIQUIDATION_CANDIDATES_REFRESH_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(LIQUIDATION_CANDIDATES.clone())).ok();
     REGISTRY.register(Box::new(LIQUIDATION_WALK_LOCK_WAIT_SECONDS.clone())).ok();

@@ -51,7 +51,7 @@ use crate::{
     metrics::{
         PENDING_BOOK_ACTIONS_TOTAL, PENDING_BOOK_BLOCK_LOG_LEAD_BLOCKS, PENDING_BOOK_GAPS_TOTAL, PENDING_BOOK_HELD_ACTIONS,
         PENDING_BOOK_MOVED_COINS, PENDING_BOOK_OVERLAY_TOTAL, PENDING_BOOK_PREDICTED_FILLS_TOTAL, PENDING_BOOK_SIGNER_ACCOUNTS,
-        PENDING_BOOK_SPAN_SECONDS, PENDING_BOOK_TRIGGER_COINS_TOTAL, PENDING_BOOK_TRIGGERS_TOTAL,
+        PENDING_BOOK_SPAN_SECONDS, PENDING_BOOK_TRAILING_READS_TOTAL, PENDING_BOOK_TRIGGER_COINS_TOTAL, PENDING_BOOK_TRIGGERS_TOTAL,
     },
     order_book::{Coin, Px, Side, Sz},
 };
@@ -531,6 +531,7 @@ impl Shadow {
         let Self { coins, trailing, trailing_basis, record, .. } = self;
         trailing.retain(|coin, _| coins.contains_key(coin));
         let at = trailing_basis.at(record, height);
+        PENDING_BOOK_TRAILING_READS_TOTAL.with_label_values(&[at.result()]).inc();
         let mut changed = Vec::new();
         for coin in coins.keys() {
             let read = at.coin(replica.trigger_table(), coin);

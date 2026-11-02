@@ -75,14 +75,13 @@ impl BlockRecord {
         }
     }
 
-    /// Whether the node wrote no main-dex mark in the blocks above `after` through `through` (batch 2n-2, hyperliquid-
-    /// trade design 000659 r3 P2-2): the record holds each - its blocks follow one another, so its oldest at or below
-    /// `after + 1` and its newest at or above `through` -, none holds a `SetGlobalAction`, and with `due_ms` each is
-    /// earlier than it (an automatic refresh may write from then on). None to prove when `after` is `through`; why not.
-    pub(crate) fn marks_unwritten(&self, after: u64, through: u64, due_ms: Option<u64>) -> Result<(), &'static str> {
-        if after > through {
-            return Err("account_copy_ahead");
-        }
+    /// Whether the node wrote no main-dex mark in the blocks between the account copy's height and the replica's - above
+    /// the lower through the higher, the copy behind (batch 2n-2, hyperliquid-trade design 000659 r3 P2-2) or ahead
+    /// (batch 2n-3) -: the record holds each - its blocks follow one another, so its oldest at or below the lower plus 1
+    /// and its newest at or above the higher -, none holds a `SetGlobalAction`, and with `due_ms` each is earlier than it
+    /// (an automatic refresh may write from then on). None to prove at one height; why not.
+    pub(crate) fn marks_unwritten(&self, copy: u64, replica: u64, due_ms: Option<u64>) -> Result<(), &'static str> {
+        let (after, through) = (copy.min(replica), copy.max(replica));
         if after == through {
             return Ok(());
         }
@@ -180,7 +179,7 @@ mod tests {
     /// Batch 2n-2 (hyperliquid-trade design 000659 r3 P2-2): blocks (A, R] are proven to write no main-dex mark only
     /// when the record holds each, none holds a `SetGlobalAction` and each is before the refresh deadline - the log
     /// starting over past A + 1, or reaching only R - 1, proves nothing; an empty range needs no proof, at the deadline
-    /// too; an account copy ahead of R is none to use.
+    /// too. A copy ahead of the replica (batch 2n-3): blocks (R, A] the same.
     #[test]
     fn a_range_writes_no_mark_only_as_the_record_proves_it() {
         let mut record = BlockRecord::default();
@@ -192,7 +191,9 @@ mod tests {
         assert_eq!(record.marks_unwritten(10, 14, Some(1_401)), Ok(()));
         assert_eq!(record.marks_unwritten(10, 15, None), Err("block_log_short"), "the log reaches R - 1 only");
         assert_eq!(record.marks_unwritten(14, 14, Some(0)), Ok(()), "A = R at the deadline");
-        assert_eq!(record.marks_unwritten(15, 14, None), Err("account_copy_ahead"));
+        assert_eq!(record.marks_unwritten(14, 10, None), Ok(()), "the copy ahead");
+        assert_eq!(record.marks_unwritten(14, 10, Some(1_400)), Err("refresh_due"), "the copy ahead, block 14 at the deadline");
+        assert_eq!(record.marks_unwritten(15, 14, None), Err("block_log_short"), "the copy ahead of the log");
         let mut restarted = BlockRecord::default();
         restarted.add(block(10, &[]));
         restarted.add(block(12, &[]));
@@ -201,6 +202,8 @@ mod tests {
         assert_eq!(restarted.marks_unwritten(11, 13, None), Ok(()));
         record.add(LoggedBlock { set_global: true, ..block(15, &[]) });
         assert_eq!(record.marks_unwritten(12, 15, None), Err("mark_written"));
+        assert_eq!(record.marks_unwritten(15, 12, None), Err("mark_written"), "the copy ahead past the write");
+        assert_eq!(record.marks_unwritten(15, 14, None), Err("mark_written"), "the write at A is above R");
         assert_eq!(record.marks_unwritten(15, 15, None), Ok(()), "a block at A is the copy's");
     }
 }

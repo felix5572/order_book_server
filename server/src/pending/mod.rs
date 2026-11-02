@@ -903,6 +903,36 @@ mod tests {
         assert_eq!(handle.snapshot().frame(&btc).unwrap().undecided, Some("trailing_unknown"));
     }
 
+    /// Batch 2n-3: the thread's account copy one block ahead of the replica - its snapshot at 30, blocks 31 to 34
+    /// applied; the replica confirmed through 33, block 34 logged with no `SetGlobalAction` -: stop 70 known (best 100,
+    /// trigger price 95), a `SetGlobalAction` at 100 reaches none, BTC decided. Review 000666 r1 P2-1: block 34 setting
+    /// stop 70 anew (best 108, trigger price 103) - its state at 33 not held -, BTC is not decided and no trade told of it.
+    /// Review 000666 r2: blocks 31 to 34 come as one, stop 70 alike at both ends - what the blocks between set not seen -:
+    /// BTC not decided either.
+    #[test]
+    fn a_copy_one_block_ahead_of_the_replica_decides_its_coins() {
+        use crate::accounts::{flow_accounts::TrailingChanges, marks::trailing::{Retracement, TrailingState, TrailingStop}};
+        let undecided_with = |blocks: Vec<(u64, Option<TrailingChanges>)>| {
+            let (accounts, _owner) = trailing_accounts();
+            let (mut book, mut feed, mut feeds) = served_book_with_accounts(shadow::tests::params(), accounts);
+            push_block(&mut book, &mut feed, &mut feeds, 32, vec![trailing_open(70, "Activation immediate, retracement 5, best 100")], vec![]);
+            push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+            push_block(&mut book, &mut feed, &mut feeds, 34, vec![], vec![]);
+            for (height, trailing) in blocks {
+                book.accounts.apply(FlowAccountsEvent::Block { generation: 1, height, time_ms: height * 100, marks: Vec::new(), positions: Vec::new(), trailing });
+            }
+            assert_eq!((book.replica.as_ref().and_then(BookReplica::confirmed), book.accounts.serving_at()), (Some(33), Some((1, 34))));
+            let (_prices, step) = bid_then_set_global(&mut book);
+            (book.publisher.handle().snapshot().frame(&Coin::new("BTC")).unwrap().undecided, step.trades.len())
+        };
+        let one_by_one = |block_34: Option<TrailingChanges>| (31..=34).map(|height| (height, if height == 34 { block_34.clone() } else { None })).collect();
+        assert_eq!(undecided_with(one_by_one(None)), (None, 0));
+        let stop = TrailingStop { side: crate::order_book::Side::Ask, activation: None, retracement: Retracement::Price(50), state: TrailingState::Active { best: 1_080 } };
+        let reset = TrailingChanges { updates: vec![(70, Some(("BTC".to_string(), Ok(stop))))], refresh_due_ms: None, claimed: None };
+        assert_eq!(undecided_with(one_by_one(Some(reset))), (Some("trailing_unknown"), 0));
+        assert_eq!(undecided_with(vec![(34, None)]), (Some("trailing_unknown"), 0), "blocks 31 to 34 as one");
+    }
+
     /// The thread's account copy at 30 holding BTC's trailing stop 70 (best 100, retracement 5: trigger price 95), its
     /// mark claimed; with the owner's watch.
     fn trailing_accounts() -> (FlowAccounts, watch::Sender<crate::accounts::flow_accounts::FlowAccountsValidity>) {

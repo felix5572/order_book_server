@@ -145,11 +145,37 @@ impl TrailingCopy {
         let unchanged = updates.is_empty() && self.refresh_due_ms == now.refresh_due_ms && claimed.is_none();
         (!unchanged).then_some(TrailingChanges { updates, refresh_due_ms: now.refresh_due_ms, claimed })
     }
+}
 
-    fn apply(&mut self, changes: TrailingChanges) {
+/// The trailing stops as the pending book's copy holds them (batch 2n-2): the owner's, each with the height it was last
+/// set at - its snapshot's, or that of the block, or of the marks rebuilt, changing it (review 000666 r1: a stop set
+/// after a height does not tell its state there).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CopiedTrailing {
+    stops: FxHashMap<u64, CopiedStop>,
+    pub(crate) refresh_due_ms: Option<u64>,
+    pub(crate) claimed: FxHashSet<String>,
+}
+
+/// A stop the copy holds: its coin, as the node marks hold it, and the height it was last set at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CopiedStop {
+    pub(crate) coin: String,
+    pub(crate) entry: TrailingEntry,
+    pub(crate) set_at: u64,
+}
+
+impl CopiedTrailing {
+    fn of(sent: TrailingCopy, height: u64) -> Self {
+        let stops = sent.stops.into_iter().map(|(oid, (coin, entry))| (oid, CopiedStop { coin, entry, set_at: height })).collect();
+        Self { stops, refresh_due_ms: sent.refresh_due_ms, claimed: sent.claimed }
+    }
+
+    /// `changes` at `height`.
+    fn apply(&mut self, changes: TrailingChanges, height: u64) {
         for (oid, stop) in changes.updates {
             match stop {
-                Some(stop) => self.stops.insert(oid, stop),
+                Some((coin, entry)) => self.stops.insert(oid, CopiedStop { coin, entry, set_at: height }),
                 None => self.stops.remove(&oid),
             };
         }
@@ -157,6 +183,23 @@ impl TrailingCopy {
         if let Some(claimed) = changes.claimed {
             self.claimed = claimed;
         }
+    }
+
+    /// Every stop taken as set at `height`: the blocks up to it came in one, what each set between them not seen (review
+    /// 000666 r2: equal ends prove nothing of the blocks between).
+    fn set_all_at(&mut self, height: u64) {
+        self.stops.values_mut().for_each(|stop| stop.set_at = height);
+    }
+
+    pub(crate) fn stop(&self, oid: u64) -> Option<&CopiedStop> {
+        self.stops.get(&oid)
+    }
+
+    /// The stops as the owner sent them.
+    #[cfg(test)]
+    pub(crate) fn sent(&self) -> TrailingCopy {
+        let stops = self.stops.iter().map(|(oid, stop)| (*oid, (stop.coin.clone(), stop.entry))).collect();
+        TrailingCopy { stops, refresh_due_ms: self.refresh_due_ms, claimed: self.claimed.clone() }
     }
 }
 
@@ -338,7 +381,7 @@ pub(crate) struct AccountsCopy {
     candidates: Result<CandidatesCopy, String>,
     changed: ChangedSinceConfirmed,
     /// The pending book's copy alone (batch 2n-2).
-    trailing: Option<TrailingCopy>,
+    trailing: Option<CopiedTrailing>,
 }
 
 #[derive(Debug)]
@@ -411,7 +454,7 @@ impl AccountsCopy {
             positions: snapshot.positions,
             candidates,
             changed,
-            trailing: snapshot.trailing,
+            trailing: snapshot.trailing.map(|sent| CopiedTrailing::of(sent, snapshot.height)),
         }
     }
 
@@ -421,12 +464,12 @@ impl AccountsCopy {
             return Err(format!("trailing stops of block {height} at block {}", self.height));
         }
         let trailing = self.trailing.as_mut().ok_or("trailing stops sent a copy keeping none")?;
-        trailing.apply(changes);
+        trailing.apply(changes, height);
         Ok(())
     }
 
     /// The trailing stops the node marks hold at the copy's height (`positions_at`); `None` for a copy keeping none.
-    pub(crate) const fn trailing(&self) -> Option<&TrailingCopy> {
+    pub(crate) const fn trailing(&self) -> Option<&CopiedTrailing> {
         self.trailing.as_ref()
     }
 
@@ -442,7 +485,12 @@ impl AccountsCopy {
             return Err(format!("account block {height} after block {}", self.height));
         }
         if let Some(changes) = trailing {
-            self.trailing.as_mut().ok_or("a block's trailing stops sent a copy keeping none")?.apply(changes);
+            self.trailing.as_mut().ok_or("a block's trailing stops sent a copy keeping none")?.apply(changes, height);
+        }
+        if height > self.height + 1
+            && let Some(trailing) = self.trailing.as_mut()
+        {
+            trailing.set_all_at(height);
         }
         (self.height, self.time_ms) = (height, time_ms);
         for (coin, mark) in marks {
@@ -1113,16 +1161,20 @@ pub(crate) mod tests {
         feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
         let Ok(event @ FlowAccountsEvent::Trailing { height: 1_000, .. }) = events.try_recv() else { panic!("the change at 1000") };
         accounts.apply(event);
-        assert_eq!(accounts.copy().unwrap().trailing(), Some(&held.trailing));
+        assert_eq!(accounts.copy().unwrap().trailing().map(CopiedTrailing::sent), Some(held.trailing.clone()));
         // a block, one gone with it
         book.apply_block_actions(block_actions(1_001, &[]));
         held.marks.height = 1_001;
         held.trailing.stops.remove(&8);
+        held.trailing.stops.insert(9, stop(80));
         feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
         let Ok(block @ FlowAccountsEvent::Block { trailing: Some(_), .. }) = events.try_recv() else { panic!("the block with its change") };
         assert!(events.try_recv().is_err(), "nothing apart from the block");
         accounts.apply(block);
-        assert_eq!(accounts.copy().unwrap().trailing(), Some(&held.trailing));
+        assert_eq!(accounts.copy().unwrap().trailing().map(CopiedTrailing::sent), Some(held.trailing.clone()));
+        // each stop with the height it was last set at (review 000666 r1): 7 as the marks were rebuilt at 1000, 9 at 1001
+        let set_at = |accounts: &FlowAccounts, oid| accounts.copy().unwrap().trailing().and_then(|trailing| trailing.stop(oid)).map(|stop| stop.set_at);
+        assert_eq!((set_at(&accounts, 7), set_at(&accounts, 8), set_at(&accounts, 9)), (Some(1_000), None, Some(1_001)));
         feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
         assert!(events.try_recv().is_err(), "nothing changed");
         // a coin's claim withdrawn at the same height, its stops as they were (review 000662 r2 P2-2)
@@ -1130,7 +1182,7 @@ pub(crate) mod tests {
         feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
         let Ok(event @ FlowAccountsEvent::Trailing { height: 1_001, .. }) = events.try_recv() else { panic!("the claim withdrawn") };
         accounts.apply(event);
-        assert_eq!(accounts.copy().unwrap().trailing(), Some(&held.trailing));
+        assert_eq!(accounts.copy().unwrap().trailing().map(CopiedTrailing::sent), Some(held.trailing.clone()));
         // the marks rebuilt ahead of the view (review 000662 r2 P2-1): the copy withdrawn until both stand at one height
         held.marks.height = 1_100;
         feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
@@ -1139,8 +1191,18 @@ pub(crate) mod tests {
         feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
         let Ok(FlowAccountsEvent::Snapshot(snapshot)) = events.try_recv() else { panic!("a snapshot once they stand together") };
         assert_eq!((snapshot.height, snapshot.trailing.as_ref()), (1_001, Some(&held.trailing)));
+        let generation = snapshot.generation;
+        accounts.apply(FlowAccountsEvent::Snapshot(snapshot));
+        // two blocks published as one, their ends alike (review 000666 r2): every stop taken as set at the last
+        book.apply_block_actions(block_actions(1_002, &[]));
+        book.apply_block_actions(block_actions(1_003, &[]));
+        held.marks.height = 1_003;
+        feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
+        let Ok(block @ FlowAccountsEvent::Block { height: 1_003, trailing: None, .. }) = events.try_recv() else { panic!("one block through 1003, no change") };
+        accounts.apply(block);
+        assert_eq!((set_at(&accounts, 7), set_at(&accounts, 9)), (Some(1_003), Some(1_003)));
         let changes = TrailingChanges { updates: Vec::new(), refresh_due_ms: None, claimed: None };
-        accounts.apply(FlowAccountsEvent::Trailing { generation: 1, height: 999, changes });
+        accounts.apply(FlowAccountsEvent::Trailing { generation, height: 999, changes });
         assert!(accounts.copy().is_err(), "a change of another height breaks the copy off");
         let (mut forced, _, mut forced_events) = link(CopyOwner::ForcedFlow);
         forced.on_applied(&book, Some(&held), &Touched::default(), &candidates);
