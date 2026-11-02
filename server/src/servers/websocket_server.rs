@@ -22,8 +22,8 @@ use crate::{
         triggers::TriggerAvailability,
     },
     local_marks::{
-        feeds::{EquityFeedsConfig, LocalMarkFeeds},
-        hip3::{protocol::AlpacaCredentials, sources::Hip3SipSources},
+        feeds::{EquityFeedsConfig, Hip3ExternalConfig, LocalMarkFeeds},
+        hip3::{external_sources::Hip3ExternalSources, protocol::AlpacaCredentials, sources::Hip3SipSources},
         owner::LocalMarks,
         sources::MarkSources,
     },
@@ -39,7 +39,7 @@ use crate::{
         Bbo, L2Book, L4Book, L4BookUpdates, L4Order,
         inner::InnerLevel,
         subscription::{
-            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_FORCED_FLOW, EXT_FORCED_FLOW_PATH, EXT_MARK_INPUTS_PATH, EXT_HIP3_MARK_PRICES_PATH, EXT_MARK_PRICES_PATH, EXT_MARK_REFERENCE_CACHES_PATH, EXT_LIQUIDATION_CANDIDATES,
+            SimplifiedOracleUpdate, ClientMessage, DEFAULT_LEVELS, EXT_COIN_POSITIONS, EXT_COIN_POSITIONS_PATH, EXT_FORCED_FLOW, EXT_FORCED_FLOW_PATH, EXT_MARK_INPUTS_PATH, EXT_HIP3_EXTERNAL_QUOTES_PATH, EXT_HIP3_MARK_PRICES_PATH, EXT_MARK_PRICES_PATH, EXT_MARK_REFERENCE_CACHES_PATH, EXT_LIQUIDATION_CANDIDATES,
             OrderUpdate, ServerResponse, Subscription, SubscriptionManager, UserFills,
         },
     },
@@ -323,6 +323,10 @@ pub async fn run_websocket_server(config: ServerConfig) -> Result<()> {
                 let marks = marks.clone();
                 get(move |query| mark_prices::hip3_mark_prices_handler(query, marks.clone()))
             })
+            .route(EXT_HIP3_EXTERNAL_QUOTES_PATH, {
+                let marks = marks.clone();
+                get(move |query| mark_prices::hip3_external_quotes_handler(query, marks.clone()))
+            })
             .route(EXT_MARK_PRICES_PATH, get(move |query| mark_prices_handler(query, marks.clone()))),
         None => app,
     };
@@ -432,6 +436,9 @@ fn start_local_marks(
         if config.hip3_sip_marks {
             return Err("--hip3-sip-marks needs --local-marks: the HIP-3 marks are computed by the local marks' owner".into());
         }
+        if config.hip3_external_quote_max_age_ms.is_some() {
+            return Err("--hip3-external-quotes needs --local-marks: the HIP-3 external quotes are computed by the local marks' owner".into());
+        }
         return Ok(None);
     }
     let accounts = accounts.ok_or("--local-marks needs --accounts: the local marks read the node replica of the account view")?;
@@ -444,7 +451,12 @@ fn start_local_marks(
     } else {
         None
     };
-    let feeds = Arc::new(LocalMarkFeeds::start(Arc::new(sources), equity));
+    let hip3_external = config.hip3_external_quote_max_age_ms.map(|quote_max_age_ms| {
+        let sources = Hip3ExternalSources::embedded()?;
+        info!("HIP-3 external quotes: {} coins, Binance's TradFi perpetuals, a quote withheld past {quote_max_age_ms} ms", sources.coins().count());
+        Ok::<_, String>(Hip3ExternalConfig { sources: Arc::new(sources), quote_max_age_ms })
+    });
+    let feeds = Arc::new(LocalMarkFeeds::start(Arc::new(sources), equity, hip3_external.transpose()?));
     Ok(Some(LocalMarks::start(feeds, accounts.node_prices(), Arc::clone(listener))))
 }
 
@@ -1110,9 +1122,14 @@ async fn receive_client_message(
     // operator sees a single clear "denied" message in the log instead of "valid
     // subscription" then a rejection.
     if bbo_only && !matches!(&subscription, Subscription::Bbo { .. }) {
-        return outbound.send_message(ServerResponse::Error(
-            "BBO-only mode: L2/L4/Trades subscriptions disabled. Only BBO subscriptions allowed.".to_string(),
-        )).await;
+        // the HIP-3 external quotes answer as with their switch off, the one refusal a client takes for the channel's
+        // absence (hyperliquid-trade design 000664 r4); any other is a session error to it
+        let refused = if matches!(subscription, Subscription::Hip3ExternalQuotes { .. }) {
+            mark_prices::hip3_external_not_enabled()
+        } else {
+            "BBO-only mode: L2/L4/Trades subscriptions disabled. Only BBO subscriptions allowed.".to_string()
+        };
+        return outbound.send_message(ServerResponse::Error(refused)).await;
     }
     // this is used for display purposes only, hence unwrap_or_default. It also shouldn't fail
     let sub = serde_json::to_string(&subscription).unwrap_or_default();
@@ -1137,11 +1154,11 @@ async fn receive_client_message(
     if let Some((market, coin)) = match &subscription {
         Subscription::MarkPrices { coin } => Some((mark_prices::Market::Main, coin)),
         Subscription::Hip3MarkPrices { coin } => Some((mark_prices::Market::Hip3, coin)),
+        Subscription::Hip3ExternalQuotes { coin } => Some((mark_prices::Market::Hip3External, coin)),
         _ => None,
     } {
         let Some(session) = mark_prices.as_mut() else {
-            let refused = format!("{} needs the server started with --local-marks", subscription.type_label());
-            return outbound.send_message(ServerResponse::Error(refused)).await;
+            return outbound.send_message(ServerResponse::Error(mark_prices::refusal_without_local_marks(market))).await;
         };
         return session.on_client_message(outbound, manager, client_message, market, coin).await;
     }
@@ -2345,6 +2362,11 @@ mod tests {
 
     /// A loopback server (127.0.0.1 only) on a ready book, with the account view `accounts`; a connected client.
     async fn coin_positions_server(accounts: Option<AccountsHandle>) -> (yawc::TcpWebSocket, tokio::task::JoinHandle<()>) {
+        test_server(accounts, false).await
+    }
+
+    /// A server of the test book, without the local marks or the pending book, BBO-only or not, and a client of it.
+    async fn test_server(accounts: Option<AccountsHandle>, bbo_only: bool) -> (yawc::TcpWebSocket, tokio::task::JoinHandle<()>) {
         let (tx, _rx) = channel(32);
         let mut state = OrderBookListener::new(Some(tx.clone()), false, ActiveL2Params::new(), (true, true, true));
         state.init_from_snapshot(btc_bid_snapshot(PX_100), 10);
@@ -2356,7 +2378,7 @@ mod tests {
             get(move |incoming| {
                 let (listener, tx, cache, trust, accounts) =
                     (listener.clone(), tx.clone(), cache.clone(), trust.clone(), accounts.clone());
-                async move { ws_handler(incoming, tx, listener, cache, trust, accounts, None, None, false, 0, 0, yawc::Options::default(), None) }
+                async move { ws_handler(incoming, tx, listener, cache, trust, accounts, None, None, bbo_only, 0, 0, yawc::Options::default(), None) }
             }),
         );
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2448,6 +2470,27 @@ mod tests {
         let refused = next_json(&mut ws).await;
         assert_eq!((refused["channel"].as_str(), refused["data"].as_str()), (Some("error"), Some("extCoinPositions needs the server started with --accounts")));
         server.abort();
+    }
+
+    /// Review 000665 r1 P2: without the local marks, and in BBO-only mode, `extHip3ExternalQuotes` answers a subscribe
+    /// and an unsubscribe with its "not enabled" - the one refusal a client takes for the channel's absence -, at the real
+    /// dispatch; the connection stays up.
+    #[tokio::test]
+    #[allow(clippy::future_not_send)]
+    async fn test_hip3_external_quotes_answer_not_enabled_without_the_local_marks_or_in_bbo_only() {
+        let not_enabled = "extHip3ExternalQuotes is not enabled (the server runs with --hip3-external-quotes?)";
+        for bbo_only in [false, true] {
+            let (mut ws, server) = test_server(None, bbo_only).await;
+            for method in ["subscribe", "unsubscribe"] {
+                let message = format!(r#"{{"method":"{method}","subscription":{{"type":"extHip3ExternalQuotes","coin":"xyz:TSLA"}}}}"#);
+                ws.send(Frame::text(message.into_bytes())).await.unwrap();
+                let refused = next_json(&mut ws).await;
+                assert_eq!((refused["channel"].as_str(), refused["data"].as_str()), (Some("error"), Some(not_enabled)), "{method}, BBO-only {bbo_only}");
+            }
+            ws.send(Frame::text(r#"{"method":"ping"}"#.as_bytes().to_vec())).await.unwrap();
+            assert_eq!(next_json(&mut ws).await["channel"], "pong", "the connection stays up");
+            server.abort();
+        }
     }
 
     /// Design 000443: a candidates subscription needs `--accounts`, a threshold up to 1,000 bp and trusted candidates

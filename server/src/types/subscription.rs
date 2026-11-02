@@ -30,6 +30,8 @@ pub(crate) const EXT_MARK_PRICES_PATH: &str = "/extMarkPrices";
 /// The HIP-3 US stocks' local marks (design 000535 r2 revision 1): their own channel, `extMarkPrices` unchanged.
 pub(crate) const EXT_HIP3_MARK_PRICES: &str = "extHip3MarkPrices";
 pub(crate) const EXT_HIP3_MARK_PRICES_PATH: &str = "/extHip3MarkPrices";
+pub(crate) const EXT_HIP3_EXTERNAL_QUOTES: &str = "extHip3ExternalQuotes";
+pub(crate) const EXT_HIP3_EXTERNAL_QUOTES_PATH: &str = "/extHip3ExternalQuotes";
 /// The `GET` path of the node's reference caches with their members, beside `extMarkPrices` (user 2026-10-27).
 pub(crate) const EXT_MARK_REFERENCE_CACHES_PATH: &str = "/extMarkReferenceCaches";
 /// The subscription type and channel of the liquidation candidates.
@@ -93,6 +95,10 @@ pub(crate) enum Subscription {
     /// `--hip3-sip-marks`.
     #[serde(rename = "extHip3MarkPrices", rename_all = "camelCase")]
     Hip3MarkPrices { coin: String },
+    /// `extHip3ExternalQuotes`: one HIP-3 coin's external quote (Binance's `TRADIFI_PERPETUAL` contract) and its normal
+    /// basis every 50 ms (hyperliquid-trade design 000664); needs `--hip3-external-quotes`.
+    #[serde(rename = "extHip3ExternalQuotes", rename_all = "camelCase")]
+    Hip3ExternalQuotes { coin: String },
     /// `extPendingBbo`: one coin's best levels as the mempool's pending actions will leave the book, beside the
     /// confirmed ones (hyperliquid-trade design 000604 section 4); needs `--pending-book`.
     #[serde(rename = "extPendingBbo")]
@@ -202,7 +208,9 @@ impl Subscription {
             }
             // Coins of the account anchor's universe, or of the local marks' sources, which the book universe does not
             // bound (it is market-filtered): an unknown coin is refused when the subscription takes its first frame.
-            Self::CoinPositions { coin } | Self::MarkPrices { coin } | Self::Hip3MarkPrices { coin } => !coin.is_empty(),
+            Self::CoinPositions { coin } | Self::MarkPrices { coin } | Self::Hip3MarkPrices { coin } | Self::Hip3ExternalQuotes { coin } => {
+                !coin.is_empty()
+            }
             // checked against the forced flow's rules when the subscription takes its first frames
             Self::ForcedFlow(_) => true,
             Self::LiquidationCandidates { coin, max_distance_bps } => {
@@ -243,6 +251,7 @@ impl Subscription {
             Self::LiquidationCandidates { .. } => EXT_LIQUIDATION_CANDIDATES,
             Self::MarkPrices { .. } => EXT_MARK_PRICES,
             Self::Hip3MarkPrices { .. } => EXT_HIP3_MARK_PRICES,
+            Self::Hip3ExternalQuotes { .. } => EXT_HIP3_EXTERNAL_QUOTES,
             Self::ForcedFlow(_) => EXT_FORCED_FLOW,
             Self::PendingBbo(_) => EXT_PENDING_BBO,
             Self::PendingTrades(_) => EXT_PENDING_TRADES,

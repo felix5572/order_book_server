@@ -9,6 +9,9 @@
 pub(crate) mod carry;
 pub(crate) mod compute;
 pub(crate) mod ema;
+pub(crate) mod external;
+pub(crate) mod external_sources;
+pub(crate) mod external_view;
 pub(crate) mod protocol;
 pub(crate) mod session;
 pub(crate) mod snapshot;

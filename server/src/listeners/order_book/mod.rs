@@ -2148,6 +2148,7 @@ impl ActiveSubs {
             | Subscription::LiquidationCandidates { .. }
             | Subscription::MarkPrices { .. }
             | Subscription::Hip3MarkPrices { .. }
+            | Subscription::Hip3ExternalQuotes { .. }
             | Subscription::PendingBbo(_)
             | Subscription::PendingTrades(_)
             | Subscription::ForcedFlow(_) => Vec::new(),

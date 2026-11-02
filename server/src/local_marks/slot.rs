@@ -70,8 +70,21 @@ pub(crate) enum Validity {
     NoQuote,
     /// This market's connection is not connected.
     NotConnected,
-    /// A polled quote older than the feed's expiry.
+    /// A quote older than the feed's expiry (a polled feed's, the HIP-3 external quotes').
     Expired,
+}
+
+impl Validity {
+    /// The views' name of it: `GET /extMarkInputs`' `status`, the HIP-3 external quotes' reason code.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::NotQuoted => "notQuoted",
+            Self::NoQuote => "noQuote",
+            Self::NotConnected => "notConnected",
+            Self::Expired => "expired",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +113,8 @@ impl SlotState {
 #[derive(Debug)]
 pub(crate) struct FeedSlot {
     pub(crate) feed: Feed,
-    /// A polled feed's quote age limit; `None` for a WS feed (its venue pushes on change: a quiet market sends nothing).
+    /// A polled feed's quote age limit; `None` for a main-dex WS feed (its venue pushes on change: a quiet market sends
+    /// nothing). The HIP-3 external quotes' WS feed has one (design 000664): a coin silent past it is withheld.
     expires_after_ms: Option<u64>,
     state: Mutex<SlotState>,
 }
@@ -159,19 +173,53 @@ impl FeedSlot {
     pub(crate) fn read(&self, now_ms: u64) -> FeedReading {
         let state = self.lock();
         let connected = matches!(state.connection, Connection::Connected { .. });
-        let validity = |entry: &Option<Entry>| match entry {
-            _ if !connected => Validity::NotConnected,
-            Some(entry) if entry.epoch != state.epoch => Validity::NotQuoted,
-            None => Validity::NotQuoted,
-            Some(Entry { quote: None, .. }) => Validity::NoQuote,
-            Some(entry) if self.expires_after_ms.is_some_and(|limit| now_ms.saturating_sub(entry.received_ms) > limit) => Validity::Expired,
-            Some(_) => Validity::Valid,
-        };
-        FeedReading {
+        let entries = state.entries.iter().map(|entry| (*entry, validity(entry.as_ref(), state.epoch, connected, self.expires_after_ms, now_ms))).collect();
+        FeedReading { connection: state.connection.clone(), messages: state.messages, entries }
+    }
+
+    /// The slot as it stands, its validity judged later (`SlotCopy::reading`).
+    pub(crate) fn copy(&self) -> SlotCopy {
+        let state = self.lock();
+        SlotCopy {
+            epoch: state.epoch,
             connection: state.connection.clone(),
             messages: state.messages,
-            entries: state.entries.iter().map(|entry| (*entry, validity(entry))).collect(),
+            entries: state.entries.clone(),
+            expires_after_ms: self.expires_after_ms,
         }
+    }
+}
+
+/// A copy of a slot, whose quotes' validity is judged at a moment taken after it (hyperliquid-trade design 000664 r4:
+/// a snapshot whose publish time is taken after its quotes were copied holds no quote received after that time, and
+/// ages none by a time before its receipt).
+#[derive(Debug, Clone)]
+pub(crate) struct SlotCopy {
+    epoch: u64,
+    connection: Connection,
+    messages: u64,
+    entries: Vec<Option<Entry>>,
+    expires_after_ms: Option<u64>,
+}
+
+impl SlotCopy {
+    pub(crate) fn reading(self, now_ms: u64) -> FeedReading {
+        let connected = matches!(self.connection, Connection::Connected { .. });
+        let entries = self.entries.iter().map(|entry| (*entry, validity(entry.as_ref(), self.epoch, connected, self.expires_after_ms, now_ms))).collect();
+        FeedReading { connection: self.connection, messages: self.messages, entries }
+    }
+}
+
+/// Whether a market's latest observation holds at `now_ms`, on a slot at connection `epoch`, `connected` or not, of
+/// quote age limit `expires_after_ms`: the one rule of a read and of a copy judged later.
+fn validity(entry: Option<&Entry>, epoch: u64, connected: bool, expires_after_ms: Option<u64>, now_ms: u64) -> Validity {
+    match entry {
+        _ if !connected => Validity::NotConnected,
+        Some(entry) if entry.epoch != epoch => Validity::NotQuoted,
+        None => Validity::NotQuoted,
+        Some(Entry { quote: None, .. }) => Validity::NoQuote,
+        Some(entry) if expires_after_ms.is_some_and(|limit| now_ms.saturating_sub(entry.received_ms) > limit) => Validity::Expired,
+        Some(_) => Validity::Valid,
     }
 }
 
@@ -244,6 +292,24 @@ mod tests {
         assert_eq!(reading.entries[0].1, Validity::NotConnected);
         assert_eq!(reading.entries[0].0.map(|entry| entry.received_ms), Some(2), "the stopped feed's last observation, untouched");
         assert_eq!(reading.messages, 1);
+    }
+
+    /// Design 000664 r3 P2: a quote written after the tick's time but before the copy is judged at the copy's later
+    /// moment - one millisecond old, valid -, never received after the moment it is judged at.
+    #[test]
+    fn a_copy_judged_after_it_holds_no_quote_received_later() {
+        let slot = FeedSlot::new(FEED, 1, Some(1_000));
+        let epoch = slot.connected(0);
+        let tick_ms = 100_000;
+        slot.record(epoch, 100_001, [(0, Some(quote("100", "101")), None)]);
+        let copy = slot.copy();
+        let published_ms = 100_002;
+        let reading = copy.clone().reading(published_ms);
+        assert_eq!(reading.entries[0].1, Validity::Valid);
+        assert!(reading.entries[0].0.unwrap().received_ms <= published_ms && tick_ms < published_ms);
+        assert_eq!(copy.clone().reading(101_001).entries[0].1, Validity::Valid);
+        assert_eq!(copy.reading(101_002).entries[0].1, Validity::Expired);
+        assert_eq!(slot.read(101_002), slot.copy().reading(101_002), "a read is a copy judged at once");
     }
 
     #[test]

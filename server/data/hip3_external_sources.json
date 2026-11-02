@@ -1,0 +1,375 @@
+{
+ "coins": {
+  "xyz:AAOI": {
+   "pxMultiplier": "1",
+   "symbol": "AAOIUSDT"
+  },
+  "xyz:AAPL": {
+   "pxMultiplier": "1",
+   "symbol": "AAPLUSDT"
+  },
+  "xyz:AMAT": {
+   "pxMultiplier": "1",
+   "symbol": "AMATUSDT"
+  },
+  "xyz:AMD": {
+   "pxMultiplier": "1",
+   "symbol": "AMDUSDT"
+  },
+  "xyz:AMZN": {
+   "pxMultiplier": "1",
+   "symbol": "AMZNUSDT"
+  },
+  "xyz:ARM": {
+   "pxMultiplier": "1",
+   "symbol": "ARMUSDT"
+  },
+  "xyz:ASML": {
+   "pxMultiplier": "1",
+   "symbol": "ASMLUSDT"
+  },
+  "xyz:AVGO": {
+   "pxMultiplier": "1",
+   "symbol": "AVGOUSDT"
+  },
+  "xyz:BABA": {
+   "pxMultiplier": "1",
+   "symbol": "BABAUSDT"
+  },
+  "xyz:BE": {
+   "pxMultiplier": "1",
+   "symbol": "BEUSDT"
+  },
+  "xyz:BMNR": {
+   "pxMultiplier": "1",
+   "symbol": "BMNRUSDT"
+  },
+  "xyz:BOT": {
+   "pxMultiplier": "1",
+   "symbol": "BOTUSDT"
+  },
+  "xyz:BRENTOIL": {
+   "pxMultiplier": "1",
+   "symbol": "BZUSDT"
+  },
+  "xyz:BX": {
+   "pxMultiplier": "1",
+   "symbol": "BXUSDT"
+  },
+  "xyz:CBRS": {
+   "pxMultiplier": "1",
+   "symbol": "CBRSUSDT"
+  },
+  "xyz:CL": {
+   "pxMultiplier": "1",
+   "symbol": "CLUSDT"
+  },
+  "xyz:COIN": {
+   "pxMultiplier": "1",
+   "symbol": "COINUSDT"
+  },
+  "xyz:COPPER": {
+   "pxMultiplier": "1",
+   "symbol": "COPPERUSDT"
+  },
+  "xyz:COST": {
+   "pxMultiplier": "1",
+   "symbol": "COSTUSDT"
+  },
+  "xyz:CRCL": {
+   "pxMultiplier": "1",
+   "symbol": "CRCLUSDT"
+  },
+  "xyz:CRWD": {
+   "pxMultiplier": "1",
+   "symbol": "CRWDUSDT"
+  },
+  "xyz:CRWV": {
+   "pxMultiplier": "1",
+   "symbol": "CRWVUSDT"
+  },
+  "xyz:CXMT": {
+   "pxMultiplier": "1",
+   "symbol": "CXMTUSDT"
+  },
+  "xyz:DELL": {
+   "pxMultiplier": "1",
+   "symbol": "DELLUSDT"
+  },
+  "xyz:DKNG": {
+   "pxMultiplier": "1",
+   "symbol": "DKNGUSDT"
+  },
+  "xyz:DRAM": {
+   "pxMultiplier": "1",
+   "symbol": "DRAMUSDT"
+  },
+  "xyz:EBAY": {
+   "pxMultiplier": "1",
+   "symbol": "EBAYUSDT"
+  },
+  "xyz:EWJ": {
+   "pxMultiplier": "1",
+   "symbol": "EWJUSDT"
+  },
+  "xyz:EWT": {
+   "pxMultiplier": "1",
+   "symbol": "EWTUSDT"
+  },
+  "xyz:EWY": {
+   "pxMultiplier": "1",
+   "symbol": "EWYUSDT"
+  },
+  "xyz:EWZ": {
+   "pxMultiplier": "1",
+   "symbol": "EWZUSDT"
+  },
+  "xyz:GEV": {
+   "pxMultiplier": "1",
+   "symbol": "GEVUSDT"
+  },
+  "xyz:GLW": {
+   "pxMultiplier": "1",
+   "symbol": "GLWUSDT"
+  },
+  "xyz:GME": {
+   "pxMultiplier": "1",
+   "symbol": "GMEUSDT"
+  },
+  "xyz:GOLD": {
+   "pxMultiplier": "1",
+   "symbol": "XAUUSDT"
+  },
+  "xyz:GOOGL": {
+   "pxMultiplier": "1",
+   "symbol": "GOOGLUSDT"
+  },
+  "xyz:HIMS": {
+   "pxMultiplier": "1",
+   "symbol": "HIMSUSDT"
+  },
+  "xyz:HOOD": {
+   "pxMultiplier": "1",
+   "symbol": "HOODUSDT"
+  },
+  "xyz:HYUNDAI": {
+   "pxMultiplier": "1",
+   "symbol": "HYUNDAIUSDT"
+  },
+  "xyz:IBM": {
+   "pxMultiplier": "1",
+   "symbol": "IBMUSDT"
+  },
+  "xyz:INTC": {
+   "pxMultiplier": "1",
+   "symbol": "INTCUSDT"
+  },
+  "xyz:IREN": {
+   "pxMultiplier": "1",
+   "symbol": "IRENUSDT"
+  },
+  "xyz:KORU": {
+   "pxMultiplier": "1",
+   "symbol": "KORUUSDT"
+  },
+  "xyz:KSTR": {
+   "pxMultiplier": "1",
+   "symbol": "KSTRUSDT"
+  },
+  "xyz:LITE": {
+   "pxMultiplier": "1",
+   "symbol": "LITEUSDT"
+  },
+  "xyz:LLY": {
+   "pxMultiplier": "1",
+   "symbol": "LLYUSDT"
+  },
+  "xyz:LRCX": {
+   "pxMultiplier": "1",
+   "symbol": "LRCXUSDT"
+  },
+  "xyz:LYTE": {
+   "pxMultiplier": "1",
+   "symbol": "LYTEUSDT"
+  },
+  "xyz:META": {
+   "pxMultiplier": "1",
+   "symbol": "METAUSDT"
+  },
+  "xyz:MINIMAX": {
+   "pxMultiplier": "1",
+   "symbol": "MINIMAXUSDT"
+  },
+  "xyz:MRNA": {
+   "pxMultiplier": "1",
+   "symbol": "MRNAUSDT"
+  },
+  "xyz:MRVL": {
+   "pxMultiplier": "1",
+   "symbol": "MRVLUSDT"
+  },
+  "xyz:MSFT": {
+   "pxMultiplier": "1",
+   "symbol": "MSFTUSDT"
+  },
+  "xyz:MSTR": {
+   "pxMultiplier": "1",
+   "symbol": "MSTRUSDT"
+  },
+  "xyz:MU": {
+   "pxMultiplier": "1",
+   "symbol": "MUUSDT"
+  },
+  "xyz:NATGAS": {
+   "pxMultiplier": "1",
+   "symbol": "NATGASUSDT"
+  },
+  "xyz:NBIS": {
+   "pxMultiplier": "1",
+   "symbol": "NBISUSDT"
+  },
+  "xyz:NET": {
+   "pxMultiplier": "1",
+   "symbol": "NETUSDT"
+  },
+  "xyz:NFLX": {
+   "pxMultiplier": "1",
+   "symbol": "NFLXUSDT"
+  },
+  "xyz:NOK": {
+   "pxMultiplier": "1",
+   "symbol": "NOKUSDT"
+  },
+  "xyz:NOW": {
+   "pxMultiplier": "1",
+   "symbol": "NOWUSDT"
+  },
+  "xyz:NVDA": {
+   "pxMultiplier": "1",
+   "symbol": "NVDAUSDT"
+  },
+  "xyz:ORCL": {
+   "pxMultiplier": "1",
+   "symbol": "ORCLUSDT"
+  },
+  "xyz:OURA": {
+   "pxMultiplier": "1",
+   "symbol": "OURAUSDT"
+  },
+  "xyz:PALLADIUM": {
+   "pxMultiplier": "1",
+   "symbol": "XPDUSDT"
+  },
+  "xyz:PLATINUM": {
+   "pxMultiplier": "1",
+   "symbol": "XPTUSDT"
+  },
+  "xyz:PLTR": {
+   "pxMultiplier": "1",
+   "symbol": "PLTRUSDT"
+  },
+  "xyz:QCOM": {
+   "pxMultiplier": "1",
+   "symbol": "QCOMUSDT"
+  },
+  "xyz:RDDT": {
+   "pxMultiplier": "1",
+   "symbol": "RDDTUSDT"
+  },
+  "xyz:RIVN": {
+   "pxMultiplier": "1",
+   "symbol": "RIVNUSDT"
+  },
+  "xyz:RKLB": {
+   "pxMultiplier": "1",
+   "symbol": "RKLBUSDT"
+  },
+  "xyz:SHAZ": {
+   "pxMultiplier": "1",
+   "symbol": "SHAZUSDT"
+  },
+  "xyz:SILVER": {
+   "pxMultiplier": "1",
+   "symbol": "XAGUSDT"
+  },
+  "xyz:SKHX": {
+   "pxMultiplier": "1",
+   "symbol": "SKHYNIXUSDT"
+  },
+  "xyz:SKHY": {
+   "pxMultiplier": "1",
+   "symbol": "SKHYUSDT"
+  },
+  "xyz:SMH": {
+   "pxMultiplier": "1",
+   "symbol": "SMHUSDT"
+  },
+  "xyz:SMSN": {
+   "pxMultiplier": "1",
+   "symbol": "SAMSUNGUSDT"
+  },
+  "xyz:SNDK": {
+   "pxMultiplier": "1",
+   "symbol": "SNDKUSDT"
+  },
+  "xyz:SNXX": {
+   "pxMultiplier": "1",
+   "symbol": "SNXXUSDT"
+  },
+  "xyz:SOXL": {
+   "pxMultiplier": "1",
+   "symbol": "SOXLUSDT"
+  },
+  "xyz:SPCX": {
+   "pxMultiplier": "1",
+   "symbol": "SPCXUSDT"
+  },
+  "xyz:STRC": {
+   "pxMultiplier": "1",
+   "symbol": "STRCUSDT"
+  },
+  "xyz:TSLA": {
+   "pxMultiplier": "1",
+   "symbol": "TSLAUSDT"
+  },
+  "xyz:TSM": {
+   "pxMultiplier": "1",
+   "symbol": "TSMUSDT"
+  },
+  "xyz:TWST": {
+   "pxMultiplier": "1",
+   "symbol": "TWSTUSDT"
+  },
+  "xyz:URNM": {
+   "pxMultiplier": "1",
+   "symbol": "URNMUSDT"
+  },
+  "xyz:USAR": {
+   "pxMultiplier": "1",
+   "symbol": "USARUSDT"
+  },
+  "xyz:WDC": {
+   "pxMultiplier": "1",
+   "symbol": "WDCUSDT"
+  },
+  "xyz:XBI": {
+   "pxMultiplier": "1",
+   "symbol": "XBIUSDT"
+  },
+  "xyz:XLE": {
+   "pxMultiplier": "1",
+   "symbol": "XLEUSDT"
+  },
+  "xyz:ZHIPU": {
+   "pxMultiplier": "1",
+   "symbol": "ZHIPUUSDT"
+  },
+  "xyz:ZM": {
+   "pxMultiplier": "1",
+   "symbol": "ZMUSDT"
+  }
+ },
+ "generatedAt": "2026-11-02T09:07:19Z",
+ "tolerance": "0.01",
+ "venue": "binance_perp"
+}

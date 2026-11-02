@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use super::{
-    slot::{Connection, Entry, FeedSlot, Validity},
+    slot::{Connection, Entry, FeedReading, FeedSlot, SlotCopy, Validity},
     sources::{Feed, FeedMarkets, Kind, Venue},
 };
 
@@ -47,9 +47,15 @@ pub(crate) struct FeedProjection {
 impl FeedSubscriptions {
     /// `MarkSources` only registers feeds with at least one validated market.
     pub(crate) fn new(feed: Feed, markets: &FeedMarkets) -> Self {
-        let binance_perp = feed == (Feed { kind: Kind::Perp, venue: Venue::Binance });
-        let width = if binance_perp { BINANCE_PERP_MARKETS_PER_CONNECTION } else { markets.symbols.len() };
         let expiry = (feed == (Feed { kind: Kind::Spot, venue: Venue::Mexc })).then_some(MEXC_SPOT_EXPIRY_MS);
+        Self::with_expiry(feed, markets, expiry)
+    }
+
+    /// `expiry`: every partition's quote age limit (`FeedSlot`). Binance's perp feeds, the HIP-3 external quotes' too,
+    /// take `BINANCE_PERP_MARKETS_PER_CONNECTION` markets a connection.
+    pub(crate) fn with_expiry(feed: Feed, markets: &FeedMarkets, expiry: Option<u64>) -> Self {
+        let binance_perp = feed.venue == Venue::Binance && feed.kind != Kind::Spot;
+        let width = if binance_perp { BINANCE_PERP_MARKETS_PER_CONNECTION } else { markets.symbols.len() };
         let dedicated = |symbol: &String| binance_perp && DEDICATED_BINANCE_PERP_MARKETS.contains(&symbol.as_str());
         let mut subscriptions = Vec::new();
         let mut first = 0;
@@ -67,20 +73,40 @@ impl FeedSubscriptions {
     }
 
     pub(crate) fn read(&self, now_ms: u64) -> FeedProjection {
-        let mut connections = Vec::with_capacity(self.subscriptions.len());
-        let mut entries = Vec::with_capacity(self.subscriptions.iter().map(|part| part.markets.symbols.len()).sum());
-        let mut messages = 0;
-        for part in &self.subscriptions {
-            let reading = part.slot.read(now_ms);
-            connections.push(ConnectionProjection {
-                shard: part.shard, markets: part.markets.symbols.len(), connection: reading.connection,
-                frames: reading.messages, quoting: reading.entries.iter().filter(|(_, validity)| *validity == Validity::Valid).count(),
-            });
-            messages += reading.messages;
-            entries.extend(reading.entries);
-        }
-        FeedProjection { connections, messages, entries }
+        projection(self.subscriptions.iter().map(|part| (part.shard, part.markets.symbols.len(), part.slot.read(now_ms))))
     }
+
+    /// Every partition's slot as it stands, its validity judged later (`FeedCopy::projection`).
+    pub(crate) fn copy(&self) -> FeedCopy {
+        FeedCopy { parts: self.subscriptions.iter().map(|part| (part.shard, part.markets.symbols.len(), part.slot.copy())).collect() }
+    }
+}
+
+/// A feed's partitions copied at one moment (`SlotCopy`), by shard: (shard, markets, copy).
+pub(crate) struct FeedCopy {
+    parts: Vec<(usize, usize, SlotCopy)>,
+}
+
+impl FeedCopy {
+    pub(crate) fn projection(self, now_ms: u64) -> FeedProjection {
+        projection(self.parts.into_iter().map(|(shard, markets, copy)| (shard, markets, copy.reading(now_ms))))
+    }
+}
+
+/// The partitions' readings joined in the feed's market order: (shard, markets, reading) each.
+fn projection(parts: impl ExactSizeIterator<Item = (usize, usize, FeedReading)>) -> FeedProjection {
+    let mut connections = Vec::with_capacity(parts.len());
+    let mut entries = Vec::new();
+    let mut messages = 0;
+    for (shard, markets, reading) in parts {
+        connections.push(ConnectionProjection {
+            shard, markets, connection: reading.connection,
+            frames: reading.messages, quoting: reading.entries.iter().filter(|(_, validity)| *validity == Validity::Valid).count(),
+        });
+        messages += reading.messages;
+        entries.extend(reading.entries);
+    }
+    FeedProjection { connections, messages, entries }
 }
 
 #[cfg(test)]
@@ -110,6 +136,25 @@ mod tests {
                 for (index, symbol) in part.markets.symbols.iter().enumerate() { assert_eq!(part.markets.index(symbol), Some(index)); }
             }
         }
+    }
+
+    /// Design 000664 §2.1: the HIP-3 external quotes' partitions are their own, 50 markets a connection, every quote
+    /// expiring past the age limit; the main-dex Binance perps' never expire.
+    #[test]
+    fn the_hip3_external_partitions_are_their_own_and_expire() {
+        let external = crate::local_marks::hip3::external_sources::Hip3ExternalSources::embedded().unwrap();
+        let group = FeedSubscriptions::with_expiry(Feed::HIP3_EXTERNAL, &external.markets, Some(2_000));
+        assert_eq!(group.subscriptions.iter().map(|part| part.markets.symbols.len()).collect::<Vec<_>>(), [50, 42]);
+        let quote = Quote { bid: VenuePrice::parse("100").unwrap(), ask: VenuePrice::parse("101").unwrap() };
+        let sources = MarkSources::embedded().unwrap();
+        let main = FeedSubscriptions::new(BINANCE, sources.markets(BINANCE).unwrap());
+        for part in group.subscriptions.iter().chain(&main.subscriptions) {
+            let epoch = part.slot.connected(0);
+            part.slot.record(epoch, 1_000, (0..part.markets.symbols.len()).map(|i| (i, Some(quote), None)));
+        }
+        assert!(group.read(3_000).entries.iter().all(|(_, validity)| *validity == Validity::Valid));
+        assert!(group.read(3_001).entries.iter().all(|(_, validity)| *validity == Validity::Expired));
+        assert!(main.read(3_600_000).entries.iter().all(|(_, validity)| *validity == Validity::Valid));
     }
 
     #[test]

@@ -281,7 +281,7 @@ mod tests {
     impl World {
         fn new() -> Self {
             let sources = MarkSources::parse(MAIN).unwrap();
-            let table = Arc::new(CoinTable::new(&sources, Some(&Hip3SipSources::parse(HIP3).unwrap())));
+            let table = Arc::new(CoinTable::new(&sources, Some(&Hip3SipSources::parse(HIP3).unwrap()), None));
             let tsla = Hip3Coin {
                 order_asset: 110_000, size_decimals: 3, oracle: Some(405_770), oracle_time_ns: Some((NOW_MS - 500) * 1_000_000), external: Some(405_770),
                 last_trade: Some(405_760),
@@ -307,7 +307,7 @@ mod tests {
                 (feed, markets, FeedProjection { connections: Vec::new(), messages: 0, entries })
             }).collect();
             self.instant += Duration::from_millis(50);
-            let tick = Tick { now_ms, instant: self.instant, stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, equity: Some(&self.equity) };
+            let tick = Tick { now_ms, instant: self.instant, stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, equity: Some(&self.equity), hip3_external: None };
             let snapshot = assemble(&self.table, &tick, &mut self.state);
             snapshot.hip3_coin("xyz:TSLA").unwrap().clone()
         }
@@ -397,7 +397,7 @@ mod tests {
             (feed, markets, FeedProjection { connections: Vec::new(), messages: 0, entries: vec![(None, Validity::NotConnected); markets.symbols.len()] })
         }).collect();
         world.instant += Duration::from_millis(50);
-        let tick = Tick { now_ms: NOW_MS, instant: world.instant, stopped: None, node: &world.node, book: world.book.as_ref(), readings: &readings, equity: Some(&world.equity) };
+        let tick = Tick { now_ms: NOW_MS, instant: world.instant, stopped: None, node: &world.node, book: world.book.as_ref(), readings: &readings, equity: Some(&world.equity), hip3_external: None };
         let snapshot = assemble(&world.table, &tick, &mut world.state);
         assert_eq!(snapshot.local_predicted("xyz:TSLA").map(|local| local.map_err(|withheld| withheld.code)), Some(Ok(405_760)));
         assert_eq!(snapshot.local_predicted("BTC").map(|local| local.map_err(|withheld| withheld.code)), Some(Err("nodeCoin")), "the main dex's through the same entry");

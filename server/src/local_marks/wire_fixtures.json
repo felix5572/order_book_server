@@ -62,5 +62,10 @@
  ],
  "kucoin_bullet_public": [
   "{\"code\": \"200000\", \"data\": {\"token\": \"<token>\", \"instanceServers\": [{\"endpoint\": \"wss://ws-api-spot.kucoin.com/\", \"encrypt\": true, \"protocol\": \"websocket\", \"pingInterval\": 18000, \"pingTimeout\": 10000}]}}"
+ ],
+ "hip3_perp_binance": [
+  "{\"stream\":\"koruusdt@bookTicker\",\"data\":{\"e\":\"bookTicker\",\"u\":11990272813688,\"s\":\"KORUUSDT\",\"ps\":\"KORUUSDT\",\"b\":\"11.89000\",\"B\":\"4211.01\",\"a\":\"11.90000\",\"A\":\"16913.62\",\"T\":1793611060742,\"E\":1793611060742,\"st\":1}}",
+  "{\"stream\":\"xauusdt@bookTicker\",\"data\":{\"e\":\"bookTicker\",\"u\":11990272814132,\"s\":\"XAUUSDT\",\"ps\":\"XAUUSDT\",\"b\":\"3910.45\",\"B\":\"36.503\",\"a\":\"3910.46\",\"A\":\"39.865\",\"T\":1793611060750,\"E\":1793611060751,\"st\":1}}",
+  "{\"stream\":\"tslausdt@bookTicker\",\"data\":{\"e\":\"bookTicker\",\"u\":11990272824214,\"s\":\"TSLAUSDT\",\"ps\":\"TSLAUSDT\",\"b\":\"402.28000\",\"B\":\"5.12\",\"a\":\"402.29000\",\"A\":\"7.17\",\"T\":1793611060867,\"E\":1793611060867,\"st\":1}}"
  ]
 }

@@ -15,6 +15,7 @@ use tokio::{
 
 use super::{
     feeds::LocalMarkFeeds,
+    hip3::external::Hip3ExternalReading,
     now_ms,
     snapshot::{CoinTable, LocalMarksSnapshot, Tick, assemble},
 };
@@ -50,11 +51,16 @@ pub(crate) struct LocalMarks {
 impl LocalMarks {
     /// Spawns the owner task, and a watcher logging its end.
     pub(crate) fn start(feeds: Arc<LocalMarkFeeds>, node_prices: watch::Receiver<NodePrices>, book: impl BookPrices) -> Self {
-        let table = Arc::new(CoinTable::new(&feeds.sources, feeds.hip3.as_deref()));
+        let external_sources = feeds.hip3_external.as_ref().map(|external| &*external.sources);
+        let table = Arc::new(CoinTable::new(&feeds.sources, feeds.hip3.as_deref(), external_sources));
         let now_ms = now_ms();
         let readings = feeds.readings(now_ms);
         let equity = feeds.equity_readings(now_ms);
-        let tick = Tick { now_ms, instant: Instant::now(), stopped: None, node: &Err(NOT_TICKED.to_string()), book: None, readings: &readings, equity: equity.as_ref() };
+        let external = hip3_external_reading(&feeds);
+        let tick = Tick {
+            now_ms, instant: Instant::now(), stopped: None, node: &Err(NOT_TICKED.to_string()), book: None, readings: &readings, equity: equity.as_ref(),
+            hip3_external: external.as_ref(),
+        };
         let initial = assemble(&table, &tick, &mut table.owner_state());
         let (snapshots, receiver) = watch::channel(Arc::new(initial));
         let owner = tokio::spawn(run_owner(table, Arc::clone(&feeds), node_prices, book, snapshots));
@@ -113,14 +119,27 @@ async fn run_owner(
         let readings = feeds.readings(now_ms);
         let equity = feeds.equity_readings(now_ms);
         let stopped = if owner_gone { Some(OWNER_GONE.to_string()) } else { feeds.stopped() };
-        let tick = Tick { now_ms, instant: Instant::now(), stopped, node: &node, book: best.as_ref(), readings: &readings, equity: equity.as_ref() };
+        let external = hip3_external_reading(&feeds);
+        let tick = Tick {
+            now_ms, instant: Instant::now(), stopped, node: &node, book: best.as_ref(), readings: &readings, equity: equity.as_ref(),
+            hip3_external: external.as_ref(),
+        };
         let snapshot = assemble(&table, &tick, &mut state);
         drop(snapshots.send_replace(Arc::new(snapshot)));
     }
 }
 
+/// The HIP-3 external quotes' reading of this tick, last of its reads: the partitions copied, then the publish time
+/// taken and their validity judged at it (hyperliquid-trade design 000664 r4); `None` without them.
+fn hip3_external_reading(feeds: &LocalMarkFeeds) -> Option<Hip3ExternalReading> {
+    let external = feeds.hip3_external.as_ref()?;
+    let copy = external.copy();
+    let published_ms = now_ms();
+    Some(Hip3ExternalReading { published_ms, quote_max_age_ms: external.quote_max_age_ms, projection: copy.projection(published_ms) })
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use rustc_hash::FxHashMap;
 
     use super::*;
@@ -130,11 +149,11 @@ mod tests {
         order_book::Px,
     };
 
-    const SOURCES: &str = r#"{"coins": {"BTC": {"spot": {"kraken": {"symbol": "XBT/USDT", "pxMultiplier": "1"}},
+    pub(crate) const SOURCES: &str = r#"{"coins": {"BTC": {"spot": {"kraken": {"symbol": "XBT/USDT", "pxMultiplier": "1"}},
         "perp": {"gate": {"symbol": "BTC_USDT", "pxMultiplier": "1"}}}}}"#;
 
     /// A book always at the local clock.
-    struct FreshBook;
+    pub(crate) struct FreshBook;
 
     impl BookPrices for FreshBook {
         fn best_prices(&self, coins: &[Coin]) -> impl Future<Output = Option<BestPricesAt>> + Send {
@@ -145,7 +164,7 @@ mod tests {
     }
 
     /// BTC's node state, its block a minute ahead: never behind.
-    fn node_prices() -> Arc<NativePriceSnapshot> {
+    pub(crate) fn node_prices() -> Arc<NativePriceSnapshot> {
         let node = btc_state(0.0, now_ms() * 1_000_000);
         let coins = FxHashMap::from_iter([("BTC".to_string(), node)]);
         Arc::new(NativePriceSnapshot { seed_height: 1, height: 2, block_time_ms: now_ms() + 60_000, coins, hip3: FxHashMap::default() })

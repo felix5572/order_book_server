@@ -93,7 +93,7 @@ impl Protocol {
         let json = |value: sonic_rs::Value| value.to_string();
         let ping = |text: &str| Some((Heartbeat::Text(text.to_string()), HEARTBEAT_INTERVAL));
         match (self.kind, self.venue) {
-            (Kind::Spot | Kind::Perp, Venue::Binance) => {
+            (Kind::Spot | Kind::Perp | Kind::Hip3Perp, Venue::Binance) => {
                 let host = if self.kind == Kind::Spot { "wss://stream.binance.com:9443/stream" } else { "wss://fstream.binance.com/public/stream" };
                 let streams: Vec<String> = symbols.iter().map(|symbol| format!("{}@bookTicker", symbol.to_lowercase())).collect();
                 Session { url: format!("{host}?streams={}", streams.join("/")), requests: Vec::new(), acks: 0, heartbeat: None }
@@ -155,6 +155,7 @@ impl Protocol {
                 heartbeat: ping(r#"{"method":"ping"}"#),
             },
             (Kind::Spot, Venue::Mexc) | (Kind::Perp, Venue::Kraken | Venue::Kucoin) => unreachable!("not a WS feed: {self:?}"),
+            (Kind::Hip3Perp, _) => unreachable!("the HIP-3 external quotes are Binance's only: {self:?}"),
             (Kind::Equity | Kind::EquityOvernight, _) | (_, Venue::Alpaca) => {
                 unreachable!("an Alpaca session carries the credentials: `hip3::protocol::alpaca_session`")
             }
@@ -263,7 +264,7 @@ fn binance(kind: Kind, text: &str, markets: &FeedMarkets) -> Result<Parsed, Stri
         return Ok(Parsed::Unknown);
     }
     let row: BinanceTicker<'_> = strict(payload(frame.data.as_ref(), "Binance bookTicker")?, "Binance bookTicker")?;
-    if kind == Kind::Perp && row.e != Some("bookTicker") {
+    if kind != Kind::Spot && row.e != Some("bookTicker") {
         return Err(format!("Binance perp event {:?}", row.e));
     }
     Ok(Parsed::Quotes(vec![observation(markets, row.s, &row.b, &row.a, row.transaction_ms)?]))
@@ -682,6 +683,22 @@ mod tests {
         assert_eq!(first_quote(Kind::Spot, Venue::Kraken, "spot_kraken"), ("SHIB/USDT".into(), "0.000005118".into(), "0.000005132".into(), None));
         assert_eq!(first_quote(Kind::Perp, Venue::Mexc, "perp_mexc"), ("BTC_USDT".into(), "82771.8".into(), "82771.9".into(), Some(1_792_556_634_121)));
         assert_eq!(first_quote(Kind::Perp, Venue::Bybit, "perp_bybit").0, "BTCUSDT");
+    }
+
+    /// Design 000664: Binance's `TRADIFI_PERPETUAL` contracts stream on the perps' combined stream with the same fields
+    /// (bm 11-02 09:57Z, KORU, XAU and TSLA), parsed as a perp's into the HIP-3 external partitions' markets; the
+    /// session is the perps' host.
+    #[test]
+    fn the_hip3_external_feed_parses_its_real_frames() {
+        let sources = super::super::hip3::external_sources::Hip3ExternalSources::embedded().unwrap();
+        let protocol = Protocol { kind: Kind::Hip3Perp, venue: Venue::Binance };
+        let parsed: Vec<_> = fixtures()["hip3_perp_binance"].iter().map(|frame| protocol.parse(frame, &sources.markets).unwrap()).collect();
+        assert_eq!(kinds(&parsed), ["quote", "quote", "quote"]);
+        let quotes: Vec<_> = parsed.iter().flat_map(|parsed| quote_of(parsed, &sources.markets)).collect();
+        assert_eq!(quotes[1], ("XAUUSDT".into(), "3910.45".into(), "3910.46".into(), Some(1_793_611_060_750)));
+        assert_eq!(quotes[2], ("TSLAUSDT".into(), "402.28".into(), "402.29".into(), Some(1_793_611_060_867)));
+        let session = protocol.session(&["TSLAUSDT".to_string()], 0, None);
+        assert_eq!(session.url, "wss://fstream.binance.com/public/stream?streams=tslausdt@bookTicker");
     }
 
     #[test]

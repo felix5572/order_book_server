@@ -127,6 +127,17 @@ struct Args {
     #[arg(long, default_value = "false")]
     hip3_sip_marks: bool,
 
+    /// HIP-3 external quotes (hyperliquid-trade design 000664; needs --local-marks and
+    /// --hip3-external-quote-max-age-ms): Binance's `TRADIFI_PERPETUAL` contracts of the coins in
+    /// server/data/hip3_external_sources.json, in connections of their own, each coin's external bid and ask and its
+    /// normal basis to them; served at GET /extHip3ExternalQuotes and the extHip3ExternalQuotes subscription.
+    #[arg(long, default_value = "false", requires = "hip3_external_quote_max_age_ms")]
+    hip3_external_quotes: bool,
+
+    /// The HIP-3 external quotes' age limit: a coin's quote older than this many ms is withheld (`expired`).
+    #[arg(long, requires = "hip3_external_quotes")]
+    hip3_external_quote_max_age_ms: Option<u64>,
+
     /// The pending book (hyperliquid-trade design 000604): a replica of the book on its own thread, block-aligned,
     /// fed by the listener (a fork of its book, then a copy of each book batch it applies), and the node's mempool
     /// (`<data-dir>/mempool_txs`) read on the same thread, its asset ids named by the account view's anchor. Needs
@@ -241,6 +252,7 @@ async fn main() -> Result<()> {
         accounts: args.accounts,
         local_marks: args.local_marks,
         hip3_sip_marks: args.hip3_sip_marks,
+        hip3_external_quote_max_age_ms: args.hip3_external_quote_max_age_ms.filter(|_| args.hip3_external_quotes),
         pending_book: args.pending_book,
         pending_backlog_events: args.pending_backlog_events,
         pending_expiry_ms: args.pending_expiry_ms,
@@ -278,6 +290,9 @@ async fn main() -> Result<()> {
     }
     if config.hip3_sip_marks {
         println!("  HIP-3 US stock marks: ON (Alpaca SIP and BOATS feeds, GET /extHip3MarkPrices)");
+    }
+    if let Some(quote_max_age_ms) = config.hip3_external_quote_max_age_ms {
+        println!("  HIP-3 external quotes: ON (Binance TradFi perpetuals, quote age limit {quote_max_age_ms} ms, GET /extHip3ExternalQuotes)");
     }
     if config.no_resync {
         println!("  Re-sync: DISABLED (--no-resync) — drift tolerated, book will NOT self-heal");

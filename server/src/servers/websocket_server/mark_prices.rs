@@ -1,7 +1,13 @@
-//! The local marks' side of a WS connection - `extMarkPrices` (design 000454 r1 1.4) and `extHip3MarkPrices` (design
-//! 000535 r2 revision 1): every tick, a frame of each subscribed coin - and the `GET /extMarkPrices`,
-//! `GET /extMarkReferenceCaches` and `GET /extHip3MarkPrices` handlers. The frames come from the local marks' own snapshot
-//! channel, never the book's broadcast. The main-dex selectors read only the main-dex coins.
+//! The local marks' side of a WS connection - `extMarkPrices` (design 000454 r1 1.4), `extHip3MarkPrices` (design
+//! 000535 r2 revision 1) and `extHip3ExternalQuotes` (hyperliquid-trade design 000664): every tick, a frame of each
+//! subscribed coin - and the `GET /extMarkPrices`, `GET /extMarkReferenceCaches`, `GET /extHip3MarkPrices` and
+//! `GET /extHip3ExternalQuotes` handlers. The frames come from the local marks' own snapshot channel, never the book's
+//! broadcast. The main-dex selectors read only the main-dex coins.
+//!
+//! `extHip3ExternalQuotes` answers a subscribe and an unsubscribe alike by its switch, then its sources (design 000664
+//! r4): off, both get `HIP3_EXTERNAL_NOT_ENABLED`; a coin outside the loaded sources, both get the same refusal naming
+//! it - never `Already unsubscribed` -, so a client's unsubscribe still in flight past the refusal of its subscribe
+//! meets the answer it already handled. A coin of the sources unsubscribed twice gets `Already unsubscribed` as any.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -12,19 +18,48 @@ use tokio::sync::watch::{self, error::RecvError};
 use super::{Outbound, coin_positions::json_response};
 use crate::{
     local_marks::{
-        hip3::view::Hip3MarksView,
+        hip3::{external_sources::Hip3ExternalSources, external_view::Hip3ExternalView, view::Hip3MarksView},
         owner::{LocalMarks, OWNER_TASK_ENDED},
         prices_view::{CoinCachesView, CoinMarksView},
         snapshot::{CoinMarks, LocalMarksSnapshot},
     },
-    types::subscription::{ClientMessage, EXT_HIP3_MARK_PRICES, EXT_MARK_PRICES, ServerResponse, Subscription, SubscriptionManager},
+    types::subscription::{
+        ClientMessage, EXT_HIP3_EXTERNAL_QUOTES, EXT_HIP3_MARK_PRICES, EXT_MARK_PRICES, ServerResponse, Subscription, SubscriptionManager,
+    },
 };
 
-/// Which channel a subscription is on: the main-dex coins' or the HIP-3 SIP coins'.
+/// `extHip3ExternalQuotes`' answer to a subscribe or an unsubscribe while the server runs without it, with or without
+/// the local marks.
+const HIP3_EXTERNAL_NOT_ENABLED: &str = "extHip3ExternalQuotes is not enabled (the server runs with --hip3-external-quotes?)";
+
+/// `extHip3ExternalQuotes`' answer wherever the server serves it not: its switch off, without the local marks, in
+/// BBO-only mode.
+pub(super) fn hip3_external_not_enabled() -> String {
+    HIP3_EXTERNAL_NOT_ENABLED.to_string()
+}
+
+/// The answer to a subscribe or an unsubscribe of these channels while the server runs without the local marks: the
+/// external quotes' is theirs with only their switch off (hyperliquid-trade design 000664 r4), the others' names the
+/// switch.
+pub(super) fn refusal_without_local_marks(market: Market) -> String {
+    match market {
+        Market::Hip3External => hip3_external_not_enabled(),
+        Market::Main | Market::Hip3 => format!("{} needs the server started with --local-marks", market.channel()),
+    }
+}
+
+/// Its answer to either of a coin outside the loaded sources.
+fn outside_hip3_external_sources(coin: &str) -> String {
+    format!("{EXT_HIP3_EXTERNAL_QUOTES} {coin} is not in the HIP-3 external quote sources")
+}
+
+/// Which channel a subscription is on: the main-dex coins', the HIP-3 SIP coins' or the HIP-3 coins' external
+/// quotes'.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Market {
     Main,
     Hip3,
+    Hip3External,
 }
 
 impl Market {
@@ -32,6 +67,7 @@ impl Market {
         match self {
             Self::Main => EXT_MARK_PRICES,
             Self::Hip3 => EXT_HIP3_MARK_PRICES,
+            Self::Hip3External => EXT_HIP3_EXTERNAL_QUOTES,
         }
     }
 
@@ -39,6 +75,7 @@ impl Market {
         match self {
             Self::Main => Subscription::MarkPrices { coin: coin.to_string() },
             Self::Hip3 => Subscription::Hip3MarkPrices { coin: coin.to_string() },
+            Self::Hip3External => Subscription::Hip3ExternalQuotes { coin: coin.to_string() },
         }
     }
 
@@ -47,6 +84,7 @@ impl Market {
         match self {
             Self::Main => snapshot.coin(coin).map(|marks| CoinMarksView::of(snapshot, coin, marks).to_wire()),
             Self::Hip3 => snapshot.hip3_coin(coin).map(|marks| Hip3MarksView::of(snapshot, coin, marks).to_wire()),
+            Self::Hip3External => snapshot.hip3_external_coin(coin).map(|leg| Hip3ExternalView::of(snapshot, coin, leg).to_wire()),
         }
     }
 
@@ -54,20 +92,31 @@ impl Market {
         match self {
             Self::Main => "the local marks' sources",
             Self::Hip3 => "the HIP-3 SIP sources (the server runs with --hip3-sip-marks?)",
+            Self::Hip3External => "the HIP-3 external quote sources",
         }
     }
 }
 
-/// A connection's `extMarkPrices` and `extHip3MarkPrices` subscriptions.
+/// A connection's `extMarkPrices`, `extHip3MarkPrices` and `extHip3ExternalQuotes` subscriptions.
 pub(super) struct MarkPricesSession {
     /// `None` once the owner task ended.
     snapshots: Option<watch::Receiver<Arc<LocalMarksSnapshot>>>,
     subscribed: BTreeSet<(Market, String)>,
+    /// The loaded HIP-3 external sources; `None` without `--hip3-external-quotes`.
+    hip3_external: Option<Arc<Hip3ExternalSources>>,
 }
 
 impl MarkPricesSession {
     pub(super) fn new(marks: &LocalMarks) -> Self {
-        Self { snapshots: Some(marks.subscribe()), subscribed: BTreeSet::new() }
+        let hip3_external = marks.feeds.hip3_external.as_ref().map(|external| Arc::clone(&external.sources));
+        Self { snapshots: Some(marks.subscribe()), subscribed: BTreeSet::new(), hip3_external }
+    }
+
+    /// Why a subscribe or an unsubscribe of the HIP-3 external `coin` is refused before either: the switch off, the
+    /// coin outside the loaded sources.
+    fn hip3_external_refusal(&self, coin: &str) -> Option<String> {
+        let Some(sources) = &self.hip3_external else { return Some(HIP3_EXTERNAL_NOT_ENABLED.to_string()) };
+        (!sources.coins().any(|each| each == coin)).then(|| outside_hip3_external_sources(coin))
     }
 
     /// The next snapshot while a coin is subscribed, pending otherwise; `Err` once the owner task ended. Cancel-safe.
@@ -109,6 +158,9 @@ impl MarkPricesSession {
         market: Market,
         coin: &str,
     ) -> bool {
+        if let Some(refused) = (market == Market::Hip3External).then(|| self.hip3_external_refusal(coin)).flatten() {
+            return outbound.send_message(ServerResponse::Error(refused)).await;
+        }
         let subscription = market.subscription(coin);
         // display only, as for the other subscriptions
         let sub = serde_json::to_string(&subscription).unwrap_or_default();
@@ -209,6 +261,31 @@ pub(super) async fn hip3_mark_prices_handler(
             snapshot.hip3_coin(coin).map_or_else(
                 || error_response(axum::http::StatusCode::NOT_FOUND, &format!("{coin} is not in the HIP-3 SIP sources")),
                 |marks| rows_response(&[Hip3MarksView::of(&snapshot, coin, marks)]),
+            )
+        },
+    )
+}
+
+/// `GET /extHip3ExternalQuotes[?coin=]`: the HIP-3 coins' external quotes, answered alike; 404 without
+/// `--hip3-external-quotes` (off is not an empty set) or for a coin outside its sources.
+#[expect(clippy::unused_async, reason = "an axum handler")]
+pub(super) async fn hip3_external_quotes_handler(
+    axum::extract::Query(query): axum::extract::Query<MarkPricesQuery>,
+    marks: LocalMarks,
+) -> axum::response::Response {
+    if marks.feeds.hip3_external.is_none() {
+        return error_response(axum::http::StatusCode::NOT_FOUND, "the server runs without --hip3-external-quotes");
+    }
+    let snapshot = match marks.latest() {
+        Ok(snapshot) => snapshot,
+        Err(reason) => return error_response(axum::http::StatusCode::SERVICE_UNAVAILABLE, reason),
+    };
+    query.coin.as_deref().map_or_else(
+        || rows_response(&snapshot.hip3_external_coins().map(|(coin, leg)| Hip3ExternalView::of(&snapshot, coin, leg)).collect::<Vec<_>>()),
+        |coin| {
+            snapshot.hip3_external_coin(coin).map_or_else(
+                || error_response(axum::http::StatusCode::NOT_FOUND, &outside_hip3_external_sources(coin)),
+                |leg| rows_response(&[Hip3ExternalView::of(&snapshot, coin, leg)]),
             )
         },
     )
@@ -343,6 +420,108 @@ mod tests {
         assert_eq!((status, ended["error"].as_str()), (axum::http::StatusCode::SERVICE_UNAVAILABLE, Some("the local marks owner task ended")));
         let (status, ended) = get_caches(&marks, Some("BTC")).await;
         assert_eq!((status, ended["error"].as_str()), (axum::http::StatusCode::SERVICE_UNAVAILABLE, Some("the local marks owner task ended")));
+    }
+
+    const EXTERNAL: &str = r#"{"venue": "binance_perp", "coins": {"xyz:GOLD": {"symbol": "XAUUSDT", "pxMultiplier": "1"},
+        "xyz:TSLA": {"symbol": "TSLAUSDT", "pxMultiplier": "1"}}}"#;
+
+    /// The real owner over idle feeds with the HIP-3 external quotes of xyz:GOLD and xyz:TSLA, quotes held 60 s.
+    fn external_marks() -> (LocalMarks, Arc<LocalMarkFeeds>, watch::Sender<crate::accounts::publish::NodePrices>) {
+        use crate::local_marks::{feeds::Hip3ExternalConfig, hip3::external_sources::Hip3ExternalSources, owner::tests, sources::MarkSources};
+        let sources = Arc::new(MarkSources::parse(tests::SOURCES).unwrap());
+        let external = Hip3ExternalConfig { sources: Arc::new(Hip3ExternalSources::parse(EXTERNAL).unwrap()), quote_max_age_ms: 60_000 };
+        let feeds = Arc::new(LocalMarkFeeds::idle_with_external_for_test(sources, None, Some(external)));
+        let (prices, receiver) = watch::channel(Ok(tests::node_prices()));
+        (LocalMarks::start(Arc::clone(&feeds), receiver, tests::FreshBook), feeds, prices)
+    }
+
+    fn external(coin: &str, subscribe: bool) -> ClientMessage {
+        let subscription = Subscription::Hip3ExternalQuotes { coin: coin.to_string() };
+        if subscribe { ClientMessage::Subscribe { subscription } } else { ClientMessage::Unsubscribe { subscription } }
+    }
+
+    /// Design 000664 r4: off, a subscribe and an unsubscribe get the same answer, without the local marks too; on, a
+    /// coin outside the loaded sources gets the same refusal for both - never `Already unsubscribed`, which a client
+    /// would take for a session error -, while a coin of the sources unsubscribed twice gets it as any.
+    #[tokio::test]
+    async fn the_external_quotes_refuse_alike_when_off_or_outside_their_sources() {
+        let off = "extHip3ExternalQuotes is not enabled (the server runs with --hip3-external-quotes?)";
+        assert_eq!(refusal_without_local_marks(Market::Hip3External), off);
+        assert_eq!(refusal_without_local_marks(Market::Hip3), "extHip3MarkPrices needs the server started with --local-marks");
+        let (marks, _sender) = marks();
+        let (outbound, mut sent) = outbound();
+        let mut manager = SubscriptionManager::default();
+        let mut session = MarkPricesSession::new(&marks);
+        for subscribe in [true, false] {
+            assert!(session.on_client_message(&outbound, &mut manager, external("xyz:TSLA", subscribe), Market::Hip3External, "xyz:TSLA").await);
+            assert_eq!(json(&sent.recv().await.unwrap())["data"], off);
+        }
+        let (marks, _feeds, _prices) = external_marks();
+        let mut session = MarkPricesSession::new(&marks);
+        for subscribe in [true, false, false] {
+            assert!(session.on_client_message(&outbound, &mut manager, external("xyz:KIOXIA", subscribe), Market::Hip3External, "xyz:KIOXIA").await);
+            assert_eq!(json(&sent.recv().await.unwrap())["data"], "extHip3ExternalQuotes xyz:KIOXIA is not in the HIP-3 external quote sources");
+        }
+        assert!(manager.subscriptions().is_empty());
+        assert!(session.on_client_message(&outbound, &mut manager, external("xyz:TSLA", false), Market::Hip3External, "xyz:TSLA").await);
+        let twice = json(&sent.recv().await.unwrap());
+        assert!(twice["data"].as_str().unwrap().starts_with("Already unsubscribed"), "{twice}");
+    }
+
+    /// A coin of the sources takes its frame at once and each tick: withheld while its connection is down, then
+    /// Binance's quote, received no later than the snapshot's publish time (design 000664 r4).
+    #[tokio::test]
+    async fn a_coin_of_the_external_sources_takes_its_frames() {
+        let (marks, feeds, _prices) = external_marks();
+        let (outbound, mut sent) = outbound();
+        let mut manager = SubscriptionManager::default();
+        let mut session = MarkPricesSession::new(&marks);
+        assert!(session.on_client_message(&outbound, &mut manager, external("xyz:GOLD", true), Market::Hip3External, "xyz:GOLD").await);
+        assert_eq!(json(&sent.recv().await.unwrap())["channel"], "subscriptionResponse");
+        let first = json(&sent.recv().await.unwrap());
+        assert_eq!((first["channel"].as_str(), first["data"]["schemaVersion"].as_u64(), first["data"]["quoteMaxAgeMs"].as_u64()), (Some("extHip3ExternalQuotes"), Some(1), Some(60_000)));
+        assert_eq!(first["data"]["external"], serde_json::json!({"status": "unavailable", "reasonCode": "notConnected",
+            "reason": first["data"]["external"]["reason"]}));
+        let slot = &feeds.hip3_external_parts_for_test()[0].slot;
+        let epoch = slot.connected(crate::local_marks::now_ms());
+        let received_ms = crate::local_marks::now_ms();
+        slot.record(epoch, received_ms, [(0, Some(crate::local_marks::slot::Quote {
+            bid: crate::local_marks::price::VenuePrice::parse("3900.5").unwrap(),
+            ask: crate::local_marks::price::VenuePrice::parse("3901").unwrap(),
+        }), None)]);
+        let ready = loop {
+            let next = session.next().await;
+            assert!(session.on_snapshot(&outbound, &mut manager, next).await);
+            let frame = json(&sent.recv().await.unwrap());
+            if frame["data"]["external"]["status"] == "ready" {
+                break frame["data"].clone();
+            }
+        };
+        assert_eq!((ready["coin"].as_str(), ready["external"]["externalBidPx"].as_str(), ready["external"]["externalAskPx"].as_str()), (Some("xyz:GOLD"), Some("3900.5"), Some("3901")));
+        let quote = &ready["external"]["externalQuotes"]["binance"];
+        assert_eq!((quote["bidPx"].as_str(), quote["receivedTsMs"].as_u64()), (Some("3900.5"), Some(received_ms)));
+        assert!(received_ms <= ready["publishedTsMs"].as_u64().unwrap());
+        assert_eq!(ready["external"]["externalBasis"]["reasonCode"], "externalBasisSamples");
+    }
+
+    #[tokio::test]
+    async fn the_external_quotes_http_view_answers_404_off_or_outside_and_rows_on() {
+        async fn get(marks: &LocalMarks, coin: Option<&str>) -> (axum::http::StatusCode, serde_json::Value) {
+            let query = MarkPricesQuery { coin: coin.map(str::to_string) };
+            let response = hip3_external_quotes_handler(axum::extract::Query(query), marks.clone()).await;
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice(&body).unwrap())
+        }
+        let (off, _sender) = marks();
+        let (status, body) = get(&off, None).await;
+        assert_eq!((status, body["error"].as_str()), (axum::http::StatusCode::NOT_FOUND, Some("the server runs without --hip3-external-quotes")));
+        let (marks, _feeds, _prices) = external_marks();
+        let (status, all) = get(&marks, None).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(all.as_array().unwrap().iter().map(|row| row["coin"].as_str().unwrap()).collect::<Vec<_>>(), ["xyz:GOLD", "xyz:TSLA"]);
+        let (status, outside) = get(&marks, Some("xyz:KIOXIA")).await;
+        assert_eq!((status, outside["error"].as_str()), (axum::http::StatusCode::NOT_FOUND, Some("extHip3ExternalQuotes xyz:KIOXIA is not in the HIP-3 external quote sources")));
     }
 
     async fn get_caches(marks: &LocalMarks, coin: Option<&str>) -> (axum::http::StatusCode, serde_json::Value) {

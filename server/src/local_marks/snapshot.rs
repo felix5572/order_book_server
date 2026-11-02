@@ -17,6 +17,8 @@ use super::{
     compute::{LocalMark, MarkInputs, local_mark, weighted_median},
     external_basis::{self, ExternalBasis, ExternalBasisWindow},
     hip3::{
+        external::{Hip3ExternalGates, Hip3ExternalLeg, Hip3ExternalReading, Hip3ExternalSnapshot, Hip3ExternalTable, hip3_external},
+        external_sources::Hip3ExternalSources,
         snapshot::{Hip3CoinMarks, Hip3CoinState, Hip3Gates, Hip3Table, hip3_marks},
         sources::Hip3SipSources,
     },
@@ -116,7 +118,7 @@ pub(crate) struct ExternalQuotes {
 
 impl ExternalQuotes {
     /// `None` without a quote.
-    fn of(venues: Vec<VenueQuote>) -> Option<Self> {
+    pub(crate) fn of(venues: Vec<VenueQuote>) -> Option<Self> {
         let median = |side: fn(&VenueQuote) -> VenuePrice| weighted_median(venues.iter().map(|quote| (side(quote), quote.feed.weight())).collect());
         let (bid, ask) = (median(|quote| quote.bid)?, median(|quote| quote.ask)?);
         Some(Self { bid, ask, venues })
@@ -192,6 +194,9 @@ pub(crate) struct LocalMarksSnapshot {
     coins: Vec<CoinMarks>,
     /// The HIP-3 SIP coins' (design 000535), in `CoinTable::hip3`'s order; none without `--hip3-sip-marks`.
     hip3: Vec<Hip3CoinMarks>,
+    /// The HIP-3 coins' external quotes (hyperliquid-trade design 000664), in `CoinTable::hip3_external`'s order;
+    /// `None` without `--hip3-external-quotes`.
+    hip3_external: Option<Hip3ExternalSnapshot>,
 }
 
 impl LocalMarksSnapshot {
@@ -218,6 +223,23 @@ impl LocalMarksSnapshot {
     /// Every HIP-3 SIP coin in its sources' order.
     pub(crate) fn hip3_coins(&self) -> impl Iterator<Item = (&str, &Hip3CoinMarks)> {
         self.table.hip3.names().iter().map(String::as_str).zip(&self.hip3)
+    }
+
+    /// The HIP-3 external quotes of this snapshot; `None` without `--hip3-external-quotes`.
+    pub(crate) const fn hip3_external(&self) -> Option<&Hip3ExternalSnapshot> {
+        self.hip3_external.as_ref()
+    }
+
+    /// The coin's external leg; `None` without `--hip3-external-quotes` or for a coin outside the external sources.
+    pub(crate) fn hip3_external_coin(&self, coin: &str) -> Option<&Result<Hip3ExternalLeg, Withheld>> {
+        let index = self.table.hip3_external.index(coin)?;
+        self.hip3_external.as_ref().map(|external| &external.coins[index])
+    }
+
+    /// Every HIP-3 external coin in its sources' order; none without `--hip3-external-quotes`.
+    pub(crate) fn hip3_external_coins(&self) -> impl Iterator<Item = (&str, &Result<Hip3ExternalLeg, Withheld>)> {
+        let coins = self.hip3_external.iter().flat_map(|external| &external.coins);
+        self.table.hip3_external.names().iter().map(String::as_str).zip(coins)
     }
 
     /// The coin's local predicted mark (price units) whichever market it is in, why there is none, or `None` for a coin
@@ -250,10 +272,13 @@ pub(crate) struct CoinTable {
     feeds: Vec<Feed>,
     /// The HIP-3 SIP coins; their books follow the main coins' in `book_coins`.
     hip3: Hip3Table,
+    /// The HIP-3 external coins; a SIP coin's book is read once, the others' follow the SIP coins' (review 000664 r1
+    /// P2-1: the books read are the union of the tables by full coin name).
+    hip3_external: Hip3ExternalTable,
 }
 
 impl CoinTable {
-    pub(crate) fn new(sources: &MarkSources, hip3: Option<&Hip3SipSources>) -> Self {
+    pub(crate) fn new(sources: &MarkSources, hip3: Option<&Hip3SipSources>, hip3_external: Option<&Hip3ExternalSources>) -> Self {
         let feeds: Vec<Feed> = sources.feeds().map(|(feed, _)| feed).collect();
         let names: Vec<String> = sources.coins().map(str::to_string).collect();
         let listings = names
@@ -273,14 +298,24 @@ impl CoinTable {
             .collect();
         let by_name = names.iter().enumerate().map(|(index, coin)| (coin.clone(), index)).collect();
         let hip3 = Hip3Table::new(hip3);
-        let book_coins = names.iter().chain(hip3.names()).map(|coin| Coin::new(coin)).collect();
-        Self { names, book_coins, listings, by_name, feeds, hip3 }
+        let mut book_coins: Vec<Coin> = names.iter().chain(hip3.names()).map(|coin| Coin::new(coin)).collect();
+        let hip3_external = Hip3ExternalTable::new(hip3_external, |coin| {
+            hip3.index(coin).map_or_else(
+                || {
+                    book_coins.push(Coin::new(coin));
+                    book_coins.len() - 1
+                },
+                |index| names.len() + index,
+            )
+        });
+        Self { names, book_coins, listings, by_name, feeds, hip3, hip3_external }
     }
 
     /// The owner's state across ticks, nothing sampled yet.
     pub(crate) fn owner_state(&self) -> OwnerState {
         let hip3 = vec![Hip3CoinState::default(); self.hip3.names().len()];
-        OwnerState { hip3, external_basis: vec![ExternalBasisWindow::default(); self.names.len()] }
+        let hip3_external_basis = vec![ExternalBasisWindow::default(); self.hip3_external.names().len()];
+        OwnerState { hip3, external_basis: vec![ExternalBasisWindow::default(); self.names.len()], hip3_external_basis }
     }
 
     /// The coins to read from the HL book, in the table's order.
@@ -296,6 +331,8 @@ pub(crate) struct OwnerState {
     pub(crate) hip3: Vec<Hip3CoinState>,
     /// Each main-dex coin's basis samples (design 000594).
     pub(crate) external_basis: Vec<ExternalBasisWindow>,
+    /// Each HIP-3 external coin's basis samples (design 000664).
+    pub(crate) hip3_external_basis: Vec<ExternalBasisWindow>,
 }
 
 /// What one tick read.
@@ -312,6 +349,9 @@ pub(crate) struct Tick<'a> {
     pub(crate) readings: &'a [(Feed, &'a FeedMarkets, FeedProjection)],
     /// The HIP-3 equity feeds' readings; `None` without them.
     pub(crate) equity: Option<&'a EquityReadings>,
+    /// The HIP-3 external quotes' reading, judged at its own publish time after the others' reads; `None` without
+    /// them.
+    pub(crate) hip3_external: Option<&'a Hip3ExternalReading>,
 }
 
 /// `state`: the owner's (`CoinTable::owner_state`); this tick moves it.
@@ -322,7 +362,7 @@ pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, state: &mut Owne
     );
     assert_eq!(state.external_basis.len(), table.names.len(), "one basis window per main-dex coin");
     let node_withheld = node_withheld(tick);
-    let book_withheld = book_withheld(tick);
+    let book_withheld = book_withheld_at(tick, tick.now_ms);
     let stopped = tick.stopped.as_ref().map(|reason| Withheld::unavailable("stopped", reason.clone()));
     let local_withheld = stopped.clone().or_else(|| node_withheld.clone()).or_else(|| book_withheld.clone());
     // the basis reads the book and the venues, not the node state (design 000594)
@@ -335,6 +375,11 @@ pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, state: &mut Owne
         .collect();
     let gates = Hip3Gates { node: node_withheld.as_ref(), book: book_withheld.as_ref(), stopped: stopped.as_ref() };
     let hip3 = hip3_marks(&table.hip3, tick, table.names.len(), gates, &mut state.hip3);
+    // the external quotes' basis samples the book as of their own publish time, later than the tick's (review 000665 r1 P2)
+    let hip3_external = tick.hip3_external.map(|reading| {
+        let gates = Hip3ExternalGates { stopped: stopped.as_ref(), book_usable: book_withheld_at(tick, reading.published_ms).is_none() };
+        hip3_external(&table.hip3_external, tick, reading, gates, &mut state.hip3_external_basis)
+    });
     LocalMarksSnapshot {
         computed_ms: tick.now_ms,
         node: tick.node.as_ref().map(|prices| NodeProgress { seed_height: prices.seed_height, height: prices.height, block_time_ms: prices.block_time_ms }).map_err(Clone::clone),
@@ -343,6 +388,7 @@ pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, state: &mut Owne
         table: Arc::clone(table),
         coins,
         hip3,
+        hip3_external,
     }
 }
 
@@ -358,15 +404,15 @@ fn node_withheld(tick: &Tick<'_>) -> Option<Withheld> {
     })
 }
 
-/// The book not yet read, withheld after a data loss, or behind.
-fn book_withheld(tick: &Tick<'_>) -> Option<Withheld> {
+/// The book not yet read, withheld after a data loss, or behind the local clock at `now_ms`.
+fn book_withheld_at(tick: &Tick<'_>, now_ms: u64) -> Option<Withheld> {
     let Some(book) = tick.book else {
         return Some(Withheld::unavailable("hlBook", "the HL book has no snapshot yet"));
     };
     if !book.trusted {
         return Some(Withheld::unavailable("hlBook", format!("the HL book is withheld after a data loss (height {})", book.height)));
     }
-    let lag_ms = tick.now_ms.saturating_sub(book.time);
+    let lag_ms = now_ms.saturating_sub(book.time);
     (lag_ms > MAX_PROGRESS_LAG_MS)
         .then(|| Withheld::stale("bookProgress", format!("the HL book's block {} is {lag_ms} ms behind the local clock", book.height)))
 }
@@ -389,7 +435,7 @@ fn coin_marks(
         match listed.feed.kind {
             Kind::Spot => oracle_coverage.add(listed.feed, validity),
             Kind::Perp => external_coverage.add(listed.feed, validity),
-            Kind::Equity | Kind::EquityOvernight => unreachable!("a main-dex coin lists no Alpaca market (`Feed::ALL`)"),
+            Kind::Equity | Kind::EquityOvernight | Kind::Hip3Perp => unreachable!("a main-dex coin lists no Alpaca or HIP-3 market (`Feed::ALL`)"),
         }
     }
     let perps = valid_quotes(listings, tick, Kind::Perp).map(ExternalQuotes::of);
@@ -531,8 +577,66 @@ pub(crate) mod tests {
         VenuePrice::parse(text).unwrap()
     }
 
-    /// The test's world: the sources, every market quoting (spot BTC 100,000 / 100,000.2, perp 100,003.95 / 100,004.05),
-    /// the node state of BTC at `NOW_MS`, and the book.
+    /// Review 000664 r1 P2-1: the books read are the union of the main, SIP and external tables by full coin name, each
+    /// coin once; an external coin in the SIP table reads the SIP coin's book, the others follow; external without SIP
+    /// still reads its coins'.
+    #[test]
+    fn the_books_read_are_the_union_of_the_tables_each_once() {
+        let sources = MarkSources::parse(SOURCES).unwrap();
+        let sip = Hip3SipSources::parse(r#"{"feed": "sip", "coins": {"xyz:TSLA": {"symbol": "TSLA"}, "xyz:AAPL": {"symbol": "AAPL"}}}"#).unwrap();
+        let external = Hip3ExternalSources::parse(r#"{"venue": "binance_perp", "coins": {"xyz:TSLA": {"symbol": "TSLAUSDT", "pxMultiplier": "1"},
+            "xyz:ZHIPU": {"symbol": "ZHIPUUSDT", "pxMultiplier": "1"}}}"#).unwrap();
+        let names = |table: &CoinTable| table.book_coins().iter().map(Coin::value).collect::<Vec<_>>();
+        let both = CoinTable::new(&sources, Some(&sip), Some(&external));
+        assert_eq!(names(&both), ["BTC", "ETH", "xyz:AAPL", "xyz:TSLA", "xyz:ZHIPU"]);
+        let read = |table: &CoinTable| table.hip3_external.book_indices().iter().map(|index| table.book_coins()[*index].value()).collect::<Vec<_>>();
+        assert_eq!(read(&both), ["xyz:TSLA", "xyz:ZHIPU"]);
+        let external_only = CoinTable::new(&sources, None, Some(&external));
+        assert_eq!(names(&external_only), ["BTC", "ETH", "xyz:TSLA", "xyz:ZHIPU"]);
+        assert_eq!(read(&external_only), ["xyz:TSLA", "xyz:ZHIPU"]);
+        assert_eq!(names(&CoinTable::new(&sources, Some(&sip), None)), ["BTC", "ETH", "xyz:AAPL", "xyz:TSLA"], "off: the books read as before");
+    }
+
+    /// Review 000665 r1 P2: the HIP-3 external basis samples the book as of the quotes' publish time: a book 5,000 ms
+    /// behind at the tick, 5,001 ms at the publish, takes no 120th sample - the quote still read -; the next tick with
+    /// both fresh publishes the basis.
+    #[test]
+    fn the_external_basis_judges_the_book_at_its_publish_time() {
+        use crate::local_marks::external_basis::SAMPLE_INTERVAL;
+        let world = World::new();
+        let external = Hip3ExternalSources::parse(r#"{"venue": "binance_perp", "coins": {"xyz:GOLD": {"symbol": "XAUUSDT", "pxMultiplier": "1"}}}"#).unwrap();
+        let table = Arc::new(CoinTable::new(&world.sources, None, Some(&external)));
+        let mut state = table.owner_state();
+        let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
+        let start = Instant::now();
+        let gold = Quote { bid: price("3900"), ask: price("3901") };
+        let tick_at = |state: &mut OwnerState, second: u32, book_lag_ms: u64| {
+            let now_ms = NOW_MS + 1_000 * u64::from(second);
+            let entries = vec![(Some(Entry::for_test(Some(gold), now_ms, 1)), Validity::Valid)];
+            let reading = Hip3ExternalReading { published_ms: now_ms + 1, quote_max_age_ms: 60_000, projection: FeedProjection { connections: Vec::new(), messages: 1, entries } };
+            let prices = vec![(Some(Px::new(10_000_100_000_000)), Some(Px::new(10_000_300_000_000))), (None, None), (Some(Px::new(390_050_000_000)), Some(Px::new(390_060_000_000)))];
+            let book = BestPricesAt { time: now_ms - book_lag_ms, height: 1_001, trusted: true, prices };
+            let tick = Tick {
+                now_ms, instant: start + SAMPLE_INTERVAL * second, stopped: None, node: &world.node, book: Some(&book), readings: &readings, equity: None,
+                hip3_external: Some(&reading),
+            };
+            assemble(&table, &tick, state)
+        };
+        for second in 0..119 {
+            tick_at(&mut state, second, 0);
+        }
+        let late = tick_at(&mut state, 119, MAX_PROGRESS_LAG_MS);
+        let leg = late.hip3_external_coin("xyz:GOLD").unwrap().as_ref().unwrap();
+        assert_eq!((leg.quotes.bid, leg.quotes.ask), (price("3900"), price("3901")), "the quote still read");
+        let withheld = &leg.basis.as_ref().unwrap_err().detail;
+        assert!(withheld.starts_with("119 of the 120 samples"), "{withheld}");
+        let fresh = tick_at(&mut state, 120, 0);
+        let basis = fresh.hip3_external_coin("xyz:GOLD").unwrap().as_ref().unwrap().basis.clone().unwrap();
+        assert_eq!(basis.samples, 120);
+    }
+
+    /// The test's world: the sources, every market quoting (spot BTC 100,000 / 100,000.2, perp 100,003.95 /
+    /// 100,004.05), the node state of BTC at `NOW_MS`, and the book.
     pub(crate) struct World {
         pub(crate) sources: MarkSources,
         table: Arc<CoinTable>,
@@ -549,7 +653,7 @@ pub(crate) mod tests {
         /// The world of `sources`, which list BTC and ETH.
         fn of(sources: &str) -> Self {
             let sources = MarkSources::parse(sources).unwrap();
-            let table = Arc::new(CoinTable::new(&sources, None));
+            let table = Arc::new(CoinTable::new(&sources, None, None));
             let quote = |bid: &str, ask: &str| {
                 (Some(Entry::for_test(Some(Quote { bid: price(bid), ask: price(ask) }), NOW_MS, 1)), Validity::Valid)
             };
@@ -593,7 +697,7 @@ pub(crate) mod tests {
         /// A tick at `now_ms` and `instant` of the owner's `state`.
         pub(crate) fn snapshot_at(&self, state: &mut OwnerState, now_ms: u64, instant: Instant) -> LocalMarksSnapshot {
             let readings: Vec<_> = self.sources.feeds().zip(&self.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
-            let tick = Tick { now_ms, instant, stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, equity: None };
+            let tick = Tick { now_ms, instant, stopped: None, node: &self.node, book: self.book.as_ref(), readings: &readings, equity: None, hip3_external: None };
             assemble(&self.table, &tick, state)
         }
 
@@ -624,11 +728,11 @@ pub(crate) mod tests {
         let world = World::new();
         let alone = world.snapshot(NOW_MS);
         let hip3 = Hip3SipSources::parse(r#"{"feed": "sip", "coins": {"xyz:TSLA": {"symbol": "TSLA"}}}"#).unwrap();
-        let table = Arc::new(CoinTable::new(&world.sources, Some(&hip3)));
+        let table = Arc::new(CoinTable::new(&world.sources, Some(&hip3), None));
         let mut book = world.book.clone().unwrap();
         book.prices.push((None, None));
         let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
-        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: None, node: &world.node, book: Some(&book), readings: &readings, equity: None };
+        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: None, node: &world.node, book: Some(&book), readings: &readings, equity: None, hip3_external: None };
         let shared = assemble(&table, &tick, &mut table.owner_state());
         let frames = |snapshot: &LocalMarksSnapshot| {
             snapshot.coins().map(|(coin, marks)| super::super::prices_view::CoinMarksView::of(snapshot, coin, marks).to_wire()).collect::<Vec<_>>()
@@ -693,7 +797,7 @@ pub(crate) mod tests {
         assert_eq!(snapshot.coin("BTC").unwrap().node.as_ref().unwrap_err().detail, "the account view is unavailable: initializing");
         let world = World::new();
         let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
-        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: Some("gone".to_string()), node: &world.node, book: world.book.as_ref(), readings: &readings, equity: None };
+        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: Some("gone".to_string()), node: &world.node, book: world.book.as_ref(), readings: &readings, equity: None, hip3_external: None };
         let stopped = assemble(&world.table, &tick, &mut world.owner_state());
         assert_eq!(statuses(&stopped, "BTC"), (None, Some("stopped")), "the node leg does not read the feeds");
     }
@@ -792,7 +896,7 @@ pub(crate) mod tests {
         assert!(!sampled(&world, NOW_MS), "no perp quote");
         let world = World::new();
         let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
-        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: Some("gone".to_string()), node: &world.node, book: world.book.as_ref(), readings: &readings, equity: None };
+        let tick = Tick { now_ms: NOW_MS, instant: Instant::now(), stopped: Some("gone".to_string()), node: &world.node, book: world.book.as_ref(), readings: &readings, equity: None, hip3_external: None };
         let mut state = world.owner_state();
         assemble(&world.table, &tick, &mut state);
         assert!(state.external_basis[0].published().unwrap_err().detail.starts_with("0 of"), "the feeds stopped");

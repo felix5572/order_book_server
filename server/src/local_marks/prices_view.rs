@@ -16,6 +16,7 @@ use alloy::primitives::Address;
 use serde::Serialize;
 
 use super::{
+    external_basis::ExternalBasis,
     price::MAX_PERP_DECIMALS,
     snapshot::{CoinMarks, Coverage, ExternalQuotes, LocalLeg, LocalMarksSnapshot, NodeMark, Status, VenueQuote, Withheld},
 };
@@ -157,20 +158,26 @@ struct LocalView {
 /// second over the window.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ExternalBasisView {
+pub(crate) struct ExternalBasisView {
     ratio: f64,
     samples: usize,
 }
 
+/// The basis, or why it is withheld (`extMarkPrices`' local leg, `extHip3ExternalQuotes`).
+pub(crate) fn external_basis_view(basis: &Result<ExternalBasis, Withheld>) -> LegView<ExternalBasisView> {
+    basis.as_ref().map_or_else(withheld, |basis| LegView::Ready(ExternalBasisView { ratio: basis.ratio, samples: basis.samples }))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ExternalQuoteView {
+pub(crate) struct ExternalQuoteView {
     bid_px: String,
     ask_px: String,
     received_ts_ms: u64,
 }
 
-fn external_quotes(quotes: &ExternalQuotes) -> BTreeMap<&'static str, ExternalQuoteView> {
+/// Each quote by venue, scaled to HL's price scale of the coin, with its receipt time (the server's wall clock).
+pub(crate) fn external_quotes(quotes: &ExternalQuotes) -> BTreeMap<&'static str, ExternalQuoteView> {
     let view = |quote: &VenueQuote| ExternalQuoteView { bid_px: quote.bid.to_string(), ask_px: quote.ask.to_string(), received_ts_ms: quote.received_ms };
     quotes.venues.iter().map(|quote| (quote.feed.venue.name(), view(quote))).collect()
 }
@@ -257,7 +264,7 @@ fn local_view(snapshot: &LocalMarksSnapshot, local: &LocalLeg) -> LegView<LocalV
         external_bid_px: local.external_quotes.bid.to_string(),
         external_ask_px: local.external_quotes.ask.to_string(),
         external_quotes: external_quotes(&local.external_quotes),
-        external_basis: local.external_basis.as_ref().map_or_else(withheld, |basis| LegView::Ready(ExternalBasisView { ratio: basis.ratio, samples: basis.samples })),
+        external_basis: external_basis_view(&local.external_basis),
         oracle_px: px(mark.oracle),
         basis_ratio: mark.basis_ratio,
         basis_samples: mark.basis_samples,

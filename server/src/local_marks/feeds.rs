@@ -23,13 +23,14 @@ use tokio::{
 use super::{
     connection::{ConnectionEnd, FeedError, Timeouts, run_connection},
     hip3::{
+        external_sources::Hip3ExternalSources,
         protocol::{AlpacaCredentials, EquityFeed, alpaca_session},
         sources::Hip3SipSources,
     },
     protocol::{Protocol, kucoin_session, mexc_spot_book_tickers},
     rest::RestClient,
     slot::FeedSlot,
-    subscriptions::{FeedProjection, FeedSubscriptions, Subscription},
+    subscriptions::{FeedCopy, FeedProjection, FeedSubscriptions, Subscription},
     sources::{Feed, FeedMarkets, Kind, MarkSources, Venue},
 };
 use crate::{
@@ -52,6 +53,35 @@ const ALPACA_CONNECTION_LIMIT_BUDGET: Duration = Duration::from_secs(60);
 pub(crate) struct EquityFeedsConfig {
     pub(crate) sources: Arc<Hip3SipSources>,
     pub(crate) credentials: AlpacaCredentials,
+}
+
+/// The HIP-3 external quotes' configuration (hyperliquid-trade design 000664): their markets and each quote's age
+/// limit.
+pub(crate) struct Hip3ExternalConfig {
+    pub(crate) sources: Arc<Hip3ExternalSources>,
+    pub(crate) quote_max_age_ms: u64,
+}
+
+/// The HIP-3 external quotes' feed: Binance's `TRADIFI_PERPETUAL` contracts in partitions of their own, apart from the
+/// main-dex perps', a coin's quote withheld once older than `quote_max_age_ms` (`Validity::Expired`) - a coin silent
+/// while its partition's others quote is withheld alone.
+pub(crate) struct Hip3ExternalFeeds {
+    pub(crate) sources: Arc<Hip3ExternalSources>,
+    pub(crate) quote_max_age_ms: u64,
+    subscriptions: FeedSubscriptions,
+}
+
+impl Hip3ExternalFeeds {
+    fn new(Hip3ExternalConfig { sources, quote_max_age_ms }: Hip3ExternalConfig) -> Self {
+        let subscriptions = FeedSubscriptions::with_expiry(Feed::HIP3_EXTERNAL, &sources.markets, Some(quote_max_age_ms));
+        Self { sources, quote_max_age_ms, subscriptions }
+    }
+
+    /// The partitions as they stand, their quotes' validity judged at the snapshot's publish time taken after (design
+    /// 000664 r4).
+    pub(crate) fn copy(&self) -> FeedCopy {
+        self.subscriptions.copy()
+    }
 }
 
 /// The HIP-3 US stocks' two feeds, the SIP's and BOATS's, of the same markets; each always connected (design 000543
@@ -96,6 +126,8 @@ pub(crate) struct LocalMarkFeeds {
     /// The HIP-3 SIP coins and their feeds' connections, one each; `None` without `--hip3-sip-marks`.
     pub(crate) hip3: Option<Arc<Hip3SipSources>>,
     equity: Option<EquitySubscriptions>,
+    /// The HIP-3 external quotes' feed; `None` without `--hip3-external-quotes`.
+    pub(crate) hip3_external: Option<Hip3ExternalFeeds>,
     /// Why every feed stopped (a task's internal failure), until restart.
     stopped: Arc<Mutex<Option<String>>>,
     supervisor: AbortHandle,
@@ -110,8 +142,8 @@ impl Drop for LocalMarkFeeds {
 
 impl LocalMarkFeeds {
     /// Spawns one supervised task per connection partition, with independent retry/quote epochs, and the HIP-3 equity
-    /// feeds' when configured.
-    pub(crate) fn start(sources: Arc<MarkSources>, equity: Option<EquityFeedsConfig>) -> Self {
+    /// feeds' and external quotes' when configured.
+    pub(crate) fn start(sources: Arc<MarkSources>, equity: Option<EquityFeedsConfig>, hip3_external: Option<Hip3ExternalConfig>) -> Self {
         let subscriptions: Vec<_> = sources.feeds().map(|(feed, markets)| FeedSubscriptions::new(feed, markets)).collect();
         let mut tasks = JoinSet::new();
         let mut by_task = HashMap::new();
@@ -135,33 +167,55 @@ impl LocalMarkFeeds {
             }
             (sources, groups)
         });
-        Self::supervised(sources, subscriptions, hip3, tasks, by_task)
+        let hip3_external = hip3_external.map(Hip3ExternalFeeds::new);
+        for part in hip3_external.iter().flat_map(|feeds| &feeds.subscriptions.subscriptions) {
+            let identity = (Feed::HIP3_EXTERNAL, part.shard);
+            let part = Arc::clone(part);
+            let task = tasks.spawn(async move { run_feed(&part).await });
+            by_task.insert(task.id(), identity);
+        }
+        Self::supervised(sources, subscriptions, hip3, hip3_external, tasks, by_task)
     }
 
     fn supervised(
         sources: Arc<MarkSources>,
         subscriptions: Vec<FeedSubscriptions>,
         hip3: Option<(Arc<Hip3SipSources>, EquitySubscriptions)>,
+        hip3_external: Option<Hip3ExternalFeeds>,
         tasks: JoinSet<()>,
         by_task: HashMap<Id, (Feed, usize)>,
     ) -> Self {
         let stopped = Arc::new(Mutex::new(None));
         let (hip3, equity) = hip3.unzip();
         let equity_groups = equity.iter().flat_map(|groups| EquityFeed::ALL.map(|feed| groups.of(feed)));
-        let slots = subscriptions.iter().chain(equity_groups).flat_map(|group| group.subscriptions.iter().map(|part| Arc::clone(&part.slot))).collect();
+        let external_group = hip3_external.iter().map(|feeds| &feeds.subscriptions);
+        let groups = subscriptions.iter().chain(equity_groups).chain(external_group);
+        let slots = groups.flat_map(|group| group.subscriptions.iter().map(|part| Arc::clone(&part.slot))).collect();
         let supervisor = tokio::spawn(supervise(tasks, by_task, slots, Arc::clone(&stopped))).abort_handle();
-        Self { sources, subscriptions, hip3, equity, stopped, supervisor }
+        Self { sources, subscriptions, hip3, equity, hip3_external, stopped, supervisor }
     }
 
     /// The feeds' slots without a task: nothing connects or quotes.
     #[cfg(test)]
     pub(crate) fn idle_for_test(sources: Arc<MarkSources>, hip3: Option<Arc<Hip3SipSources>>) -> Self {
+        Self::idle_with_external_for_test(sources, hip3, None)
+    }
+
+    /// The same with the HIP-3 external quotes' slots.
+    #[cfg(test)]
+    pub(crate) fn idle_with_external_for_test(sources: Arc<MarkSources>, hip3: Option<Arc<Hip3SipSources>>, hip3_external: Option<Hip3ExternalConfig>) -> Self {
         let subscriptions = sources.feeds().map(|(feed, markets)| FeedSubscriptions::new(feed, markets)).collect();
         let hip3 = hip3.map(|sources| {
             let groups = EquitySubscriptions::new(&sources.markets);
             (sources, groups)
         });
-        Self::supervised(sources, subscriptions, hip3, JoinSet::new(), HashMap::new())
+        Self::supervised(sources, subscriptions, hip3, hip3_external.map(Hip3ExternalFeeds::new), JoinSet::new(), HashMap::new())
+    }
+
+    /// The HIP-3 external quotes' partitions, for a test to write in.
+    #[cfg(test)]
+    pub(crate) fn hip3_external_parts_for_test(&self) -> &[Arc<Subscription>] {
+        self.hip3_external.as_ref().map_or(&[], |feeds| &feeds.subscriptions.subscriptions)
     }
 
 
@@ -388,7 +442,7 @@ mod tests {
                 .id(),
             (second, 0),
         );
-        LocalMarkFeeds::supervised(sources, subscriptions, None, tasks, by_task)
+        LocalMarkFeeds::supervised(sources, subscriptions, None, None, tasks, by_task)
     }
 
     async fn until(feeds: &LocalMarkFeeds, done: impl Fn(&LocalMarkFeeds) -> bool + Sync) {

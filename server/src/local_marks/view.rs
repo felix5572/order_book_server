@@ -105,16 +105,6 @@ struct ListingView {
     status: &'static str,
 }
 
-const fn status(validity: Validity) -> &'static str {
-    match validity {
-        Validity::Valid => "valid",
-        Validity::NotQuoted => "notQuoted",
-        Validity::NoQuote => "noQuote",
-        Validity::NotConnected => "notConnected",
-        Validity::Expired => "expired",
-    }
-}
-
 fn connection(connection: &Connection) -> ConnectionView {
     match connection {
         Connection::Connecting => ConnectionView::Connecting,
@@ -194,7 +184,7 @@ fn listing_view(symbol: &str, px_multiplier: String, entry: Option<Entry>, valid
         ask: quote.map(|quote| quote.ask.to_string()),
         received_ts_ms: entry.map(|entry| entry.received_ms),
         event_ts_ms: entry.and_then(|entry| entry.event_ms),
-        status: status(validity),
+        status: validity.name(),
     }
 }
 
