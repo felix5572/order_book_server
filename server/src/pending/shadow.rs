@@ -1457,7 +1457,7 @@ pub(crate) mod tests {
             actions::tests::{coins, requested},
             blocks::tests::hash,
             mempool::{ActionKind, RequestedTif, RequestedTrigger, SignedAction, TriggerGrouping},
-            refusals::TakerOutcome,
+            refusals::{Refusal, TakerOutcome},
             signer::ActingIdentity,
         },
     };
@@ -1652,8 +1652,8 @@ pub(crate) mod tests {
         (statuses, vec![btc_diff(11, "A", "101.0", remove())])
     }
 
-    /// The account of the replica's orders in these tests (`btc_status`'s and `btc_stop_status`'s user).
-    pub(crate) const ACCOUNT: Address = Address::with_last_byte(1);
+    /// The replica's stops' account in these tests (`btc_stop_status`'s user), not its resting orders' (`0x..01`).
+    pub(crate) const ACCOUNT: Address = Address::with_last_byte(2);
 
     /// A `SetGlobalAction`'s line seen at `seen_ms`, its hash from `byte`.
     fn set_global_line(seen_ms: i64, byte: u8) -> MempoolTx {
@@ -1850,7 +1850,7 @@ pub(crate) mod tests {
     /// of the untriggered ones - the cloid index holding it -: the action fires nothing.
     #[test]
     fn a_pending_cancel_by_cloid_takes_a_confirmed_stop_out() {
-        for (vault, trades) in [(ACCOUNT, 0), (Address::with_last_byte(2), 1)] {
+        for (vault, trades) in [(ACCOUNT, 0), (Address::with_last_byte(3), 1)] {
             let mut harness = Harness::ready_from(1_000);
             harness.rest_ask(11);
             harness.open_stop(77, "B", None, false, Some("0x0e"));
@@ -2390,7 +2390,7 @@ pub(crate) mod tests {
     const TAKER: Address = Address::repeat_byte(0x5a);
 
     fn taker_outcome(refused: bool) -> TakerOutcome {
-        TakerOutcome { key: TakerKey { identity: ActingIdentity::Signer(TAKER), asset: 0, is_buy: true }, refused }
+        TakerOutcome { key: TakerKey { identity: ActingIdentity::Signer(TAKER), asset: 0, is_buy: true }, reduce_only: false, refused: refused.then_some(Refusal::Margin) }
     }
 
     fn gtc_bid(px: &str, cloid: &str) -> ActionKind {

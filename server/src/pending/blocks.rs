@@ -19,7 +19,7 @@ use tokio::time::Instant;
 use super::{
     feed::{self, Feed, FeedEvent, FeedLosses, FeedReports},
     mempool::order_tif,
-    refusals::{TakerKey, TakerOutcome},
+    refusals::{Refusal, TakerKey, TakerOutcome},
     signer::{self, ActingIdentity},
 };
 use crate::{
@@ -34,6 +34,9 @@ use crate::{
 
 /// The error of an order HL could not margin (bm 10-31: "Insufficient margin to place order. asset=159").
 const MARGIN_REFUSED: &str = "Insufficient margin to place order";
+/// The error of a reduce-only order that would increase its position (bm 11-02: "Reduce only order would increase
+/// position. asset=200"; batch 2p).
+const REDUCE_ONLY_REFUSED: &str = "Reduce only order would increase position";
 
 /// The error of an IOC that met no level to take ("Order could not immediately match against any resting orders.
 /// asset=46").
@@ -293,9 +296,14 @@ fn taker_outcomes(block: &ReplicaLine<'_>, paired_actions: &[PairedAction<'_, '_
             PENDING_BOOK_TAKER_OUTCOMES_TOTAL.with_label_values(&["no_identity"]).inc_by(u64::try_from(outcomes.len()).unwrap_or(u64::MAX));
             continue;
         };
-        for (asset, is_buy, refused) in outcomes {
-            PENDING_BOOK_TAKER_OUTCOMES_TOTAL.with_label_values(&[if refused { "refused" } else { "cleared" }]).inc();
-            taken.push(TakerOutcome { key: TakerKey { identity, asset, is_buy }, refused });
+        for OrderOutcome { asset, is_buy, reduce_only, refused } in outcomes {
+            let label = match refused {
+                Some(Refusal::Margin) => "refused",
+                Some(Refusal::ReduceOnly) => "refused_reduce_only",
+                None => "cleared",
+            };
+            PENDING_BOOK_TAKER_OUTCOMES_TOTAL.with_label_values(&[label]).inc();
+            taken.push(TakerOutcome { key: TakerKey { identity, asset, is_buy }, reduce_only, refused });
         }
     }
     Ok(taken)
@@ -312,34 +320,49 @@ fn taking_items(orders: &[WireOrder]) -> Result<Vec<usize>, String> {
     Ok(taking)
 }
 
-/// (asset, is buy, refused for margin) of each order of `orders` at `taking` whose status tells either. The statuses
-/// are one per order, or one error for them all - a refused batch, which only a margin error tells of: each taker
-/// refused; any other, an IOC's miss among them, says nothing of any one (design 000621 r3; review 000621 r4 P2-1).
-fn order_outcomes(orders: &[WireOrder], taking: &[usize], statuses: &[WireStatus]) -> Result<Vec<(u32, bool, bool)>, String> {
+/// A taker order's outcome by its status: its asset, side and reduce-only flag; refused and why, or cleared (`None`).
+struct OrderOutcome {
+    asset: u32,
+    is_buy: bool,
+    reduce_only: bool,
+    refused: Option<Refusal>,
+}
+
+impl OrderOutcome {
+    const fn of(order: &WireOrder, refused: Option<Refusal>) -> Self {
+        Self { asset: order.a, is_buy: order.b, reduce_only: order.r, refused }
+    }
+}
+
+/// The outcome of each order of `orders` at `taking` whose status tells one. The statuses are one per order, or one
+/// error for them all - a refused batch, which only a margin error tells of: each taker refused; any other, an IOC's
+/// miss among them, says nothing of any one (design 000621 r3; review 000621 r4 P2-1).
+fn order_outcomes(orders: &[WireOrder], taking: &[usize], statuses: &[WireStatus]) -> Result<Vec<OrderOutcome>, String> {
     if statuses.len() != orders.len() {
         let [status] = statuses else { return Err(format!("{} orders with {} statuses", orders.len(), statuses.len())) };
         if !refused(status) {
             return Err(format!("{} orders with one status not an error", orders.len()));
         }
-        let margin = matches!(taker_status(status), Some(TakerStatus::Refused));
-        return Ok(if margin { taking.iter().map(|item| (orders[*item].a, orders[*item].b, true)).collect() } else { Vec::new() });
+        let margin = matches!(taker_status(status), Some(TakerStatus::Refused(Refusal::Margin)));
+        let refused_each = |item: &usize| OrderOutcome::of(&orders[*item], Some(Refusal::Margin));
+        return Ok(if margin { taking.iter().map(refused_each).collect() } else { Vec::new() });
     }
     let mut outcomes = Vec::new();
     for item in taking {
         let order = &orders[*item];
         match taker_status(&statuses[*item]).ok_or_else(|| format!("item {item}: a status neither placed nor refused"))? {
-            TakerStatus::Refused => outcomes.push((order.a, order.b, true)),
-            TakerStatus::Cleared => outcomes.push((order.a, order.b, false)),
+            TakerStatus::Refused(refusal) => outcomes.push(OrderOutcome::of(order, Some(refusal))),
+            TakerStatus::Cleared => outcomes.push(OrderOutcome::of(order, None)),
             TakerStatus::Silent => {}
         }
     }
     Ok(outcomes)
 }
 
-/// What a taker order's status says of its taker's margin.
+/// What a taker order's status says of its taker.
 enum TakerStatus {
-    /// Refused for margin.
-    Refused,
+    /// Refused for margin, or - batch 2p - a reduce-only order that would increase its position.
+    Refused(Refusal),
     /// Placed (filled, resting), or an IOC that missed every level.
     Cleared,
     /// Any other error.
@@ -353,7 +376,9 @@ fn taker_status(status: &WireStatus) -> Option<TakerStatus> {
     }
     let WireStatus::Object(WireStatusObject { error: Some(error), resting: None, filled: None }) = status else { return None };
     Some(if error.contains(MARGIN_REFUSED) {
-        TakerStatus::Refused
+        TakerStatus::Refused(Refusal::Margin)
+    } else if error.contains(REDUCE_ONLY_REFUSED) {
+        TakerStatus::Refused(Refusal::ReduceOnly)
     } else if error.contains(IOC_MISSED) {
         TakerStatus::Cleared
     } else {
@@ -527,12 +552,17 @@ pub(crate) mod tests {
         format!(r#"{{"user":"0xbff945932b5ff40699e9f12fa40927c5667df619","res":{{"status":"ok","response":{{"type":"order","data":{{"statuses":[{statuses}]}}}}}}}}"#)
     }
 
-    /// (asset, is buy, refused) of the block's taker outcomes, all of the one vault.
+    /// (asset, is buy, refused for margin) of the block's taker outcomes, all of the one vault.
     fn vault_outcomes(action: &str, response: &str) -> Result<Vec<(u32, bool, bool)>, String> {
+        let outcomes = vault_taker_outcomes(action, response)?;
+        Ok(outcomes.iter().map(|outcome| (outcome.key.asset, outcome.key.is_buy, outcome.refused == Some(Refusal::Margin))).collect())
+    }
+
+    fn vault_taker_outcomes(action: &str, response: &str) -> Result<Vec<TakerOutcome>, String> {
         let vault = ActingIdentity::Vault("0xbff945932b5ff40699e9f12fa40927c5667df619".parse().unwrap());
         let block = parse_block(&block_of(&[action], &[response]))?;
         assert!(block.taker_outcomes.iter().all(|outcome| outcome.key.identity == vault));
-        Ok(block.taker_outcomes.iter().map(|outcome| (outcome.key.asset, outcome.key.is_buy, outcome.refused)).collect())
+        Ok(block.taker_outcomes)
     }
 
     /// Batch 2g: the orders that may take, by their statuses - a margin error refuses, a fill, a resting order or an IOC
@@ -555,6 +585,21 @@ pub(crate) mod tests {
         // refused whole: nothing
         let refused_whole = r#"{"user":"0xbff945932b5ff40699e9f12fa40927c5667df619","res":{"status":"err","response":"Insufficient margin to place order. asset=1"}}"#;
         assert_eq!(vault_outcomes(VAULT_TAKERS, refused_whole), Ok(vec![]));
+    }
+
+    /// Batch 2p: a reduce-only taker refused as it would increase its position - with its order's reduce-only flag -, the
+    /// plain takers' outcomes as before; one such error for the batch says nothing of each order.
+    #[test]
+    fn a_line_reads_its_reduce_only_refusals() {
+        const REDUCE_ONLY: &str = r#"{"error":"Reduce only order would increase position. asset=1"}"#;
+        const RESTING: &str = r#"{"resting":{"oid":11}}"#;
+        const FILLED: &str = r#"{"filled":{"totalSz":"1","avgPx":"10","oid":12}}"#;
+        let action = VAULT_TAKERS.replacen(r#""r":false,"t":{"limit":{"tif":"Ioc"}}"#, r#""r":true,"t":{"limit":{"tif":"Ioc"}}"#, 1);
+        let response = vault_response(&format!(r#"{REDUCE_ONLY},{RESTING},{RESTING},{FILLED},"waitingForTrigger""#));
+        let outcomes = vault_taker_outcomes(&action, &response).unwrap();
+        let read: Vec<_> = outcomes.iter().map(|outcome| (outcome.key.asset, outcome.reduce_only, outcome.refused)).collect();
+        assert_eq!(read, [(1, true, Some(Refusal::ReduceOnly)), (3, false, None), (4, false, None)]);
+        assert_eq!(vault_taker_outcomes(&action, &vault_response(REDUCE_ONLY)), Ok(vec![]));
     }
 
     /// Review 000621 r4 P2-2: an action without an order that may take - ALOs without a priority, trigger orders -

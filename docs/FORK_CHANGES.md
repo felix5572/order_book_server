@@ -1911,3 +1911,41 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - 追赶上限（23 张）：13 张为 3 × 普通量向上取整，其余不一致，规则未明。
   - 普通 TWAP 下限未及估出（101 张，执行稀疏的 TWAP 要很久才见到两次）；无拒单的“预测了没执行”251 张待查。
 - **用例**：`a_refused_suborder_ends_its_twap`；`a_floor_needs_two_slots`（原 `a_floor_needs_two_slots_and_no_randomizing`，随机化也估出）；`a_randomized_floor_is_past_the_randomizing`（随机范围内的量不算证据）。变异 3 处都有测试失败。
+
+## 2026-11-02 影子盘口批次 2p：只减仓被拒、自成交（用户 11-02 “你按照你的顺序处理吧”）
+
+- **依据**（hyperliquid-trade 研究 `mempool_pending_book_20261031`；录制 `after2n3_20261102T1008`）：
+  - 预测了没发生的里，“吃单只减仓被拒”319 笔，17 个吃单账户，其中一个账户在 PUMP 上 173 笔。块日志 08–11 点（`scripts/margin_repeat.py --refusal reduce_only`）：只减仓被拒 6,701 次，6,409 次紧接上一次；被拒后同一账户、币、方向的下一张只减仓吃单，之后的块里 5 s 内 93.7%、300 s 内 98.2% 再被拒（同块 98.6%），与 2g 保证金的 98.4% 相当。
+  - “吃单方与挂单方同一账户”129 笔，113 张挂单的最终状态全部是 `selfTradeCanceled`，吃单照常成交：HL 撤掉同账户挂单，吃单继续。
+- **改了什么**：
+  - `pending/refusals.rs`：被拒原因 `Refusal::{Margin, ReduceOnly}`；`TakerOutcome` 带订单的只减仓标记。只减仓被拒只对该身份同币同向的只减仓单生效（`reduce_only_refused_recently`），窗口同 M；任何下单清保证金推断，只减仓单下单（成交、挂上、IOC 落空）才清只减仓推断。
+  - `pending/blocks.rs`：`Reduce only order would increase position` 读作只减仓被拒（单张订单自己的状态；整批一个错误时不读，同保证金以外的错误）；`orderbook_pending_book_taker_outcomes_total{outcome="refused_reduce_only"}`。
+  - `pending/actions.rs`：`Placement.reduce_only`。触发单执行时按其定量方式（非普通量即只减仓/整仓）给出，只用于标记，不经被拒判断。
+  - `pending/overlay.rs`：吃单走到同一账户的挂单（回放的按用户、待入块的按已知账户），撤掉它、不成交、继续往下吃；吃单账户未知时不变。TWAP 子单、触发单同样适用。
+- **测试夹具**：回放止损单（`btc_stop_status`）的用户改为 `0x..02`，影子测试 `ACCOUNT` 随之改；overlay 用例里 TWAP 子单和移动止损的主人改为 CAROL。原先它们与挂单同为 `0x..01` / ALICE，新规则下会被当成自成交。signer 用例按真实块订单的 `r` 断言只减仓标记。
+- **用例**：`a_reduce_only_refusal_holds_for_reduce_only_orders`、`a_line_reads_its_reduce_only_refusals`、`a_reduce_only_taker_lately_refused_is_refused_again`、`a_taker_cancels_its_own_resting_orders_and_goes_on`、`a_placement_keeps_its_orders_reduce_only_flag`。变异 6 处都有测试失败。
+  - 代码审查 000670 r1 后（2 条 P2）：
+    - 价位队列顺序未证实时，已知账户的吃单在含自己挂单的价位上，是否撞到自己的单取决于排序（自己排前：撤掉、吃别人的；别人排前：吃满就停，自己的单还在），剩下的盘口不同。现在只要吃单余量 ≤ 别人的总量，该币从这一步起不可判定（`self_trade_unproven`，沿用 2n-2 的按币 `undecided`）；这一笔的成交量与排序无关，照报。余量超过别人的总量时，排序无关，照常处理。TWAP 子单改为在吃之前看是否已不可判定，不让它自己引起的不可判定吞掉它自己的成交。
+    - 98.2% 是研究脚本按回执账户、自己的批量错误口径算的，与线上规则（可吃单项、逐项回执、vault 或签名人身份）不同。新增 `pending::refusals::real_data::real_refusals_repeat`（忽略的真实数据用例）：用 `parse_block` 读真实块日志，按确认滞后 2 块的推断逐张判断，再与该块的实际结果比对。按订单所在块的时间判断（线上按行到达时间），只计逐项回执能分类的吃单，“放行”含 IOC 落空。bm 11-02 09:57–11:09（6 个块日志文件，连续）：判为只减仓被拒 3,742 张，实际只减仓被拒 3,513（93.9%）、放行 229；判为保证金被拒 30,960 张，实际 30,205（97.6%）；只减仓被拒但未判出 810 张（多为一轮的第一次）。先前未查连续性的 09:45–10:57 一次为 3,246 / 3,303（98.3%），两段有 5 个文件重叠；最早的文件已被节点清理，不能补查。
+  - 代码审查 000670 r2 后（3 条 P2）：
+    - 匿名成交后的归属：顺序未证实的价位被吃单吃了一部分（吃单在此用完），剩下的单属于谁不知道，记为归属不明（`blurred`）；之后已知账户、在该价位有自己挂单的吃单到来，直接判不可判定，不再用 `left` 的某一种排列算自己与别人的剩余。没有自己挂单的吃单照常。
+    - 同一次 SGA 的批次：以单张触发单为报成交的边界，执行前该币已不可判定（由同批前面一张引起）的触发单不报成交、结果记为该原因，持仓照常按实际成交推进，仍离开未触发表。
+    - 离线核验：块高不连续（断档、重复）时按线上块日志缺口清空推断并计数；读不出高度的行报文件与行号后停止。数字的含义写明：固定滞后 2 块、按块时间判断、“放行”含 IOC 落空，放行数不等于漏掉的成交，也不归因于反方向开仓。
+    - 用例：`a_self_trade_after_a_level_taken_part_of_leaves_the_run_undecided`（DAVE 先吃一半，ALICE 再买，两种排列；CAROL 无挂单照常）、`a_trigger_order_after_one_turning_the_run_undecided_reports_no_fill`（一次 SGA 触发 ALICE 1、DAVE 2，两种排列）。变异 3 处都有测试失败。
+    - 测试夹具里新旧两条账户说明合为一条（P3）。
+    - 不同地址之间的自成交撤单（OB PROVE 样本，区块 1192106175）不在本批，单独处理。
+  - 代码审查 000670 r3 后（1 条 P2）：
+    - r2 的 `blurred` 只拦住“之后的吃单在该价位有自己的单”。但价位被吃掉一部分后，剩下哪几张单本身就取决于排序，之后任何吃单在该价位的成交量和价格、按 oid 撤单找不找得到、BBO 的订单数都会随排列变。
+    - 改为：顺序未证实的价位上有两张以上回放挂单，被一张吃单吃掉（或撤掉）一部分后还有剩余时，该币从这张吃单之后不可判定（`unproven_level_part_taken`）。这张吃单本身的成交（一笔，不报挂单方）与排序无关，照报。待入块挂单在这种价位一律排在回放挂单之后，顺序已知，不计入。`blurred` 删除。
+    - 线上频率：2o 录制 30 分钟 127,046 笔预测成交里，落在顺序未证实价位的只有 15 笔，按币不可用的代价很小。
+    - 用例：
+      - `a_level_of_unproven_order_taken_part_of_leaves_the_run_undecided` 替换 r2 的用例：两种排列下，DAVE 吃一半之后，ALICE 限价 101、ALICE 限价 102、CAROL 都不报成交；
+      - `a_level_taken_whole_or_of_one_order_or_proven_leaves_the_run_decided`：整档吃完、只有一张回放挂单、顺序已证实，三种对照；
+      - 2f 用例 `no_priority_an_order_taken_out_and_an_unproven_level` 改为：先吃 2（整档回放单）再吃 1，两笔都报；先吃 1 之后的吃单不报；吃 1 后按 oid 撤单再吃，也不报。
+    - 变异 4 处都有测试失败。
+  - 代码审查 000670 r4 后（1 条 P2）：
+    - 顺序未证实的价位上，待入块 ALO 一律排在回放挂单之后，这只是 2f 的估计。带优先费的 ALO 可能越过 400 ms 内费更低的回放挂单，实际排在前面。只有一张回放挂单加一张这样的待入块单时，吃掉一部分后剩下哪张同样不确定。
+    - 改为按合并队列判断：吃单前合并价位上多于一张单、吃完仍有剩余，就不可判定。待入块单都计入，不区分是否带费，只多拦这种本已罕见的情况。
+    - 用例 `a_level_of_unproven_order_taken_part_of_with_a_pending_order_leaves_the_run_undecided`：ALICE 回放卖 2，BOB 待入块 ALO 卖 1，费 6。DAVE 买 1 报一笔匿名成交，之后不可判定，ALICE 的 IOC 不报；DAVE 买 3 吃完整档，仍可判定。
+    - 2f 用例改为：整档吃 3 报一笔匿名；先吃 1 之后不报。原来“先吃 2 再吃 1”的那张 ALO 带费 5，同样可能排前，现在第二笔不报。
+    - 变异 5 处都有测试失败，其中一处是“只数回放挂单”。

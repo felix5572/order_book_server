@@ -46,6 +46,8 @@ pub(crate) struct Placement {
     pub(crate) cloid: Option<String>,
     /// Its action's ALO priority (batch 2f; `Action::alo_priority`): a modify's new order has none.
     pub(crate) priority: u64,
+    /// A reduce-only order: refused as its taker's last reduce-only order was (batch 2p).
+    pub(crate) reduce_only: bool,
 }
 
 /// A book order's time in force.
@@ -339,6 +341,7 @@ fn placement(order: &RequestedOrder, priority: u64) -> Option<Placement> {
         tif: Tif::of_requested(order.tif)?,
         cloid: order.cloid.clone(),
         priority,
+        reduce_only: order.reduce_only,
     })
 }
 
@@ -383,6 +386,15 @@ pub(crate) mod tests {
     /// (szDecimals 5): a price of 6 significant figures, or of 2 decimals, a size of 6 decimals - an integer price of
     /// Review 000637 r1 P2-1: an action one of whose orders is under the price band is refused whole, every order of
     /// it `price_band`; another action of the line is held; a trigger order is not judged.
+    /// Batch 2p: a requested order's reduce-only flag is its placement's.
+    #[test]
+    fn a_placement_keeps_its_orders_reduce_only_flag() {
+        for reduce_only in [false, true] {
+            let order = RequestedOrder { reduce_only, ..requested(0, true, "101", RequestedTif::Ioc, None) };
+            assert_eq!(placement(&order, 0).map(|placement| placement.reduce_only), Some(reduce_only));
+        }
+    }
+
     #[test]
     fn an_action_under_the_price_band_is_refused_whole() {
         let below = |_: &str, px: Px| px < Px::parse_from_str("5").unwrap();

@@ -175,7 +175,7 @@ mod tests {
     use crate::pending::{
         blocks::{parse_block, tests::block_of},
         mempool::parse_line,
-        refusals::{TakerKey, TakerOutcome},
+        refusals::{Refusal, TakerKey, TakerOutcome},
     };
 
     /// bm 10-31 block 1204360008's signed actions, the signer of each recovered by the research's Python
@@ -287,18 +287,19 @@ mod tests {
             format!(r#"{{"user":"{user}","res":{{"status":"ok","response":{{"type":"order","data":{{"statuses":[{{"error":"Insufficient margin to place order. asset={asset}"}}]}}}}}}}}"#)
         };
         let cases = [
-            (AGENT, AGENT_TX, AGENT_SIGNER, "0xc2502a3c1b3d0c0b98d6f8f29b130610bc8dbbee", 224, false),
-            (OWN, OWN_TX, OWN_SIGNER, OWN_SIGNER, 223, false),
+            // each block's order as written: the agent's reduce-only (`"r":true`), the owner's not
+            (AGENT, AGENT_TX, AGENT_SIGNER, "0xc2502a3c1b3d0c0b98d6f8f29b130610bc8dbbee", 224, false, true),
+            (OWN, OWN_TX, OWN_SIGNER, OWN_SIGNER, 223, false, false),
         ];
-        for (signed, tx, signer, user, asset, is_buy) in cases {
+        for (signed, tx, signer, user, asset, is_buy, reduce_only) in cases {
             let mempool = parse_line(&tx.replace("ACTION", signed)).unwrap();
             assert_eq!(mempool.actions[0].signer, Some(address(signer)));
             let block = parse_block(&block_of(&[signed], &[&margin(user, asset)])).unwrap();
             let key = TakerKey { identity: ActingIdentity::Signer(address(signer)), asset, is_buy };
-            assert_eq!(block.taker_outcomes, [TakerOutcome { key, refused: true }]);
+            assert_eq!(block.taker_outcomes, [TakerOutcome { key, reduce_only, refused: Some(Refusal::Margin) }]);
         }
         let vault = address("0xbff945932b5ff40699e9f12fa40927c5667df619");
         let block = parse_block(&block_of(&[VAULT_EXPIRING], &[&margin("0xbff945932b5ff40699e9f12fa40927c5667df619", 64)])).unwrap();
-        assert_eq!(block.taker_outcomes, [TakerOutcome { key: TakerKey { identity: ActingIdentity::Vault(vault), asset: 64, is_buy: true }, refused: true }]);
+        assert_eq!(block.taker_outcomes, [TakerOutcome { key: TakerKey { identity: ActingIdentity::Vault(vault), asset: 64, is_buy: true }, reduce_only: false, refused: Some(Refusal::Margin) }]);
     }
 }

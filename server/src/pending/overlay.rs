@@ -46,7 +46,7 @@ use super::{
     mark_forecast::{book_px, price_units},
     refusals::{TakerKey, TakerRefusals},
     trailing::CoinTrailing,
-    triggers::{BatchPositions, RuledOut, SetGlobalCoin, TriggerOrder, TriggerSource, batch},
+    triggers::{BatchPositions, RuledOut, SetGlobalCoin, Sizing, TriggerOrder, TriggerSource, batch},
     twaps::TwapSlice,
 };
 use crate::{
@@ -458,11 +458,16 @@ impl Overlay {
                 TriggerSource::Confirmed { oid, cloid, .. } => (ActionId { item, ..placing.id }, Some(*oid), cloid.clone()),
                 TriggerSource::Pending { placed, cloid, .. } => (*placed, None, cloid.clone()),
             };
-            let placement = Placement { side: order.side, limit_px: order.limit_px, sz, tif: order.tif, cloid, priority: 0 };
+            // sized already as it runs: a position order closes what it may, as a reduce-only one does
+            let reduce_only = !matches!(order.sizing, Sizing::Order);
+            let placement = Placement { side: order.side, limit_px: order.limit_px, sz, tif: order.tif, cloid, priority: 0, reduce_only };
+            let decided = self.undecided.is_none();
             let Effect { fills, outcome, .. } = self.execute(base, Placing { id, account, trigger_oid, ..placing }, &placement);
             for fill in &fills {
                 positions.apply_fill(account, order.side, fill);
             }
+            // an order after one of the batch turned the run undecided reports no fill (review 000670 r2 P2-2)
+            let (fills, outcome) = self.undecided.filter(|_| !decided).map_or((fills, outcome), |reason| (Vec::new(), reason));
             triggered.push(TriggerFills { source: order.source, side: order.side, fills, outcome });
         }
         Effect { fills: Vec::new(), outcome: "set_global", triggered, stale }
@@ -574,9 +579,10 @@ impl Overlay {
             (Side::Ask, Some(parent)) => slipped.max(parent),
             (_, None) => slipped,
         };
+        // a run deciding nothing of the coin before it moves its book on, reporting no fill (review 000662 r1 P2-6)
+        let undecided = self.undecided.is_some();
         let fills = self.take(base, side, limit, slice.sz.value(), Some(slice.user)).0;
-        // a run deciding nothing of the coin moves its book on, reporting no fill (review 000662 r1 P2-6)
-        if self.undecided.is_some() { Vec::new() } else { fills }
+        if undecided { Vec::new() } else { fills }
     }
 
     /// The merged book's best levels, (bid, ask).
@@ -592,9 +598,11 @@ impl Overlay {
     /// A new order: one its taker's recent margin refusal takes to be refused too goes (batch 2g), when HL's minimum
     /// value does not refuse it first (design 000621 r3).
     fn place_new(&mut self, base: CoinBase<'_>, placing: Placing<'_>, taker: Option<TakerKey>, order: &Placement) -> Effect {
-        let refused = taker.is_some_and(|taker| placing.basis.refusals.refused(&taker, placing.seen_ms));
-        if refused && !self.below_min_notional(base, order, &Target::Missing) {
-            return Effect::of("margin_refused_recently");
+        let refused = taker.and_then(|taker| placing.basis.refusals.refused(&taker, order.reduce_only, placing.seen_ms));
+        if let Some(refusal) = refused
+            && !self.below_min_notional(base, order, &Target::Missing)
+        {
+            return Effect::of(refusal.recently());
         }
         self.place(base, placing, order)
     }
@@ -781,7 +789,7 @@ impl Overlay {
         let mut fills = Vec::new();
         while sz > 0 {
             let Some(px) = self.best(base, makers).filter(|best| reaches(side, limit_px, *best)) else { break };
-            sz = self.take_level(base, makers, px, sz, &mut fills);
+            sz = self.take_level(base, makers, px, sz, taker, &mut fills);
         }
         if !fills.is_empty() {
             self.moved.extend(taker.into_iter().chain(fills.iter().filter_map(|fill| fill.maker.account())));
@@ -791,17 +799,28 @@ impl Overlay {
 
     /// `sz` at most of the merged level at (side, px), in its queue: before each replica order the pending ones in
     /// front of it, then it; the pending ones behind them all last. A level whose queue order is not proven gives one
-    /// fill without a maker for all it gives. The size left.
-    fn take_level(&mut self, base: CoinBase<'_>, side: Side, px: Px, mut sz: u64, fills: &mut Vec<Fill>) -> u64 {
+    /// fill without a maker for all it gives - taking part of its orders, the run undecided after
+    /// (`judge_part_taken`). An order of the `taker`'s own account it reaches is canceled, not taken
+    /// (HL's self-trade prevention, batch 2p: bm 11-02, 113 of 113 such makers `selfTradeCanceled`, the taker going on).
+    /// The size left.
+    fn take_level(&mut self, base: CoinBase<'_>, side: Side, px: Px, mut sz: u64, taker: Option<Address>, fills: &mut Vec<Fill>) -> u64 {
         let unproven = base.unproven(side, px);
+        if unproven && let Some(taker) = taker {
+            self.judge_own_unproven(base, side, px, sz, taker);
+        }
+        let orders_before = unproven.then(|| self.level_at(base, side, px).1);
         let mut level_fills = Vec::new();
         for order in base.level(side, px).into_iter().flat_map(PriceLevel::orders) {
             if sz == 0 {
                 break;
             }
             let oid = Oid::new(order.oid);
-            sz = self.take_pending(side, px, Some(&oid), sz, &mut level_fills);
+            sz = self.take_pending(side, px, Some(&oid), sz, taker, &mut level_fills);
             let left = self.left.get(&oid).copied().unwrap_or_else(|| order.sz.value());
+            if sz > 0 && left > 0 && taker == Some(order.user) {
+                self.reduce(side, px, oid, left, left);
+                continue;
+            }
             let fill = left.min(sz);
             if fill == 0 {
                 continue;
@@ -810,7 +829,10 @@ impl Overlay {
             self.reduce(side, px, oid.clone(), left, fill);
             level_fills.push(Fill { px, sz: Sz::new(fill), maker: Maker::Confirmed { user: order.user, oid, cloid: order.cloid.clone() } });
         }
-        sz = self.take_pending(side, px, None, sz, &mut level_fills);
+        sz = self.take_pending(side, px, None, sz, taker, &mut level_fills);
+        if let Some(orders_before) = orders_before {
+            self.judge_part_taken(orders_before, self.level_at(base, side, px).0);
+        }
         if unproven && !level_fills.is_empty() {
             let unattributed = level_fills.iter().map(|fill| fill.sz.value()).sum();
             fills.push(Fill { px, sz: Sz::new(unattributed), maker: Maker::Unattributed });
@@ -820,14 +842,56 @@ impl Overlay {
         sz
     }
 
+    /// A taker of a known account, `sz` to take, at a level of unproven queue order holding an order of its own: whether
+    /// it reaches that order - and cancels it - turns on the order unless it takes every other order there and goes on
+    /// (review 000670 r1 P2-1: its fill the same either way, the book after it not); when it may not, the run decides
+    /// nothing of the coin from here (`self_trade_unproven`).
+    fn judge_own_unproven(&mut self, base: CoinBase<'_>, side: Side, px: Px, sz: u64, taker: Address) {
+        if self.undecided.is_some() {
+            return;
+        }
+        let confirmed = base.level(side, px).into_iter().flat_map(PriceLevel::orders).map(|order| {
+            let left = self.left.get(&Oid::new(order.oid)).copied().unwrap_or_else(|| order.sz.value());
+            (order.user == taker, left)
+        });
+        let pending = self.resting[at(side)].get(&px).into_iter().flatten().map(|maker| (maker.account == Some(taker), maker.sz));
+        let (mut own, mut others) = (0_u64, 0_u64);
+        for (is_own, left) in confirmed.chain(pending) {
+            if is_own {
+                own += left;
+            } else {
+                others += left;
+            }
+        }
+        if own > 0 && sz <= others {
+            self.undecided = Some("self_trade_unproven");
+        }
+    }
+
+    /// A level of unproven queue order a taker reached - taking or canceling one of its orders at least -, the merged
+    /// level's orders before it and its size left after: more than one, some left, which of them are left and how much
+    /// of each turns on their order - and with it a later taker's fills there, a cancel's target found or not, the
+    /// level's orders told (review 000670 r3 P2) -; the run decides nothing of the coin after this taker, whose fill
+    /// there is one naming no maker either way. The pending orders count: queued behind the replica's there, an
+    /// estimate, one paying a priority fee may stand in front of them (review 000670 r4 P2).
+    fn judge_part_taken(&mut self, orders_before: usize, sz_after: u64) {
+        if orders_before > 1 && sz_after > 0 {
+            self.undecided.get_or_insert("unproven_level_part_taken");
+        }
+    }
+
     /// `sz` at most of the level's pending orders from the front, while they queue in front of the replica order
-    /// `before` - all of them for `None`, the back of the queue.
-    fn take_pending(&mut self, side: Side, px: Px, before: Option<&Oid>, mut sz: u64, fills: &mut Vec<Fill>) -> u64 {
+    /// `before` - all of them for `None`, the back of the queue; one of the `taker`'s own account canceled.
+    fn take_pending(&mut self, side: Side, px: Px, before: Option<&Oid>, mut sz: u64, taker: Option<Address>, fills: &mut Vec<Fill>) -> u64 {
         let levels = &mut self.resting[at(side)];
         let Some(queue) = levels.get_mut(&px) else { return sz };
         while sz > 0
             && let Some(maker) = queue.front_mut().filter(|maker| before.is_none() || maker.ahead_of.as_ref() == before)
         {
+            if taker.is_some() && maker.account == taker {
+                queue.pop_front();
+                continue;
+            }
             let fill = maker.sz.min(sz);
             maker.sz -= fill;
             sz -= fill;
@@ -1072,7 +1136,7 @@ mod tests {
     }
 
     fn order(side: Side, at: &str, quantity: &str, tif: Tif, cloid: Option<&str>) -> Placement {
-        Placement { side, limit_px: px(at), sz: sz(quantity), tif, cloid: cloid.map(str::to_string), priority: 0 }
+        Placement { side, limit_px: px(at), sz: sz(quantity), tif, cloid: cloid.map(str::to_string), priority: 0, reduce_only: false }
     }
 
     /// A plain cancel of the replica order `oid`.
@@ -1471,12 +1535,164 @@ mod tests {
         assert!(!below_price_band(CoinBase::new(None, &[], None), px("0.000001")));
     }
 
+    /// Batch 2p: a taker reaching a resting order of its own account cancels it, takes none of it and goes on (HL's
+    /// self-trade prevention): ALICE's IOC buy of 2 at 102 skips her ask 3 at 101, takes BOB's 4 and 5; an IOC of no
+    /// known account takes hers as before. Her own pending ALO sale at 100.5, ahead of them, goes the same way.
+    #[test]
+    fn a_taker_cancels_its_own_resting_orders_and_goes_on() {
+        let (book, cloids) = book();
+        let base = CoinBase::new(Some(&book), &[], Some(&cloids));
+        let alices = |action: PendingAction| PendingAction { account: Some(ALICE), ..action };
+        let fills = |effect: &Effect| effect.fills.iter().map(|fill| (fill.px, fill.sz, fill.maker.clone())).collect::<Vec<_>>();
+        let mut overlay = Overlay::default();
+        let effect = overlay.apply(base, no_priorities(), &alices(place(0, Side::Bid, "102", "2", Tif::Ioc, None)));
+        assert_eq!(fills(&effect), [(px("101"), sz("1"), confirmed(BOB, 4, None)), (px("102"), sz("1"), confirmed(BOB, 5, None))]);
+        assert_eq!(overlay.bbo(base).1, None, "her ask canceled, the others taken");
+        let effect = Overlay::default().apply(base, no_priorities(), &place(0, Side::Bid, "102", "2", Tif::Ioc, None));
+        assert_eq!(fills(&effect), [(px("101"), sz("1"), confirmed(ALICE, 3, Some("0x03"))), (px("101"), sz("1"), confirmed(BOB, 4, None))]);
+        let mut overlay = Overlay::default();
+        drop(overlay.apply(base, no_priorities(), &alices(place(0, Side::Ask, "100.5", "1", Tif::Alo, None))));
+        let effect = overlay.apply(base, no_priorities(), &alices(place(1, Side::Bid, "101", "1", Tif::Ioc, None)));
+        assert_eq!(fills(&effect), [(px("101"), sz("1"), confirmed(BOB, 4, None))]);
+        assert_eq!(overlay.bbo(base).1, Some(level("102", "1", 1)), "her pending ALO canceled too");
+    }
+
+    /// Review 000670 r1 P2-1: at an ask of unproven queue order holding ALICE's 1 and BOB's 1, ALICE's IOC buy of 1 may
+    /// reach hers - canceling it, taking BOB's - or BOB's first, hers resting on: its fill 1 at 101 either way, the run
+    /// decides nothing of the coin after it, in either order the replica holds them; DAVE's IOC after reports none. Her
+    /// buy of 2 at 101 takes BOB's and cancels hers in either order: decided, DAVE then takes at 102.
+    #[test]
+    fn a_self_trade_at_a_level_of_unproven_order_leaves_the_run_undecided() {
+        let unproven = [(Side::Ask, px("101"))];
+        for alice_first in [true, false] {
+            let mut asks = vec![resting(3, ALICE, Side::Ask, "101", "1", None), resting(4, BOB, Side::Ask, "101", "1", None)];
+            if !alice_first {
+                asks.reverse();
+            }
+            let mut book = OrderBook::new();
+            for order in asks.into_iter().chain([resting(5, BOB, Side::Ask, "102", "1", None)]) {
+                book.add_order(order);
+            }
+            let cloids = CoinCloids::default();
+            let base = CoinBase::new(Some(&book), &unproven, Some(&cloids));
+            let alices = |quantity: &str, limit: &str| PendingAction { account: Some(ALICE), ..place(0, Side::Bid, limit, quantity, Tif::Ioc, None) };
+            let daves = PendingAction { account: Some(DAVE), ..place(1, Side::Bid, "102", "1", Tif::Ioc, None) };
+            let mut overlay = Overlay::default();
+            let effect = overlay.apply(base, no_priorities(), &alices("1", "102"));
+            let filled: Vec<(Px, Sz)> = effect.fills.iter().map(|fill| (fill.px, fill.sz)).collect();
+            assert_eq!((filled, overlay.undecided()), (vec![(px("101"), sz("1"))], Some("self_trade_unproven")), "ALICE first {alice_first}");
+            assert_eq!(overlay.apply(base, no_priorities(), &daves).fills, [], "ALICE first {alice_first}");
+            let mut overlay = Overlay::default();
+            drop(overlay.apply(base, no_priorities(), &alices("2", "101")));
+            assert_eq!(overlay.undecided(), None, "ALICE first {alice_first}");
+            let taken: Vec<Px> = overlay.apply(base, no_priorities(), &daves).fills.iter().map(|fill| fill.px).collect();
+            assert_eq!(taken, [px("102")], "ALICE first {alice_first}");
+        }
+    }
+
+    /// An ask of unproven queue order at 101 - ALICE's 1 and BOB's 1, in the order `alice_first` gives -, BOB's 1 at 102.
+    fn unproven_asks(alice_first: bool) -> OrderBook<InnerL4Order> {
+        let mut asks = vec![resting(3, ALICE, Side::Ask, "101", "1", None), resting(4, BOB, Side::Ask, "101", "1", None)];
+        if !alice_first {
+            asks.reverse();
+        }
+        let mut book = OrderBook::new();
+        for order in asks.into_iter().chain([resting(5, BOB, Side::Ask, "102", "1", None)]) {
+            book.add_order(order);
+        }
+        book
+    }
+
+    /// Review 000670 r3 P2: DAVE's IOC buy of 1 takes half the ask of unproven order, its fill 1 at 101 either way;
+    /// whose order is left turns on their order - ALICE's buy of 1 then cancels hers or takes BOB's, at 101 or at 102 -,
+    /// so the run decides nothing of the coin after DAVE's, in either order: ALICE's, CAROL's report no fill.
+    #[test]
+    fn a_level_of_unproven_order_taken_part_of_leaves_the_run_undecided() {
+        let unproven = [(Side::Ask, px("101"))];
+        let ioc = |account, index, limit| PendingAction { account: Some(account), ..place(index, Side::Bid, limit, "1", Tif::Ioc, None) };
+        for alice_first in [true, false] {
+            let book = unproven_asks(alice_first);
+            let cloids = CoinCloids::default();
+            let base = CoinBase::new(Some(&book), &unproven, Some(&cloids));
+            for (account, limit) in [(ALICE, "101"), (ALICE, "102"), (CAROL, "102")] {
+                let mut overlay = Overlay::default();
+                let daves: Vec<(Px, Sz)> = overlay.apply(base, no_priorities(), &ioc(DAVE, 0, "101")).fills.iter().map(|fill| (fill.px, fill.sz)).collect();
+                assert_eq!((daves, overlay.undecided()), (vec![(px("101"), sz("1"))], Some("unproven_level_part_taken")), "ALICE first {alice_first}");
+                let after = overlay.apply(base, no_priorities(), &ioc(account, 1, limit));
+                assert_eq!((after.fills, after.outcome), (vec![], "unproven_level_part_taken"), "ALICE first {alice_first}, {limit}");
+            }
+        }
+    }
+
+    /// Review 000670 r4 P2: at 105, of unproven queue order, ALICE's replica ask of 2 and BOB's pending ALO of 1 paying
+    /// a priority fee, queued behind as batch 2f estimates though it may stand in front: DAVE's IOC buy of 1 takes 1
+    /// naming no maker, which of the two is left turning on that - the run undecided after it, ALICE's IOC reporting no
+    /// fill. DAVE's buy of 3, taking the merged level whole, leaves it decided.
+    #[test]
+    fn a_level_of_unproven_order_taken_part_of_with_a_pending_order_leaves_the_run_undecided() {
+        let mut book = OrderBook::new();
+        book.add_order(InnerL4Order { timestamp: 1_200, ..resting(10, ALICE, Side::Ask, "105", "2", None) });
+        let unproven = [(Side::Ask, px("105"))];
+        let cloids = CoinCloids::default();
+        let base = CoinBase::new(Some(&book), &unproven, Some(&cloids));
+        let ioc = |account, index, quantity| PendingAction { account: Some(account), ..place(index, Side::Bid, "105", quantity, Tif::Ioc, None) };
+        let daves = |quantity| {
+            let mut overlay = Overlay::default();
+            drop(overlay.apply(base, no_priorities(), &PendingAction { account: Some(BOB), ..alo_at_105(0, 6, 1_300) }));
+            let fills: Vec<(Sz, Maker)> = overlay.apply(base, no_priorities(), &ioc(DAVE, 1, quantity)).fills.into_iter().map(|fill| (fill.sz, fill.maker)).collect();
+            (overlay, fills)
+        };
+        let (mut overlay, fills) = daves("1");
+        assert_eq!((fills, overlay.undecided()), (vec![(sz("1"), Maker::Unattributed)], Some("unproven_level_part_taken")));
+        assert_eq!(overlay.apply(base, no_priorities(), &ioc(ALICE, 2, "1")).fills, []);
+        let (overlay, fills) = daves("3");
+        assert_eq!((fills, overlay.undecided()), (vec![(sz("3"), Maker::Unattributed)], None));
+    }
+
+    /// Review 000670 r3 P2's controls: a level of unproven order taken whole, or holding one replica order, or one of
+    /// proven order taken part of - what is left known, the run decided.
+    #[test]
+    fn a_level_taken_whole_or_of_one_order_or_proven_leaves_the_run_decided() {
+        let unproven = [(Side::Ask, px("101"))];
+        let daves = |base: CoinBase<'_>, quantity: &str| {
+            let mut overlay = Overlay::default();
+            let fills = overlay.apply(base, no_priorities(), &PendingAction { account: Some(DAVE), ..place(0, Side::Bid, "101", quantity, Tif::Ioc, None) }).fills;
+            (fills.iter().map(|fill| fill.sz).collect::<Vec<_>>(), overlay.undecided())
+        };
+        let cloids = CoinCloids::default();
+        let book = unproven_asks(true);
+        assert_eq!(daves(CoinBase::new(Some(&book), &unproven, Some(&cloids)), "2"), (vec![sz("2")], None), "taken whole");
+        assert_eq!(daves(CoinBase::new(Some(&book), &[], Some(&cloids)), "1"), (vec![sz("1")], None), "proven");
+        let mut one = OrderBook::new();
+        one.add_order(resting(3, ALICE, Side::Ask, "101", "2", None));
+        assert_eq!(daves(CoinBase::new(Some(&one), &unproven, Some(&cloids)), "1"), (vec![sz("1")], None), "one order");
+    }
+
+    /// Review 000670 r2 P2-2: one `SetGlobalAction` firing ALICE's stop buy of 1 and DAVE's of 2 over that ask: ALICE's
+    /// takes 1 at 101 and turns the run undecided; DAVE's, after it in the batch, reports no fill - in either order.
+    #[test]
+    fn a_trigger_order_after_one_turning_the_run_undecided_reports_no_fill() {
+        let unproven = [(Side::Ask, px("101"))];
+        for alice_first in [true, false] {
+            let book = unproven_asks(alice_first);
+            let cloids = CoinCloids::default();
+            let triggers = vec![stop(61, ALICE, Side::Bid, None, "1", Sizing::Order), stop(62, DAVE, Side::Bid, None, "2", Sizing::Order)];
+            let (table, coin) = (table(TriggerSection::Complete(triggers)), Coin::new("BTC"));
+            let base = CoinBase::new(Some(&book), &unproven, Some(&cloids)).with_triggers(&table, &coin);
+            let mut overlay = Overlay::default();
+            let effect = overlay.apply(base, no_priorities(), &set_global(0, "101", &[(ALICE, 0), (DAVE, 0)]));
+            let fired: Vec<(TriggerSource, usize)> = effect.triggered.iter().map(|order| (order.source.clone(), order.fills.len())).collect();
+            assert_eq!(fired, [(confirmed_source(61, ALICE), 1), (confirmed_source(62, DAVE), 0)], "ALICE first {alice_first}");
+            assert_eq!(overlay.undecided(), Some("self_trade_unproven"));
+        }
+    }
+
     /// Batch 2h: a TWAP suborder takes up to 3% past the best opposite level, and no further than its parent's limit.
     #[test]
     fn a_twap_suborder_takes_to_its_slippage_and_its_parents_limit() {
         let (book, cloids) = book();
         let base = CoinBase::new(Some(&book), &[], Some(&cloids));
-        let slice = |is_buy: bool, limit: Option<&str>| TwapSlice { twap_id: 7, user: ALICE, slot: 0, is_buy, sz: sz("5"), limit_px: limit.map(px), due_ms: 0 };
+        let slice = |is_buy: bool, limit: Option<&str>| TwapSlice { twap_id: 7, user: CAROL, slot: 0, is_buy, sz: sz("5"), limit_px: limit.map(px), due_ms: 0 };
         let taken = |slice: TwapSlice| {
             let mut overlay = Overlay::default();
             drop(overlay.apply(base, no_priorities(), &place(0, Side::Ask, "105", "1", Tif::Alo, None)));
@@ -1826,19 +2042,21 @@ mod tests {
     /// Batch 2f: without a priority an ALO queues behind; a replica order the overlay took out stops nothing - its
     /// cancel by oid ahead, the ALO passes the young one of none before it -; at a level whose queue order is not proven
     /// the ALO queues behind and the taker's fills there name no maker (review 000620 r2: the ALO would go in front of
-    /// both replica orders, the second taker's naming it wrong).
+    /// both replica orders, the second taker's naming it wrong). A taker taking part of the level leaves which orders
+    /// are left - and a cancel by oid after - turning on their order: nothing after it reported (review 000670 r3 P2).
     #[test]
     fn no_priority_an_order_taken_out_and_an_unproven_level() {
         let book = asks_at_105(&[(10, 1_200), (11, 1_250)]);
         assert_eq!(queue(&book, &[(11, 9)], 0, &[alo_at_105(1, 0, 1_300)]), [mine(10), mine(11), pending(1)]);
         let cancel = action(0, cancel_op(11));
         assert_eq!(queue(&book, &[(11, 9)], 0, &[cancel, alo_at_105(1, 6, 1_300)]), [pending(1), mine(10)]);
+        let unproven = takes(&book, &[], 0, true, &[alo_at_105(1, 5, 1_300)], &["3"]);
+        assert_eq!(unproven, [vec![(sz("3"), Maker::Unattributed)]]);
         let unproven = takes(&book, &[], 0, true, &[alo_at_105(1, 5, 1_300)], &["1", "2"]);
-        assert_eq!(unproven, [vec![(sz("1"), Maker::Unattributed)], vec![(sz("2"), Maker::Unattributed)]]);
-        // behind them there: an IOC takes the replica's first, whose cancel then finds it gone; the next IOC takes 2
+        assert_eq!(unproven, [vec![(sz("1"), Maker::Unattributed)], vec![]]);
         let cancel = action(3, cancel_op(10));
         let unproven = takes(&book, &[], 0, true, &[alo_at_105(1, 5, 1_300), action(2, BookOp::Place(order(Side::Bid, "105", "1", Tif::Ioc, None))), cancel], &["2"]);
-        assert_eq!(unproven, [vec![(sz("2"), Maker::Unattributed)]]);
+        assert_eq!(unproven, [vec![]]);
     }
 
     /// Review 000620 r1 P2-4: a replica order A and a pending one P of 1.0 each at 105, an IOC of 1, a cancel of A by oid,
@@ -1860,19 +2078,45 @@ mod tests {
         }
     }
 
+    /// Batch 2p: a reduce-only taker refused as it would increase its position at block time 1,000 ms: the identity's
+    /// next reduce-only order on the coin and side within M rejected so; a plain order of it, or another side, takes.
+    #[test]
+    fn a_reduce_only_taker_lately_refused_is_refused_again() {
+        use crate::pending::{
+            refusals::{Refusal, TakerKey, TakerOutcome},
+            signer::ActingIdentity,
+        };
+        let mut refusals = TakerRefusals::new(300_000);
+        let key = TakerKey { identity: ActingIdentity::Signer(ALICE), asset: 0, is_buy: true };
+        refusals.stage(7, 1_000, vec![TakerOutcome { key, reduce_only: true, refused: Some(Refusal::ReduceOnly) }]);
+        refusals.apply_through(7);
+        let priorities = FxHashMap::default();
+        let basis = Basis::new(&priorities, &refusals, 1_000);
+        let (book, cloids) = book();
+        let base = CoinBase::new(Some(&book), &[], Some(&cloids));
+        let by_alice = |side, at: &str, reduce_only: bool| {
+            let op = BookOp::Place(Placement { reduce_only, ..order(side, at, "1", Tif::Ioc, None) });
+            let action = PendingAction { seen_ns: 2_000 * 1_000_000, signer: Some(ALICE), ..action(0, op) };
+            Overlay::default().apply(base, basis, &action).outcome
+        };
+        assert_eq!(by_alice(Side::Bid, "102", true), "reduce_only_refused_recently");
+        assert_eq!(by_alice(Side::Bid, "102", false), "took", "a plain order");
+        assert_eq!(by_alice(Side::Ask, "98", true), "took", "the other side");
+    }
+
     /// Batch 2g: a new order that may take, of a taker refused for margin on its coin and side at block time 1,000 ms,
     /// its line coming within [1,000, 1,000 + M]: rejected, after the minimum value's rule; an ALO, a modify, another
     /// identity, side or asset, an earlier or a later line, or no identity, as before.
     #[test]
     fn a_taker_lately_refused_for_margin_is_refused_again() {
         use crate::pending::{
-            refusals::{TakerKey, TakerOutcome},
+            refusals::{Refusal, TakerKey, TakerOutcome},
             signer::ActingIdentity,
         };
         const M: u64 = 300_000;
         let taker = ActingIdentity::Signer(ALICE);
         let mut refusals = TakerRefusals::new(M);
-        refusals.stage(7, 1_000, vec![TakerOutcome { key: TakerKey { identity: taker, asset: 0, is_buy: true }, refused: true }]);
+        refusals.stage(7, 1_000, vec![TakerOutcome { key: TakerKey { identity: taker, asset: 0, is_buy: true }, reduce_only: false, refused: Some(Refusal::Margin) }]);
         refusals.apply_through(7);
         let priorities = FxHashMap::default();
         let basis = Basis::new(&priorities, &refusals, 1_000);
@@ -1945,10 +2189,10 @@ mod tests {
     /// sale 10% under 105 taking the bid at 99.
     #[test]
     fn a_pending_set_global_moves_a_trailing_stop_a_later_one_fires() {
-        let trailing = coin_trailing(vec![(trailing_sale(70, ALICE, "Activation immediate, retracement 5, best 100"), Ok(sale_stop(Some(1_000), None, 50)))]);
+        let trailing = coin_trailing(vec![(trailing_sale(70, CAROL, "Activation immediate, retracement 5, best 100"), Ok(sale_stop(Some(1_000), None, 50)))]);
         let (effects, _) = run_trailing(Vec::new(), &trailing, &[set_global(0, "110", &[]), set_global(1, "104", &[])]);
         assert_eq!((effects[0].outcome, fired(&effects[0])), ("set_global", vec![]), "105 not reached at 110");
-        assert_eq!(fired(&effects[1]), [(confirmed_source(70, ALICE), "took", sz("1"))]);
+        assert_eq!(fired(&effects[1]), [(confirmed_source(70, CAROL), "took", sz("1"))]);
         assert_eq!(effects[1].triggered[0].fills[0].px, px("99"));
         let (effects, _) = run_trailing(Vec::new(), &trailing, &[set_global(0, "104", &[])]);
         assert_eq!(fired(&effects[0]), [], "without the rise its trigger price is 95");
@@ -2010,7 +2254,7 @@ mod tests {
         let (book, cloids) = book();
         let (table, coin) = (table(TriggerSection::Complete(Vec::new())), Coin::new("BTC"));
         let base = CoinBase::new(Some(&book), &[], Some(&cloids)).with_triggers(&table, &coin);
-        let slice = TwapSlice { twap_id: 7, user: ALICE, slot: 0, is_buy: true, sz: sz("0.1"), limit_px: None, due_ms: 0 };
+        let slice = TwapSlice { twap_id: 7, user: CAROL, slot: 0, is_buy: true, sz: sz("0.1"), limit_px: None, due_ms: 0 };
         assert_eq!(Overlay::default().take_slice(base, &slice).len(), 1, "decided: it takes at 101");
         let mut overlay = Overlay::default();
         overlay.apply(base, no_priorities(), &action(0, BookOp::SetGlobal(Box::new(SetGlobalCoin::undecided("trailing_unknown")))));

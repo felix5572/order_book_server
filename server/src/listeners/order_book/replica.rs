@@ -582,14 +582,15 @@ pub(crate) mod tests {
         })
     }
 
-    /// A BTC stop of user 0x..01 at 100 - a sale's fired by a fall to it, a buy's by a rise -, `status` in a block at
-    /// `placed_ms`: a market one (`limit` `None`) or a limit one; of 1.0, or a position TP/SL (`position`, of none).
+    /// A BTC stop of user 0x..02 - not the resting orders' 0x..01 (`btc_status`): no self-trade (batch 2p) - at 100, a
+    /// sale's fired by a fall to it, a buy's by a rise, `status` in a block at `placed_ms`: a market one (`limit`
+    /// `None`) or a limit one; of 1.0, or a position TP/SL (`position`, of none).
     pub(crate) fn btc_stop_status(oid: u64, side: &str, limit: Option<&str>, position: bool, status: &str, cloid: Option<&str>, placed_ms: u64) -> serde_json::Value {
         let condition = if side == "A" { "Price below 100" } else { "Price above 100" };
         let kind = if limit.is_some() { "Stop Limit" } else { "Stop Market" };
         let sz = if position { "0.0" } else { "1.0" };
         serde_json::json!({
-            "time": node_time(placed_ms), "user": "0x0000000000000000000000000000000000000001", "hash": null, "status": status,
+            "time": node_time(placed_ms), "user": "0x0000000000000000000000000000000000000002", "hash": null, "status": status,
             "order": {
                 "coin": BTC, "side": side, "limitPx": limit.unwrap_or("100"), "sz": sz, "oid": oid, "timestamp": placed_ms,
                 "triggerCondition": condition, "isTrigger": true, "triggerPx": "100", "children": [], "isPositionTpsl": position,
