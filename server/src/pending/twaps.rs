@@ -20,10 +20,15 @@
 //!   unfilled -: the cursor moves by block time alone.
 //! - **Size**: a randomized TWAP's suborder adds (its block's unix ms % 40 - 20)% of a normal suborder to the target
 //!   (research `twap_randomize_20261101`, 829 of 829): unknown before its block, so the deficit, the expectation. Else
-//!   the deficit rounded down to the size grid, or the TWAP's estimated floor (a size seen above its deficit
-//!   at two slots, never for a randomized TWAP - an estimate, not a protocol bound), capped at the rest and at 3 x the
-//!   normal suborder (HL docs "TWAP details"): max(total / N, the floor) once a floor is estimated; with none, a deficit
-//!   over 3 x total / N is not predicted, its cap unknown.
+//!   the deficit rounded down to the size grid. Either way at least the TWAP's estimated floor - a size seen past what
+//!   its deficit gives at two slots, a randomized TWAP's past the most its randomizing adds too (20% of a normal
+//!   suborder: batch 2o, research `mempool_pending_book_20261031` 11-02: 19 of 23 randomized TWAPs sized so twice, one
+//!   size each) - an estimate, not a protocol bound; capped at the rest and at 3 x the normal suborder (HL docs "TWAP
+//!   details"): max(total / N, the floor) once a floor is estimated; with none, a deficit over 3 x total / N is not
+//!   predicted, its cap unknown.
+//! - **Refused**: a suborder refused ends its TWAP, with no status of its end (batch 2o, research
+//!   `mempool_pending_book_20261031` 11-02: of 1,752 TWAPs refused over 4 hours, none filled again or told another
+//!   status; of 846 refused a minute or more before a checkpoint, none in its tracker).
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -246,7 +251,11 @@ impl TwapBook {
             match event {
                 TwapEvent::Activated(activation) => staged.activations.push(activation),
                 TwapEvent::Ended { twap_id } => staged.ends.push(twap_id),
-                TwapEvent::Refused { .. } => PENDING_BOOK_TWAP_EVENTS_TOTAL.with_label_values(&["suborder_refused"]).inc(),
+                // its TWAP ended with it (batch 2o)
+                TwapEvent::Refused { twap_id } => {
+                    PENDING_BOOK_TWAP_EVENTS_TOTAL.with_label_values(&["suborder_refused"]).inc();
+                    staged.ends.push(twap_id);
+                }
                 TwapEvent::Waiting { twap_id } => {
                     PENDING_BOOK_TWAP_EVENTS_TOTAL.with_label_values(&["waiting_for_trigger"]).inc();
                     staged.waiting.push(twap_id);
@@ -558,16 +567,28 @@ impl Twap {
         u64::try_from(target).unwrap_or(u64::MAX)
     }
 
-    /// A suborder's fills at block time `time_ms`: the executed size, and the floor's evidence.
+    /// A suborder's fills at block time `time_ms`: the executed size, and the floor's evidence - a size past what the
+    /// deficit gives, a randomized TWAP's past the most its randomizing adds too (batch 2o).
     fn filled(&mut self, time_ms: u64, size: u64) {
         if let Some(slot) = self.slot_at(time_ms) {
-            let deficit = self.target(slot).saturating_sub(self.executed) / self.lot * self.lot;
             let rest = self.total.saturating_sub(self.executed);
-            if !self.randomize && size > deficit && size < rest {
+            if self.past_reach(slot, size) && size < rest {
                 self.floor.observe(slot, size);
             }
         }
         self.executed = self.executed.saturating_add(size);
+    }
+
+    /// Whether a suborder of `size` at `slot` is past what its deficit gives: the deficit rounded down to the size grid;
+    /// a randomized TWAP's target plus the most its randomizing adds - +19% (ms % 40 - 20), bound by 20% of a normal
+    /// suborder - less what was executed, in one fraction: size + executed > total x (slot + offset + 1/5) / N (review
+    /// 000668 r1 P2: each part rounded down alone reaches less).
+    fn past_reach(&self, slot: u64, size: u64) -> bool {
+        if !self.randomize {
+            return size > self.target(slot).saturating_sub(self.executed) / self.lot * self.lot;
+        }
+        let taken = 5 * u128::from(self.slots) * (u128::from(size) + u128::from(self.executed));
+        taken > u128::from(self.total) * (5 * u128::from(slot + self.count_offset) + 1)
     }
 
     /// The suborder of its first slot due at or after `first_of_second_ms`, when due by `boundary_ms`: the next
@@ -861,9 +882,10 @@ mod tests {
         assert_eq!(harness.due_sizes(slot(4) - 1), [(7, 4, 17 * LOT)], "a deficit of 0.17 over the floor, slot 3 unfilled");
     }
 
-    /// A size seen above the deficit twice at one slot is no floor; a randomized TWAP's sizes estimate none.
+    /// A size seen above the deficit twice at one slot is no floor; a randomized TWAP's, past its deficit plus 20% of a
+    /// normal suborder, is one alike (batch 2o): 1 HYPE over 5 minutes, a slot's share 0.0909, 0.14 past 0.0909 + 0.0182.
     #[test]
-    fn a_floor_needs_two_slots_and_no_randomizing() {
+    fn a_floor_needs_two_slots() {
         for randomize in [false, true] {
             let mut harness = Harness::anchored(Vec::new());
             let twap = TwapActivation { randomize, ..activation(7, ONE, 5, time_ms(3)) };
@@ -875,8 +897,57 @@ mod tests {
             assert_eq!(harness.book.floor(7), None, "twice at one slot");
             harness.book.on_fills(slot(2), vec![fill(7, 3, 14 * LOT)]);
             harness.through(slot(2)).unwrap();
-            assert_eq!(harness.book.floor(7), (!randomize).then_some(14 * LOT), "randomize {randomize}");
+            assert_eq!(harness.book.floor(7), Some(14 * LOT), "randomize {randomize}");
         }
+    }
+
+    /// Batch 2o: a randomized TWAP's size within the most its randomizing adds - 0.10 at slot 0 (a deficit of 0.0909,
+    /// under 0.0909 + 0.0182), 0.10 at slot 1 (at 0.1818 + 0.0182 - 0.10) - is no floor's evidence, twice either; past
+    /// it, 0.12 at slots 2 and 3 (over 0.0909 and 0.0618), is.
+    #[test]
+    fn a_randomized_floor_is_past_the_randomizing() {
+        let mut harness = Harness::anchored(Vec::new());
+        let twap = TwapActivation { randomize: true, ..activation(7, ONE, 5, time_ms(3)) };
+        harness.book.on_statuses(3, vec![TwapEvent::Activated(twap)]);
+        let slot = |k: u64| first_block_after(time_ms(3) + FIRST_SLOT_MS + k * SLOT_MS);
+        harness.book.on_fills(slot(0), vec![fill(7, 1, 10 * LOT)]);
+        harness.book.on_fills(slot(1), vec![fill(7, 2, 10 * LOT)]);
+        harness.through(slot(1)).unwrap();
+        assert_eq!(harness.book.floor(7), None, "within the randomizing");
+        harness.book.on_fills(slot(2), vec![fill(7, 3, 12 * LOT)]);
+        harness.book.on_fills(slot(3), vec![fill(7, 4, 12 * LOT)]);
+        harness.through(slot(3)).unwrap();
+        assert_eq!(harness.book.floor(7), Some(12 * LOT));
+    }
+
+    /// Review 000668 r1 P2: a randomized TWAP of 160 over 17 slots, a lot of 10 (1e-8 units), a lot at each of its first
+    /// three slots - within +19% of its normal 9.41 -: the most its randomizing reaches at slots 1 and 2 - (k + 1 + 1/5)
+    /// x 160 / 17 less what was executed, 10.706 and 10.118 - taken in one fraction, no floor; slot 3, its deficit 7.6
+    /// under a lot, sends none.
+    #[test]
+    fn a_randomized_reach_is_one_fraction() {
+        let mut twap = Twap {
+            user: USER, coin: Coin::new("HYPE"), is_buy: true, total: 160, executed: 0, lot: 10, slots: 17, origin_ms: 0, count_offset: 1,
+            randomize: true, limit_px: None, floor: FloorEstimate::default(),
+        };
+        for slot in 0..3 {
+            twap.filled(slot * SLOT_MS, 10);
+        }
+        assert_eq!(twap.floor.estimated, None);
+        assert_eq!(twap.slice(7, 3 * SLOT_MS, 3 * SLOT_MS).map(|slice| slice.sz.value()), None);
+    }
+
+    /// Batch 2o: a suborder refused ends its TWAP: due no more.
+    #[test]
+    fn a_refused_suborder_ends_its_twap() {
+        let mut harness = Harness::anchored(Vec::new());
+        activate(&mut harness, 7, ONE, 5, 3);
+        let slot = |k: u64| first_block_after(time_ms(3) + FIRST_SLOT_MS + k * SLOT_MS);
+        harness.through(slot(1) - 1).unwrap();
+        assert_eq!(harness.due_sizes(slot(1) - 1).len(), 1, "due before");
+        harness.book.on_statuses(slot(1), vec![TwapEvent::Refused { twap_id: 7 }]);
+        harness.through(slot(2) - 1).unwrap();
+        assert_eq!(harness.due_sizes(slot(2) - 1), [], "ended");
     }
 
     /// A suborder sends no more than the rest: 0.9 of 1 HYPE executed, the floor 0.14 over the rest 0.1.
