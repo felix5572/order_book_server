@@ -15,6 +15,7 @@ mod record;
 mod refusals;
 mod signer;
 mod signer_accounts;
+mod trailing;
 pub(crate) mod triggers;
 mod twap_streams;
 mod twaps;
@@ -27,6 +28,7 @@ use std::{
 };
 
 use log::{error, info};
+use rustc_hash::FxHashMap;
 use tokio::{sync::{mpsc, watch}, task::JoinHandle};
 
 pub(crate) use self::{
@@ -39,8 +41,9 @@ use self::{
     blocks::{LoggedBlock, BlockIngest, BlockInput},
     feed::{Feed, FeedEvent, FeedReports, Proven},
     mark_forecast::{ForecastBook, ServedBook, SgaForecasts},
+    trailing::TrailingBasis,
     triggers::SetGlobalCoin,
-    mempool::{MempoolIngest, MempoolInput, MempoolTx},
+    mempool::{ActionKind, MempoolIngest, MempoolInput, MempoolTx},
     twap_streams::{TwapFillLine, TwapStatusLine},
     twaps::TwapStream,
     publish::Publisher,
@@ -59,7 +62,7 @@ use crate::{
         PENDING_BOOK_CONFIRMED_HEIGHT, PENDING_BOOK_STEP_SECONDS, PENDING_BOOK_TRIGGER_COINS_TOTAL, PENDING_BOOK_UNAVAILABLE_SECONDS_TOTAL,
         PENDING_BOOK_UNPROVEN_LEVELS,
     },
-    order_book::Coin,
+    order_book::{Coin, Px},
 };
 
 /// How often the thread looks for a generation the listener ended, exports its gauges and counts its time unavailable.
@@ -122,6 +125,7 @@ async fn run(inputs: ReplicaInputs, feeds: PendingFeeds, backlog_events: usize, 
     }
     let mut prices_open = book.take_prices(&mut prices, true);
     let mut account_events_open = true;
+    let mut account_validity_open = true;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let closed = loop {
@@ -184,11 +188,42 @@ async fn run(inputs: ReplicaInputs, feeds: PendingFeeds, backlog_events: usize, 
                     continue;
                 };
                 book.accounts.apply(event);
+                book.on_accounts(readings.unreported());
+            }
+            // the owner's watch withdrawing the copy, or serving it again, with no event (review 000662 r1 P2-2)
+            changed = book.accounts.validity_changed(), if account_validity_open => {
+                if changed.is_err() {
+                    error!("pending book: the account view's owner ended; no trailing stop is known");
+                    account_validity_open = false;
+                }
+                book.on_accounts(readings.unreported());
             }
             _ = tick.tick() => book.on_tick(readings.unreported()),
         }
     };
     error!("pending book: {closed} closed; the pending thread ends");
+}
+
+/// The main-dex coins a `SetGlobalAction` line prices, in asset order: by the asset table - each it names, priced or in
+/// part -, else those its forecast named (review 000662 r1 P2-5: a coin's place is kept whatever its forecast).
+fn set_global_coins(tx: &MempoolTx, named: Option<&ActionCoins>, forecast: &FxHashMap<u32, (String, Result<Px, &'static str>)>) -> Vec<(u32, String)> {
+    let submitted = tx.actions.iter().find_map(|action| match &action.kind {
+        ActionKind::SetGlobal(submitted) => Some(submitted),
+        _ => None,
+    });
+    let priced = submitted.into_iter().flatten().enumerate().filter(|(_, prices)| prices.priced() != Some(false));
+    let by_table = priced.filter_map(|(asset, _)| {
+        let asset = u32::try_from(asset).ok()?;
+        Some((asset, named?.coins.get(&asset)?.coin.clone()))
+    });
+    let mut coins: Vec<(u32, String)> = by_table.collect();
+    for (asset, (name, _)) in forecast {
+        if !coins.iter().any(|(held, _)| held == asset) {
+            coins.push((*asset, name.clone()));
+        }
+    }
+    coins.sort_unstable();
+    coins
 }
 
 /// The pending thread's readings of its node feeds.
@@ -282,13 +317,15 @@ struct PendingBook {
     forecasts: SgaForecasts,
     /// The thread's copy of the account view (batch 2m).
     accounts: FlowAccounts,
+    /// The copy's (generation, height) the shadow's trailing stops were last read at; `None` with none serving.
+    trailing_read: Option<(u64, u64)>,
 }
 
 impl PendingBook {
     fn new(control: Arc<ReplicaControl>, backlog_events: usize, shadow: Shadow, publisher: Publisher, accounts: FlowAccounts) -> Self {
         let ended = control.ended();
         control.request(1);
-        Self { control, wanted: 1, replica: None, ended, backlog_events, shadow, publisher, forecasts: SgaForecasts::default(), accounts }
+        Self { control, wanted: 1, replica: None, ended, backlog_events, shadow, publisher, forecasts: SgaForecasts::default(), accounts, trailing_read: None }
     }
 
     fn on_fork(&mut self, fork: ReplicaFork) {
@@ -304,7 +341,7 @@ impl PendingBook {
     fn on_batch(&mut self, batch: ReplicaBatch, forks: &mut mpsc::Receiver<ReplicaFork>, unreported: Unreported) {
         let mut step = self.sync(unreported);
         step.absorb(self.apply_batch(batch, forks));
-        self.publish(&step);
+        self.publish(&mut step);
     }
 
     fn apply_batch(&mut self, batch: ReplicaBatch, forks: &mut mpsc::Receiver<ReplicaFork>) -> Step {
@@ -341,7 +378,8 @@ impl PendingBook {
 
     /// The mempool's next input, its asset ids named by `coins`: the predicted trades and the coins moved.
     fn on_mempool(&mut self, input: MempoolInput, coins: Option<&ActionCoins>, unreported: Unreported) -> Step {
-        let mut step = self.sync(unreported);
+        // its own loss taken with those unreported, before any trailing stop is read anew (review 000662 r4 P2-1)
+        let mut step = self.sync(Unreported { mempool: unreported.mempool || matches!(input, MempoolInput::Loss), ..unreported });
         step.absorb(match input {
             MempoolInput::Tx { tx, after_loss } => {
                 let started = Instant::now();
@@ -354,23 +392,23 @@ impl PendingBook {
                     let book: Option<&dyn ForecastBook> = served.as_ref().map(|served| -> &dyn ForecastBook { served });
                     self.forecasts.on_tx(&tx, coins, book, unix_ns(wall_ms()))
                 };
-                if forecast.lines.contains(&"forecast") {
-                    step.absorb(self.set_global(&tx));
+                // every `SetGlobalAction`: a coin not decided where it comes keeps its place forecast or not (review
+                // 000662 r1 P2-5)
+                if tx.actions.iter().any(|action| matches!(action.kind, ActionKind::SetGlobal(_))) {
+                    step.absorb(self.set_global(&tx, coins));
                 }
+                drop(forecast);
                 step
             }
-            MempoolInput::Loss => {
-                self.shadow.on_mempool_loss();
-                Step::default()
-            }
+            MempoolInput::Loss => Step::default(),
         });
-        self.publish(&step);
+        self.publish(&mut step);
         step
     }
 
     /// The block log's next input: the coins moved by the settling it brings.
     fn on_block(&mut self, input: BlockInput, unreported: Unreported) -> Step {
-        let mut step = self.sync(unreported);
+        let mut step = self.sync(Unreported { block_log: unreported.block_log || matches!(input, BlockInput::Loss), ..unreported });
         step.absorb(match input {
             BlockInput::Block { block, after_loss } => {
                 let _report = self.forecasts.on_block(&block);
@@ -380,41 +418,64 @@ impl PendingBook {
                 PENDING_BOOK_STEP_SECONDS.with_label_values(&["block_log"]).observe(started.elapsed().as_secs_f64());
                 step
             }
-            BlockInput::Loss => self.shadow.on_block_log_loss(self.replica.as_ref()),
+            BlockInput::Loss => Step::default(),
         });
-        self.publish(&step);
+        self.publish(&mut step);
         step
     }
 
     /// A TWAP stream's input (batch 2h).
     fn on_twap(&mut self, input: TwapInput, unreported: Unreported) {
-        let mut step = self.sync(unreported);
+        let mut step = self.sync(Unreported { twaps: unreported.twaps || matches!(input, TwapInput::Loss), ..unreported });
         let replica = self.replica.as_ref();
         step.absorb(match input {
             TwapInput::Line(TwapLine::Statuses(line)) => self.shadow.on_twap_statuses(line.height, line.events, replica),
             TwapInput::Line(TwapLine::Fills(line)) => self.shadow.on_twap_fills(line.height, line.fills, replica),
             TwapInput::ReadThrough(stream, at) => self.shadow.on_twap_read_through(stream, at, replica),
-            TwapInput::Loss => self.shadow.on_twap_loss(wall_ms(), replica),
+            TwapInput::Loss => Step::default(),
         });
-        self.publish(&step);
+        self.publish(&mut step);
     }
 
     /// The account view's new anchor: its running TWAPs.
     fn on_anchor(&mut self, anchor: Arc<PendingAnchor>, unreported: Unreported) {
         let mut step = self.sync(unreported);
         step.absorb(self.shadow.on_anchor(anchor, self.replica.as_ref()));
-        self.publish(&step);
+        self.publish(&mut step);
+    }
+
+    /// An account copy event applied, or its validity turned: its trailing stops as they now serve (batch 2n-2), the coins they move replayed.
+    fn on_accounts(&mut self, unreported: Unreported) {
+        let mut step = self.sync(unreported);
+        step.absorb(self.take_trailing());
+        self.publish(&mut step);
+    }
+
+    fn take_trailing(&mut self) -> Step {
+        self.trailing_read = self.accounts.serving_at();
+        let basis = TrailingBasis::of(self.accounts.copy().ok());
+        self.shadow.on_trailing(basis, self.replica.as_ref())
     }
 
     /// A `SetGlobalAction` line held where it stands, a coin at a time (batch 2m, design 000652 r2): its mark the one its
     /// forecast gave the merged book there, frozen with the positions of the accounts of the untriggered orders it
     /// reaches then; a coin of no mark counted.
-    fn set_global(&mut self, tx: &MempoolTx) -> Step {
+    fn set_global(&mut self, tx: &MempoolTx, named: Option<&ActionCoins>) -> Step {
         let started = Instant::now();
         let replica = self.replica.as_ref();
         let copy = self.accounts.copy().ok();
+        let mut forecast: FxHashMap<u32, (String, Result<Px, &'static str>)> =
+            self.forecasts.merged_marks(&tx.tx_hash).into_iter().map(|(asset, name, mark_px)| (asset, (name, mark_px))).collect();
         let mut coins = Vec::new();
-        for (asset, name, mark_px) in self.forecasts.merged_marks(&tx.tx_hash) {
+        for (asset, name) in set_global_coins(tx, named, &forecast) {
+            let coin = Coin::new(&name);
+            // the coin's run deciding nothing where the line comes: held as its place, nothing frozen (design 000659 r4)
+            if let Some(reason) = self.shadow.undecided_at(&coin, replica, tx.seen_ns) {
+                coins.push((coin, asset, SetGlobalCoin::undecided(reason)));
+                continue;
+            }
+            // a coin of no forecast is not held, as before; one whose forecast failed counted
+            let Some((_, mark_px)) = forecast.remove(&asset) else { continue };
             let mark_px = match mark_px {
                 Ok(mark_px) => mark_px,
                 Err(reason) => {
@@ -422,7 +483,6 @@ impl PendingBook {
                     continue;
                 }
             };
-            let coin = Coin::new(&name);
             let accounts = self.shadow.reached_accounts(&coin, replica, mark_px, tx.seen_ns);
             coins.push((coin, asset, SetGlobalCoin::frozen(&name, mark_px, &accounts, copy)));
         }
@@ -453,7 +513,9 @@ impl PendingBook {
     }
 
     fn on_tick(&mut self, unreported: Unreported) {
-        let step = self.sync(unreported);
+        let mut step = self.sync(unreported);
+        // the copy's validity may have turned with no event: its trailing stops read again
+        step.absorb(self.take_trailing());
         let replica = self.replica.as_ref();
         let confirmed = replica.and_then(BookReplica::confirmed).unwrap_or(0);
         PENDING_BOOK_CONFIRMED_HEIGHT.set(i64::try_from(confirmed).unwrap_or(i64::MAX));
@@ -466,20 +528,35 @@ impl PendingBook {
             PENDING_BOOK_UNAVAILABLE_SECONDS_TOTAL.with_label_values(&[unavailable.label()]).inc_by(TICK.as_secs_f64());
         }
         // what `sync` changed - a generation ended, a loss found - goes out though nothing else came
-        self.publish(&step);
+        self.publish(&mut step);
     }
 
     /// `step`'s frames, the availability with them; every coin's when the overlays were dropped or rebuilt whole and a
     /// replica is there to frame them on.
-    fn publish(&mut self, step: &Step) {
+    fn publish(&mut self, step: &mut Step) {
+        // the copy turned while the step was computed (review 000662 r2 P2-3): its trailing stops read again, the coins
+        // they move replayed, and of those coins' trades only what the new version yields alike told (r3 P2-1)
+        if self.accounts.serving_at() != self.trailing_read {
+            let read = self.take_trailing();
+            if let Some(replica) = &self.replica {
+                self.shadow.retain_yielded(&mut step.trades, &read.changed, replica);
+            }
+            step.absorb(read);
+        }
+        // the suborders the step's trailing reads held back, as its final runs fill them (review 000662 r5 P2), the
+        // frame in the order its runs take them (r6 P2)
+        self.shadow.tell_held_back(&mut step.trades, self.replica.as_ref());
+        self.shadow.order_trades(&mut step.trades);
         let aligned = self.replica.as_ref().is_some_and(|replica| replica.confirmed().is_some());
         let refresh_all = aligned && self.shadow.take_refresh_all();
-        self.publisher.publish(step, refresh_all, &self.shadow, self.replica.as_ref());
+        let told = self.publisher.publish(step, refresh_all, &self.shadow, self.replica.as_ref());
+        // the step's suborder slots told only as its trades went out (review 000662 r4 P2-2)
+        self.shadow.on_committed(if told { &step.trades } else { &[] });
     }
 
     /// What the listener and the feeds' watchers already flagged, taken before an input is handled (review 000611 r1
     /// P1-2): a generation the listener ended takes the replica with it, and a loss a watcher found - its report still
-    /// queued behind the lines it may precede - is a gap at once. What it changed, published with the input's step
+    /// queued behind the lines it may precede, or the input itself (review 000662 r4 P2-1) - is a gap at once. What it changed, published with the input's step
     /// (review 000624 r5 P1: the suborders a loss withdrew, in the commit telling the TWAPs unknown).
     fn sync(&mut self, unreported: Unreported) -> Step {
         self.end_if_ended();
@@ -492,6 +569,11 @@ impl PendingBook {
         }
         if unreported.twaps {
             step.absorb(self.shadow.on_twap_loss(wall_ms(), self.replica.as_ref()));
+        }
+        // before any input reads them, the losses known taken first (review 000662 r2 P2-4): the trailing stops as the
+        // copy now serves (r1 P2-2)
+        if self.accounts.serving_at() != self.trailing_read {
+            step.absorb(self.take_trailing());
         }
         step
     }
@@ -550,7 +632,7 @@ mod tests {
     /// Block `height`: its hashes (none) through the block log first, as it leads, then its lines through the
     /// listener's feed, each taken by the pending book.
     fn push_block(book: &mut PendingBook, feed: &mut ReplicaFeed, feeds: &mut Feeds, height: u64, statuses: Vec<serde_json::Value>, diffs: Vec<serde_json::Value>) {
-        let block = LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), read_at: Instant::now() };
+        let block = LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), set_global: false, read_at: Instant::now() };
         drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
         for batch in block_lines(height, statuses, diffs) {
             listener_applied(feed, batch);
@@ -612,8 +694,8 @@ mod tests {
             seed_height: 1,
             height: 30,
             block_time_ms: 3_000,
-            coins: rustc_hash::FxHashMap::from_iter([("BTC".to_string(), btc)]),
-            hip3: rustc_hash::FxHashMap::default(),
+            coins: FxHashMap::from_iter([("BTC".to_string(), btc)]),
+            hip3: FxHashMap::default(),
         };
         let (sender, mut prices) = watch::channel(Ok(Arc::new(snapshot)));
         assert!(book.take_prices(&mut prices, true));
@@ -639,20 +721,25 @@ mod tests {
     /// then a `SetGlobalAction` whose mark comes to 100 (submitted 100, L median(99, 101, 100)): the action's step, and the
     /// prices' sender to keep them.
     fn bid_then_set_global(book: &mut PendingBook) -> (watch::Sender<NodePrices>, Step) {
+        bid_then_set_global_at(book, 3_250)
+    }
+
+    /// `bid_then_set_global`, the action's line seen at `seen_ms`.
+    fn bid_then_set_global_at(book: &mut PendingBook, seen_ms: i64) -> (watch::Sender<NodePrices>, Step) {
         let btc = crate::accounts::marks::native::CoinPriceState { last_trade: 1_000, ..crate::local_marks::compute::tests::btc_state(0.0, 1_000_000_000) };
         let snapshot = crate::accounts::marks::NativePriceSnapshot {
             seed_height: 1,
             height: 30,
             block_time_ms: 3_000,
-            coins: rustc_hash::FxHashMap::from_iter([("BTC".to_string(), btc)]),
-            hip3: rustc_hash::FxHashMap::default(),
+            coins: FxHashMap::from_iter([("BTC".to_string(), btc)]),
+            hip3: FxHashMap::default(),
         };
         let (sender, mut prices) = watch::channel(Ok(Arc::new(snapshot)));
         assert!(book.take_prices(&mut prices, true));
         let bid = ActionKind::Order(vec![requested(0, true, "99", RequestedTif::Alo, Some("0x08"))]);
         drop(book.on_mempool(line(3_210, 8, vec![bid]), Some(&coins()), NONE_UNREPORTED));
         let submitted = crate::accounts::marks::actions::SubmittedPrices::Priced { oracle: "100".to_string(), mark: "100".to_string() };
-        (sender, book.on_mempool(line(3_250, 1, vec![ActionKind::SetGlobal(vec![submitted])]), Some(&coins()), NONE_UNREPORTED))
+        (sender, book.on_mempool(line(seen_ms, 1, vec![ActionKind::SetGlobal(vec![submitted])]), Some(&coins()), NONE_UNREPORTED))
     }
 
     /// Batch 2m: on a book served - bid 99 (a pending ALO), ask 101 - with the replica's market stop selling a fall to
@@ -669,7 +756,8 @@ mod tests {
             let fired_trades: Vec<_> = step.trades.iter().map(|trade| (trade.taker.clone(), trade.px, trade.sz)).collect();
             let expected = (!position).then(|| {
                 let source = TriggerSource::Confirmed { oid: 77, user: shadow::tests::ACCOUNT, cloid: None };
-                (Taker::Trigger { source, seen_ns: 3_250_000_000 }, crate::order_book::Px::parse_from_str("99").unwrap(), crate::order_book::Sz::parse_from_str("1").unwrap())
+                let set_global = actions::ActionId { tx_hash: alloy::primitives::B256::repeat_byte(1), action: 0, item: 0 };
+                (Taker::Trigger { source, set_global, seen_ns: 3_250_000_000 }, Px::parse_from_str("99").unwrap(), crate::order_book::Sz::parse_from_str("1").unwrap())
             });
             assert_eq!(fired_trades, expected.into_iter().collect::<Vec<_>>(), "position {position}");
         }
@@ -683,10 +771,11 @@ mod tests {
             generation: 1,
             height: 30,
             time_ms: 3_000,
-            coins: rustc_hash::FxHashMap::from_iter([("BTC".to_string(), 5)]),
-            marks: rustc_hash::FxHashMap::default(),
-            positions: rustc_hash::FxHashMap::from_iter([("BTC".to_string(), rustc_hash::FxHashMap::from_iter([(shadow::tests::ACCOUNT, 100_000)]))]),
+            coins: FxHashMap::from_iter([("BTC".to_string(), 5)]),
+            marks: FxHashMap::default(),
+            positions: FxHashMap::from_iter([("BTC".to_string(), FxHashMap::from_iter([(shadow::tests::ACCOUNT, 100_000)]))]),
             candidates: Err("none".to_string()),
+            trailing: None,
         };
         let (accounts, _validity) = crate::accounts::flow_accounts::tests::copy_of(snapshot);
         let (mut book, mut feed, mut feeds) = served_book_with_accounts(shadow::tests::params(), accounts);
@@ -694,7 +783,7 @@ mod tests {
         push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
         let (_prices, step) = bid_then_set_global(&mut book);
         let sold: Vec<_> = step.trades.iter().map(|trade| (trade.px, trade.sz)).collect();
-        assert_eq!(sold, [(crate::order_book::Px::parse_from_str("99").unwrap(), crate::order_book::Sz::parse_from_str("1").unwrap())]);
+        assert_eq!(sold, [(Px::parse_from_str("99").unwrap(), crate::order_book::Sz::parse_from_str("1").unwrap())]);
     }
 
     /// The IOC crossing the resting ask predicts its trade on a book served.
@@ -702,6 +791,509 @@ mod tests {
     fn a_served_book_predicts_a_taker() {
         let (mut book, _feed, _feeds) = served_book();
         assert_eq!(book.on_mempool(ioc(), Some(&coins()), NONE_UNREPORTED).trades.len(), 1);
+    }
+
+    /// Batch 2n-2 (design 000659 r3 P2-3, r4): a `SetGlobalAction` that may fire a trailing stop not known - the
+    /// thread's account copy serving none - leaves BTC not decided: its frame says so, to the subscribers and in the
+    /// store; a second one coming meanwhile is held as its place, nothing frozen. The first's block confirmed, BTC is
+    /// still not decided; the second's too, it is decided again with its best levels as they were - the pending bid
+    /// still held -: that goes out too, and a new subscriber reads it.
+    #[test]
+    fn a_coin_undecided_then_decided_again_goes_out_both_times() {
+        let (mut book, mut feed, mut feeds) = served_book();
+        let mut trailing = btc_stop_status(70, "A", None, false, "open", None, 3_200);
+        trailing["order"]["orderType"] = serde_json::json!("Trailing Stop Market");
+        trailing["order"]["triggerCondition"] = serde_json::json!("Activation immediate, retracement 5, best 120");
+        push_block(&mut book, &mut feed, &mut feeds, 32, vec![trailing], vec![]);
+        push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+        let handle = book.publisher.handle().clone();
+        let btc = Coin::new("BTC");
+        let mut events = handle.subscribe();
+        let (_prices, step) = bid_then_set_global(&mut book);
+        assert_eq!(step.trades.len(), 0);
+        let undecided = handle.snapshot().frame(&btc).unwrap();
+        assert_eq!(undecided.undecided, Some("trailing_unknown"));
+        // a second action coming meanwhile: held as its place, nothing frozen (design 000659 r4)
+        let submitted = crate::accounts::marks::actions::SubmittedPrices::Priced { oracle: "100".to_string(), mark: "100".to_string() };
+        drop(book.on_mempool(line(3_280, 2, vec![ActionKind::SetGlobal(vec![submitted])]), Some(&coins()), NONE_UNREPORTED));
+        let held: Vec<Option<&str>> = book.shadow.held_set_globals(&btc).iter().map(|sga| sga.undecided_input).collect();
+        assert_eq!(held, [None, Some("trailing_unknown")]);
+        let told_btc = |events: &mut tokio::sync::broadcast::Receiver<PendingEvent>| -> Vec<Option<&'static str>> {
+            std::iter::from_fn(|| events.try_recv().ok())
+                .filter_map(|event| match event {
+                    PendingEvent::Bbos(frames) => frames.iter().find(|frame| frame.coin == btc).map(|frame| frame.undecided),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(told_btc(&mut events).last(), Some(&Some("trailing_unknown")));
+        // each action's block: its hash through the block log, then its lines, confirmed once the next block's lines come
+        let mut confirm_line = |book: &mut PendingBook, height: u64, hash: u8| {
+            let block = LoggedBlock {
+                height, time_ms: height * 100, hashes: vec![alloy::primitives::B256::repeat_byte(hash)], priorities: Vec::new(), taker_outcomes: Vec::new(),
+                signer_accounts: Vec::new(), twap_cancels: Vec::new(), set_global: true, read_at: Instant::now(),
+            };
+            drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
+            for batch in block_lines(height, vec![], vec![]) {
+                listener_applied(&mut feed, batch);
+                book.on_batch(feeds.batches.try_recv().unwrap(), &mut feeds.forks, NONE_UNREPORTED);
+            }
+        };
+        confirm_line(&mut book, 34, 1);
+        confirm_line(&mut book, 35, 2);
+        assert_eq!(handle.snapshot().frame(&btc).unwrap().undecided, Some("trailing_unknown"), "the first confirmed, the second still held");
+        drop(told_btc(&mut events));
+        push_block(&mut book, &mut feed, &mut feeds, 36, vec![], vec![]);
+        let decided = handle.snapshot().frame(&btc).unwrap();
+        assert_eq!((decided.undecided, decided.bbo), (None, undecided.bbo), "the bid still pending: the levels as they were");
+        let told = told_btc(&mut events);
+        assert_eq!(told.last(), Some(&None), "decided again, told: {told:?}");
+    }
+
+    /// BTC's trailing stop market sale of 1 at 3,200 ms, `condition`.
+    fn trailing_open(oid: u64, condition: &str) -> serde_json::Value {
+        let mut status = btc_stop_status(oid, "A", None, false, "open", None, 3_200);
+        status["order"]["orderType"] = serde_json::json!("Trailing Stop Market");
+        status["order"]["triggerCondition"] = serde_json::json!(condition);
+        status
+    }
+
+    /// Review 000662 r1 P2-5: the node prices withdrawn after a first `SetGlobalAction` left BTC not decided, a second
+    /// one - forecast none - is held all the same as BTC's place; the first's block confirmed, BTC stays not decided.
+    #[test]
+    fn a_set_global_forecast_none_keeps_an_undecided_coins_place() {
+        let (mut book, mut feed, mut feeds) = served_book();
+        push_block(&mut book, &mut feed, &mut feeds, 32, vec![trailing_open(70, "Activation immediate, retracement 5, best 120")], vec![]);
+        push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+        let (_prices, _step) = bid_then_set_global(&mut book);
+        let btc = Coin::new("BTC");
+        book.on_prices(&Err("withdrawn".to_string()));
+        let submitted = crate::accounts::marks::actions::SubmittedPrices::Priced { oracle: "100".to_string(), mark: "100".to_string() };
+        drop(book.on_mempool(line(3_280, 2, vec![ActionKind::SetGlobal(vec![submitted])]), Some(&coins()), NONE_UNREPORTED));
+        let held: Vec<Option<&str>> = book.shadow.held_set_globals(&btc).iter().map(|sga| sga.undecided_input).collect();
+        assert_eq!(held, [None, Some("trailing_unknown")]);
+        let block = LoggedBlock {
+            height: 34, time_ms: 3_400, hashes: vec![alloy::primitives::B256::repeat_byte(1)], priorities: Vec::new(), taker_outcomes: Vec::new(),
+            signer_accounts: Vec::new(), twap_cancels: Vec::new(), set_global: true, read_at: Instant::now(),
+        };
+        drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
+        for batch in block_lines(34, vec![], vec![]) {
+            listener_applied(&mut feed, batch);
+            book.on_batch(feeds.batches.try_recv().unwrap(), &mut feeds.forks, NONE_UNREPORTED);
+        }
+        push_block(&mut book, &mut feed, &mut feeds, 35, vec![], vec![]);
+        assert_eq!(book.publisher.handle().snapshot().frame(&btc).unwrap().undecided, Some("trailing_unknown"), "the second still held");
+    }
+
+    /// Review 000662 r1 P2-2: the owner's watch withdrawing the copy with no event, the next input reads the trailing
+    /// stops anew before it runs: BTC's stop, known (best 100, trigger price 95: a `SetGlobalAction` at 100 runs it
+    /// none), is not known any more, and BTC is not decided.
+    #[test]
+    fn a_copy_withdrawn_with_no_event_is_read_before_the_next_input() {
+        let (accounts, validity) = trailing_accounts();
+        let (mut book, mut feed, mut feeds) = served_book_with_accounts(shadow::tests::params(), accounts);
+        push_block(&mut book, &mut feed, &mut feeds, 32, vec![trailing_open(70, "Activation immediate, retracement 5, best 100")], vec![]);
+        push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+        let (_prices, _step) = bid_then_set_global(&mut book);
+        let btc = Coin::new("BTC");
+        let handle = book.publisher.handle().clone();
+        assert_eq!(handle.snapshot().frame(&btc).unwrap().undecided, None, "the stop known and not reached");
+        validity.send_replace(crate::accounts::flow_accounts::FlowAccountsValidity { generation: 1, state: Err("withdrawn".to_string()) });
+        drop(book.on_mempool(line(3_260, 3, vec![]), Some(&coins()), NONE_UNREPORTED));
+        assert_eq!(handle.snapshot().frame(&btc).unwrap().undecided, Some("trailing_unknown"));
+    }
+
+    /// The thread's account copy at 30 holding BTC's trailing stop 70 (best 100, retracement 5: trigger price 95), its
+    /// mark claimed; with the owner's watch.
+    fn trailing_accounts() -> (FlowAccounts, watch::Sender<crate::accounts::flow_accounts::FlowAccountsValidity>) {
+        crate::accounts::flow_accounts::tests::copy_of(trailing_snapshot(1, 1_000))
+    }
+
+    /// The account view at 30 of `generation`: BTC's trailing stop 70 a sale of best `best` (price units of 5 size
+    /// decimals) and retracement 5, its mark claimed.
+    fn trailing_snapshot(generation: u64, best: u64) -> crate::accounts::flow_accounts::AccountsSnapshot {
+        use crate::accounts::{flow_accounts::TrailingCopy, marks::trailing::{Retracement, TrailingState, TrailingStop}};
+        let stop = TrailingStop { side: crate::order_book::Side::Ask, activation: None, retracement: Retracement::Price(50), state: TrailingState::Active { best } };
+        crate::accounts::flow_accounts::AccountsSnapshot {
+            generation,
+            height: 30,
+            time_ms: 3_000,
+            coins: FxHashMap::from_iter([("BTC".to_string(), 5)]),
+            marks: FxHashMap::from_iter([("BTC".to_string(), 1_000)]),
+            positions: FxHashMap::default(),
+            candidates: Err("none".to_string()),
+            trailing: Some(TrailingCopy {
+                stops: FxHashMap::from_iter([(70, ("BTC".to_string(), Ok(stop)))]),
+                refresh_due_ms: None,
+                claimed: std::iter::once("BTC".to_string()).collect(),
+            }),
+        }
+    }
+
+    fn validity(state: Result<(), String>) -> crate::accounts::flow_accounts::FlowAccountsValidity {
+        crate::accounts::flow_accounts::FlowAccountsValidity { generation: 1, state }
+    }
+
+    /// The step of a mempool line on `book` as computed before it is told: the input's sync, then the line held.
+    fn untold_step(book: &mut PendingBook, input: MempoolInput) -> Step {
+        let MempoolInput::Tx { tx, .. } = input else { unreachable!() };
+        let mut step = book.sync(NONE_UNREPORTED);
+        step.absorb(book.shadow.on_tx(&tx, false, Some(&coins()), book.replica.as_ref()));
+        step
+    }
+
+    /// The trades `events` told since last read, in order.
+    fn told_trades(events: &mut tokio::sync::broadcast::Receiver<PendingEvent>) -> Vec<PendingTrade> {
+        std::iter::from_fn(|| events.try_recv().ok())
+            .flat_map(|event| match event {
+                PendingEvent::Trades(frame) => frame.trades.clone(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// The anchor at `anchor_height` - at most the confirmed height 32 - holding TWAP 7, both streams read through after
+    /// the log's block 33: its suborder due.
+    fn prove_twaps(book: &mut PendingBook, anchor_height: u64) {
+        book.on_anchor(shadow::tests::twap_anchor(anchor_height), NONE_UNREPORTED);
+        for stream in [TwapStream::Statuses, TwapStream::Fills] {
+            book.on_twap(TwapInput::ReadThrough(stream, Instant::now()), NONE_UNREPORTED);
+        }
+        assert!(book.shadow.twaps_known());
+    }
+
+    /// Review 000662 r2 P2-3, r3 P2-1: the copy withdrawn while a step was computed - after its input began, before it
+    /// is told -, the trailing stops are read again at the step's commit. A sale into the pending bid after a
+    /// `SetGlobalAction` stop 70 does not reach - known: best 100, trigger price 95, the mark 100 - is not told: read
+    /// anew, the stop is not known and the action leaves BTC not decided before the sale.
+    #[test]
+    fn a_copy_withdrawn_before_a_step_is_told_drops_a_trade_after_an_undecided_set_global() {
+        let (accounts, owner) = trailing_accounts();
+        let (mut book, mut feed, mut feeds) = served_book_with_accounts(shadow::tests::params(), accounts);
+        push_block(&mut book, &mut feed, &mut feeds, 32, vec![trailing_open(70, "Activation immediate, retracement 5, best 100")], vec![]);
+        push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+        let (_prices, _step) = bid_then_set_global(&mut book);
+        let handle = book.publisher.handle().clone();
+        let btc = Coin::new("BTC");
+        assert_eq!(handle.snapshot().frame(&btc).unwrap().undecided, None, "the stop known and not reached");
+        let mut events = handle.subscribe();
+        let sale = ActionKind::Order(vec![requested(0, false, "99", RequestedTif::Ioc, Some("0x04"))]);
+        let mut step = untold_step(&mut book, line(3_260, 4, vec![sale]));
+        assert_eq!(step.trades.len(), 1, "1 at 99 into the bid");
+        owner.send_replace(validity(Err("withdrawn".to_string())));
+        book.publish(&mut step);
+        assert_eq!(step.trades, shadow::tests::NO_TRADES);
+        assert_eq!(told_trades(&mut events), shadow::tests::NO_TRADES);
+        assert_eq!(handle.snapshot().frame(&btc).unwrap().undecided, Some("trailing_unknown"));
+    }
+
+    /// Review 000662 r3 P2-1: the copy withdrawn before a step is told, BTC - no trailing stop, no `SetGlobalAction` - is
+    /// read anew and replayed; its IOC's trade, the new version yielding it alike, is told, BTC decided.
+    #[test]
+    fn a_copy_withdrawn_before_a_step_is_told_keeps_a_trade_of_no_trailing_stop() {
+        let (accounts, owner) = trailing_accounts();
+        let (mut book, _feed, _feeds) = served_book_with_accounts(shadow::tests::params(), accounts);
+        let handle = book.publisher.handle().clone();
+        let mut events = handle.subscribe();
+        let mut step = untold_step(&mut book, ioc());
+        owner.send_replace(validity(Err("withdrawn".to_string())));
+        book.publish(&mut step);
+        let told: Vec<(Px, crate::order_book::Sz)> = told_trades(&mut events).iter().map(|trade| (trade.px, trade.sz)).collect();
+        assert_eq!(told, [(Px::parse_from_str("101").unwrap(), crate::order_book::Sz::parse_from_str("1").unwrap())]);
+        assert_eq!(handle.snapshot().frame(&Coin::new("BTC")).unwrap().undecided, None);
+    }
+
+    /// Review 000662 r3 P2-1: BTC's TWAP suborder due, the cut at 3,980 ms: an IOC seen at 3,970 runs before a
+    /// `SetGlobalAction` seen at 3,990 though held after it; stop 70 known and not reached. The copy withdrawn before the
+    /// IOC's step is told, BTC is not decided from the action on - its frame says so -, and the IOC's trade, before it,
+    /// is told.
+    #[test]
+    fn a_copy_withdrawn_before_a_step_is_told_keeps_a_trade_before_the_first_undecided_set_global() {
+        let (accounts, owner) = trailing_accounts();
+        let (mut book, mut feed, mut feeds) = served_book_with_accounts(shadow::tests::params(), accounts);
+        push_block(&mut book, &mut feed, &mut feeds, 32, vec![trailing_open(70, "Activation immediate, retracement 5, best 100")], vec![]);
+        push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+        prove_twaps(&mut book, 32);
+        let (_prices, _step) = bid_then_set_global_at(&mut book, 3_990);
+        let handle = book.publisher.handle().clone();
+        let btc = Coin::new("BTC");
+        assert_eq!(handle.snapshot().frame(&btc).unwrap().undecided, None, "the stop known and not reached");
+        let mut events = handle.subscribe();
+        let buy = ActionKind::Order(vec![requested(0, true, "101", RequestedTif::Ioc, Some("0x09"))]);
+        let mut step = untold_step(&mut book, line(3_970, 9, vec![buy]));
+        let computed = step.trades.clone();
+        assert_eq!(computed.iter().map(|trade| trade.px).collect::<Vec<_>>(), [Px::parse_from_str("101").unwrap()], "the ask left after the suborder");
+        owner.send_replace(validity(Err("withdrawn".to_string())));
+        book.publish(&mut step);
+        assert_eq!(told_trades(&mut events), computed);
+        assert_eq!(handle.snapshot().frame(&btc).unwrap().undecided, Some("trailing_unknown"));
+    }
+
+    /// Review 000662 r3 P2-1: a trade the copy's new version yields otherwise is not told as computed either. Bids at 99
+    /// and 98 pending, a sale - limit 98 - after a `SetGlobalAction` stop 70 does not reach is computed into the bid at
+    /// 99; the copy turning before it is told to one whose stop 70 the action reaches (best 106: trigger price 101, the
+    /// mark 100), the stop sells into that bid first and the sale would take the one at 98. Nothing is told, BTC decided.
+    #[test]
+    fn a_copy_turned_before_a_step_is_told_drops_a_trade_its_new_version_moves() {
+        let (accounts, owner) = trailing_accounts();
+        let (mut book, mut feed, mut feeds) = served_book_with_accounts(shadow::tests::params(), accounts);
+        push_block(&mut book, &mut feed, &mut feeds, 32, vec![trailing_open(70, "Activation immediate, retracement 5, best 100")], vec![]);
+        push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+        let (_prices, _step) = bid_then_set_global(&mut book);
+        let bid = ActionKind::Order(vec![requested(0, true, "98", RequestedTif::Alo, Some("0x06"))]);
+        drop(book.on_mempool(line(3_255, 6, vec![bid]), Some(&coins()), NONE_UNREPORTED));
+        let handle = book.publisher.handle().clone();
+        let mut events = handle.subscribe();
+        let sale = ActionKind::Order(vec![requested(0, false, "98", RequestedTif::Ioc, Some("0x04"))]);
+        let mut step = untold_step(&mut book, line(3_260, 4, vec![sale]));
+        assert_eq!(step.trades.iter().map(|trade| trade.px).collect::<Vec<_>>(), [Px::parse_from_str("99").unwrap()]);
+        book.accounts.apply(FlowAccountsEvent::Snapshot(Box::new(trailing_snapshot(2, 1_060))));
+        owner.send_replace(crate::accounts::flow_accounts::FlowAccountsValidity { generation: 2, state: Ok(()) });
+        book.publish(&mut step);
+        assert_eq!(told_trades(&mut events), shadow::tests::NO_TRADES);
+        assert_eq!(handle.snapshot().frame(&Coin::new("BTC")).unwrap().undecided, None);
+    }
+
+    /// Review 000662 r3 P2-2: BTC's TWAP suborder runs after a `SetGlobalAction` stop 70, known, does not reach. The copy
+    /// withdrawn before the step proving the TWAPs is told, BTC is not decided from the action on and the suborder's
+    /// trade is not told; the copy restored, BTC replayed tells it once, a later replay not again.
+    #[test]
+    fn a_suborder_withdrawn_before_told_goes_out_once_the_copy_is_restored() {
+        let (accounts, owner) = trailing_accounts();
+        let (mut book, mut feed, mut feeds) = served_book_with_accounts(shadow::tests::params(), accounts);
+        push_block(&mut book, &mut feed, &mut feeds, 32, vec![trailing_open(70, "Activation immediate, retracement 5, best 100")], vec![]);
+        push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+        let (_prices, _step) = bid_then_set_global(&mut book);
+        let handle = book.publisher.handle().clone();
+        let mut events = handle.subscribe();
+        let suborders = |trades: Vec<PendingTrade>| trades.into_iter().filter(|trade| matches!(trade.taker, Taker::Twap { .. })).collect::<Vec<_>>();
+        book.on_anchor(shadow::tests::twap_anchor(32), NONE_UNREPORTED);
+        book.on_twap(TwapInput::ReadThrough(TwapStream::Statuses, Instant::now()), NONE_UNREPORTED);
+        let mut step = book.sync(NONE_UNREPORTED);
+        step.absorb(book.shadow.on_twap_read_through(TwapStream::Fills, Instant::now(), book.replica.as_ref()));
+        let computed = suborders(step.trades.clone());
+        assert_eq!(computed.iter().map(|trade| trade.px).collect::<Vec<_>>(), [Px::parse_from_str("101").unwrap()]);
+        owner.send_replace(validity(Err("withdrawn".to_string())));
+        book.publish(&mut step);
+        assert_eq!(suborders(told_trades(&mut events)), shadow::tests::NO_TRADES, "withdrawn: none told");
+        assert_eq!(handle.snapshot().frame(&Coin::new("BTC")).unwrap().undecided, Some("trailing_unknown"));
+        owner.send_replace(validity(Ok(())));
+        book.on_accounts(NONE_UNREPORTED);
+        assert_eq!(suborders(told_trades(&mut events)), computed, "restored: told once");
+        let ask = ActionKind::Order(vec![requested(0, false, "105", RequestedTif::Alo, Some("0x05"))]);
+        drop(book.on_mempool(line(3_300, 5, vec![ask]), Some(&coins()), NONE_UNREPORTED));
+        assert_eq!(suborders(told_trades(&mut events)), shadow::tests::NO_TRADES, "BTC replayed: not again");
+    }
+
+    /// The trades told as `input` comes, the copy - withheld while BTC's suborder (TWAP 7's slot 0, 0.1 at the cut) was
+    /// held back, BTC not decided - restored by the owner's watch with no event just before it. The TWAPs anchored at 31,
+    /// 32 proven complete; ETH's ask resting from 34.
+    fn told_restored_before(input: impl FnOnce(&mut PendingBook)) -> Vec<PendingTrade> {
+        let (accounts, owner) = trailing_accounts();
+        owner.send_replace(validity(Err("withheld".to_string())));
+        let (mut book, mut feed, mut feeds) = served_book_with_accounts(shadow::tests::params(), accounts);
+        push_block(&mut book, &mut feed, &mut feeds, 32, vec![trailing_open(70, "Activation immediate, retracement 5, best 100")], vec![]);
+        push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+        let (_prices, _step) = bid_then_set_global(&mut book);
+        prove_twaps(&mut book, 31);
+        let (status, diff) = eth_ask();
+        push_block(&mut book, &mut feed, &mut feeds, 34, vec![status], vec![diff]);
+        push_block(&mut book, &mut feed, &mut feeds, 35, vec![], vec![]);
+        let handle = book.publisher.handle().clone();
+        assert_eq!(handle.snapshot().frame(&Coin::new("BTC")).unwrap().undecided, Some("trailing_unknown"), "the suborder held back");
+        let mut events = handle.subscribe();
+        owner.send_replace(validity(Ok(())));
+        input(&mut book);
+        told_trades(&mut events)
+    }
+
+    fn suborders_told_restored_before(input: impl FnOnce(&mut PendingBook)) -> Vec<PendingTrade> {
+        told_restored_before(input).into_iter().filter(|trade| matches!(trade.taker, Taker::Twap { .. })).collect()
+    }
+
+    /// A buy IOC of `sz` BTC at 101 seen at `seen_ms`.
+    fn ioc_of(seen_ms: i64, sz: &str) -> MempoolInput {
+        line(seen_ms, 9, vec![btc_buy(sz)])
+    }
+
+    fn btc_buy(sz: &str) -> ActionKind {
+        let order = mempool::RequestedOrder {
+            sz: crate::order_book::Sz::parse_from_str(sz).unwrap(),
+            sz_shape: mempool::DecimalShape::of(sz),
+            ..requested(0, true, "101", RequestedTif::Ioc, Some("0x09"))
+        };
+        ActionKind::Order(vec![order])
+    }
+
+    /// ETH's ask of 1 at 2,000 (oid 21): its status and its diff.
+    fn eth_ask() -> (serde_json::Value, serde_json::Value) {
+        let mut status = btc_status(21, "A", "2000.0", "1.0", "open", Some("0x15"), "Alo", 3_300);
+        status["order"]["coin"] = serde_json::json!("ETH");
+        let mut diff = btc_diff(21, "A", "2000.0", new_diff("1.0"));
+        diff["coin"] = serde_json::json!("ETH");
+        (status, diff)
+    }
+
+    /// Review 000662 r6 P2: BTC's suborder held back to the commit takes its place in the frame among a line's trades on
+    /// other coins: before an ETH IOC seen at the cut (3,980 ms), before a line's ETH then BTC IOCs after it; after them,
+    /// as they came, before it.
+    #[test]
+    fn a_held_back_suborder_takes_its_place_among_the_frames_trades() {
+        let eth_buy = || ActionKind::Order(vec![requested(1, true, "2000", RequestedTif::Ioc, Some("0x0e"))]);
+        let told_of = |input: MempoolInput| -> Vec<(String, bool)> {
+            let told = told_restored_before(|book| drop(book.on_mempool(input, Some(&coins()), NONE_UNREPORTED)));
+            told.iter().map(|trade| (trade.coin.value(), matches!(trade.taker, Taker::Twap { .. }))).collect()
+        };
+        let order = |entries: &[(&str, bool)]| entries.iter().map(|(coin, twap)| ((*coin).to_string(), *twap)).collect::<Vec<_>>();
+        assert_eq!(told_of(line(3_980, 9, vec![eth_buy()])), order(&[("BTC", true), ("ETH", false)]), "at the cut");
+        assert_eq!(told_of(line(3_990, 9, vec![eth_buy(), btc_buy("0.5")])), order(&[("BTC", true), ("ETH", false), ("BTC", false)]));
+        assert_eq!(told_of(line(3_970, 9, vec![eth_buy(), btc_buy("0.5")])), order(&[("ETH", false), ("BTC", false), ("BTC", true)]), "before the cut");
+    }
+
+    /// Review 000662 r5 P2: the copy restored in the step of a line, BTC's suborder - its slot not told - is told as the
+    /// step's final run fills it, at its place in the run. A buy of 1 before the cut takes the ask whole: the suborder
+    /// takes nothing. A buy of 0.5 before the cut: its trade, then the suborder's. After the cut: the suborder's first.
+    #[test]
+    fn a_restored_copys_suborder_is_told_as_the_steps_final_run_fills_it() {
+        let told_of = |input: MempoolInput| -> Vec<(bool, String)> {
+            let told = told_restored_before(|book| drop(book.on_mempool(input, Some(&coins()), NONE_UNREPORTED)));
+            told.iter().map(|trade| (matches!(trade.taker, Taker::Twap { .. }), format!("{} @ {}", trade.sz.to_str(), trade.px.to_str()))).collect()
+        };
+        let told = |entries: &[(bool, &str)]| entries.iter().map(|(twap, trade)| (*twap, (*trade).to_string())).collect::<Vec<_>>();
+        assert_eq!(told_of(ioc_of(3_270, "1")), told(&[(false, "1 @ 101")]), "the ask taken before the suborder");
+        assert_eq!(told_of(ioc_of(3_270, "0.5")), told(&[(false, "0.5 @ 101"), (true, "0.1 @ 101")]));
+        assert_eq!(told_of(ioc_of(3_990, "0.5")), told(&[(true, "0.1 @ 101"), (false, "0.5 @ 101")]), "after the cut");
+    }
+
+    /// Review 000662 r5 P2: the copy restored in the step of an input that finds a gap - the block log skipping 36, a
+    /// TWAP status line of the complete height 32, above the anchor, coming late -, BTC's suborder is not told.
+    #[test]
+    fn a_restored_copys_suborder_is_not_told_past_a_gap_its_step_finds() {
+        let skipping = |book: &mut PendingBook| {
+            let block = LoggedBlock {
+                height: 37, time_ms: 3_700, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(),
+                twap_cancels: Vec::new(), set_global: false, read_at: Instant::now(),
+            };
+            drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
+        };
+        assert_eq!(suborders_told_restored_before(skipping), shadow::tests::NO_TRADES, "a block log hole");
+        let late = |book: &mut PendingBook| book.on_twap(TwapInput::Line(TwapLine::Statuses(TwapStatusLine { height: 32, events: Vec::new() })), NONE_UNREPORTED);
+        assert_eq!(suborders_told_restored_before(late), shadow::tests::NO_TRADES, "a late TWAP line");
+    }
+
+    /// Review 000662 r4 P2-1: an input that is itself a loss - a TWAP stream's, the mempool's, the block log's - takes it
+    /// before the trailing stops the restored copy serves are read: no suborder trade told. An input of no loss tells it.
+    #[test]
+    fn an_input_bringing_a_loss_takes_it_before_the_trailing_stops_are_read() {
+        let twap_loss = suborders_told_restored_before(|book| book.on_twap(TwapInput::Loss, NONE_UNREPORTED));
+        let mempool_loss = suborders_told_restored_before(|book| drop(book.on_mempool(MempoolInput::Loss, Some(&coins()), NONE_UNREPORTED)));
+        let block_log_loss = suborders_told_restored_before(|book| drop(book.on_block(BlockInput::Loss, NONE_UNREPORTED)));
+        assert_eq!((twap_loss.len(), mempool_loss.len(), block_log_loss.len()), (0, 0, 0));
+        let no_loss = suborders_told_restored_before(|book| drop(book.on_mempool(line(3_300, 3, vec![]), Some(&coins()), NONE_UNREPORTED)));
+        assert_eq!(no_loss.iter().map(|trade| (trade.px, trade.sz)).collect::<Vec<_>>(), [(Px::parse_from_str("101").unwrap(), crate::order_book::Sz::parse_from_str("0.1").unwrap())]);
+    }
+
+    /// Review 000662 r4 P2-2: a suborder's trade computed in a step whose replica stops before it is told - no trades
+    /// frame - is not told; the next generation served with the ask again - forked at height 0 here, its TWAPs proven
+    /// anew over its blocks - tells it once.
+    #[test]
+    fn a_suborder_computed_as_the_replica_stops_goes_out_with_the_next_generation() {
+        let (mut book, mut feed, mut feeds) = served_book();
+        push_block(&mut book, &mut feed, &mut feeds, 32, vec![], vec![]);
+        push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+        let handle = book.publisher.handle().clone();
+        let mut events = handle.subscribe();
+        book.on_anchor(shadow::tests::twap_anchor(32), NONE_UNREPORTED);
+        book.on_twap(TwapInput::ReadThrough(TwapStream::Statuses, Instant::now()), NONE_UNREPORTED);
+        let mut step = book.sync(NONE_UNREPORTED);
+        step.absorb(book.shadow.on_twap_read_through(TwapStream::Fills, Instant::now(), book.replica.as_ref()));
+        let computed = step.trades.clone();
+        assert_eq!(computed.iter().map(|trade| (trade.px, trade.sz)).collect::<Vec<_>>(), [(Px::parse_from_str("101").unwrap(), crate::order_book::Sz::parse_from_str("0.1").unwrap())]);
+        // as a batch past the replica's budget stops it
+        book.request_next("backlog_budget");
+        book.publish(&mut step);
+        assert_eq!(told_trades(&mut events), shadow::tests::NO_TRADES, "no replica to frame them on");
+        empty_book_batch(&mut feed);
+        let ask = (vec![btc_status(11, "A", "101.0", "1.0", "open", Some("0x0b"), "Alo", 2_500)], vec![btc_diff(11, "A", "101.0", new_diff("1.0"))]);
+        push_block(&mut book, &mut feed, &mut feeds, 34, ask.0, ask.1);
+        push_block(&mut book, &mut feed, &mut feeds, 35, vec![], vec![]);
+        for stream in [TwapStream::Statuses, TwapStream::Fills] {
+            book.on_twap(TwapInput::ReadThrough(stream, Instant::now()), NONE_UNREPORTED);
+        }
+        assert!(book.shadow.twaps_known());
+        assert_eq!(told_trades(&mut events), computed, "told once");
+        push_block(&mut book, &mut feed, &mut feeds, 36, vec![], vec![]);
+        assert_eq!(told_trades(&mut events), shadow::tests::NO_TRADES, "not again");
+    }
+
+    /// Review 000662 r4 P2-3: two `SetGlobalAction`s whose lines share a `local_time`, marks 100 then 95; stop 70 - best
+    /// 100, trigger price 95 - fired by the second sells 1 into the bid at 99. The copy turning before the second's step
+    /// is told to one whose stop the first fires (best 106: trigger price 101), the second fires nothing: its trade -
+    /// the same order's, the same fill - is not told as the first's.
+    #[test]
+    fn a_trigger_trade_is_told_only_as_the_action_firing_it_yields_it() {
+        let (accounts, owner) = trailing_accounts();
+        let (mut book, mut feed, mut feeds) = served_book_with_accounts(shadow::tests::params(), accounts);
+        push_block(&mut book, &mut feed, &mut feeds, 32, vec![trailing_open(70, "Activation immediate, retracement 5, best 100")], vec![]);
+        push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+        let bid = ActionKind::Order(vec![requested(0, true, "99", RequestedTif::Alo, Some("0x08"))]);
+        drop(book.on_mempool(line(3_210, 8, vec![bid]), Some(&coins()), NONE_UNREPORTED));
+        let btc = Coin::new("BTC");
+        let untold_set_global = |book: &mut PendingBook, hash: u8, mark: &str| {
+            let MempoolInput::Tx { tx, .. } = line(3_250, hash, vec![]) else { unreachable!() };
+            let mark_px = Px::parse_from_str(mark).unwrap();
+            let reached = book.shadow.reached_accounts(&btc, book.replica.as_ref(), mark_px, tx.seen_ns);
+            let sga = SetGlobalCoin::frozen("BTC", mark_px, &reached, book.accounts.copy().ok());
+            let mut step = book.sync(NONE_UNREPORTED);
+            step.absorb(book.shadow.on_set_global(&tx, vec![(btc.clone(), 0, sga)], book.replica.as_ref()));
+            step
+        };
+        let mut first = untold_set_global(&mut book, 1, "100");
+        assert_eq!(first.trades, shadow::tests::NO_TRADES);
+        book.publish(&mut first);
+        let mut second = untold_set_global(&mut book, 2, "95");
+        assert_eq!(second.trades.iter().map(|trade| trade.px).collect::<Vec<_>>(), [Px::parse_from_str("99").unwrap()]);
+        let handle = book.publisher.handle().clone();
+        let mut events = handle.subscribe();
+        book.accounts.apply(FlowAccountsEvent::Snapshot(Box::new(trailing_snapshot(2, 1_060))));
+        owner.send_replace(crate::accounts::flow_accounts::FlowAccountsValidity { generation: 2, state: Ok(()) });
+        book.publish(&mut second);
+        assert_eq!(told_trades(&mut events), shadow::tests::NO_TRADES);
+    }
+
+    /// Review 000662 r2 P2-4: an input restoring the account copy and bringing a TWAP loss takes the loss first: BTC,
+    /// not decided while the copy was withheld - its suborder held back -, is replayed decided again with its TWAPs
+    /// unknown: no suborder trade told.
+    #[test]
+    fn a_copy_restored_with_a_twap_loss_tells_no_suborder_trade() {
+        let (accounts, owner) = trailing_accounts();
+        owner.send_replace(validity(Err("withheld".to_string())));
+        let (mut book, mut feed, mut feeds) = served_book_with_accounts(shadow::tests::params(), accounts);
+        push_block(&mut book, &mut feed, &mut feeds, 32, vec![trailing_open(70, "Activation immediate, retracement 5, best 100")], vec![]);
+        push_block(&mut book, &mut feed, &mut feeds, 33, vec![], vec![]);
+        let (_prices, _step) = bid_then_set_global(&mut book);
+        // the confirmed block's TWAPs proven - the log read past it, both streams read through after that - while BTC is
+        // not decided: its suborder runs, told nothing
+        book.on_anchor(shadow::tests::twap_anchor(32), NONE_UNREPORTED);
+        let twap_trades = |step: &Step| step.trades.iter().filter(|trade| matches!(trade.taker, Taker::Twap { .. })).count();
+        for stream in [TwapStream::Statuses, TwapStream::Fills] {
+            let mut step = book.sync(NONE_UNREPORTED);
+            step.absorb(book.shadow.on_twap_read_through(stream, Instant::now(), book.replica.as_ref()));
+            assert_eq!(twap_trades(&step), 0);
+            book.publish(&mut step);
+        }
+        assert!(book.shadow.twaps_known());
+        let handle = book.publisher.handle().clone();
+        assert_eq!(handle.snapshot().frame(&Coin::new("BTC")).unwrap().undecided, Some("trailing_unknown"), "the suborder held back");
+        let mut events = handle.subscribe();
+        owner.send_replace(validity(Ok(())));
+        book.on_accounts(Unreported { twaps: true, ..NONE_UNREPORTED });
+        let told_twap = std::iter::from_fn(|| events.try_recv().ok()).any(|event| match event {
+            PendingEvent::Trades(frame) => frame.trades.iter().any(|trade| matches!(trade.taker, Taker::Twap { .. })),
+            _ => false,
+        });
+        assert!(!told_twap);
+        assert_eq!(handle.snapshot().frame(&Coin::new("BTC")).unwrap().undecided, None, "decided again");
     }
 
     /// Batch 2c: the book served published the replica's coins; a line moving BTC's book sends its frame - the bid
@@ -748,7 +1340,7 @@ mod tests {
         assert_eq!(frame.availability(), Err(Unavailable::WarmingUp));
         assert!(events.try_recv().is_err(), "not served: no frame");
         let latest = handle.stored_frame(&Coin::new("BTC"));
-        assert_eq!(latest.bbo.1.unwrap().0, crate::order_book::Px::parse_from_str("100.5").unwrap());
+        assert_eq!(latest.bbo.1.unwrap().0, Px::parse_from_str("100.5").unwrap());
     }
 
     /// Batch 2c: a new generation refreshes every coin - BTC's ask gone from the new fork's book, though no block of
@@ -835,7 +1427,7 @@ mod tests {
     }
 
     fn ask_101() -> overlay::BestLevel {
-        (crate::order_book::Px::parse_from_str("101").unwrap(), crate::order_book::Sz::parse_from_str("1").unwrap(), 1)
+        (Px::parse_from_str("101").unwrap(), crate::order_book::Sz::parse_from_str("1").unwrap(), 1)
     }
 
     /// Review 000611 r3 P2-2: a batch whose block both streams have not passed yet only queues - no settling; the one
@@ -844,7 +1436,7 @@ mod tests {
     fn a_batch_that_only_queues_settles_nothing() {
         let (mut book, mut feed, mut feeds) = served_book();
         let settles = book.shadow.settles();
-        let block = LoggedBlock { height: 32, time_ms: 3_200, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), read_at: Instant::now() };
+        let block = LoggedBlock { height: 32, time_ms: 3_200, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), set_global: false, read_at: Instant::now() };
         drop(book.on_block(BlockInput::Block { block, after_loss: false }, NONE_UNREPORTED));
         assert_eq!(book.shadow.settles(), settles + 1, "a block of the log settles");
         let [statuses, diffs] = block_lines(32, vec![], vec![]);

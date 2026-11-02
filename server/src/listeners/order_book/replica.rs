@@ -350,6 +350,11 @@ impl BookReplica {
         self.state.books().keys()
     }
 
+    /// The untriggered trigger orders (batch 2n-2: the trailing stops read apart).
+    pub(crate) const fn trigger_table(&self) -> &crate::listeners::order_book::triggers::TriggerTable {
+        self.state.trigger_table()
+    }
+
     /// One coin of the book, as the overlay reads it: its untriggered orders with it (batch 2m).
     pub(crate) fn coin<'a>(&'a self, coin: &'a Coin) -> CoinBase<'a> {
         let cloids = self.cloids.as_ref().and_then(|index| index.0.get(coin));

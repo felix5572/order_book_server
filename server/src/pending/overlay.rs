@@ -43,13 +43,18 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
     actions::{ActionId, BookOp, PendingAction, PendingTrigger, Placement, Tif},
+    mark_forecast::{book_px, price_units},
     refusals::{TakerKey, TakerRefusals},
+    trailing::CoinTrailing,
     triggers::{BatchPositions, RuledOut, SetGlobalCoin, TriggerOrder, TriggerSource, batch},
     twaps::TwapSlice,
 };
 use crate::{
-    accounts::replica::OrderRef,
-    listeners::order_book::triggers::{Direction, TriggerAvailability, TriggerTable},
+    accounts::{
+        marks::trailing::{TrailingEntry, TrailingState},
+        replica::OrderRef,
+    },
+    listeners::order_book::triggers::{Direction, TriggerAvailability, TriggerTable, stop_direction},
     order_book::{Coin, Oid, OrderBook, PriceLevel, Px, Side, Sz},
     types::inner::InnerL4Order,
 };
@@ -87,11 +92,18 @@ pub(crate) struct CoinBase<'a> {
     cloids: Option<&'a CoinCloids>,
     /// The replica's untriggered trigger orders, and the coin they are read for (batch 2m).
     triggers: Option<(&'a TriggerTable, &'a Coin)>,
+    /// Its trailing stops as a run stands on them (batch 2n-2); none read without.
+    trailing: Option<&'a CoinTrailing>,
 }
 
 impl<'a> CoinBase<'a> {
     pub(crate) const fn new(book: Option<&'a OrderBook<InnerL4Order>>, unproven: &'a [(Side, Px)], cloids: Option<&'a CoinCloids>) -> Self {
-        Self { book, unproven, cloids, triggers: None }
+        Self { book, unproven, cloids, triggers: None, trailing: None }
+    }
+
+    /// With the coin's trailing stops as a run stands on them.
+    pub(crate) const fn with_trailing(self, trailing: &'a CoinTrailing) -> Self {
+        Self { trailing: Some(trailing), ..self }
     }
 
     /// With the replica's untriggered trigger orders of `coin`.
@@ -320,6 +332,18 @@ pub(crate) struct Overlay {
     triggers_added: Vec<AddedTrigger>,
     /// The accounts, as known, whose position a fill of this run moved (design 000652 r4).
     moved: FxHashSet<Address>,
+    /// The replica's trailing stops as the run's `SetGlobalAction`s moved them (batch 2n-2), by oid.
+    trailing: FxHashMap<u64, TrailingEntry>,
+    /// From where the run decides nothing of the coin, why (batch 2n-2, design 000659 r3 P2-3): a `SetGlobalAction` may
+    /// have fired a trailing stop not known, or came where the run was so. The actions after it still apply, so that
+    /// later ones find what they take out gone, but report no fill.
+    undecided: Option<&'static str>,
+}
+
+/// What a mark reaches: the orders it fires, and the accounts of the trailing stops not known that it may fire.
+struct Reached {
+    orders: Vec<TriggerOrder>,
+    unknown: Vec<Address>,
 }
 
 /// A pending trigger order placed: its placement, its account as known.
@@ -332,6 +356,22 @@ struct AddedTrigger {
 
 impl Overlay {
     pub(crate) fn apply(&mut self, base: CoinBase<'_>, basis: Basis<'_>, action: &PendingAction) -> Effect {
+        let undecided = self.undecided;
+        let mut effect = self.apply_op(base, basis, action);
+        if let Some(reason) = undecided {
+            effect.fills.clear();
+            effect.triggered.clear();
+            effect.outcome = reason;
+        }
+        effect
+    }
+
+    /// Why the run decides nothing of the coin from some action on (batch 2n-2); `None` while it decides all.
+    pub(crate) const fn undecided(&self) -> Option<&'static str> {
+        self.undecided
+    }
+
+    fn apply_op(&mut self, base: CoinBase<'_>, basis: Basis<'_>, action: &PendingAction) -> Effect {
         let seen_ms = u64::try_from(action.seen_ns / 1_000_000).unwrap_or(0);
         let placing = Placing { basis, id: action.id, seen_ms, account: action.account, trigger_oid: None };
         match &action.op {
@@ -369,20 +409,42 @@ impl Overlay {
     /// on it. A batch ruled out still fires its orders: they leave the untriggered ones, their accounts' positions taken
     /// to move by fills not known.
     fn set_global(&mut self, base: CoinBase<'_>, placing: Placing<'_>, sga: &SetGlobalCoin) -> Effect {
-        let candidates = match self.reached(base, sga.mark_px) {
-            Ok(candidates) => candidates,
-            Err(reason) => return Effect { stale: batch(Vec::new(), sga, &self.moved).1, ..Effect::of(reason) },
+        // its input not decided, or the run already so: nothing of it is (design 000659 r4)
+        if let Some(reason) = sga.undecided_input.or(self.undecided) {
+            self.undecided = Some(reason);
+            return Effect::of(reason);
+        }
+        let Reached { orders: candidates, unknown } = match self.reached(base, sga.mark_px) {
+            Ok(reached) => reached,
+            Err(reason) => {
+                // the table's gap told as it was, a trailing stop not known kept apart (review 000662 r1 P2-7)
+                if self.holds_trailing_unknown(base) {
+                    self.undecided = Some("trailing_unknown");
+                }
+                return Effect { stale: batch(Vec::new(), sga, &self.moved).1, ..Effect::of(reason) };
+            }
         };
+        if !unknown.is_empty() {
+            // a trailing stop not known may fire too (r2 s4, r3 P2-3): those reached for certain leave, every account of
+            // the coin's stops it may fire is taken to move, and the run decides nothing of the coin from here
+            let stale = batch(Vec::new(), sga, &self.moved).1;
+            self.fire(&candidates);
+            self.moved.extend(candidates.iter().filter_map(|order| order.source.account()).chain(unknown));
+            self.undecided = Some("trailing_unknown");
+            return Effect { stale, ..Effect::of("trailing_unknown") };
+        }
         let (ordered, stale) = batch(candidates, sga, &self.moved);
         let orders = match ordered {
             Ok(orders) => orders,
             Err(RuledOut { reason, reached }) => {
                 self.fire(&reached);
                 self.moved.extend(reached.iter().filter_map(|order| order.source.account()));
+                self.advance_trailing(base, sga.mark_px);
                 return Effect { stale, ..Effect::of(reason) };
             }
         };
         self.fire(&orders);
+        self.advance_trailing(base, sga.mark_px);
         let mut positions = BatchPositions::of(sga);
         let mut triggered = Vec::with_capacity(orders.len());
         for (item, order) in orders.into_iter().enumerate() {
@@ -409,7 +471,8 @@ impl Overlay {
     /// The accounts, as known, of the untriggered orders a mark at `mark_px` reaches as the overlay stands, sorted; none
     /// while they are not all known.
     pub(crate) fn reached_accounts(&self, base: CoinBase<'_>, mark_px: Px) -> Vec<Address> {
-        let mut accounts: Vec<Address> = self.reached(base, mark_px).unwrap_or_default().iter().filter_map(|order| order.source.account()).collect();
+        let reached = self.reached(base, mark_px).map(|reached| reached.orders).unwrap_or_default();
+        let mut accounts: Vec<Address> = reached.iter().filter_map(|order| order.source.account()).collect();
         accounts.sort_unstable();
         accounts.dedup();
         accounts
@@ -430,9 +493,10 @@ impl Overlay {
         }
     }
 
-    /// The untriggered orders a mark at `mark_px` reaches: the replica's not taken out by an action here, by oid, then
-    /// the pending ones as they came; why they are not all known.
-    fn reached(&self, base: CoinBase<'_>, mark_px: Px) -> Result<Vec<TriggerOrder>, &'static str> {
+    /// The untriggered orders a mark at `mark_px` reaches: the replica's not taken out by an action here, by oid - its
+    /// trailing stops among them (batch 2n-2) -, then the pending ones as they came; the accounts of the trailing stops
+    /// not known; why they are not all known.
+    fn reached(&self, base: CoinBase<'_>, mark_px: Px) -> Result<Reached, &'static str> {
         let mut orders = Vec::new();
         for (trigger_px, order) in base.reached_triggers(mark_px)? {
             if self.triggers_gone.contains(&order.oid) {
@@ -442,6 +506,7 @@ impl Overlay {
                 orders.push(order);
             }
         }
+        let unknown = self.trailing_reached(base, mark_px, &mut orders)?;
         orders.sort_by_key(|order| match order.source {
             TriggerSource::Confirmed { oid, .. } => oid,
             TriggerSource::Pending { .. } => u64::MAX,
@@ -449,7 +514,51 @@ impl Overlay {
         for added in self.triggers_added.iter().filter(|added| reaches_trigger(added.order.direction, mark_px, added.order.trigger_px)) {
             orders.push(TriggerOrder::pending(added.id, added.account, &added.order).map_err(|_| "limit_overflow")?);
         }
-        Ok(orders)
+        Ok(Reached { orders, unknown })
+    }
+
+    /// The replica's trailing stops a mark at `mark_px` reaches, each at its trigger price as the run moved it - a
+    /// sale's at or below it, a buy's at or above (as a stop's, HL firing on equality) -, into `orders`; the accounts of
+    /// those not known.
+    fn trailing_reached(&self, base: CoinBase<'_>, mark_px: Px, orders: &mut Vec<TriggerOrder>) -> Result<Vec<Address>, &'static str> {
+        let mut unknown = Vec::new();
+        let Some(trailing) = base.trailing else { return Ok(unknown) };
+        for (order, held) in trailing.stops.iter().filter(|(order, _)| !self.triggers_gone.contains(&order.oid)) {
+            let Ok(stop) = self.trailing.get(&order.oid).copied().unwrap_or(*held) else {
+                unknown.push(order.user);
+                continue;
+            };
+            let TrailingState::Active { best } = stop.state else { continue };
+            // a trigger price below zero is never reached
+            let Some(trigger_units) = stop.trigger_px(best) else { continue };
+            let trigger_px = trailing.size_decimals.and_then(|size_decimals| book_px(trigger_units, size_decimals)).ok_or("mark_overflow")?;
+            if reaches_trigger(stop_direction(order.side), mark_px, trigger_px) {
+                orders.push(TriggerOrder::trailing(trigger_px, order).map_err(|_| "limit_overflow")?);
+            }
+        }
+        Ok(unknown)
+    }
+
+    /// Whether a trailing stop of the coin left untriggered is not known.
+    fn holds_trailing_unknown(&self, base: CoinBase<'_>) -> bool {
+        let Some(trailing) = base.trailing else { return false };
+        let untriggered = trailing.stops.iter().filter(|(order, _)| !self.triggers_gone.contains(&order.oid));
+        untriggered.map(|(order, held)| self.trailing.get(&order.oid).copied().unwrap_or(*held)).any(|entry| entry.is_err())
+    }
+
+    /// After a `SetGlobalAction`'s batch: the trailing stops left untriggered moved by its mark, as the node moves them
+    /// (2n-1's rule); a mark off the coin's price units leaves them not known.
+    fn advance_trailing(&mut self, base: CoinBase<'_>, mark_px: Px) {
+        let Some(trailing) = base.trailing else { return };
+        let mark = trailing.size_decimals.and_then(|size_decimals| price_units(mark_px, size_decimals));
+        for (order, held) in trailing.stops.iter().filter(|(order, _)| !self.triggers_gone.contains(&order.oid)) {
+            let next = match (self.trailing.get(&order.oid).copied().unwrap_or(*held), mark) {
+                (Ok(stop), Some(mark)) => Ok(stop.advanced(mark)),
+                (Ok(_), None) => Err("mark_off_units"),
+                (unknown @ Err(_), _) => unknown,
+            };
+            self.trailing.insert(order.oid, next);
+        }
     }
 
     /// A TWAP suborder (batch 2h): a taker through the merged opposite side from its best, at most 3% past it (HL docs
@@ -465,7 +574,9 @@ impl Overlay {
             (Side::Ask, Some(parent)) => slipped.max(parent),
             (_, None) => slipped,
         };
-        self.take(base, side, limit, slice.sz.value(), Some(slice.user)).0
+        let fills = self.take(base, side, limit, slice.sz.value(), Some(slice.user)).0;
+        // a run deciding nothing of the coin moves its book on, reporting no fill (review 000662 r1 P2-6)
+        if self.undecided.is_some() { Vec::new() } else { fills }
     }
 
     /// The merged book's best levels, (bid, ask).
@@ -1051,7 +1162,7 @@ mod tests {
     /// A `SetGlobalAction` on BTC at `mark`, its accounts' positions (whole units, signed) frozen.
     fn set_global(index: usize, mark: &str, positions: &[(Address, i128)]) -> PendingAction {
         let positions = positions.iter().map(|(user, units)| (*user, units * 100_000_000)).collect();
-        let sga = SetGlobalCoin { mark_px: px(mark), positions, positions_known: true, stale: std::collections::BTreeSet::new() };
+        let sga = SetGlobalCoin { mark_px: px(mark), positions, positions_known: true, stale: std::collections::BTreeSet::new(), undecided_input: None };
         action(index, BookOp::SetGlobal(Box::new(sga)))
     }
 
@@ -1789,5 +1900,141 @@ mod tests {
         assert_eq!(by(ioc(Side::Bid, "101"), None, Some(BOB), 0, 2_000), "took", "another signer");
         assert_eq!(by(ioc(Side::Bid, "101"), Some(ALICE), None, 0, 2_000), "took", "a vault of the same address");
         assert_eq!(by(ioc(Side::Bid, "101"), None, None, 0, 2_000), "took", "a signer unknown");
+    }
+
+    /// A BTC trailing stop market sale of 1, its condition `condition` (batch 2n-2).
+    fn trailing_sale(oid: u64, user: Address, condition: &str) -> InnerL4Order {
+        InnerL4Order {
+            trigger_condition: condition.to_string(),
+            is_trigger: true,
+            trigger_px: "0.0".to_string(),
+            order_type: "Trailing Stop Market".to_string(),
+            tif: None,
+            ..resting(oid, user, Side::Ask, "100", "1", None)
+        }
+    }
+
+    /// BTC's trailing stops as a run stands on them (szDecimals 5: price units of 0.1).
+    fn coin_trailing(stops: Vec<(InnerL4Order, TrailingEntry)>) -> CoinTrailing {
+        CoinTrailing { size_decimals: Some(5), stops: stops.into_iter().map(|(order, entry)| (Arc::new(order), entry)).collect() }
+    }
+
+    fn sale_stop(best: Option<u64>, activation: Option<u64>, retracement_units: u64) -> crate::accounts::marks::trailing::TrailingStop {
+        let state = best.map_or(TrailingState::Waiting, |best| TrailingState::Active { best });
+        crate::accounts::marks::trailing::TrailingStop {
+            side: Side::Ask,
+            activation,
+            retracement: crate::accounts::marks::trailing::Retracement::Price(retracement_units),
+            state,
+        }
+    }
+
+    /// `run_with`, the coin's trailing stops `trailing` (in the table too) read by the run.
+    fn run_trailing(triggers: Vec<InnerL4Order>, trailing: &CoinTrailing, actions: &[PendingAction]) -> (Vec<Effect>, Overlay) {
+        let (book, cloids) = book();
+        let orders = triggers.into_iter().chain(trailing.stops.iter().map(|(order, _)| InnerL4Order::clone(order))).collect();
+        let (table, coin) = (table(TriggerSection::Complete(orders)), Coin::new("BTC"));
+        let base = CoinBase::new(Some(&book), &[], Some(&cloids)).with_triggers(&table, &coin).with_trailing(trailing);
+        let mut overlay = Overlay::default();
+        let effects = actions.iter().map(|action| overlay.apply(base, no_priorities(), action)).collect();
+        (effects, overlay)
+    }
+
+    /// Batch 2n-2 (design 000659 r2 s4): a pending `SetGlobalAction` moves a trailing stop's best, a later one fires it
+    /// at the trigger price that best gives - best 100, retracement 5: 110 raises it (105), 104 fires it, as an IOC
+    /// sale 10% under 105 taking the bid at 99.
+    #[test]
+    fn a_pending_set_global_moves_a_trailing_stop_a_later_one_fires() {
+        let trailing = coin_trailing(vec![(trailing_sale(70, ALICE, "Activation immediate, retracement 5, best 100"), Ok(sale_stop(Some(1_000), None, 50)))]);
+        let (effects, _) = run_trailing(Vec::new(), &trailing, &[set_global(0, "110", &[]), set_global(1, "104", &[])]);
+        assert_eq!((effects[0].outcome, fired(&effects[0])), ("set_global", vec![]), "105 not reached at 110");
+        assert_eq!(fired(&effects[1]), [(confirmed_source(70, ALICE), "took", sz("1"))]);
+        assert_eq!(effects[1].triggered[0].fills[0].px, px("99"));
+        let (effects, _) = run_trailing(Vec::new(), &trailing, &[set_global(0, "104", &[])]);
+        assert_eq!(fired(&effects[0]), [], "without the rise its trigger price is 95");
+    }
+
+    /// A waiting stop activates at a mark at or past its price, its best that mark (user 2026-11-02): above 105, the
+    /// first mark 106 makes its trigger 101, the next mark 100 fires it.
+    #[test]
+    fn a_waiting_trailing_stop_activates_then_fires() {
+        let waiting = coin_trailing(vec![(trailing_sale(71, ALICE, "Activation above 105, retracement 5, best waiting"), Ok(sale_stop(None, Some(1_050), 50)))]);
+        let (effects, _) = run_trailing(Vec::new(), &waiting, &[set_global(0, "104", &[]), set_global(1, "100", &[])]);
+        assert_eq!(fired(&effects[1]), [], "never active");
+        let (effects, _) = run_trailing(Vec::new(), &waiting, &[set_global(0, "106", &[]), set_global(1, "100", &[])]);
+        assert_eq!((fired(&effects[0]), fired(&effects[1]).len()), (vec![], 1), "activated at 106, not fired by it");
+    }
+
+    /// Review 000659 r1 P2-2, r2 P2-3: a `SetGlobalAction` firing stop B for certain, a trailing stop A not known beside
+    /// it - B leaves, nothing fills, and the run decides nothing of the coin from there: A cancelled, a second action
+    /// does not fire B again, a third account's IOC sale at the bid B would have taken reports no fill.
+    #[test]
+    fn a_trailing_stop_not_known_leaves_the_run_undecided() {
+        let unknown = coin_trailing(vec![(trailing_sale(71, BOB, "Activation immediate, retracement 5, best 100"), Err("mark_written"))]);
+        let stop_b = stop(80, ALICE, Side::Ask, None, "1", Sizing::Order);
+        let actions = [
+            set_global(0, "99", &[]),
+            action(1, cancel_op(71)),
+            set_global(2, "98", &[]),
+            place(3, Side::Ask, "99", "1", Tif::Ioc, None),
+        ];
+        let (effects, overlay) = run_trailing(vec![stop_b], &unknown, &actions);
+        assert_eq!((effects[0].outcome, fired(&effects[0])), ("trailing_unknown", vec![]));
+        assert!(overlay.triggers_gone.contains(&80), "B left as the action fired it");
+        assert_eq!((effects[2].outcome, fired(&effects[2])), ("trailing_unknown", vec![]), "B not fired again");
+        assert_eq!((effects[3].outcome, effects[3].fills.len()), ("trailing_unknown", 0));
+        assert_eq!(overlay.undecided(), Some("trailing_unknown"));
+        assert!(overlay.moved.contains(&ALICE) && overlay.moved.contains(&BOB));
+        // the same with A known and away (its trigger price 95): B fires, the run decided
+        let known = coin_trailing(vec![(trailing_sale(71, BOB, "Activation immediate, retracement 5, best 100"), Ok(sale_stop(Some(1_000), None, 50)))]);
+        let (effects, overlay) = run_trailing(vec![stop(80, ALICE, Side::Ask, None, "1", Sizing::Order)], &known, &actions[..1]);
+        assert_eq!((fired(&effects[0]).len(), overlay.undecided()), (1, None));
+    }
+
+    /// Design 000659 r4: a `SetGlobalAction` whose line came where the run was not decided decides nothing either - its
+    /// place kept, the run undecided from it on, though nothing before it is.
+    #[test]
+    fn an_undecided_input_leaves_the_run_undecided() {
+        let undecided = action(0, BookOp::SetGlobal(Box::new(SetGlobalCoin::undecided("trailing_unknown"))));
+        let (effects, overlay) = run_trailing(Vec::new(), &CoinTrailing::default(), &[undecided, place(1, Side::Ask, "99", "1", Tif::Ioc, None)]);
+        assert_eq!((effects[0].outcome, effects[1].outcome, effects[1].fills.len()), ("trailing_unknown", "trailing_unknown", 0));
+        assert_eq!(overlay.undecided(), Some("trailing_unknown"));
+        let (effects, overlay) = run_trailing(Vec::new(), &CoinTrailing::default(), &[place(1, Side::Ask, "99", "1", Tif::Ioc, None)]);
+        assert_eq!((effects[0].fills.len(), overlay.undecided()), (1, None));
+    }
+
+    /// Review 000662 r1 P2-6: a TWAP suborder due after the run turned undecided moves the book on, reporting no fill;
+    /// one before it reports.
+    #[test]
+    fn a_suborder_after_the_run_turned_undecided_reports_no_fill() {
+        let (book, cloids) = book();
+        let (table, coin) = (table(TriggerSection::Complete(Vec::new())), Coin::new("BTC"));
+        let base = CoinBase::new(Some(&book), &[], Some(&cloids)).with_triggers(&table, &coin);
+        let slice = TwapSlice { twap_id: 7, user: ALICE, slot: 0, is_buy: true, sz: sz("0.1"), limit_px: None, due_ms: 0 };
+        assert_eq!(Overlay::default().take_slice(base, &slice).len(), 1, "decided: it takes at 101");
+        let mut overlay = Overlay::default();
+        overlay.apply(base, no_priorities(), &action(0, BookOp::SetGlobal(Box::new(SetGlobalCoin::undecided("trailing_unknown")))));
+        assert_eq!(overlay.take_slice(base, &slice), []);
+        assert_eq!(overlay.bbo(base).1, Some(level("101", "1.9", 2)), "the book moved on all the same");
+    }
+
+    /// Review 000662 r1 P2-7: a trailing stop known not known beside an incomplete table - the action runs none, told
+    /// so - leaves the run undecided all the same; with none such, the gap alone as before.
+    #[test]
+    fn a_trailing_stop_not_known_beside_an_incomplete_table_leaves_the_run_undecided() {
+        let (book, cloids) = book();
+        let (absent, coin) = (table(TriggerSection::Absent), Coin::new("BTC"));
+        let unknown = coin_trailing(vec![(trailing_sale(71, BOB, "Activation immediate, retracement 5, best 100"), Err("mark_unclaimed"))]);
+        let base = CoinBase::new(Some(&book), &[], Some(&cloids)).with_triggers(&absent, &coin).with_trailing(&unknown);
+        let mut overlay = Overlay::default();
+        let effects: Vec<Effect> = [set_global(0, "99", &[]), place(1, Side::Ask, "99", "1", Tif::Ioc, None)]
+            .iter()
+            .map(|action| overlay.apply(base, no_priorities(), action))
+            .collect();
+        assert_eq!((effects[0].outcome, effects[1].fills.len(), overlay.undecided()), ("table_incomplete", 0, Some("trailing_unknown")));
+        let base = CoinBase::new(Some(&book), &[], Some(&cloids)).with_triggers(&absent, &coin);
+        let mut overlay = Overlay::default();
+        assert_eq!(overlay.apply(base, no_priorities(), &set_global(0, "99", &[])).outcome, "table_incomplete");
+        assert_eq!((overlay.apply(base, no_priorities(), &place(1, Side::Ask, "99", "1", Tif::Ioc, None)).fills.len(), overlay.undecided()), (1, None));
     }
 }

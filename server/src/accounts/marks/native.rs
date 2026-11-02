@@ -485,6 +485,16 @@ impl NativePrices {
         })
     }
 
+    /// The coin of `asset`.
+    pub(crate) fn coin_name(&self, asset: usize) -> &str {
+        &self.coins[asset].name
+    }
+
+    /// `RefreshState::due_ms`.
+    pub(crate) fn refresh_due_ms(&self) -> Option<u64> {
+        self.refresh.due_ms()
+    }
+
     /// The seed's universe: the assets `mark` takes.
     pub(crate) fn coin_count(&self) -> usize {
         self.coins.len()

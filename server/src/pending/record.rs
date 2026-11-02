@@ -75,6 +75,32 @@ impl BlockRecord {
         }
     }
 
+    /// Whether the node wrote no main-dex mark in the blocks above `after` through `through` (batch 2n-2, hyperliquid-
+    /// trade design 000659 r3 P2-2): the record holds each - its blocks follow one another, so its oldest at or below
+    /// `after + 1` and its newest at or above `through` -, none holds a `SetGlobalAction`, and with `due_ms` each is
+    /// earlier than it (an automatic refresh may write from then on). None to prove when `after` is `through`; why not.
+    pub(crate) fn marks_unwritten(&self, after: u64, through: u64, due_ms: Option<u64>) -> Result<(), &'static str> {
+        if after > through {
+            return Err("account_copy_ahead");
+        }
+        if after == through {
+            return Ok(());
+        }
+        let (Some(oldest), Some(newest)) = (self.blocks.front(), self.blocks.back()) else { return Err("block_log_short") };
+        if oldest.height > after + 1 || newest.height < through {
+            return Err("block_log_short");
+        }
+        for block in self.blocks.iter().skip_while(|block| block.height <= after).take_while(|block| block.height <= through) {
+            if block.set_global {
+                return Err("mark_written");
+            }
+            if due_ms.is_some_and(|due_ms| block.time_ms >= due_ms) {
+                return Err("refresh_due");
+            }
+        }
+        Ok(())
+    }
+
     /// Blocks held above `confirmed` (all of them without a confirmed height).
     pub(crate) fn lead(&self, confirmed: Option<u64>) -> u64 {
         let (Some(oldest), Some(newest)) = (self.blocks.front(), self.blocks.back()) else { return 0 };
@@ -90,7 +116,7 @@ mod tests {
 
     fn block(height: u64, hashes: &[u8]) -> LoggedBlock {
         let hashes = hashes.iter().map(|byte| hash(*byte)).collect();
-        LoggedBlock { height, time_ms: height * 100, hashes, priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), read_at: std::time::Instant::now() }
+        LoggedBlock { height, time_ms: height * 100, hashes, priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), set_global: false, read_at: std::time::Instant::now() }
     }
 
     #[test]
@@ -149,5 +175,32 @@ mod tests {
         }
         let leads = [record.lead(None), record.lead(Some(5)), record.lead(Some(12)), record.lead(Some(14)), record.lead(Some(20))];
         assert_eq!(leads, [5, 5, 2, 0, 0]);
+    }
+
+    /// Batch 2n-2 (hyperliquid-trade design 000659 r3 P2-2): blocks (A, R] are proven to write no main-dex mark only
+    /// when the record holds each, none holds a `SetGlobalAction` and each is before the refresh deadline - the log
+    /// starting over past A + 1, or reaching only R - 1, proves nothing; an empty range needs no proof, at the deadline
+    /// too; an account copy ahead of R is none to use.
+    #[test]
+    fn a_range_writes_no_mark_only_as_the_record_proves_it() {
+        let mut record = BlockRecord::default();
+        for height in 10..=14 {
+            record.add(block(height, &[]));
+        }
+        assert_eq!(record.marks_unwritten(10, 14, None), Ok(()));
+        assert_eq!(record.marks_unwritten(10, 14, Some(1_400)), Err("refresh_due"), "block 14's time is the deadline");
+        assert_eq!(record.marks_unwritten(10, 14, Some(1_401)), Ok(()));
+        assert_eq!(record.marks_unwritten(10, 15, None), Err("block_log_short"), "the log reaches R - 1 only");
+        assert_eq!(record.marks_unwritten(14, 14, Some(0)), Ok(()), "A = R at the deadline");
+        assert_eq!(record.marks_unwritten(15, 14, None), Err("account_copy_ahead"));
+        let mut restarted = BlockRecord::default();
+        restarted.add(block(10, &[]));
+        restarted.add(block(12, &[]));
+        restarted.add(block(13, &[]));
+        assert_eq!(restarted.marks_unwritten(10, 13, None), Err("block_log_short"), "the log started over past A + 1");
+        assert_eq!(restarted.marks_unwritten(11, 13, None), Ok(()));
+        record.add(LoggedBlock { set_global: true, ..block(15, &[]) });
+        assert_eq!(record.marks_unwritten(12, 15, None), Err("mark_written"));
+        assert_eq!(record.marks_unwritten(15, 15, None), Ok(()), "a block at A is the copy's");
     }
 }

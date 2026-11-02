@@ -61,6 +61,8 @@ pub(crate) struct LoggedBlock {
     pub(crate) signer_accounts: Vec<(Address, Address)>,
     /// The TWAPs its successful `twapCancel`s ended (batch 2h).
     pub(crate) twap_cancels: Vec<u64>,
+    /// It holds a `SetGlobalAction`, whatever it did (batch 2n-2: a block that may write the main dex's marks).
+    pub(crate) set_global: bool,
     /// When the watcher read its line: the TWAP book's completeness proof (design 000624 r3 P1).
     pub(crate) read_at: ReadInstant,
 }
@@ -98,7 +100,8 @@ pub(crate) fn parse_block(line: &str) -> Result<LoggedBlock, String> {
     let taker_outcomes = taker_outcomes(&block, &paired, &signers).map_err(|err| format!("block {height}: {err}"))?;
     let signer_accounts = signer_accounts(&paired, &signers).map_err(|err| format!("block {height}: {err}"))?;
     let twap_cancels = twap_cancels(&paired).map_err(|err| format!("block {height}: {err}"))?;
-    Ok(LoggedBlock { height, time_ms, hashes, priorities, taker_outcomes, signer_accounts, twap_cancels, read_at })
+    let set_global = paired.iter().any(|paired| paired.action.action_type == "SetGlobalAction");
+    Ok(LoggedBlock { height, time_ms, hashes, priorities, taker_outcomes, signer_accounts, twap_cancels, set_global, read_at })
 }
 
 /// The TWAPs the block's successful `twapCancel`s ended (`{"type": "twapCancel", "data": {"status": "success"}}`; an

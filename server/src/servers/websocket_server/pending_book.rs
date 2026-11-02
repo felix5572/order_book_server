@@ -389,7 +389,11 @@ fn levels(best: BestLevels) -> [Option<Level>; 2] {
     <[_; 2]>::from(best).map(|level| level.map(|(px, sz, n)| Level::new(px.to_str(), sz.to_str(), n as usize)))
 }
 
+/// A coin's frame: its levels, or - its pending book not decided (batch 2n-2) - the coin's own `unavailable` status.
 fn bbo_wire(frame: &BboFrame) -> bytes::Bytes {
+    if let Some(reason) = frame.undecided {
+        return unavailable_wire(EXT_PENDING_BBO, Some(&frame.coin), reason);
+    }
     wire(EXT_PENDING_BBO, BboData {
         coin: frame.coin.value(),
         status: "ready",
@@ -469,7 +473,7 @@ fn trade_data(trade: &PendingTrade) -> TradeData {
                 cloid: cloid.clone(),
                 vault: vault.map(user_text),
             },
-            Taker::Twap { twap_id, user, slot } => TakerData::Twap { twap: TwapData { twap_id: *twap_id, user: user_text(*user), slot: *slot } },
+            Taker::Twap { twap_id, user, slot, .. } => TakerData::Twap { twap: TwapData { twap_id: *twap_id, user: user_text(*user), slot: *slot } },
             Taker::Trigger { source, .. } => TakerData::Trigger { trigger: trigger_data(source) },
         },
     }
@@ -521,6 +525,7 @@ mod tests {
             basis_bbo: (None, None),
             basis: BASIS,
             pending: CoinPending::default(),
+            undecided: None,
             twaps_known: true,
             published_ms: 9,
         }
@@ -827,7 +832,8 @@ mod tests {
         let id = ActionId { tx_hash: B256::repeat_byte(2), action: 0, item: 1 };
         let remainder = Maker::Pending { id, cloid: None, account: Some(ALICE) };
         let mempool = Maker::Pending { id, cloid: None, account: None };
-        let triggered = |source| PendingTrade { taker: Taker::Trigger { source, seen_ns: 0 }, ..trade("BTC", Maker::Unattributed, None) };
+        let set_global = ActionId { tx_hash: B256::repeat_byte(4), action: 0, item: 0 };
+        let triggered = |source| PendingTrade { taker: Taker::Trigger { source, set_global, seen_ns: 0 }, ..trade("BTC", Maker::Unattributed, None) };
         let pending = |account| TriggerSource::Pending { placed: id, cloid: None, account };
         let admitted = [
             trade("BTC", Maker::Confirmed { user: ALICE, oid: Oid::new(11), cloid: None }, None),
@@ -847,8 +853,9 @@ mod tests {
     /// one by its placement, its account `null` when not known (batch 2m, design 000652 r2).
     #[test]
     fn a_trade_on_the_wire() {
-        let twap = PendingTrade { taker: Taker::Twap { twap_id: 2_470_033, user: VAULT, slot: 12 }, ..trade("BTC", Maker::Unattributed, None) };
-        let triggered = |source| PendingTrade { taker: Taker::Trigger { source, seen_ns: 3_150_000_000 }, ..trade("BTC", Maker::Unattributed, None) };
+        let twap = PendingTrade { taker: Taker::Twap { twap_id: 2_470_033, user: VAULT, slot: 12, due_ms: 3_000 }, ..trade("BTC", Maker::Unattributed, None) };
+        let set_global = ActionId { tx_hash: B256::repeat_byte(4), action: 0, item: 0 };
+        let triggered = |source| PendingTrade { taker: Taker::Trigger { source, set_global, seen_ns: 3_150_000_000 }, ..trade("BTC", Maker::Unattributed, None) };
         let trigger = triggered(TriggerSource::Confirmed { oid: 345_678, user: VAULT, cloid: None });
         let placed = ActionId { tx_hash: B256::repeat_byte(3), action: 1, item: 2 };
         let pending_trigger = triggered(TriggerSource::Pending { placed, cloid: Some("0x0d".to_string()), account: None });
@@ -906,5 +913,15 @@ mod tests {
         assert!(parse(r#"{"method":"subscribe","subscription":{"type":"extPendingTrades","coins":["BTC"]}}"#).is_err());
         assert!(parse(r#"{"method":"subscribe","subscription":{"type":"extPendingBbo","coin":"BTC","nSigFigs":5}}"#).is_err());
         assert!(parse(r#"{"method":"subscribe","subscription":{"type":"extPendingTrades","user":"0x1"}}"#).is_ok(), "the address is checked by validate");
+    }
+
+    /// Batch 2n-2 (design 000659 r3 P2-3): a coin whose pending book is not decided is framed as its own `unavailable`
+    /// status, its reason with it; decided again, its levels.
+    #[test]
+    fn an_undecided_coins_frame_says_it_is_unavailable() {
+        let undecided = BboFrame { undecided: Some("trailing_unknown"), ..frame(1, "BTC", "101") };
+        assert_eq!(json(&bbo_wire(&undecided))["data"], serde_json::json!({"coin": "BTC", "status": "unavailable", "reason": "trailing_unknown"}));
+        let decided = json(&bbo_wire(&frame(2, "BTC", "101")));
+        assert_eq!((decided["data"]["status"].as_str(), decided["data"]["bbo"][1]["px"].as_str()), (Some("ready"), Some("101")));
     }
 }

@@ -125,6 +125,14 @@ impl RefreshState {
         changed.collect()
     }
 
+    /// The earliest block time, unix ms, an automatic refresh may write the marks at: the last explicit
+    /// `SetGlobalAction`'s plus the stale window (the guards and buckets after it only delay it); `None` with the refresh
+    /// off (batch 2n-2: until then no mark is written but by a `SetGlobalAction`).
+    pub(crate) fn due_ms(&self) -> Option<u64> {
+        let stale_after_ns = self.stale_after_ns?;
+        Some(self.last_explicit_ns.saturating_add(stale_after_ns) / 1_000_000)
+    }
+
     pub(crate) fn explicit(&mut self, time_ns: u64) {
         self.last_explicit_ns = time_ns;
     }

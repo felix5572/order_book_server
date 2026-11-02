@@ -59,7 +59,7 @@ pub(crate) struct TrailingStop {
 impl TrailingStop {
     /// The stop as the node holds it after writing `mark`.
     #[must_use]
-    fn advanced(self, mark: u64) -> Self {
+    pub(crate) fn advanced(self, mark: u64) -> Self {
         let state = match (self.state, self.side) {
             (TrailingState::Waiting, _) if self.activates_at(mark) => TrailingState::Active { best: mark },
             (TrailingState::Waiting, _) => TrailingState::Waiting,
@@ -91,8 +91,14 @@ impl TrailingStop {
 
     /// The stop a line states, in price units of `size_decimals`.
     fn of_line(line: &TrailingLine, size_decimals: u32) -> Result<Self, String> {
-        let terms = TrailingTerms::parse(&line.condition)?;
-        let activation = terms.activation.map(|(direction, px)| activation_px(line.side, direction, px, size_decimals)).transpose()?;
+        Self::of_condition(line.side, &line.condition, size_decimals)
+    }
+
+    /// The stop a `triggerCondition` of a `side` states - a line's, a trigger table's order's -, in price units of
+    /// `size_decimals`.
+    pub(crate) fn of_condition(side: Side, condition: &str, size_decimals: u32) -> Result<Self, String> {
+        let terms = TrailingTerms::parse(condition)?;
+        let activation = terms.activation.map(|(direction, px)| activation_px(side, direction, px, size_decimals)).transpose()?;
         let retracement = match terms.retracement {
             RetracementText::Percent(text) => Retracement::Percent(percent_thousandths(text)?),
             RetracementText::Price(text) => Retracement::Price(wire_units(text, size_decimals)?),
@@ -102,7 +108,7 @@ impl TrailingStop {
             (None, Some(_)) => TrailingState::Waiting,
             (None, None) => return Err("an immediate stop waiting".to_string()),
         };
-        Ok(Self { side: line.side, activation, retracement, state })
+        Ok(Self { side, activation, retracement, state })
     }
 }
 
@@ -234,7 +240,8 @@ pub(crate) struct TrailingCounts {
 }
 
 /// A stop, or why it is not known.
-type Entry = Result<TrailingStop, &'static str>;
+pub(crate) type TrailingEntry = Result<TrailingStop, &'static str>;
+type Entry = TrailingEntry;
 
 fn leaving_check(line: &TrailingLine, entry: &Entry, size_decimals: u32) -> &'static str {
     let Ok(stop) = entry else { return "unknown" };
@@ -333,6 +340,11 @@ impl TrailingStops {
     /// The assets holding a stop.
     pub(crate) fn assets(&self) -> impl Iterator<Item = usize> + '_ {
         self.by_asset.keys().copied()
+    }
+
+    /// Every stop: (asset, oid, the stop or why it is not known).
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (usize, u64, Entry)> + '_ {
+        self.by_asset.iter().flat_map(|(asset, stops)| stops.iter().map(|(oid, entry)| (*asset, *oid, *entry)))
     }
 
     /// One mark write moves its coin's stops but those placed after it in the block.

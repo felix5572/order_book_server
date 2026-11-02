@@ -769,7 +769,7 @@ lazy_static! {
     ).expect("metric can be created");
 
     /// Signed actions of the mempool lines read, by `kind`: `order`, `cancel`, `cancel_by_cloid`, `modify` (a modify
-    /// or a batchModify), `other`.
+    /// or a batchModify), `set_global`, `trailing_stop` (batch 2n-2: not modelled before its block), `other`.
     pub static ref PENDING_BOOK_MEMPOOL_ACTIONS_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_pending_book_mempool_actions_total", "Pending book mempool signed actions"),
         &["kind"]
@@ -1068,7 +1068,9 @@ lazy_static! {
 
     /// A `SetGlobalAction`'s priced coins, as first applied, by `outcome`: `executed`, `none_fired`, or why none ran
     /// (batch 2m) - `no_forecast`, `mark_overflow` as its line came; `no_trigger_table`, `table_incomplete`, `truncated`,
-    /// `limit_overflow`, `account_unknown`, `position_moved`, `positions_unfrozen`, `positions_unavailable`.
+    /// `limit_overflow`, `account_unknown`, `position_moved`, `positions_unfrozen`, `positions_unavailable`; or the run
+    /// deciding nothing of the coin from it on (batch 2n-2): `trailing_unknown` (a trailing stop not known it may fire),
+    /// or that, an earlier one's, where its line came.
     pub static ref PENDING_BOOK_TRIGGER_COINS_TOTAL: IntCounterVec = IntCounterVec::new(
         Opts::new("orderbook_pending_book_trigger_coins_total", "Pending book SetGlobalAction coins by trigger outcome"),
         &["outcome"]

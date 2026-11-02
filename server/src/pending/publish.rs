@@ -43,6 +43,9 @@ pub(crate) struct BboFrame {
     pub(crate) basis_bbo: BestLevels,
     pub(crate) basis: Basis,
     pub(crate) pending: CoinPending,
+    /// Why the coin's pending book is not decided (batch 2n-2, design 000659 r3 P2-3): served as not available, the book
+    /// as a whole being so; `None` while it is.
+    pub(crate) undecided: Option<&'static str>,
     /// Whether the TWAPs' suborders are known and overlaid (batch 2h): the book's, not the coin's.
     pub(crate) twaps_known: bool,
     /// The publisher's wall clock, unix ms.
@@ -91,6 +94,7 @@ impl FrameSet {
                 basis_bbo: (None, None),
                 basis,
                 pending: CoinPending::default(),
+                undecided: None,
                 twaps_known,
                 published_ms,
             },
@@ -235,8 +239,8 @@ pub(crate) struct Publisher {
     seq: u64,
     availability: Result<(), Unavailable>,
     twaps_known: bool,
-    /// Each coin's (`bbo`, `basisBbo`) as last framed.
-    framed: FxHashMap<Coin, (BestLevels, BestLevels)>,
+    /// Each coin's (`bbo`, `basisBbo`, undecided) as last framed: a change of any goes out (review 000659 r4).
+    framed: FxHashMap<Coin, (BestLevels, BestLevels, Option<&'static str>)>,
 }
 
 impl Publisher {
@@ -246,8 +250,9 @@ impl Publisher {
 
     /// What `step` changed, published: the frames of its coins (every coin with `refresh_all`), built first, then
     /// committed to the store with the availability in one write; then broadcast - the availability when it changed,
-    /// the frames whose best levels moved while the book may be served, the trades.
-    pub(crate) fn publish(&mut self, step: &Step, refresh_all: bool, shadow: &Shadow, replica: Option<&BookReplica>) {
+    /// the frames whose best levels moved while the book may be served, the trades. Whether its trades went out: none
+    /// do without a replica aligned to frame them on.
+    pub(crate) fn publish(&mut self, step: &Step, refresh_all: bool, shadow: &Shadow, replica: Option<&BookReplica>) -> bool {
         let aligned = replica.and_then(|replica| Some((replica, basis_of(replica)?)));
         let published_ms = now_ms();
         let twaps_known = shadow.twaps_known();
@@ -272,10 +277,10 @@ impl Publisher {
             PENDING_BOOK_FRAMES_TOTAL.with_label_values(&["bbo"]).inc_by(moved.len() as u64);
             self.handle.send(PendingEvent::Bbos(Arc::new(moved)));
         }
-        if let Some(trades) = trades {
-            PENDING_BOOK_FRAMES_TOTAL.with_label_values(&["trades"]).inc();
-            self.handle.send(PendingEvent::Trades(trades));
-        }
+        let Some(trades) = trades else { return false };
+        PENDING_BOOK_FRAMES_TOTAL.with_label_values(&["trades"]).inc();
+        self.handle.send(PendingEvent::Trades(trades));
+        true
     }
 
     /// The frames of the coins `step` changed - every coin with `refresh_all` -, and of them those whose best levels
@@ -307,10 +312,12 @@ impl Publisher {
                 basis_bbo: view.basis_bbo,
                 basis,
                 pending: view.pending,
+                undecided: view.undecided,
                 twaps_known,
                 published_ms,
             });
-            if self.framed.insert(coin, (view.bbo, view.basis_bbo)) != Some((view.bbo, view.basis_bbo)) {
+            let shown = (view.bbo, view.basis_bbo, view.undecided);
+            if self.framed.insert(coin, shown) != Some(shown) {
                 moved.push(Arc::clone(&frame));
             }
             framed.push(frame);

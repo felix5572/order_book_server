@@ -40,6 +40,7 @@ use super::{
     record::{BlockRecord, MAX_LEAD_BLOCKS},
     refusals::{TakerKey, TakerRefusals},
     signer_accounts::SignerAccounts,
+    trailing::{CoinTrailing, TrailingBasis},
     triggers::{SetGlobalCoin, TriggerSource},
     twap_streams::{TwapEvent, TwapFill},
     twaps::{DueSlices, TwapBook, TwapSlice, TwapStream, TwapsUnknown},
@@ -184,11 +185,12 @@ pub(crate) struct PendingTrade {
 pub(crate) enum Taker {
     /// A mempool order: its action, its line's `local_time` (unix ns), its cloid, the vault it acts for.
     Pending { id: ActionId, seen_ns: i64, cloid: Option<String>, vault: Option<Address> },
-    /// A TWAP's suborder of `slot` (batch 2h), `user` the TWAP's.
-    Twap { twap_id: u64, user: Address, slot: u64 },
-    /// A trigger order a `SetGlobalAction` fired (batch 2l; two sources since 2m), `seen_ns` the action's line's
-    /// `local_time`.
-    Trigger { source: TriggerSource, seen_ns: i64 },
+    /// A TWAP's suborder of `slot` (batch 2h), `user` the TWAP's; due at `due_ms` (unix ms): its place among the
+    /// suborders a block runs (review 000662 r6 P2).
+    Twap { twap_id: u64, user: Address, slot: u64, due_ms: u64 },
+    /// A trigger order a `SetGlobalAction` fired (batch 2l; two sources since 2m): `set_global` the action on the coin
+    /// (review 000662 r4 P2-3: two lines may share a `local_time`), `seen_ns` its line's `local_time`.
+    Trigger { source: TriggerSource, set_global: ActionId, seen_ns: i64 },
 }
 
 /// What a step changed: the trades predicted, and the coins whose merged book may have moved. A change of every coin -
@@ -207,12 +209,14 @@ impl Step {
     }
 }
 
-/// One coin as the pending book serves it: the merged book's best levels, the replica's, and what the set holds.
+/// One coin as the pending book serves it: the merged book's best levels, the replica's, and what the set holds; or why
+/// its pending book is not decided (batch 2n-2: a trailing stop not known a `SetGlobalAction` may fire).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CoinView {
     pub(crate) bbo: BestLevels,
     pub(crate) basis_bbo: BestLevels,
     pub(crate) pending: CoinPending,
+    pub(crate) undecided: Option<&'static str>,
 }
 
 /// A coin's held actions in execution order, and their overlay.
@@ -236,26 +240,88 @@ struct Replayed {
     reported: Vec<(usize, Effect)>,
 }
 
+/// The TWAP suborders' slots whose trades went out once (batch 2i), each with its due time - kept until the slot is
+/// past, unknown spells between -, and those the step under way computed: a run of the step computes none of them
+/// again; its commit tells those whose trades went out and leaves the others to a later run (review 000662 r3 P2-2, r4
+/// P2-2: trades withdrawn as the trailing stops are read anew, or no trades frame as the replica went).
+#[derive(Default)]
+struct SuborderSlots {
+    told: FxHashMap<(u64, u64), u64>,
+    computed: FxHashMap<(u64, u64), u64>,
+}
+
+impl SuborderSlots {
+    /// Whether `slice`'s trades are computed now - neither told nor computed in the step -; so from now on.
+    fn compute(&mut self, slice: &TwapSlice) -> bool {
+        let awaited = self.awaited(slice);
+        if awaited {
+            self.computed.insert((slice.twap_id, slice.slot), slice.due_ms);
+        }
+        awaited
+    }
+
+    /// Whether `slice`'s trades are still to come: neither told nor computed in the step.
+    fn awaited(&self, slice: &TwapSlice) -> bool {
+        let key = (slice.twap_id, slice.slot);
+        !self.told.contains_key(&key) && !self.computed.contains_key(&key)
+    }
+
+    /// The step committed, `told` its trades that went out: the slots computed of them told, the others forgotten.
+    fn commit(&mut self, told: &[PendingTrade]) {
+        let computed = std::mem::take(&mut self.computed);
+        let slots = told.iter().filter_map(|trade| match trade.taker {
+            Taker::Twap { twap_id, slot, .. } => Some((twap_id, slot)),
+            Taker::Pending { .. } | Taker::Trigger { .. } => None,
+        });
+        self.told.extend(slots.filter_map(|key| computed.get(&key).map(|due_ms| (key, *due_ms))));
+    }
+
+    /// The told slots due before `first_of_second_ms` forgotten: past.
+    fn forget_before(&mut self, first_of_second_ms: u64) {
+        self.told.retain(|_, due_ms| *due_ms >= first_of_second_ms);
+    }
+}
+
+/// A run on a fresh overlay: the overlay it leaves, each known action's effect by its index, each suborder's fills.
+struct Run {
+    overlay: Overlay,
+    effects: Vec<(usize, Effect)>,
+    slices: Vec<Vec<Fill>>,
+}
+
 impl CoinActions {
-    /// The overlay anew in a block's order: the known actions as they came - with TWAP suborders due, those of the lines
-    /// seen before `cut_ns` first, then the suborders the next first-of-second block runs at its start, then the others
-    /// (batch 2j; 2h ran the suborders first; with none, no action moves: review 000634 r3 P2-1). Each suborder's fills,
-    /// and the effects of the actions from `report_from` on.
+    /// The overlay anew (`run`): each suborder's fills, and the effects of the actions from `report_from` on.
     fn replay(&mut self, base: CoinBase<'_>, basis: Basis<'_>, slices: &[TwapSlice], cut_ns: i64, report_from: usize) -> Replayed {
-        let mut overlay = Overlay::default();
-        let (mut effects, slices) = if slices.is_empty() {
-            (self.apply_where(&mut overlay, base, basis, |_| true), Vec::new())
-        } else {
-            let mut effects = self.apply_where(&mut overlay, base, basis, |action| action.seen_ns < cut_ns);
-            let slices = slices.iter().map(|slice| overlay.take_slice(base, slice)).collect();
-            effects.extend(self.apply_where(&mut overlay, base, basis, |action| action.seen_ns >= cut_ns));
-            (effects, slices)
-        };
+        let Run { overlay, mut effects, slices } = self.run(base, basis, slices, cut_ns);
         self.overlay = overlay;
         self.keep_stale(&effects);
         effects.retain(|(index, _)| *index >= report_from);
         effects.sort_unstable_by_key(|(index, _)| *index);
         Replayed { slices, reported: effects }
+    }
+
+    /// The overlay anew in a block's order: the known actions as they came - with TWAP suborders due, those of the lines
+    /// seen before `cut_ns` first, then the suborders the next first-of-second block runs at its start, then the others
+    /// (batch 2j; 2h ran the suborders first; with none, no action moves: review 000634 r3 P2-1).
+    fn run(&self, base: CoinBase<'_>, basis: Basis<'_>, slices: &[TwapSlice], cut_ns: i64) -> Run {
+        let mut overlay = Overlay::default();
+        if slices.is_empty() {
+            let effects = self.apply_where(&mut overlay, base, basis, |_| true);
+            return Run { overlay, effects, slices: Vec::new() };
+        }
+        let mut effects = self.apply_where(&mut overlay, base, basis, |action| action.seen_ns < cut_ns);
+        let filled = slices.iter().map(|slice| overlay.take_slice(base, slice)).collect();
+        effects.extend(self.apply_where(&mut overlay, base, basis, |action| action.seen_ns >= cut_ns));
+        Run { overlay, effects, slices: filled }
+    }
+
+    /// Every trade a run anew yields - each known action's, each suborder's -, told or not: what a step's trades are
+    /// judged by when the trailing stops turn before it is told (review 000662 r3 P2-1).
+    fn yielded(&self, coin: &Coin, base: CoinBase<'_>, basis: Basis<'_>, slices: &[TwapSlice], cut_ns: i64) -> Vec<PendingTrade> {
+        let Run { effects, slices: filled, .. } = self.run(base, basis, slices, cut_ns);
+        let actions = effects.into_iter().flat_map(|(index, effect)| effect_trades(coin, &self.actions[index], effect));
+        let suborders = slices.iter().zip(filled).flat_map(|(slice, fills)| fills.into_iter().map(|fill| twap_trade(coin, slice, fill)));
+        actions.chain(suborders).collect()
     }
 
     /// The accounts each `SetGlobal` applied found stale, kept on it until its line leaves (design 000652 r4, r5): a
@@ -344,13 +410,12 @@ pub(crate) struct Shadow {
     signer_accounts: SignerAccounts,
     /// The running TWAPs (batch 2h); the suborders overlaid, as of the book's version and the confirmed block time's
     /// second they were known at - kept through that second while the next height is not proven, `None` while none are
-    /// (batch 2i) -; the (twap, slot) whose trades went out, with the slot's due time: kept until the slot is past,
-    /// unknown spells between; the confirmed height the trade window last replayed its coins at (review 000631 r1
-    /// P2-2).
+    /// (batch 2i) -; the suborders' slots computed and told; the confirmed height the trade window last replayed its
+    /// coins at (review 000631 r1 P2-2).
     twaps: TwapBook,
     due: DueSlices,
     due_of: Option<(u64, u64)>,
-    emitted: FxHashMap<(u64, u64), u64>,
+    slots: SuborderSlots,
     window_height: Option<u64>,
     /// The signed actions held with no replica aligned to judge their price band by, each with the lowest limit of its
     /// orders the band judges on each coin: judged once one is, before any overlay applies them (batch 2k, review 000637
@@ -368,10 +433,19 @@ pub(crate) struct Shadow {
     /// Overlays were applied while the block record was behind the confirmed height, their confirmed orders' ALO
     /// priorities possibly missing: replayed once it catches up, before the book is served (review 000620 r1 P2-2).
     priorities_behind: bool,
+    /// The account copy's trailing stops as last read (batch 2n-2), and each held coin's as its runs stand on them: read
+    /// again as the copy or the replica moves, a coin whose stops read otherwise replayed; the coins a read replayed in
+    /// the step under way, their suborders' trades held back to its commit (`tell_held_back`).
+    trailing_basis: TrailingBasis,
+    trailing: FxHashMap<Coin, CoinTrailing>,
+    held_back: HashSet<Coin>,
     /// Settling steps taken with a replica aligned.
     #[cfg(test)]
     settles: usize,
 }
+
+/// A coin holding no trailing stop, or none read.
+static NO_TRAILING: CoinTrailing = CoinTrailing { size_decimals: None, stops: Vec::new() };
 
 impl Shadow {
     /// Every input in a gap until each has begun; lines of the TWAP streams written before `started_ms` (unix ms) not
@@ -388,7 +462,7 @@ impl Shadow {
             twaps: TwapBook::new(started_ms),
             due: DueSlices::default(),
             due_of: None,
-            emitted: FxHashMap::default(),
+            slots: SuborderSlots::default(),
             window_height: None,
             band_unjudged: FxHashMap::default(),
             band_unjudged_slots: 0,
@@ -404,9 +478,100 @@ impl Shadow {
             refresh_all: false,
             basis_ms: 0,
             priorities_behind: false,
+            trailing_basis: TrailingBasis::default(),
+            trailing: FxHashMap::default(),
+            held_back: HashSet::new(),
             #[cfg(test)]
             settles: 0,
         }
+    }
+
+    /// The account copy's trailing stops as they now serve (batch 2n-2): the held coins whose stops read otherwise
+    /// replayed - a best moved with no book event, the copy turned unavailable or back (design 000659 r2 s3). Their
+    /// suborders' trades held back to the step's commit, as its input may move them (review 000662 r5 P2).
+    pub(crate) fn on_trailing(&mut self, basis: TrailingBasis, replica: Option<&BookReplica>) -> Step {
+        if basis == self.trailing_basis {
+            return Step::default();
+        }
+        self.trailing_basis = basis;
+        // a new generation is replayed whole as it settles
+        let Some((replica, height, _)) = aligned(replica).filter(|_| !self.gaps.replica) else { return Step::default() };
+        let changed: HashSet<Coin> = self.read_trailing(replica, height).into_iter().collect();
+        self.replay_coins(replica, &changed, false, &mut Vec::new());
+        self.held_back.extend(changed.iter().cloned());
+        Step { trades: Vec::new(), changed }
+    }
+
+    /// The suborders' trades of the coins a trailing read replayed in the step, as its final runs fill them (review
+    /// 000662 r5 P2): while the book may be served in the trade window, each slot neither told nor computed in the step,
+    /// into the step's `trades` (`order_trades` places them).
+    pub(crate) fn tell_held_back(&mut self, trades: &mut Vec<PendingTrade>, replica: Option<&BookReplica>) {
+        let held_back = std::mem::take(&mut self.held_back);
+        let Some(replica) = replica.filter(|replica| self.availability(Some(replica)).is_ok() && self.in_trade_window(self.basis_ms)) else { return };
+        let cut_ns = slice_cut_ns(self.basis_ms);
+        let Self { coins, due, slots, record, refusals, basis_ms, trailing, .. } = self;
+        let basis = Basis::new(record.priorities(), refusals, *basis_ms);
+        for coin in held_back {
+            let (Some(actions), Some(slices)) = (coins.get(&coin), due.get(&coin)) else { continue };
+            let base = replica.coin(&coin).with_trailing(trailing.get(&coin).unwrap_or(&NO_TRAILING));
+            slice_trades(&coin, slices, actions.run(base, basis, slices, cut_ns).slices, true, slots, trades);
+        }
+    }
+
+    /// A step's `trades` in the order its runs take them (review 000662 r6 P2): the actions seen before the cut as they
+    /// came, the TWAP suborders by due time and id, the actions at or after the cut as they came - each one's fills as
+    /// they came. A step of no deferred suborder is so already.
+    pub(crate) fn order_trades(&self, trades: &mut [PendingTrade]) {
+        let cut_ns = slice_cut_ns(self.basis_ms);
+        trades.sort_by_key(|trade| run_order(trade, cut_ns));
+    }
+
+    /// Each held coin's trailing stops read at the replica's `height`; those reading otherwise than its runs stood on.
+    fn read_trailing(&mut self, replica: &BookReplica, height: u64) -> Vec<Coin> {
+        let Self { coins, trailing, trailing_basis, record, .. } = self;
+        trailing.retain(|coin, _| coins.contains_key(coin));
+        let at = trailing_basis.at(record, height);
+        let mut changed = Vec::new();
+        for coin in coins.keys() {
+            let read = at.coin(replica.trigger_table(), coin);
+            if trailing.get(coin).unwrap_or(&NO_TRAILING) != &read {
+                trailing.insert(coin.clone(), read);
+                changed.push(coin.clone());
+            }
+        }
+        changed
+    }
+
+    /// Of a step's `trades`, those of a taker on `coins` - their runs replayed on trailing stops read anew before the step
+    /// is told - that the runs no longer yield alike withdrawn (review 000662 r3 P2-1): an action before its coin's first
+    /// undecided `SetGlobalAction` goes out as computed, one after it does not. A withdrawn suborder's slot is not told
+    /// with the step (`on_committed`). Every other trade stands; none told before is told again.
+    pub(crate) fn retain_yielded(&self, trades: &mut Vec<PendingTrade>, coins: &HashSet<Coin>, replica: &BookReplica) {
+        let judged: HashSet<&Coin> = trades.iter().map(|trade| &trade.coin).filter(|coin| coins.contains(*coin)).collect();
+        let yielded: Vec<PendingTrade> = judged.into_iter().flat_map(|coin| self.yielded(coin, replica)).collect();
+        let alike = |taker: &Taker| trades.iter().filter(|trade| trade.taker == *taker).eq(yielded.iter().filter(|trade| trade.taker == *taker));
+        let withdrawn: Vec<Taker> = trades.iter().filter(|trade| coins.contains(&trade.coin) && !alike(&trade.taker)).map(|trade| trade.taker.clone()).collect();
+        trades.retain(|trade| !withdrawn.contains(&trade.taker));
+    }
+
+    /// A step committed, `told` the trades that went out with it: their suborders' slots told, none of them again; the
+    /// others it computed - withdrawn, or no trades frame went out - a later run computes again (review 000662 r4 P2-2).
+    pub(crate) fn on_committed(&mut self, told: &[PendingTrade]) {
+        self.slots.commit(told);
+    }
+
+    /// Every trade `coin`'s run yields anew on `replica`, told or not.
+    fn yielded(&self, coin: &Coin, replica: &BookReplica) -> Vec<PendingTrade> {
+        let Some(actions) = self.coins.get(coin) else { return Vec::new() };
+        let slices = self.due.get(coin).map_or(&[][..], Vec::as_slice);
+        let base = replica.coin(coin).with_trailing(self.trailing.get(coin).unwrap_or(&NO_TRAILING));
+        let basis = Basis::new(self.record.priorities(), &self.refusals, self.basis_ms);
+        actions.yielded(coin, base, basis, slices, slice_cut_ns(self.basis_ms))
+    }
+
+    /// `coin`'s trailing stops as its runs stand on them: a held coin's as last read, another's read now.
+    fn coin_trailing(&self, coin: &Coin, replica: &BookReplica, height: u64) -> CoinTrailing {
+        self.trailing.get(coin).cloned().unwrap_or_else(|| self.trailing_basis.at(&self.record, height).coin(replica.trigger_table(), coin))
     }
 
     /// A mempool line; `after_loss` when the watcher had found a loss not yet reported, so it may follow it. `replica`
@@ -475,9 +640,19 @@ impl Shadow {
     /// on the same overlay as its mark (review 000652 r6 P2-3). None while no replica is aligned or the coin's orders are
     /// not all known (the action tells why as it applies).
     pub(crate) fn reached_accounts(&self, coin: &Coin, replica: Option<&BookReplica>, mark_px: Px, seen_ns: i64) -> Vec<Address> {
-        let Some((replica, _, _)) = aligned(replica).filter(|_| !self.gaps.replica) else { return Vec::new() };
-        let base = replica.coin(coin);
+        let Some((replica, height, _)) = aligned(replica).filter(|_| !self.gaps.replica) else { return Vec::new() };
+        let trailing = self.coin_trailing(coin, replica, height);
+        let base = replica.coin(coin).with_trailing(&trailing);
         self.at_line(coin, base, seen_ns, |overlay| overlay.reached_accounts(base, mark_px))
+    }
+
+    /// Why `coin`'s run decides nothing of it where a line seen at `seen_ns` runs (batch 2n-2, design 000659 r4): a
+    /// `SetGlobalAction` coming there freezes neither mark nor positions. `None` with none to judge on.
+    pub(crate) fn undecided_at(&self, coin: &Coin, replica: Option<&BookReplica>, seen_ns: i64) -> Option<&'static str> {
+        let (replica, height, _) = aligned(replica).filter(|_| !self.gaps.replica)?;
+        let trailing = self.coin_trailing(coin, replica, height);
+        let base = replica.coin(coin).with_trailing(&trailing);
+        self.at_line(coin, base, seen_ns, Overlay::undecided)
     }
 
     /// Whether `arriving` more orders take the set past its cap, the price band's slots waiting counted (r4).
@@ -646,7 +821,7 @@ impl Shadow {
         }
         self.coins.retain(|coin, actions| !actions.actions.is_empty() || due.contains_key(coin));
         if let Some(first_of_second_ms) = self.twaps.first_of_second_ms().filter(|_| known) {
-            self.emitted.retain(|_, due_ms| *due_ms >= first_of_second_ms);
+            self.slots.forget_before(first_of_second_ms);
         }
         self.due = due;
         self.due_of = due_of;
@@ -667,10 +842,10 @@ impl Shadow {
             return HashSet::new();
         }
         self.window_height = Some(height);
-        let emitted = &self.emitted;
+        let slots = &self.slots;
         self.due
             .iter()
-            .filter(|(_, slices)| slices.iter().any(|slice| !emitted.contains_key(&(slice.twap_id, slice.slot))))
+            .filter(|(_, slices)| slices.iter().any(|slice| slots.awaited(slice)))
             .map(|(coin, _)| coin.clone())
             .collect()
     }
@@ -680,13 +855,14 @@ impl Shadow {
     fn replay_coins(&mut self, replica: &BookReplica, coins: &HashSet<Coin>, emit: bool, trades: &mut Vec<PendingTrade>) {
         let emit_twaps = emit && self.in_trade_window(self.basis_ms);
         let cut_ns = slice_cut_ns(self.basis_ms);
-        let Self { coins: held, due, emitted, record, refusals, basis_ms, .. } = self;
+        let Self { coins: held, due, slots, record, refusals, basis_ms, trailing, .. } = self;
         let basis = Basis::new(record.priorities(), refusals, *basis_ms);
         for coin in coins {
             let Some(actions) = held.get_mut(coin) else { continue };
             let slices = due.get(coin).map_or(&[][..], Vec::as_slice);
-            let replayed = actions.replay(replica.coin(coin), basis, slices, cut_ns, actions.actions.len());
-            slice_trades(coin, slices, replayed.slices, emit_twaps, emitted, trades);
+            let base = replica.coin(coin).with_trailing(trailing.get(coin).unwrap_or(&NO_TRAILING));
+            let replayed = actions.replay(base, basis, slices, cut_ns, actions.actions.len());
+            slice_trades(coin, slices, replayed.slices, emit_twaps, slots, trades);
         }
     }
 
@@ -769,6 +945,13 @@ impl Shadow {
         PENDING_BOOK_SIGNER_ACCOUNTS.with_label_values(&["conflicting"]).set(gauge(conflicting));
     }
 
+    /// The `SetGlobalAction`s held on `coin`, in order.
+    #[cfg(test)]
+    pub(crate) fn held_set_globals(&self, coin: &Coin) -> Vec<SetGlobalCoin> {
+        let actions = self.coins.get(coin).map_or(&[][..], |actions| actions.actions.as_slice());
+        actions.iter().filter_map(|action| if let BookOp::SetGlobal(sga) = &action.op { Some(SetGlobalCoin::clone(sga)) } else { None }).collect()
+    }
+
     /// `coin`'s merged book's best levels, (bid, ask).
     fn bbo(&self, coin: &Coin, replica: &BookReplica) -> (Option<BestLevel>, Option<BestLevel>) {
         let base = replica.coin(coin);
@@ -785,7 +968,8 @@ impl Shadow {
             newest_seen_ms: seen_ms(actions.iter().map(|action| action.seen_ns).max()),
         };
         let (bbo, basis_bbo) = self.best_levels(coin, replica);
-        CoinView { bbo, basis_bbo, pending }
+        let undecided = self.coins.get(coin).and_then(|actions| actions.overlay.undecided());
+        CoinView { bbo, basis_bbo, pending, undecided }
     }
 
     /// `coin`'s merged and its replica's best levels.
@@ -795,8 +979,10 @@ impl Shadow {
 
     /// `best_levels` where a line seen at `seen_ns` runs (`at_line`).
     pub(crate) fn best_at_line(&self, coin: &Coin, replica: &BookReplica, seen_ns: i64) -> (BestLevels, BestLevels) {
-        let base = replica.coin(coin);
-        (self.at_line(coin, base, seen_ns, |overlay| overlay.bbo(base)), Overlay::default().bbo(base))
+        // the forecast reads the book the runs stand on: with the coin's trailing stops (review 000662 r1 P2-4)
+        let trailing = aligned(Some(replica)).map_or_else(CoinTrailing::default, |(replica, height, _)| self.coin_trailing(coin, replica, height));
+        let base = replica.coin(coin).with_trailing(&trailing);
+        (self.at_line(coin, base, seen_ns, |overlay| overlay.bbo(base)), Overlay::default().bbo(replica.coin(coin)))
     }
 
     /// What `read` takes of `coin`'s overlay where a line seen at `seen_ns` runs: before the coin's TWAP suborders due
@@ -857,10 +1043,20 @@ impl Shadow {
         self.held += line_actions.len();
         let behind = aligned.is_some_and(|(_, height, _)| !self.record_covers(height));
         let emit_twaps = emit && self.in_trade_window(self.basis_ms);
-        let Self { coins, due, emitted, record, refusals, gaps, priorities_behind, .. } = self;
+        // a coin first held: its trailing stops read now, as its runs will stand on them
+        if let Some((replica, height, _)) = aligned.filter(|_| !self.gaps.replica)
+            && !self.trailing.contains_key(&coin)
+        {
+            let read = self.trailing_basis.at(&self.record, height).coin(replica.trigger_table(), &coin);
+            self.trailing.insert(coin.clone(), read);
+        }
+        let Self { coins, due, slots, record, refusals, gaps, priorities_behind, trailing, .. } = self;
+        let coin_trailing = trailing.get(&coin).unwrap_or(&NO_TRAILING);
         let base = aligned
             .filter(|_| !gaps.replica)
-            .map(|(replica, _, confirmed_ns)| (replica.coin(&coin), Basis::new(record.priorities(), refusals, unix_ms(confirmed_ns)), unix_ms(confirmed_ns)));
+            .map(|(replica, _, confirmed_ns)| {
+                (replica.coin(&coin).with_trailing(coin_trailing), Basis::new(record.priorities(), refusals, unix_ms(confirmed_ns)), unix_ms(confirmed_ns))
+            });
         let actions = coins.entry(coin.clone()).or_default();
         let first = actions.actions.len();
         let (orders, line_actions): (Vec<usize>, Vec<PendingAction>) = line_actions.into_iter().unzip();
@@ -870,7 +1066,7 @@ impl Shadow {
         let cut_ns = slice_cut_ns(basis_ms);
         let effects = if !slices.is_empty() && seen_ns < cut_ns {
             let replayed = actions.replay(base, basis, slices, cut_ns, first);
-            slice_trades(&coin, slices, replayed.slices, emit_twaps, emitted, &mut trades.suborders);
+            slice_trades(&coin, slices, replayed.slices, emit_twaps, slots, &mut trades.suborders);
             replayed.reported
         } else {
             let CoinActions { actions: held, overlay } = &mut *actions;
@@ -922,6 +1118,8 @@ impl Shadow {
         }
         let emit = self.availability(Some(replica)).is_ok();
         changed.extend(self.settle_twaps(height, basis_ms, emit));
+        // the replica's height moved: each held coin's trailing stops read there (batch 2n-2)
+        changed.extend(self.read_trailing(replica, height));
         self.priorities_behind |= !covered && changed.iter().any(|coin| self.coins.contains_key(coin));
         let mut trades = Vec::new();
         self.replay_coins(replica, &changed, emit, &mut trades);
@@ -1100,37 +1298,62 @@ fn slice_cut_ns(basis_ms: u64) -> i64 {
     unix_ns((basis_ms / 1_000 + 1) * 1_000 - SLICE_CUT_MS)
 }
 
-/// A line's actions' first applications - (place in the line, action, effect) -, counted; the fills of those placing an
-/// order, the predicted trades by their place, while `emit`.
+/// A line's actions' first applications - (place in the line, action, effect) -, counted; their trades by their place,
+/// while `emit`.
 fn trades_of<'a>(coin: &Coin, applied: impl Iterator<Item = (usize, &'a PendingAction, Effect)>, emit: bool, trades: &mut Vec<(usize, PendingTrade)>) {
     for (order_in_line, action, effect) in applied {
-        PENDING_BOOK_OVERLAY_TOTAL.with_label_values(&[action.op.label(), effect.outcome]).inc();
-        if let BookOp::SetGlobal(_) = &action.op {
-            PENDING_BOOK_TRIGGER_COINS_TOTAL.with_label_values(&[coin_outcome(&effect)]).inc();
-            let triggered = effect.triggered.into_iter().flat_map(|fills| trigger_trades(coin, action.seen_ns, fills, emit));
-            trades.extend(triggered.map(|trade| (order_in_line, trade)));
-            continue;
+        count_effect(action, &effect, emit);
+        if emit {
+            trades.extend(effect_trades(coin, action, effect).into_iter().map(|trade| (order_in_line, trade)));
         }
-        // only an action placing an order fills
-        let (true, Some(order)) = (emit, action.op.placement()) else { continue };
-        for fill in &effect.fills {
-            PENDING_BOOK_PREDICTED_FILLS_TOTAL.with_label_values(&[fill.maker.label()]).inc();
-        }
-        trades.extend(effect.fills.into_iter().map(|fill| (order_in_line, predicted(coin, action, order, fill))));
     }
 }
 
+/// An action's first application counted: its outcome; a `SetGlobal`'s on its coin and each order it triggered; the
+/// fills while `emit`.
+fn count_effect(action: &PendingAction, effect: &Effect, emit: bool) {
+    PENDING_BOOK_OVERLAY_TOTAL.with_label_values(&[action.op.label(), effect.outcome]).inc();
+    if let BookOp::SetGlobal(_) = &action.op {
+        PENDING_BOOK_TRIGGER_COINS_TOTAL.with_label_values(&[coin_outcome(effect)]).inc();
+        for triggered in &effect.triggered {
+            count_triggered(triggered, emit);
+        }
+        return;
+    }
+    if emit && action.op.placement().is_some() {
+        count_fills(&effect.fills);
+    }
+}
+
+/// An action's effect as trades: the fills of the order it places, or of each order a `SetGlobal` triggered.
+fn effect_trades(coin: &Coin, action: &PendingAction, effect: Effect) -> Vec<PendingTrade> {
+    if let BookOp::SetGlobal(_) = &action.op {
+        return effect.triggered.into_iter().flat_map(|triggered| trigger_trades(coin, action, triggered)).collect();
+    }
+    // only an action placing an order fills
+    let Some(order) = action.op.placement() else { return Vec::new() };
+    effect.fills.into_iter().map(|fill| predicted(coin, action, order, fill)).collect()
+}
+
 /// The TWAP suborders' fills of a replay as trades, each (twap, slot) once, the first time it fills while `emit_twaps`
-/// (in the trade window, batch 2i).
-fn slice_trades(coin: &Coin, slices: &[TwapSlice], filled: Vec<Vec<Fill>>, emit_twaps: bool, emitted: &mut FxHashMap<(u64, u64), u64>, trades: &mut Vec<PendingTrade>) {
+/// (in the trade window, batch 2i) - again only when the step computing them did not tell them (`SuborderSlots`).
+fn slice_trades(coin: &Coin, slices: &[TwapSlice], filled: Vec<Vec<Fill>>, emit_twaps: bool, slots: &mut SuborderSlots, trades: &mut Vec<PendingTrade>) {
     for (slice, fills) in slices.iter().zip(filled) {
-        if !emit_twaps || fills.is_empty() || emitted.insert((slice.twap_id, slice.slot), slice.due_ms).is_some() {
+        if !emit_twaps || fills.is_empty() || !slots.compute(slice) {
             continue;
         }
-        for fill in &fills {
-            PENDING_BOOK_PREDICTED_FILLS_TOTAL.with_label_values(&[fill.maker.label()]).inc();
-        }
+        count_fills(&fills);
         trades.extend(fills.into_iter().map(|fill| twap_trade(coin, slice, fill)));
+    }
+}
+
+/// A trade's place in a run cut at `cut_ns`: an action seen before the cut, a suborder by its due time and TWAP id, an
+/// action at or after the cut.
+const fn run_order(trade: &PendingTrade, cut_ns: i64) -> (u8, u64, u64) {
+    match &trade.taker {
+        Taker::Pending { seen_ns, .. } | Taker::Trigger { seen_ns, .. } if *seen_ns < cut_ns => (0, 0, 0),
+        Taker::Twap { twap_id, due_ms, .. } => (1, *due_ms, *twap_id),
+        Taker::Pending { .. } | Taker::Trigger { .. } => (2, 0, 0),
     }
 }
 
@@ -1143,25 +1366,29 @@ fn coin_outcome(effect: &Effect) -> &'static str {
     }
 }
 
-/// A batch's triggered order's trades, out while `emit`; its outcome and source counted.
-fn trigger_trades(coin: &Coin, seen_ns: i64, triggered: TriggerFills, emit: bool) -> Vec<PendingTrade> {
-    let TriggerFills { source, side, fills, outcome } = triggered;
-    PENDING_BOOK_OVERLAY_TOTAL.with_label_values(&["trigger", outcome]).inc();
-    PENDING_BOOK_TRIGGERS_TOTAL.with_label_values(&[source.label()]).inc();
-    if outcome == "zero_size" {
+/// A batch's triggered order counted: its outcome and source; its fills while `emit`.
+fn count_triggered(triggered: &TriggerFills, emit: bool) {
+    PENDING_BOOK_OVERLAY_TOTAL.with_label_values(&["trigger", triggered.outcome]).inc();
+    PENDING_BOOK_TRIGGERS_TOTAL.with_label_values(&[triggered.source.label()]).inc();
+    if triggered.outcome == "zero_size" {
         PENDING_BOOK_TRIGGERS_TOTAL.with_label_values(&["zero_size"]).inc();
     }
-    if !emit {
-        return Vec::new();
+    if emit {
+        count_fills(&triggered.fills);
     }
-    let taker = Taker::Trigger { source, seen_ns };
-    fills
-        .into_iter()
-        .map(|fill| {
-            PENDING_BOOK_PREDICTED_FILLS_TOTAL.with_label_values(&[fill.maker.label()]).inc();
-            PendingTrade { coin: coin.clone(), side, px: fill.px, sz: fill.sz, maker: fill.maker, taker: taker.clone() }
-        })
-        .collect()
+}
+
+fn count_fills(fills: &[Fill]) {
+    for fill in fills {
+        PENDING_BOOK_PREDICTED_FILLS_TOTAL.with_label_values(&[fill.maker.label()]).inc();
+    }
+}
+
+/// A batch's triggered order's trades, its taker the order `set_global` fired.
+fn trigger_trades<'a>(coin: &'a Coin, set_global: &PendingAction, triggered: TriggerFills) -> impl Iterator<Item = PendingTrade> + 'a {
+    let TriggerFills { source, side, fills, .. } = triggered;
+    let taker = Taker::Trigger { source, set_global: set_global.id, seen_ns: set_global.seen_ns };
+    fills.into_iter().map(move |fill| PendingTrade { coin: coin.clone(), side, px: fill.px, sz: fill.sz, maker: fill.maker, taker: taker.clone() })
 }
 
 fn predicted(coin: &Coin, action: &PendingAction, order: &Placement, fill: Fill) -> PendingTrade {
@@ -1182,7 +1409,7 @@ fn twap_trade(coin: &Coin, slice: &TwapSlice, fill: Fill) -> PendingTrade {
         px: fill.px,
         sz: fill.sz,
         maker: fill.maker,
-        taker: Taker::Twap { twap_id: slice.twap_id, user: slice.user, slot: slice.slot },
+        taker: Taker::Twap { twap_id: slice.twap_id, user: slice.user, slot: slice.slot, due_ms: slice.due_ms },
     }
 }
 
@@ -1297,7 +1524,7 @@ pub(crate) mod tests {
             self.logged += 1;
             let hashes = hashes.iter().map(|byte| hash(*byte)).collect();
             let read_at = self.tick();
-            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes, priorities, taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), read_at };
+            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes, priorities, taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), set_global: false, read_at };
             self.shadow.on_block(block, false, Some(&self.replica))
         }
 
@@ -1305,7 +1532,7 @@ pub(crate) mod tests {
         fn log_outcomes(&mut self, outcomes: Vec<TakerOutcome>, after_loss: bool) -> Step {
             self.logged += 1;
             let read_at = self.tick();
-            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: outcomes, signer_accounts: Vec::new(), twap_cancels: Vec::new(), read_at };
+            let block = LoggedBlock { height: self.logged, time_ms: block_time_ms(self.logged), hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: outcomes, signer_accounts: Vec::new(), twap_cancels: Vec::new(), set_global: false, read_at };
             self.shadow.on_block(block, after_loss, Some(&self.replica))
         }
 
@@ -1436,7 +1663,7 @@ pub(crate) mod tests {
     /// BTC's coin of a `SetGlobalAction` at mark 100, the positions (whole units) of `positions` frozen.
     fn btc_at_100(positions: &[(Address, i128)]) -> Vec<(Coin, u32, SetGlobalCoin)> {
         let positions = positions.iter().map(|(account, units)| (*account, units * 100_000_000)).collect();
-        let sga = SetGlobalCoin { mark_px: Px::parse_from_str("100").unwrap(), positions, positions_known: true, stale: std::collections::BTreeSet::new() };
+        let sga = SetGlobalCoin { mark_px: Px::parse_from_str("100").unwrap(), positions, positions_known: true, stale: std::collections::BTreeSet::new(), undecided_input: None };
         vec![(Coin::new(BTC), 0, sga)]
     }
 
@@ -1460,6 +1687,113 @@ pub(crate) mod tests {
         }
     }
 
+    /// BTC's coin of a `SetGlobalAction` at `mark`, no position frozen.
+    fn btc_at(mark: &str) -> Vec<(Coin, u32, SetGlobalCoin)> {
+        let sga = SetGlobalCoin { mark_px: Px::parse_from_str(mark).unwrap(), positions: Vec::new(), positions_known: true, stale: std::collections::BTreeSet::new(), undecided_input: None };
+        vec![(Coin::new(BTC), 0, sga)]
+    }
+
+    /// The account copy's trailing stops at `height` (BTC's szDecimals 5), each a sale of retracement 5 at `best` (price
+    /// units of 0.1).
+    fn trailing_basis(height: u64, stops: &[(u64, u64)]) -> TrailingBasis {
+        use crate::accounts::{flow_accounts::{AccountsSnapshot, TrailingCopy}, marks::trailing::{Retracement, TrailingState, TrailingStop}};
+        let stop = |best| TrailingStop { side: Side::Ask, activation: None, retracement: Retracement::Price(50), state: TrailingState::Active { best } };
+        let stops = stops.iter().map(|(oid, best)| (*oid, (BTC.to_string(), Ok(stop(*best))))).collect();
+        let snapshot = AccountsSnapshot {
+            generation: 1,
+            height,
+            time_ms: block_time_ms(height),
+            coins: FxHashMap::from_iter([(BTC.to_string(), 5)]),
+            marks: FxHashMap::from_iter([(BTC.to_string(), 1_000)]),
+            positions: FxHashMap::default(),
+            candidates: Err("none".to_string()),
+            trailing: Some(TrailingCopy { stops, refresh_due_ms: None, claimed: std::iter::once(BTC.to_string()).collect() }),
+        };
+        let (accounts, _validity) = crate::accounts::flow_accounts::tests::copy_of(snapshot);
+        TrailingBasis::of(accounts.copy().ok())
+    }
+
+    impl Harness {
+        /// A BTC trailing stop market sale of 1 of `ACCOUNT`, `condition`, opened in the next block.
+        fn open_trailing(&mut self, oid: u64, condition: &str) {
+            let at = block_time_ms(self.height + 1);
+            let mut status = btc_stop_status(oid, "A", None, false, "open", None, at);
+            status["order"]["orderType"] = serde_json::json!("Trailing Stop Market");
+            status["order"]["triggerCondition"] = serde_json::json!(condition);
+            status["order"]["triggerPx"] = serde_json::json!("95.0");
+            self.block(&[], vec![status], vec![]);
+        }
+    }
+
+    /// Batch 2n-2 (design 000659 r2 s3): a trailing stop's best the account copy moves, with no book event, replays its
+    /// coin - the `SetGlobalAction` held at 104 fires the stop once its best is 110 (trigger price 105), as an IOC sale
+    /// taking the bid at 99; at best 100 (95) it does not.
+    #[test]
+    fn a_trailing_stops_best_moving_in_the_copy_replays_its_coin() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_bid(12, "1.0");
+        harness.open_trailing(70, "Activation immediate, retracement 5, best 100");
+        assert!(harness.shadow.on_trailing(trailing_basis(harness.height, &[(70, 1_000)]), Some(&harness.replica)).changed.is_empty(), "no coin held");
+        let tx = set_global_line(i64::try_from(block_time_ms(harness.height)).unwrap() + 50, 1);
+        let step = harness.shadow.on_set_global(&tx, btc_at("104"), Some(&harness.replica));
+        assert_eq!((step.trades.len(), harness.bbo().0), (0, Some(level("99", "1", 1))));
+        let step = harness.shadow.on_trailing(trailing_basis(harness.height, &[(70, 1_100)]), Some(&harness.replica));
+        assert_eq!((step.changed.contains(&Coin::new(BTC)), harness.bbo().0), (true, None), "replayed: the stop took the bid");
+        assert!(harness.shadow.on_trailing(trailing_basis(harness.height, &[(70, 1_100)]), Some(&harness.replica)).changed.is_empty(), "as it was");
+    }
+
+    /// Design 000659 r3 P2-2: the account copy at A, the replica confirming a block above it that holds a
+    /// `SetGlobalAction` - a mark the copy has not applied yet - turns BTC's trailing stop not known as the replica
+    /// settles: the held action at 104 then leaves BTC not decided; the copy reaching that block, it is decided again.
+    #[test]
+    fn a_mark_written_above_the_copy_leaves_its_stops_not_known() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_bid(12, "1.0");
+        harness.open_trailing(70, "Activation immediate, retracement 5, best 100");
+        let copy_height = harness.height;
+        harness.shadow.on_trailing(trailing_basis(copy_height, &[(70, 1_000)]), Some(&harness.replica));
+        let btc = Coin::new(BTC);
+        let seen_ms = i64::try_from(block_time_ms(harness.height)).unwrap() + 50;
+        harness.shadow.on_set_global(&set_global_line(seen_ms, 1), btc_at("104"), Some(&harness.replica));
+        assert_eq!(harness.shadow.coin_view(&btc, &harness.replica).undecided, None, "95 not reached");
+        // a block above the copy's holding a SetGlobalAction, then the next one's lines confirming it
+        harness.logged += 1;
+        let read_at = harness.tick();
+        let written = LoggedBlock {
+            height: harness.logged, time_ms: block_time_ms(harness.logged), hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(),
+            signer_accounts: Vec::new(), twap_cancels: Vec::new(), set_global: true, read_at,
+        };
+        harness.shadow.on_block(written, false, Some(&harness.replica));
+        harness.confirm(vec![], vec![]);
+        assert_eq!(harness.shadow.coin_view(&btc, &harness.replica).undecided, Some("trailing_unknown"));
+        harness.shadow.on_trailing(trailing_basis(harness.height, &[(70, 1_000)]), Some(&harness.replica));
+        assert_eq!(harness.shadow.coin_view(&btc, &harness.replica).undecided, None, "the copy at the replica's height");
+    }
+
+    /// Design 000659 r3 P2-3, r4: a `SetGlobalAction` that may fire a trailing stop not known - the account copy not
+    /// serving - leaves BTC not decided from its place; a second one coming meanwhile is held as a place, nothing
+    /// frozen; the first's block confirmed, BTC is still not decided, until the second's is too.
+    #[test]
+    fn a_coin_stays_undecided_until_the_last_action_depending_on_it_leaves() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_bid(12, "1.0");
+        harness.open_trailing(70, "Activation immediate, retracement 5, best 100");
+        let btc = Coin::new(BTC);
+        let seen_ms = i64::try_from(block_time_ms(harness.height)).unwrap() + 50;
+        assert_eq!(harness.shadow.undecided_at(&btc, Some(&harness.replica), seen_ms * NS_PER_MS), None);
+        harness.shadow.on_set_global(&set_global_line(seen_ms, 1), btc_at("104"), Some(&harness.replica));
+        assert_eq!(harness.shadow.coin_view(&btc, &harness.replica).undecided, Some("trailing_unknown"));
+        let later_ns = (seen_ms + 20) * NS_PER_MS;
+        assert_eq!(harness.shadow.undecided_at(&btc, Some(&harness.replica), later_ns), Some("trailing_unknown"));
+        let second = vec![(btc.clone(), 0, SetGlobalCoin::undecided("trailing_unknown"))];
+        harness.shadow.on_set_global(&set_global_line(seen_ms + 20, 2), second, Some(&harness.replica));
+        harness.block(&[1], vec![], vec![]);
+        assert_eq!(harness.shadow.coin_view(&btc, &harness.replica).undecided, Some("trailing_unknown"), "the second still held");
+        harness.block(&[2], vec![], vec![]);
+        let view = harness.shadow.coin_view(&btc, &harness.replica);
+        assert_eq!((view.undecided, view.bbo.0), (None, Some(level("99", "1", 1))), "decided again, the book as confirmed");
+    }
+
     /// Batch 2m: a `SetGlobalAction`'s coin is held with its line, fires the replica's stop where it stands - its taker
     /// the trigger order, its `seenMs` the line's - and leaves with the line's block; the line again holds none.
     #[test]
@@ -1470,7 +1804,8 @@ pub(crate) mod tests {
         let tx = set_global_line(3_150, 1);
         let step = harness.shadow.on_set_global(&tx, btc_at_100(&[]), Some(&harness.replica));
         let [trade] = step.trades.as_slice() else { panic!("{step:?}") };
-        let taker = Taker::Trigger { source: TriggerSource::Confirmed { oid: 77, user: ACCOUNT, cloid: None }, seen_ns: tx.seen_ns };
+        let source = TriggerSource::Confirmed { oid: 77, user: ACCOUNT, cloid: None };
+        let taker = Taker::Trigger { source, set_global: ActionId { tx_hash: tx.tx_hash, action: 0, item: 0 }, seen_ns: tx.seen_ns };
         assert_eq!((&trade.taker, trade.seen_ms(), trade.taker_account()), (&taker, Some(3_150), Some(ACCOUNT)));
         assert!(matches!(&trade.maker, Maker::Confirmed { oid, .. } if *oid == Oid::new(11)));
         assert_eq!((harness.shadow.held, harness.bbo().1, step.changed.len()), (1, None, 1));
@@ -1545,6 +1880,7 @@ pub(crate) mod tests {
                 taker_outcomes: Vec::new(),
                 signer_accounts,
                 twap_cancels: Vec::new(),
+                set_global: false,
                 read_at,
             };
             self.shadow.on_block(block, after_loss, Some(&self.replica))
@@ -1656,6 +1992,23 @@ pub(crate) mod tests {
         let at = block_time_ms(harness.height + 1);
         harness.block(&[2], vec![btc_stop_status(78, "A", Some("100.5"), true, "open", None, at)], vec![]);
         assert_eq!((harness.bbo(), harness.stale_on_set_global()), ((Some(level("99", "5", 1)), None), vec![ACCOUNT]));
+    }
+
+    /// Review 000662 r1 P2-4: with a TWAP suborder due, a line before its cut reads the book the runs stand on - with
+    /// the trailing stops -: a `SetGlobalAction` at 104 having fired the stop of best 110 (trigger price 105) into the
+    /// only bid, the next line reads no bid.
+    #[test]
+    fn a_line_before_the_cut_reads_the_book_with_the_trailing_stops() {
+        let mut harness = Harness::ready_from(1_000);
+        harness.rest_ask(11);
+        harness.rest_bid(12, "1.0");
+        harness.open_trailing(70, "Activation immediate, retracement 5, best 110");
+        harness.shadow.on_trailing(trailing_basis(harness.height, &[(70, 1_100)]), Some(&harness.replica));
+        drop(harness.shadow.on_anchor(twap_anchor(harness.height), Some(&harness.replica)));
+        drop(harness.twaps_known_now());
+        harness.shadow.on_set_global(&set_global_line(3_150, 1), btc_at("104"), Some(&harness.replica));
+        let btc = Coin::new(BTC);
+        assert_eq!(harness.shadow.best_at_line(&btc, &harness.replica, 3_160 * NS_PER_MS).0.0, None, "the stop took the bid before the cut");
     }
 
     /// Review 000642 r1 P2-2: a line before the suborder's cut runs before it - its book the one the suborder has not
@@ -2400,6 +2753,35 @@ pub(crate) mod tests {
         assert_eq!(replays, []);
     }
 
+    /// Review 000662 r6 P2: a step's trades in the order its runs take them, the cut at 980 ms (confirmed block time 0):
+    /// the actions seen before it as they came, the suborders by due time and TWAP id - TWAP 8's two fills as they came
+    /// -, then the actions at or after it.
+    #[test]
+    fn a_steps_trades_are_ordered_as_its_runs_take_them() {
+        let shadow = Shadow::new(params(), true, 0);
+        let trade = |coin: &str, px: &str, taker: Taker| PendingTrade {
+            coin: Coin::new(coin), side: Side::Bid, px: Px::parse_from_str(px).unwrap(), sz: Sz::parse_from_str("1").unwrap(), maker: Maker::Unattributed, taker,
+        };
+        let action = |coin: &str, seen_ms: i64, byte: u8| {
+            trade(coin, "101", Taker::Pending { id: ActionId { tx_hash: hash(byte), action: 0, item: 0 }, seen_ns: seen_ms * NS_PER_MS, cloid: None, vault: None })
+        };
+        let suborder = |twap_id: u64, due_ms: u64, px: &str| trade(BTC, px, Taker::Twap { twap_id, user: TAKER, slot: 0, due_ms });
+        let mut trades = vec![
+            suborder(8, 1_000, "101"), action("ETH", 990, 1), action(BTC, 970, 2), suborder(7, 1_000, "101"), suborder(8, 1_000, "102"),
+            suborder(6, 2_000, "101"), action("ETH", 975, 3), action(BTC, 980, 4),
+        ];
+        shadow.order_trades(&mut trades);
+        let order: Vec<String> = trades
+            .iter()
+            .map(|trade| match &trade.taker {
+                Taker::Pending { seen_ns, .. } => format!("{} {}", trade.coin.value(), seen_ns / NS_PER_MS),
+                Taker::Twap { twap_id, .. } => format!("twap {twap_id} @ {}", trade.px.to_str()),
+                Taker::Trigger { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(order, ["BTC 970", "ETH 975", "twap 7 @ 101", "twap 8 @ 101", "twap 8 @ 102", "twap 6 @ 101", "ETH 990", "BTC 980"]);
+    }
+
     /// Batch 2i (design 000631 r2): the next height not proven yet, the suborders of the second stand - no replay, the
     /// TWAPs known -; into the next second unproven they go, their block having run them - the coin replayed -, and
     /// that second's come once proven; a TWAP stream's loss within a second, or the block log's, withdraws them at once.
@@ -2561,7 +2943,7 @@ pub(crate) mod tests {
         let mut shadow = Shadow::new(params(), true, 0);
         for height in 1..=MAX_LEAD_BLOCKS {
             assert!(shadow.takes_blocks(None));
-            shadow.on_block(LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), read_at: std::time::Instant::now() }, false, None);
+            shadow.on_block(LoggedBlock { height, time_ms: height * 100, hashes: Vec::new(), priorities: Vec::new(), taker_outcomes: Vec::new(), signer_accounts: Vec::new(), twap_cancels: Vec::new(), set_global: false, read_at: std::time::Instant::now() }, false, None);
         }
         assert!(!shadow.takes_blocks(None));
     }

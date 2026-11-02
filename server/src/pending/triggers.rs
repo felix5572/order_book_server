@@ -42,13 +42,15 @@ use crate::{
 /// A `SetGlobalAction` on one coin: its forecast mark, frozen as its line came; the positions (signed, 1e-8 units) of
 /// the accounts of the orders it reached then, by account - none when the account copy was unavailable
 /// (`positions_known` false) -; the accounts whose frozen position a fill of a run moved since - only growing, until its
-/// line leaves.
+/// line leaves. Or, its line coming where the coin's run was not decided (batch 2n-2, design 000659 r4), why: nothing
+/// of it is read, every run deciding nothing of the coin from it on while it is held.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SetGlobalCoin {
     pub(crate) mark_px: Px,
     pub(crate) positions: Vec<(Address, i128)>,
     pub(crate) positions_known: bool,
     pub(crate) stale: BTreeSet<Address>,
+    pub(crate) undecided_input: Option<&'static str>,
 }
 
 impl SetGlobalCoin {
@@ -59,7 +61,12 @@ impl SetGlobalCoin {
             let scale = 10_i128.pow(8_u32.checked_sub(copy.size_decimals(coin)?)?);
             Some(accounts.iter().map(|account| (*account, i128::from(copy.position_raw(*account, coin)) * scale)).collect::<Vec<_>>())
         });
-        Self { mark_px, positions_known: positions.is_some(), positions: positions.unwrap_or_default(), stale: BTreeSet::new() }
+        Self { mark_px, positions_known: positions.is_some(), positions: positions.unwrap_or_default(), stale: BTreeSet::new(), undecided_input: None }
+    }
+
+    /// Its line came where the coin's run was not decided, for `reason`: neither its mark nor positions are frozen.
+    pub(crate) const fn undecided(reason: &'static str) -> Self {
+        Self { mark_px: Px::new(0), positions: Vec::new(), positions_known: false, stale: BTreeSet::new(), undecided_input: Some(reason) }
     }
 }
 
@@ -130,6 +137,13 @@ impl TriggerOrder {
         }
         let source = TriggerSource::Confirmed { oid: order.oid, user: order.user, cloid: order.cloid.clone() };
         Self::of(source, kind, order.side, order.limit_px, trigger_px, order.sz, Sizing::of(order.reduce_only, order.is_position_tpsl)).map(Some)
+    }
+
+    /// A replica trailing stop the mark reaches at `trigger_px`, the trigger price its best gives it now (batch 2n-2).
+    pub(crate) fn trailing(trigger_px: Px, order: &InnerL4Order) -> Result<Self, String> {
+        let kind = OrderKind::of(&order.order_type).ok_or_else(|| format!("trailing stop {} of order type {:?}", order.oid, order.order_type))?;
+        let source = TriggerSource::Confirmed { oid: order.oid, user: order.user, cloid: order.cloid.clone() };
+        Self::of(source, kind, order.side, order.limit_px, trigger_px, order.sz, Sizing::of(order.reduce_only, order.is_position_tpsl))
     }
 
     /// A pending placement.
@@ -261,6 +275,7 @@ mod tests {
             marks: FxHashMap::default(),
             positions: FxHashMap::from_iter([("BTC".to_string(), FxHashMap::from_iter([(long, -12_345)]))]),
             candidates: Err("none".to_string()),
+            trailing: None,
         };
         let (accounts, _validity) = copy_of(snapshot);
         let copy = accounts.copy().ok();

@@ -1473,7 +1473,7 @@ mod tests {
         let mut owner = Owner::new();
         let _guard = owner.demand.acquire((Some(PUMP.to_string()), Tier::Mid));
         let (mut accounts, _validity) = owner.accounts();
-        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_005, time_ms: 1_005_000, marks: Vec::new(), positions: Vec::new() });
+        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_005, time_ms: 1_005_000, marks: Vec::new(), positions: Vec::new(), trailing: None });
         let now = Instant::now();
         drop(owner.flow.tick(now, now, &accounts));
         let ((_, _, _), FlowJob::Band { version, .. }) = owner.job() else { panic!("a band job") };
@@ -1651,7 +1651,7 @@ mod tests {
         let now = Instant::now();
         let (mut accounts, _validity, version, sides) = far_walks_out(&mut owner, now);
         let positions = vec![(PUMP.to_string(), checkpoint_user(HOLDER), 0)];
-        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_001, time_ms: 1_001_000, marks: Vec::new(), positions });
+        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_001, time_ms: 1_001_000, marks: Vec::new(), positions, trailing: None });
         let output = owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Far, version, sides: walked(sides) }, now, &accounts);
         assert!(output.frames.is_empty(), "{output:?}");
         let frame = computed_anew(&mut owner, &accounts, now);
@@ -1672,7 +1672,7 @@ mod tests {
         let snapshot = owner.candidates.snapshot().unwrap();
         let (_, _, held) = snapshot.candidates.iter().find(|(coin, user, _)| coin == PUMP && *user == holder).unwrap();
         let cut = Candidate { size_raw: 600_000, ..held.clone() };
-        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_001, time_ms: 1_001_000, marks: Vec::new(), positions: vec![(PUMP.to_string(), holder, 600_000)] });
+        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_001, time_ms: 1_001_000, marks: Vec::new(), positions: vec![(PUMP.to_string(), holder, 600_000)], trailing: None });
         let changes = CandidateChanges { version: snapshot.version + 1, height: 1_001, time_ms: 1_001_000, enter: Vec::new(), update: vec![(PUMP.to_string(), holder, cut)], exit: Vec::new() };
         accounts.apply(FlowAccountsEvent::Candidates { generation: 1, changes: Arc::new(changes) });
         accounts.apply(FlowAccountsEvent::CandidatesConfirmed { generation: 1, height: 1_001, time_ms: 1_001_000 });
@@ -1691,7 +1691,7 @@ mod tests {
         let now = Instant::now();
         let (mut accounts, _validity, version, sides) = far_walks_out(&mut owner, now);
         let positions = vec![("BTC".to_string(), Address::repeat_byte(0x42), 5)];
-        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_001, time_ms: 1_001_000, marks: Vec::new(), positions });
+        accounts.apply(FlowAccountsEvent::Block { generation: 1, height: 1_001, time_ms: 1_001_000, marks: Vec::new(), positions, trailing: None });
         let mut output = owner.flow.on_read(FlowRead::Walk { coin: PUMP.to_string(), tier: Tier::Far, version, sides: walked(sides) }, now, &accounts);
         assert_eq!(output.frames.len(), 1, "{output:?}");
         assert_eq!(liquidations(&output.frames.remove(0)), [(checkpoint_user(HOLDER), 1_000_000)]);

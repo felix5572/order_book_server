@@ -45,7 +45,12 @@
 //! of the section that did not convert, a live trigger order or a parent's children that did not parse, an announced
 //! child that never opened (bm 10-26: one EWZ child had kept every coin incomplete for 7 hours).
 
-use std::{borrow::Borrow, collections::BTreeMap, ops::Bound, sync::Arc};
+use std::{
+    borrow::Borrow,
+    collections::{BTreeMap, BTreeSet},
+    ops::Bound,
+    sync::Arc,
+};
 
 use alloy::primitives::Address;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -243,6 +248,8 @@ struct CoinTriggers {
     up: BTreeMap<(Px, u64), Arc<InnerL4Order>>,
     nowhere: BTreeMap<u64, Arc<InnerL4Order>>,
     place_of: FxHashMap<Oid, Place>,
+    /// The trailing stops' oids (batch 2n-2: the pending book reads them apart, their trigger prices moving).
+    trailing: BTreeSet<u64>,
 }
 
 impl CoinTriggers {
@@ -263,10 +270,15 @@ impl CoinTriggers {
             Place::Nowhere => self.nowhere.insert(oid, order),
         };
         self.place_of.insert(Oid::new(oid), place);
+        self.trailing.remove(&oid);
+        if self.get(&Oid::new(oid)).is_some_and(|order| TriggerRule::of(&order.trigger_condition) == TriggerRule::Trailing) {
+            self.trailing.insert(oid);
+        }
     }
 
     fn remove(&mut self, oid: &Oid) -> bool {
         let Some(place) = self.place_of.remove(oid) else { return false };
+        self.trailing.remove(&oid.clone().value());
         match place {
             Place::At(Direction::Down, trigger_px) => self.down.remove(&(trigger_px, oid.clone().value())),
             Place::At(Direction::Up, trigger_px) => self.up.remove(&(trigger_px, oid.clone().value())),
@@ -931,6 +943,12 @@ impl TriggerTable {
     /// The coin's untriggered order `oid`, a waiting child not included.
     pub(crate) fn order(&self, coin: &Coin, oid: &Oid) -> Option<&Arc<InnerL4Order>> {
         self.coins.get(coin)?.get(oid)
+    }
+
+    /// The coin's trailing stops, by oid (a waiting child not included).
+    pub(crate) fn trailing(&self, coin: &Coin) -> impl Iterator<Item = &Arc<InnerL4Order>> {
+        let coin_triggers = self.coins.get(coin);
+        coin_triggers.into_iter().flat_map(|triggers| triggers.trailing.iter().filter_map(|oid| triggers.get(&Oid::new(*oid))))
     }
 
     /// All coins' orders, or one coin's, the waiting children with them.

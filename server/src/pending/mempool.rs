@@ -81,6 +81,9 @@ pub(crate) enum ActionKind {
     Modify { always_place: bool, modifies: Vec<Modify> },
     /// A validator's `SetGlobalAction`: per main-dex asset, the prices submitted (batch 2l, `mark_forecast`).
     SetGlobal(Vec<SubmittedPrices>),
+    /// A `trailingStop` placement: counted only (batch 2n-2, design 000659 r2 s6: not modelled before its block; then
+    /// a trailing stop of the replica's table).
+    TrailingStop,
     /// Any other type (counted only).
     Other,
 }
@@ -254,6 +257,7 @@ fn signed_action(signed: &WireSignedAction<'_>) -> Result<SignedAction, String> 
             ActionKind::Modify { always_place: flag(action, action.always_place.as_ref(), "a")?, modifies }
         }
         "SetGlobalAction" => ActionKind::SetGlobal(set_global_prices(action)?),
+        "trailingStop" => ActionKind::TrailingStop,
         _ => ActionKind::Other,
     };
     Ok(SignedAction { vault: signed.vault()?, signer: None, expires_after_ms: signed.expires_after_ms()?, priority, kind })
@@ -364,6 +368,7 @@ impl ActionKind {
             Self::CancelByCloid { .. } => "cancel_by_cloid",
             Self::Modify { .. } => "modify",
             Self::SetGlobal(_) => "set_global",
+            Self::TrailingStop => "trailing_stop",
             Self::Other => "other",
         }
     }
@@ -375,7 +380,7 @@ impl ActionKind {
             Self::Cancel { cancels, .. } => cancels.iter().map(|cancel| cancel.a).collect(),
             Self::CancelByCloid { cancels, .. } => cancels.iter().map(|cancel| cancel.asset).collect(),
             Self::Modify { modifies, .. } => modifies.iter().map(|modify| modify.order.asset).collect(),
-            Self::SetGlobal(_) | Self::Other => Vec::new(),
+            Self::SetGlobal(_) | Self::TrailingStop | Self::Other => Vec::new(),
         }
     }
 

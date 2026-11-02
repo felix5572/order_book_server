@@ -48,6 +48,7 @@ use self::{
 use super::{
     book::{AnchorInfo, Stream, StreamProgress, Unavailable},
     checkpoint::node_time_ns,
+    flow_accounts::TrailingCopy,
 };
 use crate::types::node_data::{Batch, NodeDataOrderDiff, NodeDataOrderStatus, OracleUpdateEvent};
 
@@ -686,6 +687,10 @@ pub(crate) trait MarksAt {
     /// The coin's mark in price units (10^-(6 - szDecimals)); `None` when there is none to claim: a main-dex coin
     /// marked unsupported, a coin without a stored mark or outside the universe.
     fn mark(&self, coin: &str) -> Option<u64>;
+    /// The main dex's trailing stops at this height (batch 2n-2); `None` where none are kept.
+    fn trailing(&self) -> Option<TrailingCopy> {
+        None
+    }
 }
 
 impl MarksAt for MarkState {
@@ -698,6 +703,12 @@ impl MarksAt for MarkState {
             Some(asset) => self.prices.mark(asset),
             None => self.hip3.get(coin)?.mark.map(|mark| mark.px),
         }
+    }
+
+    fn trailing(&self) -> Option<TrailingCopy> {
+        let stops = self.trailing.entries().map(|(asset, oid, entry)| (oid, (self.prices.coin_name(asset).to_string(), entry))).collect();
+        let claimed = (0..self.prices.coin_count()).filter(|asset| self.prices.mark(*asset).is_some()).map(|asset| self.prices.coin_name(asset).to_string());
+        Some(TrailingCopy { stops, refresh_due_ms: self.prices.refresh_due_ms(), claimed: claimed.collect() })
     }
 }
 

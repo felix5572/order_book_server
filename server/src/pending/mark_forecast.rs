@@ -346,13 +346,13 @@ fn outcome(state: Option<&CoinPriceState>, mark: u64, time_ms: u64) -> &'static 
 }
 
 /// A book price (1e-8 units) in a perp's price units (10^-(6 - szDecimals)); `None` when it is not a whole number of them.
-fn price_units(px: Px, size_decimals: u32) -> Option<u64> {
+pub(crate) fn price_units(px: Px, size_decimals: u32) -> Option<u64> {
     let step = 10_u64.pow(2 + size_decimals);
     px.value().is_multiple_of(step).then(|| px.value() / step)
 }
 
 /// A perp's price units as a book price, `price_units`' inverse; `None` past a book price's range.
-fn book_px(units: u64, size_decimals: u32) -> Option<Px> {
+pub(crate) fn book_px(units: u64, size_decimals: u32) -> Option<Px> {
     units.checked_mul(10_u64.pow(2 + size_decimals)).map(Px::new)
 }
 
@@ -444,7 +444,7 @@ mod tests {
             hashes: bytes.iter().map(|byte| hash(*byte)).collect(),
             priorities: Vec::new(),
             taker_outcomes: Vec::new(), signer_accounts: Vec::new(),
-            twap_cancels: Vec::new(),
+            twap_cancels: Vec::new(), set_global: false,
             read_at: std::time::Instant::now(),
         }
     }
