@@ -199,6 +199,8 @@ struct MarkState {
     prices_broken: bool,
     /// The main dex's trailing stops (batch 2n-1).
     trailing: TrailingStops,
+    /// The owner's revision as it last changed it (`MarksAt::revision`).
+    revision: u64,
 }
 
 impl MarkState {
@@ -211,6 +213,7 @@ impl MarkState {
         let books = NativeBooks::seeded(native);
         Self {
             seed: AnchorInfo { height, time_ms }, height, time_ms, hip3, books, prices, system_timing, books_broken: false, prices_broken: false, trailing,
+            revision: 0,
         }
     }
 
@@ -691,6 +694,13 @@ pub(crate) trait MarksAt {
     fn trailing(&self) -> Option<TrailingCopy> {
         None
     }
+    /// A number the owner changes whenever the state may have changed - a block applied, a seed installed -: the pending
+    /// book's copy reads the trailing stops again at its height only then (each input of a block had rebuilt and
+    /// compared them whole: bm 11-02 after the US open, some 40% of the accounts owner's time, its pending blocks
+    /// overflowing every 12-15 minutes).
+    fn revision(&self) -> u64 {
+        0
+    }
 }
 
 impl MarksAt for MarkState {
@@ -703,6 +713,10 @@ impl MarksAt for MarkState {
             Some(asset) => self.prices.mark(asset),
             None => self.hip3.get(coin)?.mark.map(|mark| mark.px),
         }
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision
     }
 
     fn trailing(&self) -> Option<TrailingCopy> {
@@ -735,6 +749,8 @@ pub(crate) struct NodeMarks {
     seed_failure: Option<(u64, String)>,
     /// Permanent: an input thread or the poller is gone (`AccountBook::stop`'s reason).
     stopped: Option<String>,
+    /// The last revision given the state (`MarksAt::revision`).
+    revisions: u64,
     /// Ambiguous cuts still listed before the next install.
     ambiguous_samples_left: usize,
     /// Unknown IOC item-pairing evidence shares the seed lifetime, but has its own quota.
@@ -753,6 +769,7 @@ impl NodeMarks {
             log: InputLog::new(MAX_LOG_INPUTS),
             seed_failure: None,
             stopped: None,
+            revisions: 0,
             ambiguous_samples_left: MAX_CHECK_SAMPLES,
             ioc_pairing_samples_left: pairing::MAX_PAIRING_SAMPLES,
         }
@@ -829,6 +846,7 @@ impl NodeMarks {
         if let Some(state) = self.state.as_mut().filter(|state| state.height < height) {
             state.apply(height, &block, &mut report);
         }
+        self.stamp_revision();
         report.ambiguous_samples.truncate(self.ambiguous_samples_left);
         self.ambiguous_samples_left -= report.ambiguous_samples.len();
         if !self.log.push(height, block) {
@@ -921,7 +939,16 @@ impl NodeMarks {
             self.seed_failure = None;
         }
         if self.availability().is_err() { fill_prices.clear(); }
+        self.stamp_revision();
         MarksInstallReport { fill_prices, previous_seed, check, rebuild, trailing_unread, errors }
+    }
+
+    /// The state, as it now stands, takes a new revision (`MarksAt::revision`).
+    const fn stamp_revision(&mut self) {
+        self.revisions += 1;
+        if let Some(state) = &mut self.state {
+            state.revision = self.revisions;
+        }
     }
 
     fn rebuild(&mut self, seed: MarkSeed, errors: &mut Vec<(Stream, String)>, fill_prices: &mut Vec<(u64, FillMarkPrices)>) -> Rebuild {
@@ -1096,6 +1123,21 @@ pub(crate) mod tests {
         run(&mut marks, 996..=1_001, &[(997, "360.0")]);
         assert_eq!(marks.availability(), Ok(1_001));
         marks
+    }
+
+    /// The state takes a new revision at each block applied and each seed installed (`MarksAt::revision`): the pending
+    /// book's copy reads the trailing stops at its height again only then.
+    #[test]
+    fn the_state_takes_a_revision_at_each_block_and_seed() {
+        let mut marks = trusted_marks();
+        let revision = |marks: &NodeMarks| marks.at().map(MarksAt::revision);
+        let trusted = revision(&marks);
+        run(&mut marks, 1_002..=1_002, &[]);
+        let block = revision(&marks);
+        marks.install(seed(1_000));
+        let seeded = revision(&marks);
+        assert!(trusted.is_some() && trusted < block && block < seeded, "{trusted:?} {block:?} {seeded:?}");
+        assert_eq!(marks.at().map(MarksAt::height), Some(1_002), "the seed replayed to the block applied: the same height");
     }
 
     #[test]

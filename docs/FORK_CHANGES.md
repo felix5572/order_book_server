@@ -1976,3 +1976,21 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - 问题：IOC 的 1 倍上限原先也作用于改单（`modify` / `batchModify`）的替换 IOC。`always_place` 的改单若被提前判拒，会连带跳过撤旧单。而 HL 拒绝这种改单时旧单是否还在，没有样本。
   - 改法：只有新下的 IOC（`BookOp::Place`）用市价单上限；改单的 IOC 保持 2e 的 10 倍。
   - 用例 `a_modify_to_an_ioc_keeps_the_limit_order_cap`：两种 `always_place` 下，改成 $510k 的 IOC 都放行，改成 $5.002M 的拒绝。变异“改单也用 1 倍”时该用例失败。
+
+## 2026-11-02 账户视图：影子盘口副本的移动止损只在 mark 状态有新修订号时才重读（线上故障）
+
+- **现象**：bm 11-02 起，账户视图出现 `pending_overflow`：12:44（01167ab）、13:37（6472eb9）；14:30 之后每 12–15 分钟一次（14:30、14:31、14:43、14:55、15:09、15:24）。每次都撤回强平流，要到下一个检查点重新播种才恢复。溢出前 `block_actions` 落后约 250–300 块，此时其他输入流积压超过 100 万条上限（`MAX_PENDING_INPUTS`）。
+- **根因**：`accounts-owner` 线程在 15:30–15:33 连续三个 10 秒窗口都是 100–102% CPU。perf 采样 15 秒，约 40% 花在移动止损副本上：
+  - `TrailingCopy::changes` 8.8%；
+  - `MarksAt::trailing` 7.6%；
+  - 以币名字符串为键的表重建、扩容、比较和析构，合计约 22%；
+  - 另约 27% 是强平候选的 `reevaluate` / `reindex`，开盘后随成交量上升。
+
+  `FlowAccountsFeed::on_applied` 在每条输入后都会调用（每块约 7 条），高度未变时走 `send_trailing`，把全部移动止损（约 300 张）和全部 claimed 币名（约 230 个）重建一遍再整体比较，绝大多数时候没有变化。这是批次 2n-2 / 2n-3 带进来的成本，美股开盘后强平候选的计算量上来，主线程就跑满了。
+- **改法**：
+  - `MarksAt::revision`：`NodeMarks` 在每应用一块（`apply_block`）、每装一次种子（`install`）之后，给状态一个新的修订号（`stamp_revision`）。
+  - 影子盘口副本的 `Sent.trailing_revision` 记下上次读移动止损时的修订号。高度未变时，修订号没变就不读、不比较；新块照旧，每块读一次。
+- **用例**：
+  - `the_state_takes_a_revision_at_each_block_and_seed`：应用一块和装种子都会换修订号，种子回放到同一高度时也换。
+  - `the_pending_books_copy_keeps_the_trailing_stops`：同一高度变更止损但修订号未变时，不读不发；换了修订号后才发 `Trailing`。
+  - 变异 3 处都有用例失败：装种子不换号、应用块不换号、不看修订号。

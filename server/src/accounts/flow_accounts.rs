@@ -638,6 +638,8 @@ struct Sent {
     candidates_confirmed: Option<u64>,
     /// The trailing stops the copy holds: the pending book's alone.
     trailing: Option<TrailingCopy>,
+    /// The marks' revision they were last read at (`MarksAt::revision`).
+    trailing_revision: u64,
 }
 
 /// An event that did not go out.
@@ -700,8 +702,12 @@ impl FlowAccountsFeed {
         Some((held.changes(&now)?, now))
     }
 
-    /// The trailing stops changed with no block, at the height the copy holds (the marks rebuilt at it).
+    /// The trailing stops changed with no block, at the height the copy holds (the marks rebuilt at it): read once a
+    /// revision of the marks.
     fn send_trailing(&mut self, marks: &dyn MarksAt) {
+        let revision = marks.revision();
+        let Some(sent) = self.sent.as_mut().filter(|sent| sent.trailing_revision != revision) else { return };
+        sent.trailing_revision = revision;
         let Some((changes, now)) = self.trailing_changes(marks) else { return };
         let Some(height) = self.sent.as_ref().map(|sent| sent.height) else { return };
         let generation = self.generation;
@@ -781,6 +787,7 @@ impl FlowAccountsFeed {
         }
         let Some(sent) = &mut self.sent else { return };
         sent.height = height;
+        sent.trailing_revision = marks.revision();
         if let Some(now) = trailing_now {
             sent.trailing = Some(now);
         }
@@ -807,6 +814,7 @@ impl FlowAccountsFeed {
             marks: snapshot.marks.clone(),
             candidates_confirmed: snapshot.candidates.as_ref().ok().map(|candidates| candidates.height),
             trailing: snapshot.trailing.clone(),
+            trailing_revision: marks.revision(),
         };
         if self.send(FlowAccountsEvent::Snapshot(Box::new(snapshot))).is_err() {
             return;
@@ -1122,10 +1130,11 @@ pub(crate) mod tests {
         assert_eq!(accounts.serving().unwrap_err(), OWNER_ENDED, "before the loop takes the notice");
     }
 
-    /// The listed marks with the trailing stops their node marks hold.
+    /// The listed marks with the trailing stops their node marks hold, and their revision.
     struct TrailingMarks {
         marks: ListedMarks,
         trailing: TrailingCopy,
+        revision: u64,
     }
 
     impl MarksAt for TrailingMarks {
@@ -1140,6 +1149,10 @@ pub(crate) mod tests {
         fn trailing(&self) -> Option<TrailingCopy> {
             Some(self.trailing.clone())
         }
+
+        fn revision(&self) -> u64 {
+            self.revision
+        }
     }
 
     /// Batch 2n-2: the pending book's copy takes the trailing stops whole with its snapshot, then each change at the
@@ -1150,14 +1163,17 @@ pub(crate) mod tests {
         use crate::{accounts::marks::trailing::{Retracement, TrailingState, TrailingStop}, order_book::Side};
         let (mut book, marks, candidates) = view();
         let stop = |best| (PUMP.to_string(), Ok(TrailingStop { side: Side::Ask, activation: None, retracement: Retracement::Price(5), state: TrailingState::Active { best } }));
-        let mut held = TrailingMarks { marks, trailing: TrailingCopy { stops: FxHashMap::from_iter([(7, stop(100))]), refresh_due_ms: Some(5_000), claimed: std::iter::once(PUMP.to_string()).collect() } };
+        let mut held = TrailingMarks { marks, trailing: TrailingCopy { stops: FxHashMap::from_iter([(7, stop(100))]), refresh_due_ms: Some(5_000), claimed: std::iter::once(PUMP.to_string()).collect() }, revision: 1 };
         let (mut feed, mut accounts, mut events) = link(CopyOwner::PendingBook);
         feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
         let Ok(FlowAccountsEvent::Snapshot(snapshot)) = events.try_recv() else { panic!("a snapshot") };
         assert_eq!(snapshot.trailing.as_ref(), Some(&held.trailing));
         accounts.apply(FlowAccountsEvent::Snapshot(snapshot));
-        // the marks rebuilt at the copy's height
+        // the marks rebuilt at the copy's height: read once they take a new revision, not at each input before
         held.trailing.stops.extend([(7, stop(110)), (8, stop(90))]);
+        feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
+        assert!(events.try_recv().is_err(), "the revision the copy read");
+        held.revision = 2;
         feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
         let Ok(event @ FlowAccountsEvent::Trailing { height: 1_000, .. }) = events.try_recv() else { panic!("the change at 1000") };
         accounts.apply(event);
@@ -1165,6 +1181,7 @@ pub(crate) mod tests {
         // a block, one gone with it
         book.apply_block_actions(block_actions(1_001, &[]));
         held.marks.height = 1_001;
+        held.revision = 3;
         held.trailing.stops.remove(&8);
         held.trailing.stops.insert(9, stop(80));
         feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
@@ -1179,6 +1196,7 @@ pub(crate) mod tests {
         assert!(events.try_recv().is_err(), "nothing changed");
         // a coin's claim withdrawn at the same height, its stops as they were (review 000662 r2 P2-2)
         held.trailing.claimed.clear();
+        held.revision = 4;
         feed.on_applied(&book, Some(&held), &Touched::default(), &candidates);
         let Ok(event @ FlowAccountsEvent::Trailing { height: 1_001, .. }) = events.try_recv() else { panic!("the claim withdrawn") };
         accounts.apply(event);
