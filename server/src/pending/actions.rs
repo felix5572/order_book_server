@@ -227,7 +227,7 @@ pub(crate) fn book_actions(tx: &MempoolTx, coins: &ActionCoins, spot: bool, belo
                 actions.refused.push([op.label(), why]);
                 continue;
             }
-            if order.is_some_and(|order| too_large(order, named)) {
+            if order.is_some_and(|order| too_large(&op, order, named)) {
                 actions.refused.push([op.label(), "too_large"]);
                 continue;
             }
@@ -285,13 +285,19 @@ fn category(kind: &ActionKind) -> Option<u8> {
     }
 }
 
-/// Whether HL refuses an order for its value: worth more at its limit than its coin's largest market order value, a
-/// limit order 10 times it - an IOC taken as a limit order, an inference (HL docs "Contract specifications"). HL fails
-/// that order alone, the action's others going on (bm 10-31 block responses, "Order value too large. Max is $500000":
-/// LIT market orders from $509,879; HYPE's "Max is $2000000" at $2,027,003; every one a `FrontendMarket`).
-fn too_large(order: &RequestedOrder, asset: &ActionAsset) -> bool {
+/// Whether HL refuses an order for its value: worth more at its limit than its coin's largest market order value - a
+/// market order or an IOC -, a resting limit order (GTC, ALO) 10 times it (HL docs "Contract specifications"). HL
+/// fails that order alone, the action's others going on (bm 10-31 block responses, "Order value too large. Max is
+/// $500000": LIT market orders from $509,879; HYPE's "Max is $2000000" at $2,027,003, every one a `FrontendMarket`).
+/// An IOC placed new is capped as a market order (batch 2r; 2e had taken it as a limit order, an inference): bm 11-02's
+/// block logs, 3.3 hours, each main-dex asset's cap by its max leverage - the one IOC past it refused (HYPE,
+/// reduce-only, $2.94M at "Max is $2000000"; 591 trades the pending book predicted of it), no IOC past it placed; 106
+/// ALOs and a GTC past it placed, under 10 times it. A modify's IOC keeps 2e's cap: what HL does with its target when
+/// it refuses one is not sampled (review 000677 r1 P2).
+fn too_large(op: &BookOp, order: &RequestedOrder, asset: &ActionAsset) -> bool {
     let Some(market) = asset.max_market_value else { return false };
-    let cap = if order.tif == RequestedTif::FrontendMarket { market } else { market * 10 };
+    let placed_ioc = order.tif == RequestedTif::Ioc && matches!(op, BookOp::Place(_));
+    let cap = if order.tif == RequestedTif::FrontendMarket || placed_ioc { market } else { market * 10 };
     u128::from(order.limit_px.value()) * u128::from(order.sz.value()) > u128::from(cap) * 10_000_000_000_000_000
 }
 
@@ -444,20 +450,38 @@ pub(crate) mod tests {
         assert_eq!(actions.held.iter().map(|(coin, action)| (coin.value(), action.id.action)).collect::<Vec<_>>(), [("BTC".to_string(), 1)]);
     }
 
-    /// Batch 2e: an order worth more at its limit than its coin's largest - ETH's market order $500k here, a limit
-    /// order 10 times it - is refused alone, the action's others going on.
+    /// Batch 2e: an order worth more at its limit than its coin's largest - ETH's market order $500k here, an IOC's the
+    /// same (batch 2r), a GTC's 10 times it - is refused alone, the action's others going on.
     #[test]
     fn an_order_worth_too_much_is_refused_alone() {
-        use RequestedTif::{FrontendMarket, Ioc};
+        use RequestedTif::{FrontendMarket, Gtc, Ioc};
         let order = |px: &str, size: &str, tif| RequestedOrder {
             sz: Sz::parse_from_str(size).unwrap(),
             sz_shape: DecimalShape::of(size),
             ..requested(1, true, px, tif, None)
         };
-        let orders = vec![order("2000", "255", FrontendMarket), order("2000", "227", FrontendMarket), order("2000", "255", Ioc), order("2000", "2501", Ioc)];
+        let orders = [(FrontendMarket, "255"), (FrontendMarket, "227"), (Ioc, "255"), (Ioc, "227"), (Gtc, "255"), (Gtc, "2501")];
+        let orders = orders.into_iter().map(|(tif, size)| order("2000", size, tif)).collect();
         let actions = book_actions(&tx(vec![ActionKind::Order(orders)]), &coins(), false, &|_, _| false, &SignerAccounts::default());
-        assert_eq!(actions.held.iter().map(|(_, action)| action.id.item).collect::<Vec<_>>(), [1, 2]);
-        assert_eq!(actions.refused, [["place_ioc", "too_large"]; 2]);
+        assert_eq!(actions.held.iter().map(|(_, action)| action.id.item).collect::<Vec<_>>(), [1, 3, 4]);
+        assert_eq!(actions.refused, [["place_ioc", "too_large"], ["place_ioc", "too_large"], ["place_gtc", "too_large"]]);
+    }
+
+    /// Review 000677 r1 P2: a modify, `always_place` or not, to an IOC worth $510k - past ETH's market order cap, under
+    /// 10 times it - is held as 2e held it, its target's fate when HL refuses it not sampled; one to $5.002M is not.
+    #[test]
+    fn a_modify_to_an_ioc_keeps_the_limit_order_cap() {
+        let order = |size: &str| RequestedOrder {
+            sz: Sz::parse_from_str(size).unwrap(),
+            sz_shape: DecimalShape::of(size),
+            ..requested(1, true, "2000", RequestedTif::Ioc, None)
+        };
+        for always_place in [true, false] {
+            let modifies = ["255", "2501"].into_iter().map(|size| Modify { target: OrderRef::Oid(12), order: order(size) }).collect();
+            let actions = book_actions(&tx(vec![ActionKind::Modify { always_place, modifies }]), &coins(), false, &|_, _| false, &SignerAccounts::default());
+            assert_eq!(actions.held.iter().map(|(_, action)| action.id.item).collect::<Vec<_>>(), [0], "always_place {always_place}");
+            assert_eq!(actions.refused.iter().map(|[_, why]| *why).collect::<Vec<_>>(), ["too_large"], "always_place {always_place}");
+        }
     }
 
     const MIXED_TICK_ACTION: &str = r#"{"signature":{"r":"0xb8e8a2ed193ba5cda5b6599d5e5d67c476c9e115b9f86ce17fe347b1f2f8e145","s":"0x89a7eab30cebce29300ad9ac703e761085230a00b6253aa91ae9b6c2b9dad44","v":27},"vaultAddress":"0xf36c562be0598b8ce109998b6aa2d53ffcd8316b","action":{"type":"order","orders":[{"a":0,"b":false,"p":"77896.3","s":"0.62909","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405259"},{"a":0,"b":false,"p":"77807.6","s":"0.47182","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405258"},{"a":0,"b":false,"p":"77741.1","s":"0.31454","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405257"},{"a":0,"b":false,"p":"77696.7","s":"0.12582","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405256"},{"a":0,"b":false,"p":"77679","s":"0.03145","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065010000000012405255"},{"a":0,"b":true,"p":"77395.7","s":"0.64086","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405254"},{"a":0,"b":true,"p":"77501.4","s":"0.48064","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405253"},{"a":0,"b":true,"p":"77580.7","s":"0.32043","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405252"},{"a":0,"b":true,"p":"77633.6","s":"0.12817","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405251"},{"a":0,"b":true,"p":"77653.5","s":"0.03204","r":false,"t":{"limit":{"tif":"Alo"}},"c":"0x16173310847065000000000012405250"}],"grouping":"na"},"nonce":1793469848762,"expiresAfter":1793469858741}"#;
