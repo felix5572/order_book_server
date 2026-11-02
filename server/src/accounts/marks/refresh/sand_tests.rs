@@ -13,7 +13,7 @@ fn seed(index: usize) -> MarkSeed {
     let mut main = ex["locus"]["cls"][0].clone();
     main["meta"] = g["meta"].clone(); main["oracle"] = g["oracle"].clone(); main["lnsgt"] = g["lnsgt"].clone();
     main["halted_assets"] = json!([]); main["user_states"] = json!({"user_to_state":[],"open_order_tracker":{"user_to_data":[]}});
-    ex["locus"]["cls"] = json!([main]); ex["perp_dexs"] = json!([{"books":[g["book"]], "twap_tracker": crate::accounts::twap_tracker::tests::empty_tracker_json()}]);
+    ex["locus"]["cls"] = json!([main]); let mut book = g["book"].clone(); book["user_states"] = json!([]); ex["perp_dexs"] = json!([{"books":[book], "twap_tracker": crate::accounts::twap_tracker::tests::empty_tracker_json()}]);
     MarkSeed::from_checkpoint(parse_checkpoint_bytes(&rmp_serde::to_vec_named(&v).unwrap()).unwrap()).unwrap()
 }
 

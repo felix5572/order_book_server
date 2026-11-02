@@ -37,11 +37,12 @@ use super::{
     marks::{
         CheckpointGrid, MarkInputs, MarksBlockReport, MarksCheck, MarksInstallReport, MarksStatus, NodeMarks, Rebuild,
         actions::MarkActions, execution::BlockFill, pairing::PairingDiagnostics, seed::MarkSeed, system::SystemAction,
+        trailing::{TrailingCounts, TrailingReport},
     },
     misc::MiscEvent,
     evidence::{
         LineEvidence, ambiguous_cut_json, book_mismatch_json, fill_line_reason, hip3_mark_mismatch_json, misc_line_reason,
-        price_mismatch_json, replay_mismatch_json, replay_row_mismatch_json, silent_change_json,
+        price_mismatch_json, replay_mismatch_json, replay_row_mismatch_json, silent_change_json, trailing_check_json, trailing_line_json,
     },
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, FlowPublisher, NodePrices, Publisher},
     candidates::{BookLink, Candidates, CandidatesSnapshot},
@@ -69,7 +70,7 @@ use crate::{
         LIQUIDATION_CANDIDATES, LIQUIDATION_CANDIDATES_REFRESH_SECONDS,
         NODE_MARKS_AVAILABLE, NODE_MARKS_CHECKED_TOTAL, NODE_MARKS_CHECKS_SKIPPED_TOTAL, NODE_MARKS_HEIGHT,
         NODE_MARKS_LOGGED_INPUTS, NODE_MARKS_REBUILDS_TOTAL, NODE_MARKS_SEED_FAILURES_TOTAL, NODE_MARKS_SEED_HEIGHT,
-        NODE_MARKS_AMBIGUOUS_CUTS_TOTAL, NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL,
+        NODE_MARKS_AMBIGUOUS_CUTS_TOTAL, NODE_MARKS_TRAILING_LINES_TOTAL, NODE_MARKS_TRAILING_STOPS, NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL,
     },
     prelude::Result,
     types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus, OracleUpdateEvent},
@@ -799,8 +800,10 @@ fn record_lost_block(book: &mut AccountBook, marks: &mut NodeMarks, stream: Stre
 }
 
 fn report_marks_block(diagnostics: &mut AccountDiagnostics, height: u64, report: MarksBlockReport) {
-    let MarksBlockReport { unknown_coin_updates, unknown_coin_diffs, errors, relayer_marks, log_overflowed, ambiguous_cuts, ambiguous_samples, fill_prices: _ } =
-        report;
+    let MarksBlockReport {
+        unknown_coin_updates, unknown_coin_diffs, errors, relayer_marks, log_overflowed, ambiguous_cuts, ambiguous_samples, trailing, fill_prices: _,
+    } = report;
+    report_trailing(height, trailing);
     NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.with_label_values(&[Stream::Hip3OracleUpdates.label()]).inc_by(unknown_coin_updates as u64);
     NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.with_label_values(&[Stream::BookDiffs.label()]).inc_by(unknown_coin_diffs as u64);
     NODE_MARKS_AMBIGUOUS_CUTS_TOTAL.inc_by(ambiguous_cuts);
@@ -815,6 +818,20 @@ fn report_marks_block(diagnostics: &mut AccountDiagnostics, height: u64, report:
     if log_overflowed {
         diagnostics.report(None, Cause::MarkLogOverflow, Some(height), ||
             "node mark replay cache exceeded its bound; already-applied live state unchanged; historical rebuild waits for the next checkpoint grid".into());
+    }
+}
+
+/// A seed's untriggered orders that did not read, each logged up to this many (batch 2n-1).
+const MAX_TRAILING_SEED_SAMPLES: usize = 8;
+
+/// The trailing stops' lines by result, and each sample found otherwise (batch 2n-1).
+fn report_trailing(height: u64, report: TrailingReport) {
+    let TrailingReport { lines, samples } = report;
+    for (labels, count) in lines {
+        NODE_MARKS_TRAILING_LINES_TOTAL.with_label_values(&labels).inc_by(count);
+    }
+    for sample in &samples {
+        record_evidence(&trailing_line_json(height, sample));
     }
 }
 
@@ -946,7 +963,14 @@ fn install_seed_ready(diagnostics: &mut AccountDiagnostics, book: &mut AccountBo
 }
 
 fn log_marks_install(diagnostics: &mut AccountDiagnostics, height: u64, report: &MarksInstallReport) {
-    let MarksInstallReport { previous_seed, check, rebuild, errors, fill_prices: _ } = report;
+    let MarksInstallReport { previous_seed, check, rebuild, trailing_unread, errors, fill_prices: _ } = report;
+    if !trailing_unread.is_empty() {
+        warn!("node marks: seed {height}: {} untriggered orders did not read; each is held as a trailing stop not known until a seed reads it", trailing_unread.len());
+        NODE_MARKS_CHECKED_TOTAL.with_label_values(&["trailingStops", "unread"]).inc_by(trailing_unread.len() as u64);
+        for unread in trailing_unread.iter().take(MAX_TRAILING_SEED_SAMPLES) {
+            record_evidence(&trailing_check_json(unread, *previous_seed, height));
+        }
+    }
     let rebuild_label = match rebuild {
         Rebuild::Replayed { .. } => "replayed",
         Rebuild::Ahead => "ahead",
@@ -958,7 +982,18 @@ fn log_marks_install(diagnostics: &mut AccountDiagnostics, height: u64, report: 
             info!("node marks: seed {height} (previous {previous_seed:?}) not checked ({reason}); rebuild {rebuild:?}");
             NODE_MARKS_CHECKS_SKIPPED_TOTAL.with_label_values(&[reason]).inc();
         }
-        MarksCheck::Checked { hip3, books, prices } => {
+        MarksCheck::Checked { hip3, books, prices, trailing } => {
+            info!(
+                "node marks: seed {height} trailing stops: {} equal, {} differ, {} missing, {} extra, {} not known",
+                trailing.equal, trailing.differ.len(), trailing.missing.len(), trailing.extra.len(), trailing.unknown
+            );
+            let [differ, missing, extra] = [&trailing.differ, &trailing.missing, &trailing.extra].map(|ids| ids.len() as u64);
+            for (result, count) in [("equal", trailing.equal), ("differ", differ), ("missing", missing), ("extra", extra), ("unknown", trailing.unknown)] {
+                NODE_MARKS_CHECKED_TOTAL.with_label_values(&["trailingStops", result]).inc_by(count);
+            }
+            for sample in &trailing.samples {
+                record_evidence(&trailing_check_json(sample, *previous_seed, height));
+            }
             info!(
                 "node marks: seed {height} (previous {previous_seed:?}) against the snapshot: HIP-3 {} equal, {} differ, {} \
                  unknown; main books {} equal, {} differ, {} unknown (orders {} equal, {} differ, {} missing, {} extra); \
@@ -1172,6 +1207,11 @@ fn export_marks_status(status: &MarksStatus) {
         NODE_MARKS_SEED_HEIGHT.set(height.cast_signed());
     }
     NODE_MARKS_LOGGED_INPUTS.set((status.logged_inputs as u64).cast_signed());
+    if let Some(TrailingCounts { waiting, active, unknown }) = status.trailing {
+        for (state, count) in [("waiting", waiting), ("active", active), ("unknown", unknown)] {
+            NODE_MARKS_TRAILING_STOPS.with_label_values(&[state]).set((count as u64).cast_signed());
+        }
+    }
 }
 
 fn export_status(status: &BookStatus) {

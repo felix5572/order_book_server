@@ -757,7 +757,7 @@ pub(crate) fn parse_checkpoint_bytes(bytes: &[u8]) -> Result<CheckpointAccounts>
 
 fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, String> {
     let WireExchange { locus, perp_dexs, spot_books, spot_twap_tracker, pt, action_delayer, msc, begin_block_logic_guard, post_only_until_time, post_only_until_height } = exchange;
-    let WireNativeBooks { native: native_books, twap_trackers, hip3_last_trades } = perp_dexs;
+    let WireNativeBooks { native: native_books, trailing, twap_trackers, hip3_last_trades } = perp_dexs;
     let (twaps, waiting_twaps) = checkpoint_twaps(twap_trackers, spot_twap_tracker)?;
     let time_ms = node_time_ns(&locus.ctx.time).map_err(|err| format!("ctx.time: {err}"))? / 1_000_000;
     let mut dexes = Vec::with_capacity(locus.cls.len());
@@ -782,7 +782,7 @@ fn build(exchange: WireExchange) -> std::result::Result<CheckpointAccounts, Stri
         config: msc, outer: begin_block_logic_guard, post_only_until_time, post_only_until_height,
         hardfork_height: locus.ctx.hardfork_height, last_explicit_time,
     };
-    let native_prices = WireNativePrices { refresh, oracle: first_oracle.ok_or("locus.cls is empty")?, halted_assets: native_halted_assets, books: native_books, spot_books, system_timing: pt.zip(action_delayer).map(|(pt, delayer)| (pt.prp.order_delay_s, delayer.delay_scale)) };
+    let native_prices = WireNativePrices { refresh, oracle: first_oracle.ok_or("locus.cls is empty")?, halted_assets: native_halted_assets, books: native_books, trailing, spot_books, system_timing: pt.zip(action_delayer).map(|(pt, delayer)| (pt.prp.order_delay_s, delayer.delay_scale)) };
     let holders: Vec<Address> = {
         let mut holders: Vec<Address> = dex_users
             .iter()
@@ -1259,8 +1259,11 @@ pub(crate) mod tests {
                     {"o": {"o": 7, "r": 3, "O": 3, "u": HOLDER, "t": "Gtc", "c": {"t": 1, "S": 3, "s": "B", "l": 828_500}}},
                     {"v": 2},
                     {"o": {"n": 1, "o": 9, "r": 5, "u": HOLDER, "t": null, "c": {"t": 2, "S": 6, "s": "A", "l": 828_700}}}
-                ], "l": 2, "n": 3}},
-                {"asset": 1, "last_trade_px": 4477, "bod": {"e": [], "l": 0, "n": 0}}
+                ], "l": 2, "n": 3}, "user_states": [[HOLDER, {"b": [], "r": [], "u": [], "U": [
+                    [11, {"s": {"c": {"t": 3, "S": 2, "r": true, "d": "T", "s": "A", "l": 745_000}, "t": {"m": true, "p": 820_000, "t": "sl"}}}],
+                    [12, {"t": {"b": 828_700, "c": {"t": 4, "S": 2, "r": true, "d": "z", "s": "A", "l": 745_830}, "r": {"Pct": 2000}}}]
+                ]}]]},
+                {"asset": 1, "last_trade_px": 4477, "bod": {"e": [], "l": 0, "n": 0}, "user_states": []}
             ], "funding_tracker": {}, "twap_tracker": crate::accounts::twap_tracker::tests::tracker_json()},
             {"books": [{"asset": 10_000, "last_trade_px": 358_300, "bod": {"e": [{"x": 1}]}}],
              "twap_tracker": crate::accounts::twap_tracker::tests::empty_tracker_json()}

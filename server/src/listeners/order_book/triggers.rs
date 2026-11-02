@@ -131,6 +131,47 @@ impl TriggerRule {
     }
 }
 
+/// A trailing stop's `triggerCondition` as its line prints it (batch 2n; research `mempool_pending_book_20261031` README
+/// "移动止损"): `Activation immediate|below X|above X, retracement R[%], best B|waiting`. The texts as printed, each owner
+/// converting them to its units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrailingTerms<'a> {
+    /// The activation price and the way the mark reaches it (`above`: a rise); `None` for `immediate`.
+    pub(crate) activation: Option<(Direction, &'a str)>,
+    pub(crate) retracement: RetracementText<'a>,
+    /// `None` while it waits for its activation.
+    pub(crate) best: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetracementText<'a> {
+    /// In percent, as a float prints it (`0.33999999999999997` for a checkpoint's `Pct` 340).
+    Percent(&'a str),
+    Price(&'a str),
+}
+
+impl<'a> TrailingTerms<'a> {
+    pub(crate) fn parse(condition: &'a str) -> std::result::Result<Self, String> {
+        let malformed = || format!("trailing stop condition {condition:?}");
+        let rest = condition.strip_prefix("Activation ").ok_or_else(malformed)?;
+        let (activation, rest) = rest.split_once(", retracement ").ok_or_else(malformed)?;
+        let (retracement, best) = rest.split_once(", best ").ok_or_else(malformed)?;
+        let activation = trailing_activation(activation, malformed)?;
+        let retracement = retracement.strip_suffix('%').map_or(RetracementText::Price(retracement), RetracementText::Percent);
+        Ok(Self { activation, retracement, best: (best != "waiting").then_some(best) })
+    }
+}
+
+fn trailing_activation(text: &str, malformed: impl FnOnce() -> String) -> std::result::Result<Option<(Direction, &str)>, String> {
+    if text == "immediate" {
+        return Ok(None);
+    }
+    if let Some(px) = text.strip_prefix("above ") {
+        return Ok(Some((Direction::Up, px)));
+    }
+    text.strip_prefix("below ").map(|px| Some((Direction::Down, px))).ok_or_else(malformed)
+}
+
 /// A stop's direction by its side: a sale fires on a fall, a buy on a rise.
 pub(crate) const fn stop_direction(side: Side) -> Direction {
     match side {
@@ -983,6 +1024,21 @@ mod tests {
     /// A rise's order (`Price above`): `stop` with the condition flipped.
     fn take_profit(coin: &str, oid: u64, trigger_px: &str) -> InnerL4Order {
         InnerL4Order { trigger_condition: format!("Price above {trigger_px}"), order_type: "Take Profit Market".to_string(), ..stop(coin, oid, trigger_px) }
+    }
+
+    /// Batch 2n: the trailing stop conditions of bm's lines (11-01/02), each form; another form is an error.
+    #[test]
+    fn a_trailing_condition_reads_into_its_terms() {
+        let terms = |condition| TrailingTerms::parse(condition).unwrap();
+        assert_eq!(terms("Activation immediate, retracement 0.33999999999999997%, best 77611.8"), TrailingTerms {
+            activation: None, retracement: RetracementText::Percent("0.33999999999999997"), best: Some("77611.8") });
+        assert_eq!(terms("Activation above 0.074409, retracement 0.15%, best waiting"), TrailingTerms {
+            activation: Some((Direction::Up, "0.074409")), retracement: RetracementText::Percent("0.15"), best: None });
+        assert_eq!(terms("Activation below 77990, retracement 1559, best 77990"), TrailingTerms {
+            activation: Some((Direction::Down, "77990")), retracement: RetracementText::Price("1559"), best: Some("77990") });
+        for malformed in ["Triggered", "Price below 1", "Activation sideways 1, retracement 1%, best 1", "Activation immediate, best 1"] {
+            assert!(TrailingTerms::parse(malformed).is_err(), "{malformed}");
+        }
     }
 
     /// A band is the mark's range: a fall's orders from its low end up - those above the mark are past their level

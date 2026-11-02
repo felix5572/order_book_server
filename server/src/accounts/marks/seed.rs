@@ -12,10 +12,13 @@ use alloy::primitives::Address;
 use rustc_hash::FxHashMap;
 use serde::{
     Deserialize, Deserializer,
-    de::{IgnoredAny, SeqAccess, Visitor},
+    de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 
-use super::decimal::ExactDecimal;
+use super::{
+    decimal::ExactDecimal,
+    trailing::{Retracement, TrailingState, TrailingStop},
+};
 use crate::{
     accounts::{
         checkpoint::{CheckpointAccounts, DexMeta, MAX_PERP_DECIMALS, SpotPair, node_time_ns, spot_pair_coin},
@@ -175,6 +178,9 @@ struct WireMember {
 #[derive(Debug)]
 pub(crate) struct WireNativeBooks {
     pub(crate) native: Vec<WireBook>,
+    /// The main dex's trailing stops from its books' `user_states` (batch 2n-1): (asset, oid, the stop or what kind of
+    /// untriggered order of another kind it is).
+    pub(crate) trailing: Vec<(u32, u64, Result<WireTrailing, String>)>,
     /// Each dex's `twap_tracker`, in `perp_dexs` order (the pending book's TWAPs, `accounts::twap_tracker`).
     pub(crate) twap_trackers: Vec<WireTwapTracker>,
     /// HIP-3 books' `last_trade_px` (integer price units) by book asset `PDI_ASSET_STRIDE * pdi + index` (bm
@@ -184,8 +190,240 @@ pub(crate) struct WireNativeBooks {
 
 #[derive(Debug, Deserialize)]
 struct WireNativePerpDex {
-    books: Vec<WireBook>,
+    books: Vec<WireNativeBook>,
     twap_tracker: WireTwapTracker,
+}
+
+/// A main-dex book: a `WireBook`, with its users' untriggered orders (`user_states[].U`, batch 2n-1).
+#[derive(Debug, Deserialize)]
+struct WireNativeBook {
+    asset: u32,
+    last_trade_px: u64,
+    bod: WireBookOrders,
+    /// [user, state]; the user is not read.
+    user_states: Vec<(IgnoredAny, WireUserState)>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireUserState {
+    /// (oid, order): every untriggered order of the user on the book (bm 1205940000: 92,750 stops, 289 trailing stops).
+    #[serde(rename = "U")]
+    untriggered: Vec<(u64, WireUntriggered)>,
+}
+
+/// A `U` entry: `{"s": ...}` a stop or take profit (not read), `{"t": ...}` a trailing stop; bm 1205940000: every one
+/// of the two. A trailing stop is read whole first, as `MessagePack` types it, and its fields after, at the entry's
+/// bounds: one that does not read, or an entry of another kind, is the trailing stops' concern alone, never the
+/// checkpoint's (review 000661 r1 P1, r2 P1; as a coin missing a key is that coin's alone) - held as not known.
+#[derive(Debug)]
+enum WireUntriggered {
+    Stop,
+    Trailing(WireValue),
+    Other(String),
+}
+
+/// Any value of the checkpoint, kept as its format types it: unsigned integers, texts, nil and maps as such, any other
+/// (a sequence included, read through) by its type's name.
+#[derive(Debug)]
+enum WireValue {
+    Unsigned(u64),
+    Text(String),
+    Nil,
+    Map(Vec<(Self, Self)>),
+    Other(&'static str),
+}
+
+impl WireValue {
+    /// The value of `key` in a map; `None` without it. A key twice does not read (review 000661 r3 P2: which one the
+    /// node meant is not known).
+    fn field(&self, key: &str) -> Result<Option<&Self>, String> {
+        let Self::Map(entries) = self else { return Err(format!("{} is no map", self.describe())) };
+        let mut named = entries.iter().filter(|(name, _)| matches!(name, Self::Text(name) if name == key)).map(|(_, value)| value);
+        let value = named.next();
+        if named.next().is_some() {
+            return Err(format!("{key} twice"));
+        }
+        Ok(value)
+    }
+
+    fn unsigned(&self, field: &str) -> Result<u64, String> {
+        match self {
+            Self::Unsigned(value) => Ok(*value),
+            other => Err(format!("{field} {} is no unsigned integer", other.describe())),
+        }
+    }
+
+    /// An optional price: absent or nil, none (as serde reads an `Option`).
+    fn optional_unsigned(&self, key: &str) -> Result<Option<u64>, String> {
+        match self.field(key)? {
+            None | Some(Self::Nil) => Ok(None),
+            Some(value) => value.unsigned(key).map(Some),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::Unsigned(value) => value.to_string(),
+            Self::Text(text) => format!("{text:?}"),
+            Self::Nil => "nil".to_string(),
+            Self::Map(entries) => format!("a map of {} entries", entries.len()),
+            Self::Other(kind) => (*kind).to_string(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WireValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ValueVisitor)
+    }
+}
+
+struct ValueVisitor;
+
+impl<'de> Visitor<'de> for ValueVisitor {
+    type Value = WireValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("any value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(WireValue::Other("a boolean"))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(u64::try_from(value).map_or(WireValue::Other("a negative integer"), WireValue::Unsigned))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(WireValue::Unsigned(value))
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(WireValue::Other("a float"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(WireValue::Text(value.to_string()))
+    }
+
+    fn visit_bytes<E>(self, _: &[u8]) -> Result<Self::Value, E> {
+        Ok(WireValue::Other("bytes"))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(WireValue::Nil)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(WireValue::Nil)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        WireValue::deserialize(deserializer)
+    }
+
+    fn visit_newtype_struct<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        WireValue::deserialize(deserializer)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(WireValue::Other("a sequence"))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut entries = Vec::new();
+        while let Some(entry) = map.next_entry()? {
+            entries.push(entry);
+        }
+        Ok(WireValue::Map(entries))
+    }
+}
+
+impl<'de> Deserialize<'de> for WireUntriggered {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(UntriggeredVisitor)
+    }
+}
+
+struct UntriggeredVisitor;
+
+impl<'de> Visitor<'de> for UntriggeredVisitor {
+    type Value = WireUntriggered;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an untriggered order: a map of one kind")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut keys = Vec::new();
+        let mut kind = None;
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "t" {
+                kind = Some(map.next_value::<WireValue>()?);
+            } else {
+                // a stop's (`s`), or another kind's
+                map.next_value::<IgnoredAny>()?;
+            }
+            keys.push(key);
+        }
+        Ok(match (keys.as_slice(), kind) {
+            ([one], None) if one == "s" => WireUntriggered::Stop,
+            ([_], Some(stop)) => WireUntriggered::Trailing(stop),
+            _ => WireUntriggered::Other(format!("an untriggered order of keys {keys:?}")),
+        })
+    }
+}
+
+/// A trailing stop (bm 1205940000, 289): `a` its activation price, absent for an immediate one; `b` its best, absent
+/// while it waits; `c.s` its side; `r` its retracement, `{"Pct": thousandths of a percent}` or `{"Px": price units}`.
+/// Prices in integer price units. BTC 591778253588: `{"b": 776118, "r": {"Px": 15590}}`, its line "Activation
+/// immediate, retracement 1559, best 77611.8".
+#[derive(Debug)]
+pub(crate) struct WireTrailing {
+    a: Option<u64>,
+    b: Option<u64>,
+    side: Side,
+    r: Retracement,
+}
+
+impl WireTrailing {
+    fn of(value: &WireValue) -> Result<Self, String> {
+        let side = value.field("c")?.ok_or("no c")?.field("s")?.ok_or("no c.s")?;
+        let side = match side {
+            WireValue::Text(side) if side == "A" => Side::Ask,
+            WireValue::Text(side) if side == "B" => Side::Bid,
+            other => return Err(format!("c.s {}", other.describe())),
+        };
+        let r = retracement(value.field("r")?.ok_or("no r")?)?;
+        Ok(Self { a: value.optional_unsigned("a")?, b: value.optional_unsigned("b")?, side, r })
+    }
+}
+
+/// `r`: a map of exactly one of `Pct` and `Px` (review 000661 r3 P2: another key beside one is a rule not known).
+fn retracement(r: &WireValue) -> Result<Retracement, String> {
+    let WireValue::Map(entries) = r else { return Err(format!("r {} is no map", r.describe())) };
+    let [(WireValue::Text(kind), value)] = entries.as_slice() else { return Err(format!("r {}", r.describe())) };
+    match kind.as_str() {
+        "Pct" => Ok(Retracement::Percent(u32::try_from(value.unsigned("r.Pct")?).map_err(|err| format!("r.Pct: {err}"))?)),
+        "Px" => Ok(Retracement::Price(value.unsigned("r.Px")?)),
+        other => Err(format!("r {other:?}")),
+    }
+}
+
+impl WireNativeBook {
+    /// The book, and its trailing stops and untriggered orders of another kind as (asset, oid, stop or kind).
+    fn split(self) -> (WireBook, impl Iterator<Item = (u32, u64, Result<WireTrailing, String>)>) {
+        let Self { asset, last_trade_px, bod, user_states } = self;
+        let untriggered = user_states.into_iter().flat_map(|(_, state)| state.untriggered);
+        let trailing = untriggered.filter_map(move |(oid, order)| match order {
+            WireUntriggered::Stop => None,
+            WireUntriggered::Trailing(stop) => Some((asset, oid, WireTrailing::of(&stop).map_err(|err| format!("a trailing stop: {err}")))),
+            WireUntriggered::Other(kind) => Some((asset, oid, Err(kind))),
+        });
+        (WireBook { asset, last_trade_px, bod }, trailing)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +459,13 @@ impl<'de> Visitor<'de> for NativeBooksVisitor {
         let native = seq.next_element::<WireNativePerpDex>()?.ok_or_else(|| A::Error::custom("perp_dexs is empty"))?;
         let mut hip3_last_trades = FxHashMap::default();
         let mut twap_trackers = vec![native.twap_tracker];
+        let mut trailing = Vec::new();
+        let mut native_books = Vec::with_capacity(native.books.len());
+        for book in native.books {
+            let (book, stops) = book.split();
+            trailing.extend(stops);
+            native_books.push(book);
+        }
         while let Some(dex) = seq.next_element::<WireHip3PerpDex>()? {
             for book in dex.books {
                 if hip3_last_trades.insert(book.asset, book.last_trade_px).is_some() {
@@ -229,7 +474,7 @@ impl<'de> Visitor<'de> for NativeBooksVisitor {
             }
             twap_trackers.push(dex.twap_tracker);
         }
-        Ok(WireNativeBooks { native: native.books, twap_trackers, hip3_last_trades })
+        Ok(WireNativeBooks { native: native_books, trailing, twap_trackers, hip3_last_trades })
     }
 }
 
@@ -308,6 +553,8 @@ pub(crate) struct WireNativePrices {
     /// Main clearinghouse's explicit halt set; missing is unknown, not an empty set.
     pub(crate) halted_assets: Option<Vec<u32>>,
     pub(crate) books: Vec<WireBook>,
+    /// The main dex's trailing stops, (asset, oid, stop or the kind of another untriggered order).
+    pub(crate) trailing: Vec<(u32, u64, Result<WireTrailing, String>)>,
     /// `exchange.spot_books`, each with its pair index as `asset`.
     pub(crate) spot_books: Vec<WireBook>,
     /// (ordinary order delay in seconds, delay scale); absent on older archives.
@@ -332,6 +579,10 @@ pub(crate) struct MarkSeed {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativeSeed {
     pub(crate) refresh: super::refresh::RefreshState,
+    /// The main dex's trailing stops, (asset, oid, stop), price units (batch 2n-1).
+    pub(crate) trailing_stops: Vec<(usize, u64, TrailingStop)>,
+    /// The untriggered orders that did not read (a trailing stop's fields, or another kind): (asset, oid, why).
+    pub(crate) trailing_unread: Vec<(usize, u64, String)>,
     pub(crate) system_timing: Option<(f64, f64)>,
     pub(crate) assets: Vec<NativeAsset>,
     /// The spot books `oracle.psro` names, in its order.
@@ -515,7 +766,7 @@ impl MarkSeed {
 
 impl NativeSeed {
     fn from_wire(wire: WireNativePrices, main: &DexMeta, spot_pairs: &[SpotPair]) -> Result<Self, String> {
-        let WireNativePrices { oracle, halted_assets, books, spot_books, system_timing, refresh } = wire;
+        let WireNativePrices { oracle, halted_assets, books, trailing, spot_books, system_timing, refresh } = wire;
         let count = main.assets.len();
         let halted_assets = halted_assets.ok_or("halted_assets is missing")?;
         let mut halted = vec![false; count];
@@ -568,8 +819,38 @@ impl NativeSeed {
         for asset in partial {
             assets[asset].unsupported.get_or_insert("partialSubmittedPrices");
         }
-        Ok(Self { system_timing, assets, spot_references, refresh })
+        let (trailing_stops, trailing_unread) = trailing_stops(trailing, count)?;
+        Ok(Self { refresh, trailing_stops, trailing_unread, system_timing, assets, spot_references })
     }
+}
+
+/// The checkpoint's trailing stops, and the entries that did not read with why; an asset outside the universe breaks
+/// the contract.
+type TrailingSeed = (Vec<(usize, u64, TrailingStop)>, Vec<(usize, u64, String)>);
+
+fn trailing_stops(entries: Vec<(u32, u64, Result<WireTrailing, String>)>, count: usize) -> Result<TrailingSeed, String> {
+    let mut stops = Vec::with_capacity(entries.len());
+    let mut unread = Vec::new();
+    for (asset, oid, entry) in entries {
+        let index = usize::try_from(asset).ok().filter(|index| *index < count);
+        let index = index.ok_or_else(|| format!("untriggered order {oid} of asset {asset} outside the universe"))?;
+        match entry.and_then(trailing_stop) {
+            Ok(stop) => stops.push((index, oid, stop)),
+            Err(err) => unread.push((index, oid, err)),
+        }
+    }
+    Ok((stops, unread))
+}
+
+/// A checkpoint's trailing stop: active with a best, else waiting with an activation price.
+fn trailing_stop(wire: WireTrailing) -> Result<TrailingStop, String> {
+    let WireTrailing { a: activation, b: best, side, r: retracement } = wire;
+    let state = match (best, activation) {
+        (Some(best), _) => TrailingState::Active { best },
+        (None, Some(_)) => TrailingState::Waiting,
+        (None, None) => return Err("a trailing stop with neither a best nor an activation price".to_string()),
+    };
+    Ok(TrailingStop { side, activation, retracement, state })
 }
 
 /// The books `psro` names, each asset and pair at most once and every one present.
@@ -829,6 +1110,69 @@ pub(crate) mod tests {
         let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
         edit(&mut checkpoint);
         MarkSeed::from_checkpoint(parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap()).unwrap()
+    }
+
+    /// Batch 2n-1: the fixture's BTC book holds a stop (not read) and a trailing stop; a waiting one carries its
+    /// activation price. A trailing stop with neither a best nor an activation price, or an untriggered order of
+    /// another kind, is the trailing stops' concern alone: the seed reads, saying why.
+    #[test]
+    fn the_trailing_stops_seed_as_the_checkpoint_holds_them() {
+        let active = TrailingStop { side: Side::Ask, activation: None, retracement: Retracement::Percent(2_000), state: TrailingState::Active { best: 828_700 } };
+        assert_eq!(seed_with(|_| {}).native.trailing_stops, [(0, 12, active)]);
+        let trailing = |stop: serde_json::Value| move |checkpoint: &mut serde_json::Value| {
+            checkpoint["exchange"]["perp_dexs"][0]["books"][0]["user_states"][0][1]["U"][1][1]["t"] = stop;
+        };
+        let waiting = seed_with(trailing(json!({"a": 830_000, "c": {"t": 4, "S": 2, "s": "A", "l": 0}, "r": {"Px": 50}})));
+        let waiting_stop = TrailingStop { activation: Some(830_000), retracement: Retracement::Price(50), state: TrailingState::Waiting, ..active };
+        assert_eq!(waiting.native.trailing_stops, [(0, 12, waiting_stop)]);
+        let neither = seed_with(trailing(json!({"c": {"t": 4, "S": 2, "s": "A", "l": 0}, "r": {"Pct": 10}}))).native;
+        assert_eq!(neither.trailing_stops, []);
+        assert_eq!(neither.trailing_unread, [(0, 12, "a trailing stop with neither a best nor an activation price".to_string())]);
+        let other_kind = seed_with(|checkpoint| checkpoint["exchange"]["perp_dexs"][0]["books"][0]["user_states"][0][1]["U"][1][1] = json!({"w": 1})).native;
+        assert_eq!(other_kind.trailing_unread, [(0, 12, r#"an untriggered order of keys ["w"]"#.to_string())]);
+        // review 000661 r1 P1: a field of another form - an unknown retracement - leaves the checkpoint read
+        let other_field = seed_with(trailing(json!({"b": 828_700, "c": {"t": 4, "S": 2, "s": "A", "l": 0}, "r": {"Bps": 10}}))).native;
+        assert_eq!(other_field.trailing_stops, []);
+        assert!(matches!(other_field.trailing_unread.as_slice(), [(0, 12, err)] if err.starts_with("a trailing stop: r ")), "{:?}", other_field.trailing_unread);
+        // review 000661 r3 P2: `r` with a key beside its rule does not read; a nil `a` or `b` is one not there
+        let beside = seed_with(trailing(json!({"b": 828_700, "c": {"t": 4, "S": 2, "s": "A", "l": 0}, "r": {"Pct": 2_000, "NewRule": 1}}))).native;
+        assert_eq!((beside.trailing_stops.len(), beside.trailing_unread.len()), (0, 1), "{:?}", beside.trailing_unread);
+        let nil_activation = seed_with(trailing(json!({"a": null, "b": 828_700, "c": {"t": 4, "S": 2, "s": "A", "l": 0}, "r": {"Pct": 2_000}}))).native;
+        assert_eq!(nil_activation.trailing_stops, [(0, 12, active)]);
+        let nil_best = seed_with(trailing(json!({"a": 830_000, "b": null, "c": {"t": 4, "S": 2, "s": "A", "l": 0}, "r": {"Px": 50}}))).native;
+        assert_eq!(nil_best.trailing_stops, [(0, 12, waiting_stop)]);
+        // review 000661 r2 P1: a field of MessagePack's binary type leaves the checkpoint read - the str placeholder
+        // swapped in place for a bin of the same length
+        let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
+        trailing(json!({"b": 828_700, "c": {"t": 4, "S": 2, "s": "A", "l": 0}, "r": "BINPLACEHOLDER"}))(&mut checkpoint);
+        let mut bytes = rmp_serde::to_vec(&checkpoint).unwrap();
+        let placeholder = [&[0xae_u8][..], b"BINPLACEHOLDER"].concat();
+        let at = bytes.windows(placeholder.len()).position(|window| window == placeholder).unwrap();
+        bytes.splice(at..at + placeholder.len(), [&[0xc4_u8, 13][..], &[7; 13]].concat());
+        let binary = MarkSeed::from_checkpoint(parse_checkpoint_bytes(&bytes).expect("the checkpoint reads")).unwrap().native;
+        assert!(matches!(binary.trailing_unread.as_slice(), [(0, 12, err)] if err == "a trailing stop: r bytes is no map"), "{:?}", binary.trailing_unread);
+    }
+
+    /// Review 000661 r3 P2: a field twice in a trailing stop's entry - which one the node meant is not known - does
+    /// not read, in the entry or in its `c` or `r`.
+    #[test]
+    fn a_trailing_stop_field_twice_does_not_read() {
+        let text = |text: &str| WireValue::Text(text.to_string());
+        let map = |entries: Vec<(&str, WireValue)>| WireValue::Map(entries.into_iter().map(|(key, value)| (text(key), value)).collect());
+        let stop = |b: Vec<(&str, WireValue)>, c: WireValue, r: WireValue| {
+            let mut entries = b;
+            entries.extend([("c", c), ("r", r)]);
+            WireTrailing::of(&map(entries))
+        };
+        let side = || map(vec![("s", text("A"))]);
+        let pct = || map(vec![("Pct", WireValue::Unsigned(2_000))]);
+        assert!(stop(vec![("b", WireValue::Unsigned(828_700))], side(), pct()).is_ok());
+        let twice = stop(vec![("b", WireValue::Unsigned(828_700)), ("b", WireValue::Unsigned(700_000))], side(), pct());
+        assert_eq!(twice.unwrap_err(), "b twice");
+        let side_twice = map(vec![("s", text("A")), ("s", text("B"))]);
+        assert_eq!(stop(vec![("b", WireValue::Unsigned(1))], side_twice, pct()).unwrap_err(), "s twice");
+        let rule_twice = map(vec![("Pct", WireValue::Unsigned(2_000)), ("Pct", WireValue::Unsigned(1))]);
+        assert!(stop(vec![("b", WireValue::Unsigned(1))], side(), rule_twice).is_err());
     }
 
     /// bm 10-27: XTEN, listed that day, had lmpe without msoe at 1198840000; an ordinary-mode coin missing a key it reads

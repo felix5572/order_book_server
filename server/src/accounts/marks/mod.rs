@@ -29,6 +29,7 @@ pub(crate) mod pairing;
 pub(crate) mod rules;
 pub(crate) mod seed;
 pub(crate) mod system;
+pub(crate) mod trailing;
 #[cfg(test)]
 mod sga_prediction;
 
@@ -42,6 +43,7 @@ use self::{
     native::{CoinCut, CoinPriceState, NativePrices, PriceMismatch, PricesCheck},
     rules::wire_units,
     seed::{Hip3Coin, MarkSeed, NoRelayerGap, RelayerGap, StoredMark, exact_price_units},
+    trailing::{MarkWrite, TrailingBlock, TrailingCheck, TrailingCounts, TrailingLine, TrailingReport, TrailingStops},
 };
 use super::{
     book::{AnchorInfo, Stream, StreamProgress, Unavailable},
@@ -121,6 +123,8 @@ struct BlockInputs {
     /// `None` when the line broke the marks' contract.
     actions: Option<MarkActions>,
     statuses: BlockStatuses,
+    /// The trailing stops' lines (batch 2n-1).
+    trailing_lines: Vec<TrailingLine>,
     system: system::SystemBlock,
     fills: Vec<BlockFill>,
     collateral_coins: Vec<String>,
@@ -156,6 +160,7 @@ impl BlockInputs {
             Ok(system) => out.system = system,
             Err(err) => report.errors.push((Stream::SystemActions, format!("block {height}: {err}"))),
         }
+        out.trailing_lines = TrailingLine::of_block(&statuses);
         match BlockStatuses::of(statuses) {
             Ok(statuses) => out.statuses = statuses,
             Err(err) => report.errors.push((Stream::OrderStatuses, format!("block {height}: {err}"))),
@@ -168,7 +173,8 @@ impl BlockInputs {
     /// The block's time counts as one: it refreshes the reference caches with no action at all (review 000444 r1 P2-1).
     fn len(&self) -> usize {
         let actions = self.actions.as_ref().map_or(0, |actions| 1 + actions.actions.len());
-        self.hip3.len() + self.diffs.len() + actions + self.statuses.len() + self.fills.len() + self.system.len() + self.collateral_coins.len()
+        self.hip3.len() + self.diffs.len() + actions + self.statuses.len() + self.trailing_lines.len() + self.fills.len() + self.system.len()
+            + self.collateral_coins.len()
     }
 }
 
@@ -190,6 +196,8 @@ struct MarkState {
     /// as they were until a seed replaces them (the loss withholds the marks).
     books_broken: bool,
     prices_broken: bool,
+    /// The main dex's trailing stops (batch 2n-1).
+    trailing: TrailingStops,
 }
 
 impl MarkState {
@@ -197,14 +205,19 @@ impl MarkState {
         let MarkSeed { height, time_ms, native, hip3 } = seed;
         let system_timing = native.system_timing;
         let prices = NativePrices::seeded(&native);
+        let mut trailing = TrailingStops::seeded(&native.trailing_stops, &native.trailing_unread);
+        trailing.forget_unclaimed(|asset| prices.mark(asset).is_some());
         let books = NativeBooks::seeded(native);
-        Self { seed: AnchorInfo { height, time_ms }, height, time_ms, hip3, books, prices, system_timing, books_broken: false, prices_broken: false }
+        Self {
+            seed: AnchorInfo { height, time_ms }, height, time_ms, hip3, books, prices, system_timing, books_broken: false, prices_broken: false, trailing,
+        }
     }
 
     /// Applies block `height`; coins outside the seed's universe (listed since) are counted and skipped, a value that
     /// does not convert, a diff that does not fit or a price action that contradicts the block breaks the contract.
     fn apply(&mut self, height: u64, inputs: &BlockInputs, report: &mut MarksBlockReport) {
-        let automatic_main_refresh = self.begin_block(height, inputs, report);
+        let refreshed = self.begin_block(height, inputs, report);
+        let automatic_main_refresh = refreshed.is_some();
         let mut fill_prices = FillPriceBuilder::new(&inputs.fills);
         fill_prices.collateral(&self.hip3, &self.prices, inputs);
         fill_prices.hip3(&self.hip3, inputs);
@@ -215,12 +228,17 @@ impl MarkState {
         self.apply_hip3_trades(height, &inputs.fills, report);
         let cuts = self.apply_diffs(height, &inputs.diffs, report);
         let trades = self.block_trades(height, &inputs.fills, report);
-        if let Some(actions) = inputs.actions.as_ref().filter(|_| !self.books_broken && !self.prices_broken)
-            && let Err((stream, err)) = self.apply_prices(actions, inputs, &cuts, &trades, report, &mut fill_prices, automatic_main_refresh)
-        {
-            report.errors.push((stream, format!("block {height}: {err}")));
-            self.prices_broken = true;
-        }
+        let actions = inputs.actions.as_ref().filter(|_| !self.books_broken && !self.prices_broken);
+        let writes = match actions.map(|actions| self.apply_prices(actions, inputs, &cuts, &trades, report, &mut fill_prices, automatic_main_refresh)) {
+            Some(Ok(writes)) => Some(writes),
+            Some(Err((stream, err))) => {
+                report.errors.push((stream, format!("block {height}: {err}")));
+                self.prices_broken = true;
+                None
+            }
+            None => None,
+        };
+        self.apply_trailing(inputs, writes.as_deref(), refreshed.as_deref().unwrap_or_default(), &mut report.trailing);
         for (asset, trades) in trades {
             if let Some((_, px)) = trades.last() {
                 self.prices.trade(asset, *px);
@@ -230,11 +248,12 @@ impl MarkState {
         self.height = height;
     }
 
-    fn begin_block(&mut self, height: u64, inputs: &BlockInputs, report: &mut MarksBlockReport) -> bool {
-        let Some(actions) = &inputs.actions else { return false };
+    /// The block's start; the assets an automatic refresh wrote there, `None` when none ran.
+    fn begin_block(&mut self, height: u64, inputs: &BlockInputs, report: &mut MarksBlockReport) -> Option<Vec<usize>> {
+        let Some(actions) = &inputs.actions else { return None };
         self.time_ms = actions.time_ns / 1_000_000;
         self.prices.begin_block(actions.time_ns);
-        if self.books_broken || self.prices_broken { return false; }
+        if self.books_broken || self.prices_broken { return None; }
         let books = &self.books;
         match self.prices.refresh_stale(height, actions.time_ns, |asset| CoinCut {
             best: books.best(asset), spot_reference: books.spot_reference(asset).map(|book| books.best(book)), block_trade: None,
@@ -243,7 +262,7 @@ impl MarkState {
             Err(err) => {
                 self.prices_broken = true;
                 report.errors.push((Stream::BlockActions, format!("block {height}: {err}")));
-                false
+                None
             }
         }
     }
@@ -352,10 +371,11 @@ impl MarkState {
         report: &mut MarksBlockReport,
         fill_prices: &mut FillPriceBuilder,
         automatic_main_refresh: bool,
-    ) -> Result<(), (Stream, String)> {
+    ) -> Result<Vec<MarkWrite>, (Stream, String)> {
         let books = &self.books;
         let system = inputs.system.anchors(actions, &inputs.statuses, self.system_timing, |coin| books.order_asset(coin)).map_err(|err| (Stream::SystemActions, err))?;
         let mut fills_from = 0;
+        let mut writes = Vec::new();
         for point in execution::price_points_with_system(actions, &inputs.statuses, &inputs.diffs, &inputs.fills, &system, |coin| books.order_asset(coin), automatic_main_refresh).map_err(|err| (Stream::BlockActions, err))? {
             fill_prices.native_segment(&inputs.fills, &self.prices, fills_from, point.fills_hi);
             fills_from = point.cut.fills_lo;
@@ -372,9 +392,45 @@ impl MarkState {
                     .map(|(_, px)| *px),
             };
             self.prices.apply(&point.action.action, point.action.user, actions.time_ns, cut_of).map_err(|err| (Stream::BlockActions, err))?;
+            writes.extend(self.trailing_writes(point.action.rank, &point.action.action));
         }
         fill_prices.native_segment(&inputs.fills, &self.prices, fills_from, inputs.fills.len());
-        Ok(())
+        Ok(writes)
+    }
+
+    /// The marks a price action at `rank` wrote or withdrew, of every coin of the seed's universe, held or not - a
+    /// coin's first stop may open before it in the block (review 000661 r1 P2-2): each coin a `SetGlobalAction` prices
+    /// or names in part (that coin's mark then unclaimed); after any price action, each coin whose mark the replay does
+    /// not claim, so that a line after it in the block is not checked against a best from before (r2 P2).
+    fn trailing_writes(&self, rank: Rank, action: &MarkAction) -> Vec<MarkWrite> {
+        let priced = |asset: usize| matches!(action, MarkAction::SetGlobal(pxs) if pxs.get(asset).is_some_and(|prices| prices.priced() != Some(false)));
+        let writes = (0..self.prices.coin_count()).map(|asset| (asset, self.prices.mark(asset)));
+        writes.filter(|(asset, mark)| priced(*asset) || mark.is_none()).map(|(asset, mark)| MarkWrite { rank, asset, mark }).collect()
+    }
+
+    /// The block's trailing stop lines and mark writes, in its execution order; `writes` `None` when its price actions
+    /// were not applied, `refreshed` the assets an automatic refresh wrote at its start. Then the stops of every coin
+    /// whose mark the replay does not claim are not known (review 000661 r1 P2-3: a price action may withdraw a coin's
+    /// mark without writing it).
+    fn apply_trailing(&mut self, inputs: &BlockInputs, writes: Option<&[MarkWrite]>, refreshed: &[usize], report: &mut TrailingReport) {
+        let mut placements = FxHashMap::default();
+        let mut unread_receipts = Vec::new();
+        let placed = inputs.actions.iter().flat_map(|actions| &actions.actions);
+        for action in placed {
+            if let MarkAction::PlaceTrailing { oid } = &action.action {
+                match oid {
+                    Ok(oid) => drop(placements.insert(*oid, action.rank)),
+                    Err(err) => unread_receipts.push(err.clone()),
+                }
+            }
+        }
+        let block = TrailingBlock {
+            lines: &inputs.trailing_lines, writes: writes.unwrap_or_default(), placements: &placements, unread_receipts: &unread_receipts, refreshed,
+            marks_unapplied: writes.is_none(),
+        };
+        let prices = &self.prices;
+        self.trailing.apply_block(&block, |coin| prices.asset(coin).map(|asset| (asset, prices.size_decimals(asset))), report);
+        self.trailing.forget_unclaimed(|asset| prices.mark(asset).is_some());
     }
 }
 
@@ -534,6 +590,8 @@ pub(crate) struct MarksBlockReport {
     pub(crate) ambiguous_cuts: u64,
     /// The first of them while the seed interval's `MAX_CHECK_SAMPLES` last (review 000444 r1 P3).
     pub(crate) ambiguous_samples: Vec<AmbiguousCut>,
+    /// The trailing stops' lines checked and how the stops stand (batch 2n-1).
+    pub(crate) trailing: TrailingReport,
 }
 
 /// A price action's ambiguous cut: the diff lines `[lo, hi)` may run before or after it.
@@ -548,7 +606,8 @@ pub(crate) struct AmbiguousCut {
 #[derive(Debug, PartialEq, Eq)]
 #[expect(clippy::large_enum_variant, reason = "one per checkpoint install, moved once into the log")]
 pub(crate) enum MarksCheck {
-    Checked { hip3: Hip3Check, books: BooksCheck, prices: PricesCheck },
+    /// `trailing` is the trailing stops' alone: it never withholds the marks (`differs`).
+    Checked { hip3: Hip3Check, books: BooksCheck, prices: PricesCheck, trailing: TrailingCheck },
     /// `noSnapshot`: no trusted state was kept at the checkpoint's height (the first after start, the marks were
     /// unavailable there, a node grid other than the inferred one, or a later grid height replaced it).
     Skipped(&'static str),
@@ -556,7 +615,7 @@ pub(crate) enum MarksCheck {
 
 impl MarksCheck {
     fn differs(&self) -> bool {
-        let Self::Checked { hip3, books, prices } = self else { return false; };
+        let Self::Checked { hip3, books, prices, trailing: _ } = self else { return false; };
         hip3.differ != 0 || hip3.oracle_differ != 0 || books.books_differ != 0
             || books.orders_differ != 0 || books.missing != 0 || books.extra != 0
             || prices.fields.iter().any(|(_, _, differ)| *differ != 0)
@@ -601,6 +660,8 @@ pub(crate) struct MarksInstallReport {
     pub(crate) previous_seed: Option<u64>,
     pub(crate) check: MarksCheck,
     pub(crate) rebuild: Rebuild,
+    /// The seed's untriggered orders that did not read (batch 2n-1), each held as a trailing stop not known.
+    pub(crate) trailing_unread: Vec<String>,
     /// Logged inputs that break the contract once replayed onto the new seed (a coin listed since the previous seed,
     /// whose units only the new universe gives), by stream; each is a loss up to its block.
     pub(crate) errors: Vec<(Stream, String)>,
@@ -645,6 +706,8 @@ pub(crate) struct MarksStatus {
     pub(crate) availability: Result<u64, Unavailable>,
     pub(crate) seed_height: Option<u64>,
     pub(crate) logged_inputs: usize,
+    /// The trailing stops held, by state (batch 2n-1); `None` without a state.
+    pub(crate) trailing: Option<TrailingCounts>,
 }
 
 #[derive(Debug)]
@@ -741,6 +804,7 @@ impl NodeMarks {
             availability: self.availability(),
             seed_height: self.state.as_ref().map(|state| state.seed.height),
             logged_inputs: self.log.inputs,
+            trailing: self.state.as_ref().map(|state| state.trailing.counts()),
         }
     }
 
@@ -822,12 +886,20 @@ impl NodeMarks {
                 hip3: check_hip3(&snapshot.hip3, &seed.hip3),
                 books: snapshot.books.check_against(&seed.native),
                 prices: snapshot.prices.check_against(&seed.native),
+                trailing: snapshot.trailing.check_against(&TrailingStops::seeded(&seed.native.trailing_stops, &seed.native.trailing_unread)),
             },
             _ => MarksCheck::Skipped("noSnapshot"),
         };
         let mut errors = Vec::new();
         let mut fill_prices = Vec::new();
+        let trailing_unread = seed.native.trailing_unread.iter().map(|(asset, oid, err)| format!("asset {asset} oid {oid}: {err}")).collect();
         let rebuild = self.rebuild(seed, &mut errors, &mut fill_prices);
+        // kept as it was: the trailing stops the checkpoint shows wrong are not known until a rebuild
+        if rebuild == Rebuild::LogDoesNotReach
+            && let (Some(state), MarksCheck::Checked { trailing, .. }) = (self.state.as_mut(), &check)
+        {
+            state.trailing.withdraw(trailing);
+        }
         if rebuild == Rebuild::LogDoesNotReach && check.differs() {
             // A known disagreement is different from missing historical retention: continuing that
             // live state would publish an error we have observed and cannot yet repair.
@@ -838,7 +910,7 @@ impl NodeMarks {
             self.seed_failure = None;
         }
         if self.availability().is_err() { fill_prices.clear(); }
-        MarksInstallReport { fill_prices, previous_seed, check, rebuild, errors }
+        MarksInstallReport { fill_prices, previous_seed, check, rebuild, trailing_unread, errors }
     }
 
     fn rebuild(&mut self, seed: MarkSeed, errors: &mut Vec<(Stream, String)>, fill_prices: &mut Vec<(u64, FillMarkPrices)>) -> Rebuild {
@@ -918,6 +990,7 @@ pub(crate) mod tests {
     use crate::accounts::{
         book::{CLOCK_MARGIN_MS, LossBound},
         marks::{
+            actions::SubmittedPrices,
             book::{BookMismatch, tests::diff_line},
             seed::{RestingOrder, SpotReferenceBook},
         },
@@ -965,6 +1038,11 @@ pub(crate) mod tests {
     fn seed_prices() -> PricesCheck {
         let native = seed(0).native;
         NativePrices::seeded(&native).check_against(&native)
+    }
+
+    /// The fixture's trailing stop against itself: no block of these tests moves it.
+    fn seed_trailing() -> TrailingCheck {
+        TrailingCheck { equal: 1, ..TrailingCheck::default() }
     }
 
     /// A PUMP order placed and removed in block `height`: the books read a diff and stay as they were.
@@ -1110,6 +1188,7 @@ pub(crate) mod tests {
             previous_seed: None,
             check: MarksCheck::Skipped("noSnapshot"),
             rebuild: Rebuild::Replayed { blocks: 0 },
+            trailing_unread: Vec::new(),
             errors: Vec::new(),
         };
         assert_eq!(first, expected);
@@ -1123,7 +1202,7 @@ pub(crate) mod tests {
         checkpoint.hip3.get_mut("xyz:TSLA").unwrap().mark = Some(written(360_000));
         let report = marks.install(checkpoint);
         let hip3 = Hip3Check { equal: 2, oracle_equal: 2, ..Hip3Check::default() };
-        assert_eq!(report.check, MarksCheck::Checked { hip3, books: seed_books(), prices: seed_prices() });
+        assert_eq!(report.check, MarksCheck::Checked { hip3, books: seed_books(), prices: seed_prices(), trailing: seed_trailing() });
         assert_eq!(report.rebuild, Rebuild::Replayed { blocks: 3 }, "blocks 1001 to 1003 replayed onto the seed");
         assert_eq!((marks.availability(), tsla(&marks)), (Ok(1_003), Some(written(361_500))));
     }
@@ -1141,7 +1220,7 @@ pub(crate) mod tests {
             checkpoint: Some(StoredMark { px: 358_320, time_ns: 1_792_391_842_000_000_000 }),
         };
         let hip3 = Hip3Check { equal: 1, differ: 1, samples: vec![mismatch], oracle_equal: 2, ..Hip3Check::default() };
-        assert_eq!(report.check, MarksCheck::Checked { hip3, books: seed_books(), prices: seed_prices() });
+        assert_eq!(report.check, MarksCheck::Checked { hip3, books: seed_books(), prices: seed_prices(), trailing: seed_trailing() });
         assert_eq!(tsla(&marks).map(|mark| mark.px), Some(358_320), "the checkpoint's value, nothing logged above it");
     }
 
@@ -1438,8 +1517,8 @@ pub(crate) mod tests {
         let set_global = RankedAction {
             rank: (1, 3, 0),
             user: None,
-            action: MarkAction::SetGlobal(vec![actions::SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: "82870.0".to_string() },
-                actions::SubmittedPrices::Unpriced]),
+            action: MarkAction::SetGlobal(vec![SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: "82870.0".to_string() },
+                SubmittedPrices::Unpriced]),
         };
         let actions = MarkActions { height: 996, time_ns, actions: vec![placed((0, 1, 0), 11), set_global, placed((2, 1, 0), 12)] };
         let inputs = MarkInputs {
@@ -1455,6 +1534,118 @@ pub(crate) mod tests {
         assert_eq!(unsupported, None);
         // L = median(bid 828600 at the cut, ask 828700, last trade 828600); at the block's end the bid is 828650
         assert_eq!(mark, StoredMark { px: 828_600, time_ns }, "median(828700, Mark cache 828590, L 828600)");
+    }
+
+    /// A BTC trailing stop's `open` line placing `oid`, as bm prints one.
+    fn trailing_open(height: u64, oid: u64, condition: &str) -> Batch<NodeDataOrderStatus> {
+        trailing_line(height, oid, "open", condition, "81144.0")
+    }
+
+    /// A BTC trailing stop's line of `status`, as bm prints one.
+    fn trailing_line(height: u64, oid: u64, status: &str, condition: &str, trigger_px: &str) -> Batch<NodeDataOrderStatus> {
+        sonic_rs::from_str(&format!(
+            r#"{{"local_time":"2026-10-19T06:40:00.6","block_time":"2026-10-19T06:40:00.5","block_number":{height},"events":[{{"time":"2026-10-19T06:40:00.5","user":"{:#x}","hash":null,"builder":null,"status":"{status}","order":{{"coin":"BTC","side":"A","limitPx":"74520.0","sz":"0.001","oid":{oid},"timestamp":1,"triggerCondition":"{condition}","isTrigger":true,"triggerPx":"{trigger_px}","children":[],"isPositionTpsl":false,"reduceOnly":true,"orderType":"Trailing Stop Market","origSz":"0.001","tif":null,"cloid":null}}}}]}}"#,
+            Address::repeat_byte(1)
+        ))
+        .unwrap()
+    }
+
+    /// Review 000661 r2 P2: a `SetGlobalAction` dropping BTC's submitted prices withdraws its mark
+    /// (`submittedCoverageChanged`); the fixture's stop's `canceled` line after it in the block is not checked against
+    /// the best from before, and the stop leaves.
+    #[test]
+    fn a_line_after_its_coins_mark_withdrawn_in_the_block_is_unordered() {
+        use self::actions::RankedAction;
+        let mut marks = NodeMarks::new(GRID, STARTED_MS);
+        run(&mut marks, 995..=995, &[]);
+        let mut seeded = seed(995);
+        // a refresh not due yet: the explicit one a second before the block
+        let mut wire = refresh::tests::wire();
+        wire.last_explicit_time = Some("2026-10-19T06:37:23".to_string());
+        seeded.native.refresh = refresh::RefreshState::from_wire(wire, 2).unwrap().0;
+        marks.install(seeded);
+        let dropped = RankedAction { rank: (0, 3, 0), user: None, action: MarkAction::SetGlobal(vec![SubmittedPrices::Unpriced, SubmittedPrices::Unpriced]) };
+        let inputs = MarkInputs {
+            mark_actions: Ok(MarkActions { height: 996, time_ns: 1_792_391_844_000_000_000, actions: vec![dropped] }),
+            order_statuses: vec![trailing_line(996, 12, "canceled", "Activation immediate, retracement 2%, best 82870.0", "81212.6")],
+            ..MarkInputs::default()
+        };
+        let report = marks.apply_block(996, inputs);
+        let state = marks.state.as_ref().unwrap();
+        assert_eq!(state.prices.mark_of(0).1, Some("submittedCoverageChanged"));
+        assert_eq!(report.trailing.lines.into_iter().collect::<Vec<_>>(), [(["leaving", "unordered"], 1)]);
+        assert_eq!(state.trailing, TrailingStops::default());
+    }
+
+    /// Batch 2n-1: a `SetGlobalAction` moves the BTC trailing stop the seed holds; one the block places after it is not
+    /// moved. A checkpoint holding the first as before the write counts it differing, the second extra, and the rebuild
+    /// takes its stops.
+    #[test]
+    fn a_set_global_action_moves_its_coins_trailing_stops_and_a_checkpoint_checks_them() {
+        use self::{actions::RankedAction, trailing::{Retracement, TrailingState, TrailingStop}};
+        let stop = |best| TrailingStop { side: Side::Ask, activation: None, retracement: Retracement::Percent(2_000), state: TrailingState::Active { best } };
+        let stale = |height| {
+            let mut seeded = seed(height);
+            seeded.native.trailing_stops = vec![(0, 12, stop(828_000))];
+            seeded
+        };
+        let mut marks = NodeMarks::new(GRID, STARTED_MS);
+        run(&mut marks, 995..=995, &[]);
+        marks.install(stale(995));
+        let set_global = RankedAction {
+            rank: (1, 3, 0),
+            user: None,
+            action: MarkAction::SetGlobal(vec![SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: "82870.0".to_string() },
+                SubmittedPrices::Unpriced]),
+        };
+        let placed = RankedAction { rank: (2, 3, 0), user: Some(Address::repeat_byte(1)), action: MarkAction::PlaceTrailing { oid: Ok(13) } };
+        let inputs = MarkInputs {
+            mark_actions: Ok(MarkActions { height: 996, time_ns: 1_792_391_844_000_000_000, actions: vec![set_global, placed] }),
+            order_statuses: vec![trailing_open(996, 13, "Activation immediate, retracement 2%, best 82800.0")],
+            ..MarkInputs::default()
+        };
+        let report = marks.apply_block(996, inputs);
+        assert_eq!(report.trailing.lines.into_iter().collect::<Vec<_>>(), [(["open", "added"], 1)]);
+        let (written, _) = marks.state.as_ref().unwrap().prices.mark_of(0);
+        assert!(written.px > 828_000, "the write is past the seeded best: {written:?}");
+        let held = |marks: &NodeMarks| marks.state.as_ref().unwrap().trailing.clone();
+        let expected = TrailingStops::seeded(&[(0, 12, stop(written.px)), (0, 13, stop(828_000))], &[]);
+        assert_eq!(held(&marks).check_against(&expected), TrailingCheck { equal: 2, ..TrailingCheck::default() });
+        // every stream read past the seed: the marks trusted at the grid height
+        run(&mut marks, 997..=1_000, &[(997, "360.0")]);
+        let report = marks.install(stale(1_000));
+        let MarksCheck::Checked { trailing, .. } = report.check else { panic!("{:?}", report.check) };
+        assert_eq!((trailing.equal, trailing.differ, trailing.extra), (0, vec![(0, 12)], vec![(0, 13)]));
+        assert_eq!(held(&marks), TrailingStops::seeded(&[(0, 12, stop(828_000))], &[]), "rebuilt from the checkpoint, nothing logged above it");
+    }
+
+    /// Review 000661 r1 P2-2: the first trailing stop of a coin, opened in a block before its `SetGlobalAction`, moves
+    /// by it - the writes are every coin's, held or not.
+    #[test]
+    fn a_coins_first_trailing_stop_moves_by_the_write_after_it() {
+        use self::{actions::RankedAction, trailing::{Retracement, TrailingState, TrailingStop}};
+        let mut marks = NodeMarks::new(GRID, STARTED_MS);
+        run(&mut marks, 995..=995, &[]);
+        let mut seeded = seed(995);
+        seeded.native.trailing_stops = Vec::new();
+        marks.install(seeded);
+        let placed = RankedAction { rank: (0, 3, 0), user: Some(Address::repeat_byte(1)), action: MarkAction::PlaceTrailing { oid: Ok(13) } };
+        let set_global = RankedAction {
+            rank: (1, 3, 0),
+            user: None,
+            action: MarkAction::SetGlobal(vec![SubmittedPrices::Priced { oracle: "82890.0".to_string(), mark: "82870.0".to_string() },
+                SubmittedPrices::Unpriced]),
+        };
+        let inputs = MarkInputs {
+            mark_actions: Ok(MarkActions { height: 996, time_ns: 1_792_391_844_000_000_000, actions: vec![placed, set_global] }),
+            order_statuses: vec![trailing_open(996, 13, "Activation immediate, retracement 2%, best 82000.0")],
+            ..MarkInputs::default()
+        };
+        marks.apply_block(996, inputs);
+        let (written, _) = marks.state.as_ref().unwrap().prices.mark_of(0);
+        let stop = TrailingStop { side: Side::Ask, activation: None, retracement: Retracement::Percent(2_000), state: TrailingState::Active { best: written.px } };
+        assert!(written.px > 820_000, "{written:?}");
+        assert_eq!(marks.state.as_ref().unwrap().trailing, TrailingStops::seeded(&[(0, 13, stop)], &[]));
     }
 
     /// A reference action reads a `psro` coin's spot book at its place in the block: a bid placed before it moves the

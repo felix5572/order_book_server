@@ -51,6 +51,9 @@ pub(crate) enum MarkAction {
     Hip3Oracle { dex: String, execution_index: Option<usize>, submitted: Result<Vec<SubmittedMark>, String> },
     /// A validator's submitted oracle and external perp prices, by coin.
     Reference { oracle: Vec<(String, String)>, external: Vec<(String, String)> },
+    /// A `trailingStop` that succeeded: the oid its receipt names (batch 2n-1: the stop's place among the block's mark
+    /// writes), or why the receipt did not read - the trailing stops' concern alone, never the marks'.
+    PlaceTrailing { oid: Result<u64, String> },
 }
 
 /// One main-dex asset's prices in a `SetGlobalAction`.
@@ -180,7 +183,7 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
         &inner
     } else { paired.action };
     let kind = action.action_type;
-    if !matches!(kind, "order" | "modify" | "batchModify" | "cancel" | "cancelByCloid" | "vaultTransfer" | "perpDeploy" | "SetGlobalAction" | "validatorL1UpdateReferenceOracle") {
+    if !matches!(kind, "order" | "modify" | "batchModify" | "cancel" | "cancelByCloid" | "vaultTransfer" | "perpDeploy" | "SetGlobalAction" | "validatorL1UpdateReferenceOracle" | "trailingStop") {
         return Ok(None);
     }
     match paired.response.res.status {
@@ -251,6 +254,7 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
             (3, hip3_oracle(action)?)
         }
         "SetGlobalAction" => (3, MarkAction::SetGlobal(set_global_prices(action)?)),
+        "trailingStop" => (3, MarkAction::PlaceTrailing { oid: trailing_stop_oid(paired) }),
         _ => {
             let oracle = action.field(action.oracle_pxs.as_ref(), "oraclePxs")?;
             let external = action.field(action.external_perp_pxs.as_ref(), "externalPerpPxs")?;
@@ -258,6 +262,23 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
         }
     };
     Ok(Some(RankedAction { rank: (paired.bundle, category, paired.position), user, action }))
+}
+
+/// A `trailingStop`'s receipt, `{"type": "trailingStop", "data": {"oid"}}`: its oid the stop's `open` line's (bm
+/// 1205946781; review 000659 r2, four more).
+fn trailing_stop_oid(paired: &PairedAction<'_, '_>) -> Result<u64, String> {
+    #[derive(Deserialize)]
+    struct Receipt {
+        data: ReceiptData,
+    }
+    #[derive(Deserialize)]
+    struct ReceiptData {
+        oid: u64,
+    }
+    let raw = paired.response.res.response.as_ref().ok_or("a trailingStop without a receipt")?;
+    let Receipt { data: ReceiptData { oid } } =
+        sonic_rs::from_str(raw.as_raw_str()).map_err(|err| format!("trailingStop receipt {}: {err}", raw.as_raw_str()))?;
+    Ok(oid)
 }
 
 /// A `SetGlobalAction`'s `pxs`: per main-dex asset, the prices submitted (also the pending book's, batch 2l).
@@ -577,6 +598,21 @@ pub(crate) mod tests {
         let priced = SubmittedPrices::Priced { oracle: "81520".to_string(), mark: "81503".to_string() };
         assert_eq!(parsed.actions[4].action, MarkAction::SetGlobal(vec![priced, SubmittedPrices::Unpriced]));
         assert_eq!(parsed.actions[4].user, Some(USER.parse().unwrap()));
+    }
+
+    /// Batch 2n-1 (bm 1205946781): a `trailingStop` is a category-3 action, its oid its receipt's; a receipt that does
+    /// not read is the trailing stops' concern, never the block's.
+    #[test]
+    fn a_trailing_stop_reads_its_oid_from_its_receipt() {
+        let trailing = r#"{"type":"trailingStop","asset":38,"isBuy":true,"sz":"84584","reduceOnly":true,"retracement":{"pct":"0.6000%"},"activationPx":null}"#;
+        let line = replica_line(1_205_946_781, &[&[
+            (trailing, &ok(r#"{"type":"trailingStop","data":{"oid":592263157991}}"#)),
+            (trailing, &ok(r#"{"type":"trailingStop","data":{}}"#)),
+        ]]);
+        let parsed = mark_actions(&line);
+        assert_eq!(parsed.actions[0].rank, (0, 3, 0));
+        assert_eq!(parsed.actions[0].action, MarkAction::PlaceTrailing { oid: Ok(592_263_157_991) });
+        assert!(matches!(&parsed.actions[1].action, MarkAction::PlaceTrailing { oid: Err(err) } if err.contains("missing field `oid`")), "{:?}", parsed.actions[1]);
     }
 
     /// bm block 1191373718 (research `rune_1191370000_1191380000`): an IOC that matched nothing has an order error for

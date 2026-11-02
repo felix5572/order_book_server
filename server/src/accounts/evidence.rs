@@ -171,6 +171,16 @@ pub(crate) fn ambiguous_cut_json(height: u64, cut: &AmbiguousCut) -> serde_json:
     json!({"kind": "nodeMarkAmbiguousCut", "height": height, "rank": [bundle, category, position], "lo": cut.lo, "hi": cut.hi})
 }
 
+/// A trailing stop's line or receipt the node marks found otherwise than they hold it (batch 2n-1).
+pub(crate) fn trailing_line_json(height: u64, detail: &str) -> serde_json::Value {
+    json!({"kind": "nodeMarkTrailingLine", "height": height, "detail": detail})
+}
+
+/// A trailing stop of the marks' snapshot otherwise than the checkpoint holds it (batch 2n-1).
+pub(crate) fn trailing_check_json(detail: &str, seed_from: Option<u64>, seed_to: u64) -> serde_json::Value {
+    json!({"kind": "nodeMarkTrailingCheck", "seedFrom": seed_from, "seedTo": seed_to, "detail": detail})
+}
+
 /// A HIP-3 coin whose mark in the marks' snapshot differs from the checkpoint's (design 000439 r2 revision 2).
 pub(crate) fn hip3_mark_mismatch_json(mismatch: &Hip3Mismatch, seed_from: Option<u64>, seed_to: u64) -> serde_json::Value {
     let mark = |mark: Option<StoredMark>| mark.map(|mark| json!({"px": mark.px, "timeNs": mark.time_ns}));

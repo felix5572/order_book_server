@@ -848,6 +848,27 @@ lazy_static! {
 }
 
 
+// The node marks' trailing stops, in a block of their own (the accounts block is at the macro recursion limit).
+lazy_static! {
+    // ==================== NODE MARKS: TRAILING STOPS (batch 2n-1, hyperliquid-trade design 000659) ====================
+
+    /// Batch 2n-1: the trailing stops' lines the node marks read - `open` (`added`, `unparsed`, `unordered`: opened beside a
+    /// mark write of its coin, its placement's rank unknown), `leaving` (the line a stop leaves by, against the stop
+    /// held: `match`, `rule_mismatch`, `best_mismatch`, `trigger_mismatch`, `unordered`, `unparsed`, `unknown`,
+    /// `untracked`) - and `receipt` (`unread`).
+    pub static ref NODE_MARKS_TRAILING_LINES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_node_marks_trailing_lines_total", "Trailing stop lines and receipts the node marks read, by line and result"),
+        &["line", "result"]
+    ).expect("metric can be created");
+
+    /// Batch 2n-1: the main dex's trailing stops the node marks hold, by state (`waiting`, `active`, `unknown`).
+    pub static ref NODE_MARKS_TRAILING_STOPS: IntGaugeVec = IntGaugeVec::new(
+        Opts::new("orderbook_node_marks_trailing_stops", "Main-dex trailing stops the node marks hold, by state"),
+        &["state"]
+    ).expect("metric can be created");
+}
+
+
 lazy_static! {
     // ==================== PENDING BOOK, BATCH 2B (hyperliquid-trade design 000604) ====================
 
@@ -1147,6 +1168,8 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(NODE_MARKS_SEED_FAILURES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_UNKNOWN_COIN_INPUTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(NODE_MARKS_AMBIGUOUS_CUTS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_TRAILING_LINES_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(NODE_MARKS_TRAILING_STOPS.clone())).ok();
     REGISTRY.register(Box::new(LIQUIDATION_CANDIDATES_REFRESH_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(LIQUIDATION_CANDIDATES.clone())).ok();
     REGISTRY.register(Box::new(LIQUIDATION_WALK_LOCK_WAIT_SECONDS.clone())).ok();

@@ -429,17 +429,20 @@ impl NativePrices {
         }
     }
 
-    /// Automatic selector at block start, before this block's book effects or fills.
-    pub(crate) fn refresh_stale(&mut self, height: u64, time_ns: u64, cut_of: impl Fn(usize) -> CoinCut) -> Result<bool, String> {
-        if !self.refresh.due(height, time_ns) { return Ok(false); }
+    /// Automatic selector at block start, before this block's book effects or fills: the assets it wrote (batch 2n-1:
+    /// their trailing stops' concern), `None` when not due.
+    pub(crate) fn refresh_stale(&mut self, height: u64, time_ns: u64, cut_of: impl Fn(usize) -> CoinCut) -> Result<Option<Vec<usize>>, String> {
+        if !self.refresh.due(height, time_ns) { return Ok(None); }
+        let mut written = Vec::new();
         for (asset, pair) in self.refresh.submitted.iter().enumerate() {
             let Some((oracle, mark)) = *pair else { continue };
             let coin = &mut self.coins[asset];
             if coin.halted { continue; }
             coin.set_global(oracle, mark, time_ns, cut_of(asset), MarkUpdate::AutomaticRefresh)
                 .map_err(|err| format!("{} automatic refresh: {err}", coin.name))?;
+            written.push(asset);
         }
-        Ok(true)
+        Ok(Some(written))
     }
 
     /// A crossed fill of the coin moved the last trade.
@@ -482,7 +485,7 @@ impl NativePrices {
         })
     }
 
-    #[cfg(test)]
+    /// The seed's universe: the assets `mark` takes.
     pub(crate) fn coin_count(&self) -> usize {
         self.coins.len()
     }
@@ -512,7 +515,7 @@ impl NativePrices {
         cut_of: impl Fn(usize) -> CoinCut,
     ) -> Result<(), String> {
         match action {
-            MarkAction::Book(_) | MarkAction::VaultWithdraw { .. } | MarkAction::Hip3Oracle { .. } => Ok(()),
+            MarkAction::Book(_) | MarkAction::VaultWithdraw { .. } | MarkAction::Hip3Oracle { .. } | MarkAction::PlaceTrailing { .. } => Ok(()),
             MarkAction::SetGlobal(pxs) => {
                 for asset in self.refresh.coverage_changes(pxs.iter().map(SubmittedPrices::priced)) {
                     self.coins[asset].unsupported.get_or_insert("submittedCoverageChanged");
@@ -682,7 +685,7 @@ mod tests {
         prices.apply(&action, None, T1, |_| cut(900_000, 950_000, 925_000)).unwrap();
         let later = T1 + 21_000_000_000;
         prices.begin_block(later);
-        assert!(prices.refresh_stale(1, later, |_| cut(800_000, 850_000, 825_000)).unwrap());
+        assert!(prices.refresh_stale(1, later, |_| cut(800_000, 850_000, 825_000)).unwrap().is_some());
         assert_eq!((prices.stored_oracle(0), prices.mark(0)), (Some(266_670), Some(270_960)));
         assert_eq!(prices.coins[0].mark_update, MarkUpdate::AutomaticRefresh);
         let rows = [crate::accounts::misc::FundingDelta { user: VALIDATOR, coin: "XTEN".to_string(), size: "100".to_string(), amount_wei: 17 }];
@@ -773,7 +776,7 @@ mod tests {
         assert_eq!((state.spot_cache.as_ref().unwrap().median, state.mark_cache.as_ref().unwrap().median, state.mark_cache.as_ref().unwrap().members.len()), (Some(828_720), Some(828_590), 1));
         // the stale window is 20 s; lmpe's 30 s decay still spans the gap
         let later = T1 + 21_000_000_000;
-        assert!(prices.refresh_stale(1, later, |_| cut(828_500, 828_700, 828_600)).unwrap(), "no SetGlobalAction for 21 s");
+        assert!(prices.refresh_stale(1, later, |_| cut(828_500, 828_700, 828_600)).unwrap().is_some(), "no SetGlobalAction for 21 s");
         assert_eq!((btc(&prices).mark_update, btc(&prices).mark_time_ns), (MarkUpdate::AutomaticRefresh, later));
     }
 
