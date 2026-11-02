@@ -45,7 +45,7 @@ use super::{
         price_mismatch_json, replay_mismatch_json, replay_row_mismatch_json, silent_change_json, trailing_check_json, trailing_line_json,
     },
     publish::{AccountsFrame, CoinSubscriptionGuard, CoinSubscriptions, FRAME_CHANNEL_CAPACITY, FlowPublisher, NodePrices, Publisher},
-    candidates::{BookLink, Candidates, CandidatesSnapshot},
+    candidates::{BookLink, Candidates, CandidatesSnapshot, trusted},
     flow_accounts::{CopyOwner, FlowAccountsFeed, link},
     forced_flow::Tier,
     forced_flow_owner::{DemandKey, FlowDemand, FlowDemandGuard, FlowFrame},
@@ -94,6 +94,8 @@ const BLOCK_ACTIONS_MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 /// Checkpoints appear complete (a new file has its final size at first sight, 2026-10-19), every ~12 minutes.
 const CHECKPOINT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SUPERVISION_INTERVAL: Duration = Duration::from_secs(1);
+/// The longest the candidates' refresh waits behind queued inputs (`DeferredRefresh`): the 1 s the README gives.
+const MAX_REFRESH_DEFER: Duration = Duration::from_secs(1);
 const OWNER_GONE: &str = "account owner task exited";
 const FORCED_FLOW_GONE: &str = "the forced flow thread exited";
 /// How much of an unparsable line goes into the error.
@@ -549,6 +551,41 @@ fn spawn_checkpoint_poller(
     })
 }
 
+/// The rows the applied inputs changed since the candidates last refreshed. Behind its inputs, the owner applies what is
+/// queued before it refreshes them, once for it all: each block's refresh is stale by the next, and while behind they
+/// kept it behind (bm 11-02 after the US open: the candidates over half of the owner's time, its pending blocks
+/// overflowing). A refresh waits for no input queued, `MAX_REFRESH_DEFER` at most; one changing what is published at
+/// once - the view or its marks not trusted, the walks' book moved (review 000680 r1 P2-1) - goes at once. Merged, a
+/// candidate in and out between two refreshes is never told.
+#[derive(Default)]
+struct DeferredRefresh {
+    touched: Touched,
+    /// When the first input held since the last refresh was applied.
+    since: Option<Instant>,
+}
+
+impl DeferredRefresh {
+    /// An input applied at `now`: its rows held for the refresh; whether to refresh now - nothing queued behind it,
+    /// held `MAX_REFRESH_DEFER` (review 000680 r1 P2-2), or the published candidates to change at once.
+    fn applied(&mut self, touched: Touched, queued: bool, at_once: bool, now: Instant) -> bool {
+        self.touched.absorb(touched);
+        self.since.get_or_insert(now);
+        !queued || at_once || self.overdue(now)
+    }
+
+    /// Whether a refresh held is due at `now`: before the owner serves anything read from the candidates - a query, a
+    /// walk's result - it goes (review 000680 r2 P2).
+    fn overdue(&self, now: Instant) -> bool {
+        self.since.is_some_and(|since| now.duration_since(since) >= MAX_REFRESH_DEFER)
+    }
+
+    /// The rows held, for the refresh now.
+    fn take(&mut self) -> Touched {
+        self.since = None;
+        std::mem::take(&mut self.touched)
+    }
+}
+
 #[expect(clippy::too_many_arguments, reason = "the owner task's parts, moved in once at start")]
 async fn run_owner(
     mut book: AccountBook,
@@ -567,6 +604,7 @@ async fn run_owner(
     // a parsed anchor whose blocks are not applied yet (design 000433 r2 3.4), and a seed the marks are not ready for
     let mut held: Option<Box<ParsedAnchor>> = None;
     let mut held_seed: Option<Box<MarkSeed>> = None;
+    let mut deferred = DeferredRefresh::default();
     publisher.track(&book);
     loop {
         tokio::select! {
@@ -584,7 +622,10 @@ async fn run_owner(
                 publisher.track_marks(&mut book, &marks);
                 // the forced flow's copy before the refresh: its positions and marks do not wait for the candidates
                 publisher.copies_applied(&book, marks.at(), &touched, &candidates);
-                refresh_candidates(&mut candidates, &book, &marks, &touched, &mut publisher);
+                let at_once = !trusted(&book, marks.at()) || candidates.book_moved();
+                if deferred.applied(touched, !inputs.is_empty(), at_once, Instant::now()) {
+                    refresh_candidates(&mut candidates, &book, &marks, &deferred.take(), &mut publisher);
+                }
             }
             Some(message) = anchors.recv() => {
                 let installed = receive_anchor(&mut diagnostics, &mut book, &mut marks, &mut held, &mut held_seed, message);
@@ -593,7 +634,7 @@ async fn run_owner(
                 }
                 publisher.track_marks(&mut book, &marks);
                 publisher.copies_applied(&book, marks.at(), &Touched::default(), &candidates);
-                refresh_candidates(&mut candidates, &book, &marks, &Touched::default(), &mut publisher);
+                refresh_candidates(&mut candidates, &book, &marks, &deferred.take(), &mut publisher);
             }
             walk = next_walk(&mut walks) => {
                 let Some(result) = walk else {
@@ -602,6 +643,9 @@ async fn run_owner(
                     publisher.publish_candidates(candidates.stop("the book walk task ended".to_string()));
                     continue;
                 };
+                if deferred.overdue(Instant::now()) {
+                    refresh_candidates(&mut candidates, &book, &marks, &deferred.take(), &mut publisher);
+                }
                 publisher.publish_candidates(candidates.apply_walk(result));
             }
             query = queries.recv() => {
@@ -609,6 +653,9 @@ async fn run_owner(
                     info!("accounts: every handle dropped, owner exits");
                     return;
                 };
+                if deferred.overdue(Instant::now()) {
+                    refresh_candidates(&mut candidates, &book, &marks, &deferred.take(), &mut publisher);
+                }
                 answer(&book, &marks, &candidates, query);
             }
             _ = supervision.tick() => {
@@ -616,7 +663,7 @@ async fn run_owner(
                 publisher.track(&book);
                 publisher.track_marks(&mut book, &marks);
                 publisher.copies_applied(&book, marks.at(), &Touched::default(), &candidates);
-                refresh_candidates(&mut candidates, &book, &marks, &Touched::default(), &mut publisher);
+                refresh_candidates(&mut candidates, &book, &marks, &deferred.take(), &mut publisher);
                 let recovered_through = book.availability().ok().filter(|_| marks.availability().is_ok())
                     .and_then(|available| marks.status().seed_height.map(|seed| seed.min(available.anchor.height)));
                 diagnostics.tick(Instant::now(), recovered_through);
@@ -1381,6 +1428,34 @@ mod tests {
     /// Review 000422 r2 P2, across the real watcher and the owner's input path: the content skipped while the watcher
     /// positions at EOF (here the line that triggered it) is a loss of unknown blocks; an anchor older than the moment
     /// the owner learns of it cannot clear it, however many later lines flow.
+    /// Behind its inputs the owner holds each one's rows for one refresh, once none is queued or `MAX_REFRESH_DEFER`
+    /// after the first held (review 000680 r1 P2-2); an input after which the published candidates change at once - not
+    /// trusted, the walks' book moved - refreshes at once.
+    #[test]
+    fn the_candidates_refresh_once_the_queued_inputs_are_applied() {
+        let user = Address::with_last_byte;
+        let touched = |byte| Touched { accounts: vec![user(byte)], positions: vec![("PUMP".to_string(), user(byte))] };
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut deferred = DeferredRefresh::default();
+        assert!(!deferred.applied(touched(1), true, false, at(0)), "queued behind it");
+        assert!(!deferred.applied(touched(2), true, false, at(500)));
+        assert!(deferred.applied(touched(3), false, false, at(600)), "nothing queued");
+        assert_eq!(deferred.take().accounts, [user(1), user(2), user(3)]);
+        assert_eq!(deferred.take(), Touched::default(), "taken once");
+        assert!(deferred.applied(touched(4), true, true, at(700)), "at once");
+        assert_eq!(deferred.take().positions, [("PUMP".to_string(), user(4))]);
+        assert!(!deferred.applied(touched(5), true, false, at(800)), "held from 800");
+        assert!(!deferred.applied(touched(6), true, false, at(1_799)));
+        assert!(deferred.applied(touched(7), true, false, at(1_800)), "a second held: refreshed though inputs are queued");
+        assert_eq!(deferred.take().accounts, [user(5), user(6), user(7)]);
+        // what is served from the candidates waits for no input: a refresh held a second goes first
+        assert!(!deferred.overdue(at(5_000)), "none held");
+        assert!(!deferred.applied(touched(8), true, false, at(2_000)));
+        assert!(!deferred.overdue(at(2_999)));
+        assert!(deferred.overdue(at(3_000)));
+    }
+
     #[test]
     fn lines_skipped_while_positioning_withhold_the_view() {
         let dir = std::env::temp_dir().join(format!("accounts_start_skip_test_{}", std::process::id()));

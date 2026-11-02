@@ -1994,3 +1994,22 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - `the_state_takes_a_revision_at_each_block_and_seed`：应用一块和装种子都会换修订号，种子回放到同一高度时也换。
   - `the_pending_books_copy_keeps_the_trailing_stops`：同一高度变更止损但修订号未变时，不读不发；换了修订号后才发 `Trailing`。
   - 变异 3 处都有用例失败：装种子不换号、应用块不换号、不看修订号。
+
+## 2026-11-02 账户视图：落后时强平候选合并刷新（用户 11-02 “先搞你这个推荐先做的吧”）
+
+- **依据**：修好移动止损副本（928b588）后，15:55 的 perf 中，`accounts-owner` 的 15 秒采样里：
+  - `Candidates::reevaluate` 31.7%，`reindex` 11.3%，`refresh_candidates` 7.1%，排序约 4%，合计过半；
+  - 线程三个 10 秒窗口 CPU 为 61% / 64% / 84%。
+  原来每条输入之后都刷新一次候选（新块到来时全量重算）。主线程一落后，积压的每一块各算一次，结果在下一块就过时，于是越落后越慢，直到 `pending_overflow`。
+- **改了什么**：
+  - `runtime.rs` 新增 `DeferredRefresh`：每应用一条输入，就把它改动的行并入暂存；只有输入队列为空时才刷新候选，一次用上全部暂存的行。
+  - 视图或 mark 不可信时（`candidates::trusted` 为假）立即刷新，即立即撤回候选。
+  - 检查点安装分支和每秒一次的巡检分支，都带着暂存的行刷新。所以持续积压时，刷新最晚也在下一个巡检时发生，`select!` 在就绪分支间随机选取。
+  - 不落后时行为不变，仍是每块刷新一次。
+- **用例**：`the_candidates_refresh_once_the_queued_inputs_are_applied`。变异 3 处都有失败：不看是否可信、从不延后、暂存不清空。
+- 代码审查 000680 r1 后（2 条 P2）：
+  - **P2-1 盘口撤回**：扫盘所用的盘口变得不可信、或撤回代数变化时（`Candidates::book_moved`，与 `walk_book` 判断依据相同），立即刷新，已发布的扫盘估价马上标为 `untrusted`；不可信的账户视图或 mark 照旧立即刷新。
+  - **P2-2 延后上限**：`DeferredRefresh.since` 记下第一条被延后的输入，满 `MAX_REFRESH_DEFER`（1 s，即 README 写的 1 秒）就刷新，不再依赖 `select!` 的随机调度。
+  - **说明**：合并刷新时，两次刷新之间进入又退出的候选不会被发出，README 已写明。
+  - **用例**：`the_book_moving_is_seen_until_a_refresh_takes_it`（撤回、撤回后恢复且代数变化、未接盘口）；`the_candidates_refresh_once_the_queued_inputs_are_applied` 加了可控时钟，第 1,000 ms 刷新、第 999 ms 不刷。变异 4 处都有失败：`book_moved` 恒为假、去掉时间上限、忽略立即刷新、刷新后不清起点。
+- 代码审查 000680 r2 后（1 条 P2）：延后已满 `MAX_REFRESH_DEFER` 时，主循环若先选中查询或扫盘结果，原来会先用上一次确认的候选去服务。现在这两个分支处理之前先检查 `DeferredRefresh::overdue`，到期就先刷新。输入分支照旧在应用输入后检查。用例加了 `overdue` 的边界：无暂存时为假，满 1,000 ms 为真、999 ms 为假。

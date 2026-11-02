@@ -378,6 +378,12 @@ impl Candidates {
         self.finish(changes)
     }
 
+    /// Whether the book the walks read moved since the last refresh took it - its trust or its withheld periods
+    /// (`walk_book`): a refresh then voids the estimates published, at once (hyperliquid-trade review 000680 r1 P2-1).
+    pub(crate) fn book_moved(&self) -> bool {
+        self.book.as_ref().is_some_and(|link| self.book_state != Some((link.trust.is_trusted(), link.trust.withheld_periods())))
+    }
+
     /// The book's trust, then the walk requests (r2 revision 3, r3 revision 2): an untrusted book voids every estimate
     /// and request; a trusted one in a new period voids the requests sent before it. Only when the candidates were
     /// re-evaluated or the book's state moved are the walk orders rebuilt (review 000446 r1 P2-1): a key whose order
@@ -688,6 +694,11 @@ const fn indexed_row(size_raw: i64, replayed: &Replayed) -> Option<IndexedRow> {
     })
 }
 
+/// Whether the candidates may be published over `book` and `marks` (`trust`): otherwise a refresh withdraws them.
+pub(crate) fn trusted(book: &AccountBook, marks: Option<&dyn MarksAt>) -> bool {
+    trust(book, marks).is_ok()
+}
+
 /// The rows and the marks are trusted at one height: the view available with its replayed rows, the node marks of that
 /// height.
 fn trust(book: &AccountBook, marks: Option<&dyn MarksAt>) -> Result<Trusted, String> {
@@ -953,6 +964,26 @@ mod walk_tests {
         let mailbox = Arc::new(WalkMailbox::default());
         let candidates = Candidates::new(Some(BookLink { trust: trust.clone(), mailbox: Arc::clone(&mailbox) }));
         (candidates, trust, mailbox)
+    }
+
+    /// Review 000680 r1 P2-1: the book's state moves - untrusted, or untrusted and back in another period - as the owner
+    /// finds it before refreshing; a refresh taking it settles it.
+    #[test]
+    fn the_book_moving_is_seen_until_a_refresh_takes_it() {
+        let (book, marks) = book_and_marks();
+        let (mut candidates, trust, _mailbox) = linked();
+        assert!(candidates.book_moved(), "not taken yet");
+        candidates.refresh(&book, Some(&marks), &[]);
+        assert!(!candidates.book_moved());
+        trust.set_for_test(false);
+        assert!(candidates.book_moved(), "untrusted");
+        candidates.refresh(&book, Some(&marks), &[]);
+        assert!(!candidates.book_moved());
+        trust.set_for_test(true);
+        trust.set_for_test(false);
+        trust.set_for_test(true);
+        assert!(candidates.book_moved(), "trusted again in another period");
+        assert!(!Candidates::new(None).book_moved(), "no book linked");
     }
 
     /// Review 000446 r1 P2-1: an input without a block rebuilds no walk order (were it rebuilt, the forgotten request
