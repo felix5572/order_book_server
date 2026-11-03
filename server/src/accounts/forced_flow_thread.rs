@@ -11,21 +11,29 @@ use std::{
 
 use log::{error, info};
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{
+        mpsc::{self, error::TrySendError},
+        oneshot, watch,
+    },
     task::JoinHandle,
     time::MissedTickBehavior,
 };
 
 use super::{
     flow_accounts::{AccountsCopy, FlowAccounts, FlowAccountsEvent, OWNER_ENDED},
+    flow_staleness::{CopyTimes, FlowStaleness, StaleSpell},
     forced_flow::Tier,
     forced_flow_owner::{FlowDemand, FlowFrame, FlowLink, FlowOutput, ForcedFlow},
     forced_flow_reader::{FlowMailbox, FlowRead, run_flow_reader},
     owner_thread::spawn_owner,
     publish::FlowPublisher,
-    runtime::BookSource,
+    runtime::{BookSource, now_ms},
 };
-use crate::{local_marks::snapshot::LocalMarksSnapshot, mailbox::Mailbox, metrics::FORCED_FLOW_OWNER_SECONDS};
+use crate::{
+    local_marks::snapshot::LocalMarksSnapshot,
+    mailbox::Mailbox,
+    metrics::{FORCED_FLOW_OWNER_SECONDS, FORCED_FLOW_STALE_SPELLS_DROPPED_TOTAL},
+};
 
 /// Reads in flight back to the forced flow: at most one per (coin, tier, kind) pending.
 const FLOW_READS_CAPACITY: usize = 1_024;
@@ -34,6 +42,9 @@ const FLOW_QUERIES_CAPACITY: usize = 64;
 /// The thread's tick: the tiers' periods are its multiples, and a near key the book floor held, or a computation under
 /// way kept, is taken up at the next one (hyperliquid-trade design 000587 r2).
 const TICK: Duration = Duration::from_millis(50);
+/// Stale spells ended, waiting for their log line: the forced flow thread never waits on the log (review 000693 r1
+/// P2-1); a full queue drops the line, counted. A spell ends a second at most.
+const SPELL_LOG_CAPACITY: usize = 16;
 
 /// What the WS connections ask the forced flow thread.
 pub(crate) enum FlowQuery {
@@ -76,7 +87,8 @@ pub(crate) fn spawn_forced_flow(
 ) -> std::io::Result<(mpsc::Sender<FlowQuery>, JoinHandle<()>)> {
     let feed = FlowFeed::start(book, demand);
     let (queries_tx, queries) = mpsc::channel(FLOW_QUERIES_CAPACITY);
-    let thread = spawn_owner("forced-flow", run_flow(feed, accounts, events, queries, publisher))?;
+    let sink = FlowSink::start(publisher)?;
+    let thread = spawn_owner("forced-flow", run_flow(feed, accounts, events, queries, sink))?;
     Ok((queries_tx, thread))
 }
 
@@ -85,7 +97,7 @@ async fn run_flow(
     mut accounts: FlowAccounts,
     mut events: mpsc::Receiver<FlowAccountsEvent>,
     mut queries: mpsc::Receiver<FlowQuery>,
-    publisher: FlowPublisher,
+    mut sink: FlowSink,
 ) {
     let FlowFeed { mut flow, reads: mut flow_reads, mut revisions, fires } = feed;
     let mut tick = tokio::time::interval(TICK);
@@ -95,11 +107,11 @@ async fn run_flow(
         tokio::select! {
             changed = accounts.validity_changed() => {
                 if changed.is_err() {
-                    return end(&mut flow, &publisher);
+                    return end(&mut flow, &sink.publisher);
                 }
             }
             event = events.recv() => {
-                let Some(event) = event else { return end(&mut flow, &publisher) };
+                let Some(event) = event else { return end(&mut flow, &sink.publisher) };
                 let started = Instant::now();
                 accounts.apply(event);
                 FORCED_FLOW_OWNER_SECONDS.with_label_values(&["accounts"]).observe(started.elapsed().as_secs_f64());
@@ -111,7 +123,7 @@ async fn run_flow(
                 };
                 match query {
                     FlowQuery::Frames { coin, tier, reply } => {
-                        publisher.publish(time_flow_step("query", || flow.query(coin, tier, reply, handled_now(), &accounts)));
+                        sink.publish(time_flow_step("query", || flow.query(coin, tier, reply, handled_now(), &accounts)), &accounts);
                     }
                     FlowQuery::AttachLocalMarks(snapshots) => flow.attach_local(snapshots),
                 }
@@ -122,10 +134,10 @@ async fn run_flow(
                     flow_reads = None;
                     let reason = "the forced flow read task ended".to_string();
                     flow.stop(reason.clone());
-                    publisher.withdraw(reason);
+                    sink.publisher.withdraw(reason);
                     continue;
                 };
-                publisher.publish(time_flow_step("read", || flow.on_read(read, handled_now(), &accounts)));
+                sink.publish(time_flow_step("read", || flow.on_read(read, handled_now(), &accounts)), &accounts);
             }
             revision = next_revision(&mut revisions) => {
                 let Some(revision) = revision else {
@@ -133,26 +145,80 @@ async fn run_flow(
                     revisions = None;
                     let reason = "the book revision ended".to_string();
                     flow.stop(reason.clone());
-                    publisher.withdraw(reason);
+                    sink.publisher.withdraw(reason);
                     continue;
                 };
-                publisher.publish(time_flow_step("book", || flow.on_book(revision, handled_now(), &accounts)));
+                sink.publish(time_flow_step("book", || flow.on_book(revision, handled_now(), &accounts)), &accounts);
             }
             coins = next_fires(fires.as_deref()) => {
-                publisher.publish(time_flow_step("fires", || flow.on_fires(&coins, handled_now(), &accounts)));
+                sink.publish(time_flow_step("fires", || flow.on_fires(&coins, handled_now(), &accounts)), &accounts);
             }
             scheduled = tick.tick() => {
                 // the tick's time on its schedule: two handling times a period apart come out short of it about half the
                 // time, and the key waited a tick more (bm 2026-10-30: a Near key started 6.4 times a second, not 10)
-                publisher.publish(time_flow_step("tick", || flow.tick(scheduled.into_std(), handled_now(), &accounts)));
+                sink.publish(time_flow_step("tick", || flow.tick(scheduled.into_std(), handled_now(), &accounts)), &accounts);
             }
             closed = next_local_snapshot(&mut flow) => {
-                publisher.publish(time_flow_step("local", || flow.on_local(closed, handled_now(), &accounts)));
+                sink.publish(time_flow_step("local", || flow.on_local(closed, handled_now(), &accounts)), &accounts);
             }
         }
         if let Some(reason) = served.after_step(&accounts) {
-            publisher.publish(time_flow_step("accounts", || flow.withdraw_accounts(&reason, handled_now(), &accounts)));
+            sink.publish(time_flow_step("accounts", || flow.withdraw_accounts(&reason, handled_now(), &accounts)), &accounts);
         }
+    }
+}
+
+/// The frames' way out of the thread: published, and their account data's age followed by spell (`flow_staleness`),
+/// each spell ended handed to the log task.
+struct FlowSink {
+    publisher: FlowPublisher,
+    staleness: FlowStaleness,
+    spells: mpsc::Sender<StaleSpell>,
+}
+
+impl FlowSink {
+    /// With the log's own thread, writing each spell to the log.
+    fn start(publisher: FlowPublisher) -> std::io::Result<Self> {
+        Self::start_writing(publisher, |spell| info!("{spell}"))
+    }
+
+    /// With the log's own thread, started once: a write waiting holds that thread alone, not the forced flow's, nor a
+    /// worker of the runtime the network and the book's reads run on (review 000693 r3).
+    fn start_writing(publisher: FlowPublisher, write: impl Fn(&StaleSpell) + Send + 'static) -> std::io::Result<Self> {
+        let (spells, lines) = mpsc::channel(SPELL_LOG_CAPACITY);
+        std::thread::Builder::new().name("flow-spell-log".into()).spawn(move || log_spells(lines, &write))?;
+        Ok(Self { publisher, staleness: FlowStaleness::default(), spells })
+    }
+
+    /// The step's frames; the copy's own blocks read only when there are frames.
+    fn publish(&mut self, output: FlowOutput, accounts: &FlowAccounts) {
+        let copy = if output.frames.is_empty() {
+            None
+        } else {
+            accounts.serving().ok().map(|copy| CopyTimes { accounts_time_ms: copy.accounts_at().1, positions_time_ms: copy.positions_at().1 })
+        };
+        self.deliver(output, now_ms(), copy);
+    }
+
+    /// Each spell the frames ended to the log task's queue, never waited on; then the frames.
+    fn deliver(&mut self, output: FlowOutput, now_ms: u64, copy: Option<CopyTimes>) {
+        for spell in self.staleness.observe(&output.frames, now_ms, copy) {
+            if let Err(error) = self.spells.try_send(spell) {
+                let cause = match error {
+                    TrySendError::Full(_) => "full",
+                    TrySendError::Closed(_) => "closed",
+                };
+                FORCED_FLOW_STALE_SPELLS_DROPPED_TOTAL.with_label_values(&[cause]).inc();
+            }
+        }
+        self.publisher.publish(output);
+    }
+}
+
+/// The stale spells' log lines on the log's own thread, until the sink is gone.
+fn log_spells(mut spells: mpsc::Receiver<StaleSpell>, write: &dyn Fn(&StaleSpell)) {
+    while let Some(spell) = spells.blocking_recv() {
+        write(&spell);
     }
 }
 
@@ -241,7 +307,7 @@ mod tests {
         candidates::Candidates,
         checkpoint::tests::{HOLDER, user as checkpoint_user},
         flow_accounts::{AccountsSnapshot, CopyOwner, FlowAccountsValidity, link, tests::serving},
-        forced_flow_owner::{FlowContent, FlowDemandGuard},
+        forced_flow_owner::{FlowContent, FlowDemandGuard, FlowHeights},
         forced_flow_reader::{FlowJob, FlowJobKind},
         publish::AccountsFrame,
         test_support::{ListedMarks, PUMP, replay_book},
@@ -280,7 +346,7 @@ mod tests {
             let (frames, received) = broadcast::channel(16);
             let fires = Arc::new(Mailbox::default());
             let feed = FlowFeed { flow, reads: Some(reads), revisions: Some(revisions), fires: Some(Arc::clone(&fires)) };
-            let thread = tokio::spawn(run_flow(feed, accounts, events, queries, FlowPublisher::new(frames)));
+            let thread = tokio::spawn(run_flow(feed, accounts, events, queries, FlowSink::start(FlowPublisher::new(frames)).unwrap()));
             Self {
                 mailbox,
                 reads_back,
@@ -370,6 +436,64 @@ mod tests {
         harness.raise(3);
         assert!(harness.started().await.is_some(), "the revision at 110 ms: 50 ms after its start");
         harness.thread.abort();
+    }
+
+    /// Review 000693 r1 P2-1: the stale spells' log is a queue the thread never waits on - full, a spell's line is
+    /// dropped and counted, and every frame still goes out.
+    /// 2026-11-03 03:01:00.000 UTC.
+    const AT: u64 = 1_793_674_860_000;
+
+    /// A step's one frame of PUMP, `age_ms` old in all three at `at_ms`.
+    fn aged_output(at_ms: u64, age_ms: u64) -> FlowOutput {
+        let heights = FlowHeights { accounts_time_ms: at_ms - age_ms, positions_time_ms: at_ms - age_ms, listener_time: at_ms - age_ms, ..FlowHeights::default() };
+        FlowOutput { frames: vec![Arc::new(FlowFrame { coin: PUMP.to_string(), tier: Tier::Near, seq: 1, heights, content: FlowContent::Unavailable(String::new()) })] }
+    }
+
+    /// Review 000693 r3: the log's write waiting holds neither the forced flow's deliveries nor the runtime's only worker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_log_write_waiting_holds_neither_the_frames_nor_the_runtime() {
+        let (frames, mut received) = broadcast::channel(16);
+        let (entered, writing) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        let write = move |spell: &StaleSpell| {
+            drop(entered.send(spell.to_string()));
+            released.lock().unwrap().recv().unwrap_or_default();
+        };
+        let mut sink = FlowSink::start_writing(FlowPublisher::new(frames), write).unwrap();
+        for (at_ms, age_ms) in [(AT, 3_000), (AT + 1_000, 300)] {
+            sink.deliver(aged_output(at_ms, age_ms), at_ms, None);
+        }
+        let line = tokio::task::spawn_blocking(move || writing.recv_timeout(Duration::from_secs(5))).await.unwrap().unwrap();
+        assert!(line.contains("from 03:01:00.000 to 03:01:00.000"), "{line}");
+        // the write waits: another task of the runtime runs (waited for off the worker, so a held worker fails here), and
+        // the next frames go out
+        let (ran, running) = std::sync::mpsc::channel();
+        drop(tokio::spawn(async move { ran.send(()).unwrap_or_default() }));
+        let ran = tokio::task::spawn_blocking(move || running.recv_timeout(Duration::from_millis(500))).await.unwrap();
+        assert!(ran.is_ok(), "the runtime's only worker is held by the log");
+        sink.deliver(aged_output(AT + 2_000, 300), AT + 2_000, None);
+        assert_eq!((0..3).filter(|_| received.try_recv().is_ok()).count(), 3);
+        release.send(()).unwrap();
+    }
+
+    #[test]
+    fn a_full_spell_log_drops_the_line_and_the_frames_go_out() {
+        let output = aged_output;
+        let (frames, mut received) = broadcast::channel(16);
+        // a queue of one nobody reads
+        let (spells, mut lines) = mpsc::channel(1);
+        let mut sink = FlowSink { publisher: FlowPublisher::new(frames), staleness: FlowStaleness::default(), spells };
+        let dropped = || FORCED_FLOW_STALE_SPELLS_DROPPED_TOTAL.with_label_values(&["full"]).get();
+        let before = dropped();
+        // two spells, each ended by a frame back within a second after it
+        for (at_ms, age_ms) in [(AT, 3_000), (AT + 1_000, 300), (AT + 2_000, 3_000), (AT + 3_000, 300)] {
+            sink.deliver(output(at_ms, age_ms), at_ms, None);
+        }
+        assert_eq!(dropped() - before, 1);
+        assert_eq!((0..4).filter(|_| received.try_recv().is_ok()).count(), 4);
+        assert!(lines.try_recv().is_ok_and(|spell| spell.to_string().contains("from 03:01:00.000 to 03:01:00.000")));
+        assert!(lines.try_recv().is_err());
     }
 
     /// Review 000563 r1 test 4: the account owner busy in a long synchronous step does not hold the forced flow - a

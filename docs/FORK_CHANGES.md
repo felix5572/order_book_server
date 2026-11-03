@@ -2045,3 +2045,30 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - 变异 4 处都有失败。
 - **审查 000687 r2**：影子盘口的副本还带着每张移动止损的 `set_at`。检查点可能先修正较早一块的止损，再重放到当前块，结果和原值相同；这时副本收不到更新，旧的 `set_at` 会让影子盘口把后一块的值当成早先已证实。所以只让强平流的副本续接，影子盘口副本照旧换代（它不面向交易器，没有撤接货的问题）。用例补上了影子盘口副本换代的对照；变异“影子盘口也续接”有用例失败。
 - **不在本批**：装检查点时强平候选仍整体重建，约 0.5–1 s。
+
+## 2026-11-03 强平流帧账户数据过旧按段记日志
+
+- **依据**：交易器拒收 `accountsTimeMs` 落后本机墙钟超过 4 s 的帧。11-03 03:01:07–10 拒了 4 次（KAS、kBONK），节点当时最多落后 1.14 s，其余约 3 s 出在 OB。当时没有记录，分不清卡在哪里。
+- **改了什么**：
+  - 新增 `accounts/flow_staleness.rs` 的 `FlowStaleness`，按发布时刻的墙钟检查强平流每一帧的账户数据有多旧。
+    - 第一帧超过 1 s 时开一段。
+    - 段内最后一帧过旧之后至少 1 s，再出现回到 1 s 以内的帧，这一段才结束，结束时记一行 INFO。
+    - 不同时刻取数的帧会在同一步内、也会在相邻步之间交错（审查 000693 r1：同一时刻 200 张新旧交替的帧结束了 100 段），有了这 1 s 静默，每段只记一行，最多每秒一行。
+    - heights 全为 0 的帧（副本不服务、还没有盘口）不开段，也不结束段。
+  - 日志写：
+    - 段的起点和最后一帧过旧的时刻（UTC，到毫秒）、时长、帧数；
+    - 段内账户数据最旧的那一帧：币种，以及它输入的三个年龄，各带块高：accounts（持仓与候选确认块中较旧者）、positions、book（`listenerTime`）；
+    - 这一帧发布时副本自身的 accounts、positions 年龄；
+    - 段内 book 的最大年龄。
+  - 年龄口径（审查 000693 r1 P3-1）：输入是计算开始时读取的，所以帧的三个年龄都包含强平流自己的计算和扫盘等待，两两之差不能直接算作某个线程的落后。发布时副本自身的年龄可以作对照：副本比帧的输入新，说明差距在强平流这一侧。
+  - `forced_flow_thread.rs`：每一步的帧经 `FlowSink` 发布，发布前先交给 `FlowStaleness`；只有本步有帧时才读副本的块。`runtime::now_ms` 改为 crate 内可见，复用同一个墙钟函数。
+  - 日志不在强平流线程上写（审查 000693 r1–r2 P2-1：`env_logger` 在调用线程同步写 stderr，写入受阻时会拖住帧的发布）。结束的段 `try_send` 进容量 16 的队列，由专门的系统线程 `flow-spell-log` 用 `blocking_recv` 取出后写日志；不放在主运行时的任务里，以免写入受阻时占住承载网络和盘口读取的工作线程（审查 000693 r3）。队列满或任务已不在时丢弃这一行，计入 `orderbook_forced_flow_stale_spells_dropped_total{cause="full"|"closed"}`。
+  - 1 s 的线取自 bm 11-03 08:45Z 实测：120 s 内 64,240 帧，p50 395 ms，p99 780 ms。
+- **用例**：
+  - `a_spell_runs_from_the_first_stale_frame_to_one_back_within_a_second_after_the_last`（含日志原文）；
+  - `frames_of_inputs_old_and_new_interleaved_keep_one_spell`；
+  - `a_frame_without_account_data_neither_opens_nor_ends_a_spell`；
+  - `the_clock_reads_utc_to_the_ms`；
+  - `a_full_spell_log_drops_the_line_and_the_frames_go_out`：队列满时丢一行、计数加一，4 张帧照样发出。
+  - `a_log_write_waiting_holds_neither_the_frames_nor_the_runtime`：单工作线程的运行时上，写日志卡住时，别的任务照样能跑，后续帧照样发出。
+  - 变异 11 处都有失败：把日志写入改回主运行时任务后，上一条用例 0.5 s 内失败。

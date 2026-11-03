@@ -911,6 +911,17 @@ lazy_static! {
 }
 
 
+// The forced flow's stale spells, in a block of their own (the accounts block is at the macro recursion limit).
+lazy_static! {
+    /// Stale spells of the forced flow frames' account data whose log line was dropped: the log task's queue `full`, or the
+    /// task gone (`closed`) (hyperliquid-trade review 000693).
+    pub static ref FORCED_FLOW_STALE_SPELLS_DROPPED_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_forced_flow_stale_spells_dropped_total", "Forced flow stale spells not logged"),
+        &["cause"]
+    ).expect("metric can be created");
+}
+
+
 // The node marks' trailing stops, in a block of their own (the accounts block is at the macro recursion limit).
 lazy_static! {
     // ==================== NODE MARKS: TRAILING STOPS (batch 2n-1, hyperliquid-trade design 000659) ====================
@@ -1255,6 +1266,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(FORCED_FLOW_OWNER_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(FORCED_FLOW_ACCOUNTS_RESYNC_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(FORCED_FLOW_ACCOUNTS_QUEUE_DEPTH.clone())).ok();
+    REGISTRY.register(Box::new(FORCED_FLOW_STALE_SPELLS_DROPPED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(FORCED_FLOW_ACCOUNTS_SNAPSHOT_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(FORCED_FLOW_WALKED_ENTRIES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_FORK_SECONDS.clone())).ok();

@@ -22,6 +22,7 @@ mod diagnostics;
 mod evidence;
 mod funding;
 pub(crate) mod flow_accounts;
+mod flow_staleness;
 pub(crate) mod forced_flow;
 pub(crate) mod forced_flow_owner;
 pub(crate) mod forced_flow_reader;

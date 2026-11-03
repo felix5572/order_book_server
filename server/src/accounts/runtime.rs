@@ -500,7 +500,7 @@ fn line_error(line: &str, err: &dyn std::fmt::Display, block: Option<u64>) -> Li
 }
 
 #[expect(clippy::expect_used, reason = "a host clock before 1970 or past u64 ms is broken; loss bounds depend on it")]
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).expect("the host clock is after 1970");
     u64::try_from(since_epoch.as_millis()).expect("unix ms fit u64")
 }
