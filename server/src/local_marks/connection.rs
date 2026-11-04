@@ -11,13 +11,13 @@ use tokio::time::{Instant, sleep_until, timeout};
 use yawc::{Frame, OpCode, Options, TcpWebSocket, WebSocket};
 
 use super::{
-    protocol::{Heartbeat, Parsed, Protocol, Session, excerpt},
+    protocol::{Heartbeat, Observation, Parsed, Protocol, Session, excerpt},
     slot::FeedSlot,
     sources::FeedMarkets,
 };
 use crate::{
     local_marks::now_ms,
-    metrics::{LOCAL_MARKS_FEED_FRAMES_TOTAL, LOCAL_MARKS_FEED_UNKNOWN_FRAMES_TOTAL},
+    metrics::{LOCAL_MARKS_FEED_FRAMES_TOTAL, LOCAL_MARKS_FEED_UNKNOWN_FRAMES_TOTAL, LOCAL_MARKS_QUOTE_LAG},
 };
 
 /// A connection's limits.
@@ -102,6 +102,7 @@ async fn run_session(protocol: Protocol, session: &Session, markets: &FeedMarket
     let mut ack_deadline = (session.acks > 0).then_some(started + timeouts.ack);
     let mut next_ping = session.heartbeat.as_ref().map(|(_, every)| started + *every);
     let mut pong_deadline: Option<Instant> = None;
+    let mut lag = QuoteLag::default();
     loop {
         let read_deadline = Instant::now() + timeouts.read;
         let timer = [ack_deadline, next_ping, pong_deadline].into_iter().flatten().min().unwrap_or(read_deadline).min(read_deadline);
@@ -114,7 +115,7 @@ async fn run_session(protocol: Protocol, session: &Session, markets: &FeedMarket
                     return FeedError::Transient(format!("{label}: {acked} of {} subscriptions acknowledged within {:?}", session.acks, timeouts.ack));
                 }
                 if pong_deadline.is_some_and(|deadline| now >= deadline) {
-                    return FeedError::Transient(format!("{label}: no heartbeat answer within {:?}", timeouts.pong));
+                    return FeedError::Transient(format!("{label}: no heartbeat answer within {:?}; {}", timeouts.pong, lag.describe()));
                 }
                 if now >= read_deadline {
                     return FeedError::Transient(format!("{label}: no frame for {:?}", timeouts.read));
@@ -124,7 +125,10 @@ async fn run_session(protocol: Protocol, session: &Session, markets: &FeedMarket
                         return error;
                     }
                     next_ping = Some(now + *every);
-                    pong_deadline.get_or_insert(now + timeouts.pong);
+                    if pong_deadline.is_none() {
+                        lag = QuoteLag::default();
+                        pong_deadline = Some(now + timeouts.pong);
+                    }
                 }
                 continue;
             }
@@ -152,7 +156,11 @@ async fn run_session(protocol: Protocol, session: &Session, markets: &FeedMarket
             LOCAL_MARKS_FEED_FRAMES_TOTAL.with_label_values(&[label]).inc();
         }
         match parsed {
-            Ok(Parsed::Quotes(observations)) => slot.record(epoch, now_ms(), observations),
+            Ok(Parsed::Quotes(observations)) => {
+                let received_ms = now_ms();
+                lag.observe(label, received_ms, &observations);
+                slot.record(epoch, received_ms, observations);
+            }
             Ok(Parsed::Acked(count)) => {
                 acked += count;
                 if acked >= session.acks {
@@ -173,6 +181,39 @@ async fn run_session(protocol: Protocol, session: &Session, markets: &FeedMarket
                 }
             }
             Err(err) => return FeedError::Contract(format!("{label}: {err}")),
+        }
+    }
+}
+
+/// The quote frames since the heartbeat this connection waits on, against their newest quote's venue time: with the
+/// heartbeat unanswered, quotes arriving old point at the venue sending late, quotes arriving fresh at the answer
+/// alone being late, no quote at this side not reading (bm 2026-11-04, Alpaca's SIP 14:30-15:30).
+#[derive(Default)]
+struct QuoteLag {
+    frames: u64,
+    newest_ms: Option<i64>,
+    worst_ms: Option<i64>,
+}
+
+impl QuoteLag {
+    fn observe(&mut self, label: &str, received_ms: u64, observations: &[Observation]) {
+        let Some(event_ms) = observations.iter().filter_map(|(_, _, event_ms)| *event_ms).max() else {
+            return;
+        };
+        // a venue clock ahead of ours gives a negative lag: kept as it is here, clamped at 0 in the histogram
+        let lag_ms = received_ms as i64 - event_ms as i64;
+        LOCAL_MARKS_QUOTE_LAG.with_label_values(&[label]).observe(lag_ms.max(0) as f64 / 1_000.0);
+        self.frames += 1;
+        self.newest_ms = Some(lag_ms);
+        self.worst_ms = Some(self.worst_ms.map_or(lag_ms, |worst| worst.max(lag_ms)));
+    }
+
+    fn describe(&self) -> String {
+        match (self.newest_ms, self.worst_ms) {
+            (Some(newest), Some(worst)) => {
+                format!("since it, {} quote frames, the last {newest} ms behind its venue time, the worst {worst} ms", self.frames)
+            }
+            _ => "no quote frame with a venue time since it".to_string(),
         }
     }
 }
@@ -228,6 +269,19 @@ fn close_error(label: &str, frame: &Frame) -> FeedError {
 
 #[cfg(test)]
 mod tests {
+    /// The heartbeat timeout's reading: quotes arriving old, fresh, or none (bm 2026-11-04 Alpaca SIP).
+    #[test]
+    fn the_quote_lag_since_the_heartbeat_tells_a_late_venue_from_a_late_answer() {
+        let mut lag = QuoteLag::default();
+        assert_eq!(lag.describe(), "no quote frame with a venue time since it");
+        lag.observe("equity_alpaca", 10_000, &[(0, None, Some(9_990)), (1, None, Some(9_995))]);
+        lag.observe("equity_alpaca", 20_000, &[(0, None, Some(12_000))]);
+        lag.observe("equity_alpaca", 20_100, &[(0, None, None)]);
+        assert_eq!(lag.describe(), "since it, 2 quote frames, the last 8000 ms behind its venue time, the worst 8000 ms");
+        lag.observe("equity_alpaca", 20_200, &[(0, None, Some(20_250))]);
+        assert_eq!(lag.describe(), "since it, 3 quote frames, the last -50 ms behind its venue time, the worst 8000 ms");
+    }
+
     use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
     use axum::{Router, routing::get};

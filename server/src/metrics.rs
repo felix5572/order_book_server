@@ -847,6 +847,17 @@ lazy_static! {
 
 }
 
+// its own block: the one above is at the macro's recursion limit
+lazy_static! {
+    /// A quote frame's arrival against the venue time of its newest quote (clamped at 0 for a venue clock ahead):
+    /// with a heartbeat unanswered it tells a venue sending late from this side reading late (bm 2026-11-04).
+    pub static ref LOCAL_MARKS_QUOTE_LAG: HistogramVec = HistogramVec::new(
+        HistogramOpts::new("orderbook_local_marks_quote_lag_seconds", "Local marks quote frame arrival minus its newest quote's venue time")
+            .buckets(vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]),
+        &["feed"]
+    ).expect("metric can be created");
+}
+
 
 // The external quote tick's (hyperliquid-trade design 000673 §7, r4), in a block of their own.
 lazy_static! {
@@ -1310,6 +1321,7 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(PENDING_BOOK_ACCOUNTS_SNAPSHOT_SECONDS.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_TRIGGERS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(PENDING_BOOK_TRIGGER_COINS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(LOCAL_MARKS_QUOTE_LAG.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_FRAMES_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_FEED_DISCONNECTS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL.clone())).ok();
