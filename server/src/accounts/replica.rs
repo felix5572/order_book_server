@@ -395,6 +395,13 @@ impl WireStatus {
         let Self::Object(object) = self else { return None };
         object.resting.as_ref().or(object.filled.as_ref())
     }
+
+    /// A modify's error placing its new order ("Error placing new order during modify: ..."): the node cancelled the
+    /// old order first, and it stays cancelled.
+    pub(crate) fn modify_failed_placing(&self) -> bool {
+        let Self::Object(object) = self else { return false };
+        object.error.as_deref().is_some_and(|error| error.starts_with("Error placing new order during modify:"))
+    }
 }
 
 /// An action with its response and its place in the block.

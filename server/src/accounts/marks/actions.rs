@@ -223,12 +223,15 @@ fn ranked(paired: &PairedAction<'_, '_>) -> Result<Option<RankedAction>, String>
             let statuses = statuses()?;
             let orders: Vec<&WireOrder> = modifies.iter().map(|modify| &modify.order).collect();
             let mut anchors = order_anchors(orders, &statuses)?;
-            // only a modify that placed its new order replaced the old one (research method 2)
+            // a modify that placed its new order replaced the old one (research method 2), and one whose new order failed
+            // removed it all the same: the node cancels first (bm 11-04 blocks 1208971166, 1209038497 - an ALO by cloid
+            // rejected for crossing, the old order's `canceled` status and remove in the action's bundle; 11 of 11 such
+            // items in four blocks). "Cannot modify canceled or filled order" removed nothing.
             if statuses.len() != modifies.len() {
                 return Err(format!("batchModify of {} modifies with {} statuses", modifies.len(), statuses.len()));
             }
             for (modify, status) in modifies.iter().zip(&statuses) {
-                if status.placed().is_some() {
+                if status.placed().is_some() || status.modify_failed_placing() {
                     modify.oid.add_to(&mut anchors);
                 }
             }
@@ -602,6 +605,16 @@ pub(crate) mod tests {
 
     /// Batch 2n-1 (bm 1205946781): a `trailingStop` is a category-3 action, its oid its receipt's; a receipt that does
     /// not read is the trailing stops' concern, never the block's.
+    #[test]
+    fn a_modify_whose_new_order_fails_still_removes_the_old_one() {
+        let order = r#"{"a":0,"b":true,"p":"81349","s":"0.1","r":false,"t":{"limit":{"tif":"Alo"}}}"#;
+        let modify = format!(r#"{{"type":"batchModify","modifies":[{{"oid":"0x14bf","order":{order}}},{{"oid":77,"order":{order}}},{{"oid":78,"order":{order}}}]}}"#);
+        let statuses = r#"{"type":"order","data":{"statuses":[{"error":"Error placing new order during modify: Post only order would have immediately matched, bbo was 1039.7@1039.8."},{"error":"Cannot modify canceled or filled order"},{"error":"Error placing new order during modify: Insufficient margin to place order. asset=0"}]}}"#;
+        let parsed = mark_actions(&replica_line(1, &[&[(&modify, &ok(statuses))]]));
+        let MarkAction::Book(anchors) = &parsed.actions[0].action else { panic!("{:?}", parsed.actions) };
+        assert_eq!((anchors.created.as_slice(), anchors.cancelled.as_slice(), anchors.cancelled_cloids.as_slice()), (&[][..], &[78][..], &["0x14bf".to_string()][..]));
+    }
+
     #[test]
     fn a_trailing_stop_reads_its_oid_from_its_receipt() {
         let trailing = r#"{"type":"trailingStop","asset":38,"isBuy":true,"sz":"84584","reduceOnly":true,"retracement":{"pct":"0.6000%"},"activationPx":null}"#;

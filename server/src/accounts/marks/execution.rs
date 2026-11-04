@@ -43,7 +43,9 @@
 //! order, so one cloid can name several orders in a block (bm block 1190808326: a batchModify in bundle 0 and another in
 //! bundle 1 of the same cloid; resolving through the last cancelled status, as the research did, placed bundle 1's
 //! remove before the price action between them). In execution order: the latest order of the block created with the
-//! cloid, else the cloid's first `canceled` status (the order resting before the block).
+//! cloid, else the cloid's first `canceled` status (the order resting before the block); once an action removed that
+//! order, the cloid names nothing until an order takes it again (bm 11-04 blocks 1208971166, 1209038497: a modify whose
+//! new order failed removed the resting order, the next modify by the cloid, after the price action, removed nothing).
 //!
 //! A maker's fills match its `update` lines by the size they removed, in order: an order can shrink without a fill (a
 //! reduce-only order shrinking with its position: bm block 1190821813, a ZRO order went 33.6 → 24.9 → 12.9 → 6.0 → 0.2
@@ -305,19 +307,26 @@ fn cancelled_by_action<'b>(actions: &'b MarkActions, statuses: &BlockStatuses, f
         })
         .collect();
     books.sort_by_key(|(action, _)| action.rank);
-    let mut held: FxHashMap<(Address, &str), u64> = FxHashMap::default();
+    // the order holding each cloid as the actions run; `None` once one removed it and none took the cloid since
+    let mut held: FxHashMap<(Address, &str), Option<u64>> = FxHashMap::default();
+    // the orders earlier actions removed, by oid or cloid: a cloid names none of them (review 000737 r1 P2)
+    let mut removed: FxHashSet<u64> = FxHashSet::default();
     let mut out = Vec::with_capacity(books.len());
     for &(action, book) in &books {
         let mut cancelled = book.cancelled.clone();
         if let Some(user) = action.user {
             for cloid in &book.cancelled_cloids {
-                let holder = held.get(&(user, cloid.as_str())).or_else(|| statuses.cancelled_cloids.get(&(user, cloid.clone())));
+                let holder = held.get(&(user, cloid.as_str())).copied()
+                    .unwrap_or_else(|| statuses.cancelled_cloids.get(&(user, cloid.clone())).copied())
+                    .filter(|oid| !removed.contains(oid));
                 cancelled.extend(holder);
+                held.insert((user, cloid.as_str()), None);
             }
             for (cloid, oid) in &book.created_cloids {
-                held.insert((user, cloid.as_str()), *oid);
+                held.insert((user, cloid.as_str()), Some(*oid));
             }
         }
+        removed.extend(&cancelled);
         out.push(Removing { rank: action.rank, created: &book.created, cancelled });
     }
     let mut attributed = statuses.rejected_iocs.attributed(actions, &order_asset);
@@ -884,6 +893,39 @@ mod tests {
         let diffs = [diff(1, REMOVE), diff(2, NEW), diff(2, REMOVE), diff(3, NEW)];
         let points = price_points(&actions, &statuses, &diffs, &[], no_asset).unwrap();
         assert_eq!((points[0].cut.lo, points[0].cut.hi), (2, 2), "the second modify's remove of 2 runs after");
+    }
+
+    /// bm 11-04 blocks 1208971166 and 1209038497: a modify by cloid whose new ALO order is rejected removes the order
+    /// resting before the block; the next modify by that cloid, after the price action, removes nothing and rests its
+    /// new order. Its claim on the removed order had contradicted the line order. The same when the failed modify named
+    /// the order by its oid (review 000737 r1 P2).
+    #[test]
+    fn a_cloid_names_nothing_once_an_action_removed_its_order() {
+        for failed in [
+            BookAnchors { cancelled_cloids: vec!["0xc1".to_string()], ..BookAnchors::default() },
+            BookAnchors { cancelled: vec![1], ..BookAnchors::default() },
+        ] {
+            cloid_removed_before_a_later_modify(failed);
+        }
+    }
+
+    fn cloid_removed_before_a_later_modify(failed: BookAnchors) {
+        let user = Address::repeat_byte(1);
+        let failed = book((0, 1, 0), failed);
+        let other = book((0, 1, 1), BookAnchors { created: vec![2], ..BookAnchors::default() });
+        let point = RankedAction { rank: (0, 3, 2), user: None, action: MarkAction::Reference { oracle: vec![], external: vec![] } };
+        let resting = book((1, 1, 0), BookAnchors {
+            created: vec![3],
+            created_cloids: vec![("0xc1".to_string(), 3)],
+            cancelled_cloids: vec!["0xc1".to_string()],
+            ..BookAnchors::default()
+        });
+        let actions = MarkActions { height: 1, time_ns: 1, actions: vec![failed, other, point, resting] };
+        let mut statuses = BlockStatuses::default();
+        statuses.cancelled_cloids.insert((user, "0xc1".to_string()), 1);
+        let cut = |diffs: &[BookDiff]| price_points(&actions, &statuses, diffs, &[], no_asset).map(|points| (points[0].cut.lo, points[0].cut.hi));
+        assert_eq!(cut(&[diff(1, REMOVE), diff(2, NEW), diff(3, NEW)]), Ok((2, 2)));
+        assert_eq!(cut(&[diff(1, REMOVE), diff(3, NEW)]), Ok((1, 1)), "the remove of 1 is the failed modify's alone: {:?}", actions.actions[0]);
     }
 
     /// bm block 1190821813: a maker shrinks without a fill before its one fill, whose taker runs after the price

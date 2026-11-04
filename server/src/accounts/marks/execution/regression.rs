@@ -282,3 +282,34 @@ fn archived_triggered_order_later_cancel_has_consistent_reference_cuts() {
     assert_eq!(reference.cut.hi, 922);
     println!("1199055617 price cuts: {:?}", points.iter().map(|p| (p.action.rank, p.cut)).collect::<Vec<_>>());
 }
+
+/// bm 11-04 blocks 1208971166 and 1209038497 (`HL_MARK_FAILED_MODIFY_BLOCKS`: `block_<height>/full_block.json` and
+/// `main_assets.json`, the main dex's {coin: asset}): an io:SNDK modify by cloid whose new ALO order was rejected
+/// removed the resting order, the next modify by that cloid ran after the price action. Both blocks contradicted the
+/// line order; the price actions now find their cuts.
+#[test]
+#[ignore = "requires the archived blocks via HL_MARK_FAILED_MODIFY_BLOCKS"]
+fn archived_failed_modify_blocks_hold_together() {
+    use crate::accounts::replica::ReplicaLine;
+    let root = std::path::PathBuf::from(std::env::var("HL_MARK_FAILED_MODIFY_BLOCKS").unwrap());
+    let assets: std::collections::HashMap<String, u32> = serde_json::from_str(&std::fs::read_to_string(root.join("main_assets.json")).unwrap()).unwrap();
+    let order_asset = |coin: &str| assets.get(coin).copied().or_else(|| coin.strip_prefix('@')?.parse::<u32>().ok().map(|pair| 10_000 + pair));
+    let cuts_of = |ranks: &[Rank], cuts: &[usize]| ranks.iter().copied().zip(cuts.iter().copied()).collect::<Vec<_>>();
+    for (height, expected) in [
+        (1_208_971_166_u64, cuts_of(&[(0, 3, 2982), (0, 3, 2984), (0, 3, 2985)], &[2683, 2683, 2683])),
+        (1_209_038_497, cuts_of(&[(0, 3, 1081), (1, 3, 736)], &[1262, 2112])),
+    ] {
+        let raw = std::fs::read_to_string(root.join(format!("block_{height}/full_block.json"))).unwrap();
+        let g: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let actions = MarkActions::of(&ReplicaLine::parse(&g["replica"].to_string()).unwrap()).unwrap();
+        let statuses: Vec<NodeDataOrderStatus> = serde_json::from_value(g["node_order_statuses_streaming"].clone()).unwrap();
+        let statuses = BlockStatuses::of(statuses).unwrap();
+        let diffs: Vec<NodeDataOrderDiff> = serde_json::from_value(g["node_raw_book_diffs_streaming"].clone()).unwrap();
+        let diffs: Vec<_> = diffs.iter().map(BookDiff::of).collect::<Result<_, _>>().unwrap();
+        let fills: Vec<NodeDataFill> = serde_json::from_value(g["node_fills_streaming"].clone()).unwrap();
+        let fills: Vec<_> = fills.iter().map(BlockFill::of).collect();
+        let points = price_points(&actions, &statuses, &diffs, &fills, order_asset).unwrap();
+        let cuts: Vec<_> = points.iter().map(|point| (point.action.rank, (point.cut.lo, point.cut.hi))).collect();
+        assert_eq!(cuts, expected.into_iter().map(|(rank, cut)| (rank, (cut, cut))).collect::<Vec<_>>(), "{height}: each cut exact");
+    }
+}
