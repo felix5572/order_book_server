@@ -849,8 +849,8 @@ lazy_static! {
 
 // its own block: the one above is at the macro's recursion limit
 lazy_static! {
-    /// A quote frame's arrival against the venue time of its newest quote (clamped at 0 for a venue clock ahead):
-    /// with a heartbeat unanswered it tells a venue sending late from this side reading late (bm 2026-11-04).
+    /// How old a quote frame's newest quote was when parsed here, from its venue time (clamped at 0 for a venue clock
+    /// ahead); read beside a heartbeat timeout's summary (bm 2026-11-04).
     pub static ref LOCAL_MARKS_QUOTE_LAG: HistogramVec = HistogramVec::new(
         HistogramOpts::new("orderbook_local_marks_quote_lag_seconds", "Local marks quote frame arrival minus its newest quote's venue time")
             .buckets(vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]),

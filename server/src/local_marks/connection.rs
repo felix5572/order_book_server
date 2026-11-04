@@ -185,9 +185,9 @@ async fn run_session(protocol: Protocol, session: &Session, markets: &FeedMarket
     }
 }
 
-/// The quote frames since the heartbeat this connection waits on, against their newest quote's venue time: with the
-/// heartbeat unanswered, quotes arriving old point at the venue sending late, quotes arriving fresh at the answer
-/// alone being late, no quote at this side not reading (bm 2026-11-04, Alpaca's SIP 14:30-15:30).
+/// The quote frames read since the heartbeat this connection waits on, and how old their newest quote was when read
+/// (venue time to local parse). Old quotes can come from the venue, the network or a local backlog alike; no frame
+/// means none with a venue time was read, control frames included (bm 2026-11-04, Alpaca's SIP 14:30-15:30).
 #[derive(Default)]
 struct QuoteLag {
     frames: u64,
