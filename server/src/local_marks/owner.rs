@@ -18,6 +18,7 @@ use tokio::{
 };
 
 use super::{
+    basis_store::{self, BasisWriter, SeriesTable},
     feeds::LocalMarkFeeds,
     hip3::external::Hip3ExternalReading,
     now_ms,
@@ -55,8 +56,9 @@ pub(crate) struct LocalMarks {
 }
 
 impl LocalMarks {
-    /// Spawns the owner task, the external quote tick over its snapshots, and a watcher logging each one's end.
-    pub(crate) fn start(feeds: Arc<LocalMarkFeeds>, node_prices: watch::Receiver<NodePrices>, book: impl BookPrices) -> Self {
+    /// Spawns the owner task, the external quote tick over its snapshots, and a watcher logging each one's end;
+    /// `store`, the basis windows' samples store, restored in the owner task before its first tick (design 000741 r2).
+    pub(crate) fn start(feeds: Arc<LocalMarkFeeds>, node_prices: watch::Receiver<NodePrices>, book: impl BookPrices, store: Option<redis::Client>) -> Self {
         let external_coins = feeds.hip3_external.as_ref().map(|external| &external.coins);
         let table = Arc::new(CoinTable::new(&feeds.sources, feeds.hip3.as_deref(), external_coins));
         let now_ms = now_ms();
@@ -69,7 +71,7 @@ impl LocalMarks {
         };
         let initial = assemble(&table, &tick, &mut table.owner_state());
         let (snapshots, receiver) = watch::channel(Arc::new(initial));
-        let owner = tokio::spawn(run_owner(table, Arc::clone(&feeds), node_prices, book, snapshots));
+        let owner = tokio::spawn(run_owner(table, Arc::clone(&feeds), node_prices, book, snapshots, store));
         tokio::spawn(async move {
             let ended = owner.await;
             error!("local marks: the owner task ended; the marks stay withdrawn until restart: {ended:?}");
@@ -114,12 +116,22 @@ async fn run_owner(
     mut node_prices: watch::Receiver<NodePrices>,
     book: impl BookPrices,
     snapshots: watch::Sender<Arc<LocalMarksSnapshot>>,
+    store: Option<redis::Client>,
 ) {
+    // the HIP-3 coins' carries and the main-dex coins' basis samples live across ticks - the samples across restarts
+    // too, with the store: restored before the first tick, each tick's written after it
+    let mut state = table.owner_state();
+    let series = SeriesTable::new(&table);
+    let writer = match store {
+        Some(client) => {
+            basis_store::restore(&client, &series, &mut state, now_ms).await;
+            Some(BasisWriter::spawn(client))
+        }
+        None => None,
+    };
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut owner_gone = false;
-    // the HIP-3 coins' carries and the main-dex coins' basis samples live across ticks
-    let mut state = table.owner_state();
     loop {
         ticker.tick().await;
         if !owner_gone && node_prices.has_changed().is_err() {
@@ -139,6 +151,9 @@ async fn run_owner(
         };
         let snapshot = assemble(&table, &tick, &mut state);
         drop(snapshots.send_replace(Arc::new(snapshot)));
+        if let Some(writer) = &writer {
+            writer.offer(series.entered(&mut state, now_ms));
+        }
     }
 }
 
@@ -197,7 +212,7 @@ pub(crate) mod tests {
         let sources = Arc::new(MarkSources::parse(SOURCES).unwrap());
         let feeds = Arc::new(LocalMarkFeeds::idle_for_test(sources, None));
         let (prices, receiver) = watch::channel(Ok(node_prices()));
-        let marks = LocalMarks::start(feeds, receiver, FreshBook);
+        let marks = LocalMarks::start(feeds, receiver, FreshBook, None);
         let mut snapshots = marks.subscribe();
         let ready = next(&mut snapshots).await;
         let btc = ready.coin("BTC").unwrap();

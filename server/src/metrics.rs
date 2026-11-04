@@ -1178,10 +1178,26 @@ lazy_static! {
     ).expect("metric can be created");
 }
 
+lazy_static! {
+    /// The basis windows' samples store (hyperliquid-trade design 000741 r2): a tick's samples dropped before the
+    /// writer (`queue_full`, `writer_gone`), and the store's errors (`write`, `restore`).
+    pub static ref BASIS_STORE_DROPPED_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_basis_store_dropped_total", "Basis sample batches dropped before the store's writer"),
+        &["cause"]
+    ).expect("metric can be created");
+
+    pub static ref BASIS_STORE_ERRORS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_basis_store_errors_total", "Basis store writes and restores that failed"),
+        &["operation"]
+    ).expect("metric can be created");
+}
+
 /// Register all metrics with the registry
 pub fn register_metrics() {
     // Connection metrics
     REGISTRY.register(Box::new(WS_CONNECTIONS_ACTIVE.clone())).ok();
+    REGISTRY.register(Box::new(BASIS_STORE_DROPPED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(BASIS_STORE_ERRORS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(WS_CONNECTIONS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(WS_SUBSCRIPTIONS_ACTIVE.clone())).ok();
 

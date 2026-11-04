@@ -1,6 +1,7 @@
 //! Local marks (design 000454 r1–r2): the reference mark computed in this process from the venues' quotes and the
 //! node replica's state. Batch 1: the markets (`sources`), the venue feeds and their latest-value slots.
 
+pub(crate) mod basis_store;
 pub(crate) mod compute;
 pub(crate) mod connection;
 pub(crate) mod external_basis;

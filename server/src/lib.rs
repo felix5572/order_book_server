@@ -87,6 +87,9 @@ pub struct ServerConfig {
     /// `server/data/hip3_external_sources.json` and the SIP coins' quotes of the `hip3_sip_marks` feeds, served on
     /// `extHip3ExternalQuotes` and `GET /extHip3ExternalQuotes`. `None`: off.
     pub hip3_external_quote_max_age_ms: Option<u64>,
+    /// The basis windows' samples store (hyperliquid-trade design 000741 r2; needs `local_marks`): a Redis URL of this
+    /// host, each window's samples written as taken and restored at start. `None`: in memory only, as before.
+    pub basis_store_redis: Option<String>,
     /// Run the pending book (hyperliquid-trade design 000604): a replica of the book on its own thread, fed by the
     /// listener, and the node's mempool read on the same thread (needs `accounts`, whose anchor names its asset ids).
     /// Refused with `no_resync` (its block alignment needs every stream's heights to only go up) and with `bbo_only`

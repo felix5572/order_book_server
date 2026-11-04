@@ -11,10 +11,10 @@ use tokio::time::Instant;
 
 use super::snapshot::{QuoteChannel, QuoteKey};
 use crate::local_marks::{
-    external_basis::ExternalBasis,
+    external_basis::{ExternalBasis, LongerBases},
     feeds::LocalMarkFeeds,
     hip3::{
-        external::{Hip3ExternalBases, Hip3ExternalCoin, Hip3ExternalTable, Hip3SourceLeg, binance_quote},
+        external::{Hip3BinanceLeg, Hip3ExternalBases, Hip3ExternalCoin, Hip3ExternalTable, Hip3SourceLeg, binance_quote},
         external_equity::{EquityPlace, Hip3EquityLeg, equity_market, session_quote},
         protocol::EquityFeed,
         session::equity_session,
@@ -120,8 +120,10 @@ pub(crate) fn hip3_legs(table: &Hip3ExternalTable, index: usize, reading: &Quote
     let bases = &external.bases[index];
     let binance = table.binance(index).map_or(Hip3SourceLeg::Unlisted, |listing| {
         let quotes = binance_quote(coin, listing, reading.observed(FeedRef::Hip3Binance, listing.market), reading.published_ms);
-        let binance_basis = bases.binance.as_ref().unwrap_or_else(|| unreachable!("the owner publishes the basis of a coin Binance lists"));
-        Hip3SourceLeg::Listed(quotes.map(|quotes| ExternalLeg { quotes, basis: owner_basis(binance_basis, owner, reading.instant) }))
+        let binance = bases.binance.as_ref().unwrap_or_else(|| unreachable!("the owner publishes the bases of a coin Binance lists"));
+        let taken = |basis| owner_basis(basis, owner, reading.instant);
+        let longer = LongerBases { hour: taken(&binance.longer.hour), four_hours: taken(&binance.longer.four_hours) };
+        Hip3SourceLeg::Listed(quotes.map(|quotes| Hip3BinanceLeg { leg: ExternalLeg { quotes, basis: taken(&binance.near) }, longer }))
     });
     Hip3ExternalCoin { external: binance, equity: equity_leg(coin, table.equity_place(index), reading, bases, owner) }
 }

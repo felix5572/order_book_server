@@ -47,6 +47,10 @@ pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A coin's legs as one tick judged them.
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "every coin is evaluated each 5 ms tick: a boxed HIP-3 coin - its Binance leg's longer bases since design 000741 r2 - would allocate each tick"
+)]
 pub(crate) enum Evaluated {
     Main(Result<MainExternalLeg, Withheld>),
     Hip3(Hip3ExternalCoin),
@@ -78,7 +82,9 @@ enum Fingerprint {
     /// `binance`: Binance's own bid and ask, exact (the listing's multiplier applied), while it quotes; `venue_bases`:
     /// each quoting venue's own basis, in the quotes' order.
     Main { leg: LegFingerprint, binance: Option<(VenuePrice, VenuePrice)>, venue_bases: Vec<(Venue, BasisFingerprint)> },
-    Hip3 { external: LegFingerprint, equity: LegFingerprint },
+    /// `longer`: the Binance leg's 60- and 240-minute bases while it is ready (design 000741 r2): a change of either
+    /// is one of the frame's.
+    Hip3 { external: LegFingerprint, longer: Option<[BasisFingerprint; 2]>, equity: LegFingerprint },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,7 +113,11 @@ impl Fingerprint {
         match legs {
             Evaluated::Main(Err(withheld)) => Self::Main { leg: withheld_leg(withheld), binance: None, venue_bases: Vec::new() },
             Evaluated::Main(Ok(main)) => Self::main(main),
-            Evaluated::Hip3(coin) => Self::Hip3 { external: source_leg(&coin.external, external_leg), equity: source_leg(&coin.equity, equity_leg) },
+            Evaluated::Hip3(coin) => Self::Hip3 {
+                external: source_leg(&coin.external, |leg| external_leg(&leg.leg)),
+                longer: ready(&coin.external).map(|leg| [basis(&leg.longer.hour), basis(&leg.longer.four_hours)]),
+                equity: source_leg(&coin.equity, equity_leg),
+            },
         }
     }
 }
@@ -187,8 +197,8 @@ fn moved_received_ms(legs: &Evaluated, was: &Fingerprint, now: &Fingerprint, sin
             let binance = (was_binance != binance).then(binance_quote).flatten();
             medians.max(binance)
         }
-        (Evaluated::Hip3(coin), Fingerprint::Hip3 { external: was_external, equity: was_equity }, Fingerprint::Hip3 { external, equity }) => {
-            let binance = moved(was_external, external).then(|| ready(&coin.external).and_then(newest)).flatten();
+        (Evaluated::Hip3(coin), Fingerprint::Hip3 { external: was_external, equity: was_equity, .. }, Fingerprint::Hip3 { external, equity, .. }) => {
+            let binance = moved(was_external, external).then(|| ready(&coin.external).and_then(|leg| newest(&leg.leg))).flatten();
             let stock = moved(was_equity, equity).then(|| ready(&coin.equity).and_then(|leg| fresh(leg.quote.received_ms))).flatten();
             binance.max(stock)
         }

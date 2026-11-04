@@ -430,6 +430,11 @@ impl CoinTable {
         self.listings[index].iter().filter(|listed| listed.feed.kind == Kind::Perp).map(|listed| (listed.reading, listed.market))
     }
 
+    /// The main-dex coin's perp listings' venues, in the listings' order: each one's basis window's (`venue_basis`).
+    pub(crate) fn perp_venues(&self, index: usize) -> impl Iterator<Item = Venue> + '_ {
+        self.listings[index].iter().filter(|listed| listed.feed.kind == Kind::Perp).map(|listed| listed.feed.venue)
+    }
+
     /// The main-dex coin's perp quotes valid now and their medians (design 000588), `observed` giving a listing's entry
     /// and validity by its feed's place in the readings and its market: the coin's external leg before any gate, the
     /// owner's and the external quote tick's one rule (hyperliquid-trade design 000673 §4).
@@ -780,6 +785,52 @@ pub(crate) mod tests {
         assert_eq!(names(&CoinTable::new(&sources, Some(&sip), None)), ["BTC", "ETH", "xyz:AAPL", "xyz:TSLA"], "off: the books read as before");
     }
 
+    /// Design 000741 r2: 300 s of ticks, every window's samples handed to the store (`SeriesTable::entered`); a fresh
+    /// state restored from them ticks on as the one that took them - GOLD's Binance leg, its 10-minute basis ready
+    /// and its longer ones counting, and BTC's medians' basis alike -, nothing left out.
+    #[test]
+    fn a_state_restored_from_the_stored_samples_ticks_on_as_the_one_that_took_them() {
+        use crate::local_marks::{basis_store::SeriesTable, external_basis::SAMPLE_INTERVAL, hip3::external::Hip3SourceLeg};
+        let world = World::new();
+        let external = Hip3ExternalSources::parse(r#"{"venue": "binance_perp", "coins": {"xyz:GOLD": {"symbol": "XAUUSDT", "pxMultiplier": "1"}}}"#).unwrap();
+        let sip = Hip3SipSources::parse(r#"{"feed": "sip", "coins": {"xyz:TSLA": {"symbol": "TSLA"}}}"#).unwrap();
+        let table = Arc::new(CoinTable::new(&world.sources, None, Some(&Arc::new(Hip3ExternalCoins::new(&external, &sip)))));
+        let readings: Vec<_> = world.sources.feeds().zip(&world.readings).map(|((feed, markets), reading)| (feed, markets, reading.clone())).collect();
+        let start = Instant::now();
+        let gold = Quote { bid: price("3900"), ask: price("3901") };
+        let tick_at = |state: &mut OwnerState, second: u32| {
+            let now_ms = NOW_MS + 1_000 * u64::from(second);
+            let entries = vec![(Some(Entry::for_test(Some(gold), now_ms, 1)), Validity::Valid)];
+            let reading = Hip3ExternalReading { published_ms: now_ms + 1, quote_max_age_ms: 60_000, projection: FeedProjection { connections: Vec::new(), messages: 1, entries } };
+            let gold_book = (Some(Px::new(390_050_000_000 + u64::from(second % 7) * 100_000_000)), Some(Px::new(390_160_000_000)));
+            let prices = vec![(Some(Px::new(10_000_100_000_000)), Some(Px::new(10_000_300_000_000))), (None, None), gold_book, (None, None)];
+            let book = BestPricesAt { time: now_ms, height: 1_001, trusted: true, prices };
+            let tick = Tick {
+                now_ms, instant: start + SAMPLE_INTERVAL * second, stopped: None, node: &world.node, book: Some(&book), readings: &readings, equity: None,
+                hip3_external: Some(&reading),
+            };
+            assemble(&table, &tick, state)
+        };
+        let gold_leg = |snapshot: &LocalMarksSnapshot| match &snapshot.hip3_external_coin("xyz:GOLD").unwrap().external {
+            Hip3SourceLeg::Listed(Ok(leg)) => leg.clone(),
+            other => panic!("{other:?}"),
+        };
+        let series = SeriesTable::new(&table);
+        let (mut state, mut stored) = (table.owner_state(), Vec::new());
+        for second in 0..300 {
+            tick_at(&mut state, second);
+            stored.extend(series.entered(&mut state, NOW_MS + 1_000 * u64::from(second)));
+        }
+        let mut restored = table.owner_state();
+        let counts = series.restore(&mut restored, stored, NOW_MS + 299_500, start + SAMPLE_INTERVAL * 299 + Duration::from_millis(500));
+        assert_eq!((counts.outside, counts.unknown), (0, 0));
+        let (taken, again) = (tick_at(&mut state, 300), tick_at(&mut restored, 300));
+        assert_eq!(gold_leg(&again), gold_leg(&taken));
+        assert_eq!(gold_leg(&again).leg.basis.map(|basis| basis.samples), Ok(301));
+        assert_eq!(gold_leg(&again).longer.hour.unwrap_err().detail, "31 of the 60 samples needed over the last 3600 s");
+        assert_eq!(again.coin("BTC").unwrap().external_basis, taken.coin("BTC").unwrap().external_basis);
+    }
+
     /// Review 000665 r1 P2: the HIP-3 external basis samples the book as of the quotes' publish time: a book 5,000 ms
     /// behind at the tick, 5,001 ms at the publish, takes no 120th sample - the quote still read -; the next tick with
     /// both fresh publishes the basis.
@@ -808,7 +859,7 @@ pub(crate) mod tests {
             assemble(&table, &tick, state)
         };
         let gold_leg = |snapshot: &LocalMarksSnapshot| match &snapshot.hip3_external_coin("xyz:GOLD").unwrap().external {
-            Hip3SourceLeg::Listed(Ok(leg)) => leg.clone(),
+            Hip3SourceLeg::Listed(Ok(leg)) => leg.leg.clone(),
             other => panic!("{other:?}"),
         };
         for second in 0..119 {

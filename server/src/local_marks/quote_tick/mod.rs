@@ -361,7 +361,8 @@ mod tests {
     }
 
     /// Hyperliquid-trade design 000681 r2: the tick's `extHip3ExternalQuotes` frames byte for byte as before the main
-    /// dex's venues' own bases - GOLD's Binance leg, TSLA's two legs.
+    /// dex's venues' own bases - GOLD's Binance leg, TSLA's two legs -, the Binance leg's 60- and 240-minute bases
+    /// added after its fields (design 000741 r2).
     #[tokio::test]
     async fn the_hip3_frames_are_byte_for_byte_as_before_the_venues_bases() {
         let mut fixture = Fixture::new(true);
@@ -377,8 +378,8 @@ mod tests {
         assert_eq!(wire(TSLA), GOLDEN_TSLA);
     }
 
-    const GOLDEN_GOLD: &str = r#"{"channel":"extHip3ExternalQuotes","data":{"schemaVersion":2,"coin":"xyz:GOLD","intervalMs":5,"publishedTsMs":1793123462005,"quoteMaxAgeMs":60000,"external":{"status":"ready","externalBidPx":"3900","externalAskPx":"3901.5","externalQuotes":{"binance":{"bidPx":"3900","askPx":"3901.5","receivedTsMs":1793123461970}},"externalBasis":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 120 samples needed over the last 600 s"}},"equity":{"status":"unlisted"}}}"#;
-    const GOLDEN_TSLA: &str = r#"{"channel":"extHip3ExternalQuotes","data":{"schemaVersion":2,"coin":"xyz:TSLA","intervalMs":5,"publishedTsMs":1793123462005,"quoteMaxAgeMs":60000,"external":{"status":"ready","externalBidPx":"405.7","externalAskPx":"405.8","externalQuotes":{"binance":{"bidPx":"405.7","askPx":"405.8","receivedTsMs":1793123461980}},"externalBasis":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 120 samples needed over the last 600 s"}},"equity":{"status":"ready","feed":"sip","bidPx":"405.765","askPx":"405.775","receivedTsMs":1793123461080,"quoteTsMs":1793123461000,"basis":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 120 samples needed over the last 600 s"}}}}"#;
+    const GOLDEN_GOLD: &str = r#"{"channel":"extHip3ExternalQuotes","data":{"schemaVersion":2,"coin":"xyz:GOLD","intervalMs":5,"publishedTsMs":1793123462005,"quoteMaxAgeMs":60000,"external":{"status":"ready","externalBidPx":"3900","externalAskPx":"3901.5","externalQuotes":{"binance":{"bidPx":"3900","askPx":"3901.5","receivedTsMs":1793123461970}},"externalBasis":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 120 samples needed over the last 600 s"},"externalBasis60m":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 60 samples needed over the last 3600 s"},"externalBasis240m":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 60 samples needed over the last 14400 s"}},"equity":{"status":"unlisted"}}}"#;
+    const GOLDEN_TSLA: &str = r#"{"channel":"extHip3ExternalQuotes","data":{"schemaVersion":2,"coin":"xyz:TSLA","intervalMs":5,"publishedTsMs":1793123462005,"quoteMaxAgeMs":60000,"external":{"status":"ready","externalBidPx":"405.7","externalAskPx":"405.8","externalQuotes":{"binance":{"bidPx":"405.7","askPx":"405.8","receivedTsMs":1793123461980}},"externalBasis":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 120 samples needed over the last 600 s"},"externalBasis60m":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 60 samples needed over the last 3600 s"},"externalBasis240m":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 60 samples needed over the last 14400 s"}},"equity":{"status":"ready","feed":"sip","bidPx":"405.765","askPx":"405.775","receivedTsMs":1793123461080,"quoteTsMs":1793123461000,"basis":{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"0 of the 120 samples needed over the last 600 s"}}}}"#;
 
     /// Design 000673 §7: the first tick of a subscription publishes the coin's frame (`intervalMs` 5, the tick's
     /// publish time); unchanged it publishes nothing but the heartbeat every 10 ticks; a price change publishes at the

@@ -20,12 +20,12 @@
 use serde::Serialize;
 
 use super::{
-    external::{Hip3ExternalCoin, Hip3SourceLeg},
+    external::{Hip3BinanceLeg, Hip3ExternalCoin, Hip3SourceLeg},
     external_equity::Hip3EquityLeg,
 };
 use crate::local_marks::{
     prices_view::{ExternalBasisView, ExternalView, LegView, OWNER_INTERVAL_MS, external_basis_view, external_view, versioned_refusal, withheld},
-    snapshot::{ExternalLeg, LocalMarksSnapshot},
+    snapshot::LocalMarksSnapshot,
 };
 
 pub(crate) const SCHEMA_VERSION: u32 = 2;
@@ -38,8 +38,20 @@ pub(crate) struct Hip3ExternalView<'a> {
     interval_ms: u64,
     published_ts_ms: u64,
     quote_max_age_ms: u64,
-    external: LegView<ExternalView>,
+    external: LegView<BinanceView>,
     equity: LegView<EquityView>,
+}
+
+/// The Binance leg as `extMarkPrices`' local leg writes its quotes and 10-minute basis (`ExternalView`), field for
+/// field, then its 60- and 240-minute bases (user 2026-11-04, design 000741 r2): fields added after the others, the
+/// schema unchanged - a reader of schema 2 that knows them not reads the rest as ever.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BinanceView {
+    #[serde(flatten)]
+    external: ExternalView,
+    external_basis_60m: LegView<ExternalBasisView>,
+    external_basis_240m: LegView<ExternalBasisView>,
 }
 
 /// The US stock quote of the feed counting now, exact as sent (multiplier 1, off HL's grid), and the coin's normal
@@ -71,7 +83,7 @@ impl<'a> Hip3ExternalView<'a> {
             interval_ms,
             published_ts_ms: published_ms,
             quote_max_age_ms,
-            external: leg_view(&legs.external, |leg: &ExternalLeg| external_view(&leg.quotes, &leg.basis)),
+            external: leg_view(&legs.external, binance_view),
             equity: leg_view(&legs.equity, equity_view),
         }
     }
@@ -99,6 +111,14 @@ fn leg_view<T, V>(leg: &Hip3SourceLeg<T>, ready: impl FnOnce(&T) -> V) -> LegVie
     match leg {
         Hip3SourceLeg::Unlisted => LegView::Unlisted,
         Hip3SourceLeg::Listed(leg) => leg.as_ref().map_or_else(withheld, |leg| LegView::Ready(ready(leg))),
+    }
+}
+
+fn binance_view(leg: &Hip3BinanceLeg) -> BinanceView {
+    BinanceView {
+        external: external_view(&leg.leg.quotes, &leg.leg.basis),
+        external_basis_60m: external_basis_view(&leg.longer.hour),
+        external_basis_240m: external_basis_view(&leg.longer.four_hours),
     }
 }
 
@@ -203,7 +223,8 @@ mod tests {
         Hip3ExternalView::of(snapshot, coin, snapshot.hip3_external_coin(coin).unwrap()).to_wire()
     }
 
-    /// Design 000669 r1 1.2, the schema 2 wire, byte for byte: TSLA's two legs ready - Binance's as schema 1's leg, the
+    /// Design 000669 r1 1.2, the schema 2 wire, byte for byte - the Binance leg's 60- and 240-minute bases after its
+    /// fields since design 000741 r2: TSLA's two legs ready - Binance's as schema 1's leg, the
     /// SIP's quote as sent with its receipt and exchange times -, each received before `publishedTsMs`, each basis
     /// from its first sample; GOLD's US stock leg and BB's Binance leg `unlisted`.
     #[test]
@@ -216,8 +237,10 @@ mod tests {
             r#"{{"channel":"extHip3ExternalQuotes","data":{{"schemaVersion":2,"coin":"xyz:TSLA","intervalMs":50,"publishedTsMs":{published},"quoteMaxAgeMs":60000,"#,
             published = NOW_MS + 1
         ) + &format!(
-            r#""external":{{"status":"ready","externalBidPx":"405.7","externalAskPx":"405.8","externalQuotes":{{"binance":{{"bidPx":"405.7","askPx":"405.8","receivedTsMs":{binance}}}}},"externalBasis":{withheld}}},"#,
-            binance = NOW_MS - 30
+            r#""external":{{"status":"ready","externalBidPx":"405.7","externalAskPx":"405.8","externalQuotes":{{"binance":{{"bidPx":"405.7","askPx":"405.8","receivedTsMs":{binance}}}}},"externalBasis":{withheld},"externalBasis60m":{hour},"externalBasis240m":{four_hours}}},"#,
+            binance = NOW_MS - 30,
+            hour = r#"{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"1 of the 60 samples needed over the last 3600 s"}"#,
+            four_hours = r#"{"status":"unavailable","reasonCode":"externalBasisSamples","reason":"1 of the 60 samples needed over the last 14400 s"}"#
         ) + &format!(
             r#""equity":{{"status":"ready","feed":"sip","bidPx":"405.765","askPx":"405.775","receivedTsMs":{received},"quoteTsMs":{quoted},"basis":{withheld}}}}}}}"#,
             received = NOW_MS - 920,

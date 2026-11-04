@@ -139,6 +139,12 @@ struct Args {
     #[arg(long, requires = "hip3_external_quotes")]
     hip3_external_quote_max_age_ms: Option<u64>,
 
+    /// The basis windows' samples store (hyperliquid-trade design 000741 r2; needs --local-marks): a Redis of this host,
+    /// e.g. redis://127.0.0.1:6379/0, every basis window's samples written as taken and restored at start - the bases
+    /// ready again after a restart. Unreachable, the windows start empty, as without it.
+    #[arg(long, requires = "local_marks")]
+    basis_store_redis: Option<String>,
+
     /// The pending book (hyperliquid-trade design 000604): a replica of the book on its own thread, block-aligned,
     /// fed by the listener (a fork of its book, then a copy of each book batch it applies), and the node's mempool
     /// (`<data-dir>/mempool_txs`) read on the same thread, its asset ids named by the account view's anchor. Needs
@@ -254,6 +260,7 @@ async fn main() -> Result<()> {
         local_marks: args.local_marks,
         hip3_sip_marks: args.hip3_sip_marks,
         hip3_external_quote_max_age_ms: args.hip3_external_quote_max_age_ms.filter(|_| args.hip3_external_quotes),
+        basis_store_redis: args.basis_store_redis,
         pending_book: args.pending_book,
         pending_backlog_events: args.pending_backlog_events,
         pending_expiry_ms: args.pending_expiry_ms,

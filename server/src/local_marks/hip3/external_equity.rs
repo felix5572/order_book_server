@@ -86,7 +86,7 @@ impl EquityBasisWindows {
         }
     }
 
-    const fn of_mut(&mut self, feed: EquityFeed) -> &mut ExternalBasisWindow {
+    pub(crate) const fn of_mut(&mut self, feed: EquityFeed) -> &mut ExternalBasisWindow {
         match feed {
             EquityFeed::Sip => &mut self.sip,
             EquityFeed::Boats => &mut self.boats,

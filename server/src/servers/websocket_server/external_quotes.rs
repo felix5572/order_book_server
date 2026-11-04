@@ -332,7 +332,7 @@ mod tests {
         let external = Hip3ExternalConfig { sources: binance, sip_sources: Arc::clone(&sip_sources), quote_max_age_ms: 60_000 };
         let feeds = Arc::new(LocalMarkFeeds::idle_with_external_for_test(sources, sip_feeds.then_some(sip_sources), Some(external)));
         let (prices, receiver) = watch::channel(Ok(tests::node_prices()));
-        (LocalMarks::start(Arc::clone(&feeds), receiver, tests::FreshBook), feeds, prices)
+        (LocalMarks::start(Arc::clone(&feeds), receiver, tests::FreshBook, None), feeds, prices)
     }
 
     fn message(subscription: Subscription, subscribe: bool) -> ClientMessage {

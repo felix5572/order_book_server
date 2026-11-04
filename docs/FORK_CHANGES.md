@@ -2072,3 +2072,27 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - `a_full_spell_log_drops_the_line_and_the_frames_go_out`：队列满时丢一行、计数加一，4 张帧照样发出。
   - `a_log_write_waiting_holds_neither_the_frames_nor_the_runtime`：单工作线程的运行时上，写日志卡住时，别的任务照样能跑，后续帧照样发出。
   - 变异 11 处都有失败：把日志写入改回主运行时任务后，上一条用例 0.5 s 内失败。
+
+## 2026-11-04 基差短中长三档 + 样本存 Redis 撑过重启（hyperliquid-trade 设计 000741 r2，用户 11-04 定）
+
+- 用户：“OB 服务借助 redis 处理重启之类的，然后同时提供短中长基差。”
+- `external_basis.rs`：
+  - 新增 `LongBasisWindow`：每 `LONG_SAMPLE_INTERVAL`（10 s）取一个样本，用的是和 10 分钟窗口同一拍的原始样本，保留 240 分钟；60 分钟和 240 分钟各算一个中位数，各自满 `LONG_MIN_SAMPLES`（60 个）才发布。
+  - 中位数和“发布 / 撤回”规则提成共用函数，所有窗口用同一套。
+  - 每个窗口新增 `take_entered`（交出这一拍取的样本，只交一次）和 `restore`（把上一次运行的样本放回）。
+- HIP-3 币安腿：
+  - `Hip3BinanceLeg { leg, longer }`、`BinanceBases { near, longer }`；
+  - `extHip3ExternalQuotes` 的 `external` 在原有字段之后追加 `externalBasis60m`、`externalBasis240m`，格式和 `externalBasis` 一样；
+  - 不升 schema：交易器只拒收不认识的版本号，不拒收新字段；
+  - 报价节拍的帧指纹带上这两个长基差，长基差变了也会重新发帧。
+- `basis_store.rs`（`--basis-store-redis`）：
+  - 序列名：`main:<币>`、`venue:<币>:<交易所>`、`hip3:<币>:binance`、`hip3:<币>:<sip|boats>`；
+  - 存法：一个时间段一个 hash，每个序列一个字段，值是 `"<样本墙钟毫秒> <比值>"`；`HSET` 和 `EXPIRE` 放在一个 `MULTI` 里，过期时间是窗口长度加 60 s；
+  - 不同币在同一秒里不同拍取样，各自一个字段，互不覆盖（r1 P2）；
+  - 写入：后台任务处理，有界队列容量 30，满了就丢弃并计数；
+  - 恢复：在 owner 任务里、第一次发布之前进行，5 s 内完成，只放回仍在各自窗口时间内的样本；Redis 不可用就从空窗口开始，并打 WARN。
+- 测试：
+  - 长窗口：取样节奏、两个跨度、样本老化；
+  - 存储：两个序列错开取样后恢复，样本数和中位数都和内存一致；格式、过期时间、读取范围；队列满丢弃；Redis 不可达；
+  - 用真实币种表跑 300 s、恢复后继续跑，结果一致；
+  - 真实 Redis 往返测试默认跳过，设 `OB_BASIS_STORE_TEST_REDIS` 才跑。

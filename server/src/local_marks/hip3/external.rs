@@ -28,7 +28,7 @@ use super::{
 };
 use crate::{
     local_marks::{
-        external_basis::{self, ExternalBasis, ExternalBasisWindow},
+        external_basis::{self, ExternalBasis, ExternalBasisWindow, LongBasisWindow, LongerBases},
         price::VenuePrice,
         slot::{Entry, Validity},
         snapshot::{ExternalLeg, ExternalQuotes, Tick, VenueQuote, Withheld},
@@ -115,11 +115,26 @@ pub(crate) enum Hip3SourceLeg<T> {
     Listed(Result<T, Withheld>),
 }
 
-/// A coin's two legs: `external`, Binance's quote and its basis; `equity`, the SIP's or BOATS's.
+/// A coin's two legs: `external`, Binance's quote and its bases; `equity`, the SIP's or BOATS's.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Hip3ExternalCoin {
-    pub(crate) external: Hip3SourceLeg<ExternalLeg>,
+    pub(crate) external: Hip3SourceLeg<Hip3BinanceLeg>,
     pub(crate) equity: Hip3SourceLeg<Hip3EquityLeg>,
+}
+
+/// A coin's Binance leg: its quote and 10-minute basis as the main dex's (`ExternalLeg`), and its 60- and 240-minute
+/// bases (user 2026-11-04, design 000741 r2).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Hip3BinanceLeg {
+    pub(crate) leg: ExternalLeg,
+    pub(crate) longer: LongerBases,
+}
+
+/// A coin's Binance bases as its windows publish them: the 10-minute one and the longer ones.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BinanceBases {
+    pub(crate) near: Result<ExternalBasis, Withheld>,
+    pub(crate) longer: LongerBases,
 }
 
 /// A coin's bases as its windows publish them at the owner's tick, whatever its quotes and the feeds' stop: Binance's
@@ -127,7 +142,7 @@ pub(crate) struct Hip3ExternalCoin {
 /// its own quotes and samples nothing (hyperliquid-trade design 000673 r4).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Hip3ExternalBases {
-    pub(crate) binance: Option<Result<ExternalBasis, Withheld>>,
+    pub(crate) binance: Option<BinanceBases>,
     pub(crate) equity: Option<EquityBases>,
 }
 
@@ -142,11 +157,20 @@ pub(crate) struct Hip3ExternalSnapshot {
     pub(crate) bases: Vec<Hip3ExternalBases>,
 }
 
-/// A coin's basis windows across ticks: Binance's, and one a US stock feed.
+/// A coin's basis windows across ticks: Binance's, its longer ones, and one a US stock feed.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Hip3ExternalWindows {
-    external: ExternalBasisWindow,
-    equity: EquityBasisWindows,
+    pub(super) external: ExternalBasisWindow,
+    pub(super) long: LongBasisWindow,
+    pub(super) equity: EquityBasisWindows,
+}
+
+impl Hip3ExternalWindows {
+    /// The Binance leg's 10-minute window and its longer ones, and the US stock feeds' windows: the samples' store's
+    /// (`basis_store`).
+    pub(crate) const fn windows_mut(&mut self) -> (&mut ExternalBasisWindow, &mut LongBasisWindow, &mut EquityBasisWindows) {
+        (&mut self.external, &mut self.long, &mut self.equity)
+    }
 }
 
 /// What gates every coin at this tick: the feeds stopped or the account owner gone (every quote withheld), and the
@@ -176,10 +200,10 @@ pub(crate) fn hip3_external(
         .map(|(index, windows)| {
             let coin = &table.names()[index];
             let book = sampled_book(tick, gates, table.book_indices[index]);
-            let external = external_leg(coin, table.coins.binance(index), tick, reading, gates.stopped, book, &mut windows.external);
+            let external = external_leg(coin, table.coins.binance(index), tick, reading, gates.stopped, book, (&mut windows.external, &mut windows.long));
             let equity = equity_leg(coin, table.equity[index], equity_tick, gates.stopped, book, &mut windows.equity);
             let bases = Hip3ExternalBases {
-                binance: table.coins.binance(index).map(|_| windows.external.published()),
+                binance: table.coins.binance(index).map(|_| BinanceBases { near: windows.external.published(), longer: windows.long.published() }),
                 equity: matches!(table.equity[index], EquityPlace::Read(_)).then(|| windows.equity.published()),
             };
             (Hip3ExternalCoin { external, equity }, bases)
@@ -198,8 +222,8 @@ fn sampled_book(tick: &Tick<'_>, gates: Hip3ExternalGates<'_>, book_index: usize
     bid.zip(ask)
 }
 
-/// The coin's Binance leg. First its window moves, with this tick's sample when its quote is valid and `book` is
-/// given; `stopped` withholds the leg after.
+/// The coin's Binance leg. First its windows move - the 10-minute one and the longer ones, the same sample -, with
+/// this tick's sample when its quote is valid and `book` is given; `stopped` withholds the leg after.
 fn external_leg(
     coin: &str,
     listing: Option<BinanceListing>,
@@ -207,16 +231,17 @@ fn external_leg(
     reading: &Hip3ExternalReading,
     stopped: Option<&Withheld>,
     book: Option<(Px, Px)>,
-    window: &mut ExternalBasisWindow,
-) -> Hip3SourceLeg<ExternalLeg> {
+    (window, long): (&mut ExternalBasisWindow, &mut LongBasisWindow),
+) -> Hip3SourceLeg<Hip3BinanceLeg> {
     let Some(listing) = listing else { return Hip3SourceLeg::Unlisted };
     let quotes = binance_quote(coin, listing, reading.projection.entries[listing.market], reading.published_ms);
     let sample = book.zip(quotes.as_ref().ok()).map(|((bid, ask), quotes)| external_basis::sample(bid, ask, quotes.bid, quotes.ask));
     window.observe(tick.instant, sample);
+    long.observe(tick.instant, sample);
     if let Some(stopped) = stopped {
         return Hip3SourceLeg::Listed(Err(stopped.clone()));
     }
-    Hip3SourceLeg::Listed(quotes.map(|quotes| ExternalLeg { quotes, basis: window.published() }))
+    Hip3SourceLeg::Listed(quotes.map(|quotes| Hip3BinanceLeg { leg: ExternalLeg { quotes, basis: window.published() }, longer: long.published() }))
 }
 
 /// The coin's Binance quote valid at `published_ms`, its multiplier applied, from its market's entry and validity
@@ -290,10 +315,10 @@ mod tests {
         BestPricesAt { time: 0, height: 1, trusted: true, prices: vec![(Some(Px::new(bid)), Some(Px::new(ask))); 3] }
     }
 
-    /// The coin's Binance leg, listed.
-    fn external(coin: &Hip3ExternalCoin) -> &Result<ExternalLeg, Withheld> {
+    /// The coin's Binance leg, listed: its quote and 10-minute basis.
+    fn external(coin: &Hip3ExternalCoin) -> Result<&ExternalLeg, &Withheld> {
         let Hip3SourceLeg::Listed(leg) = &coin.external else { panic!("unlisted: {coin:?}") };
-        leg
+        leg.as_ref().map(|leg| &leg.leg)
     }
 
     struct World {
@@ -338,28 +363,28 @@ mod tests {
         world.slot().record(epoch, 1_000, [(0, Some(quote("3900", "3901")), Some(990))]);
         let book = book(390_050_000_000, 390_060_000_000);
         let ready = world.tick(Instant::now(), 1_500, Some(&book), None);
-        let gold = external(&ready.coins[GOLD]).as_ref().unwrap();
+        let gold = external(&ready.coins[GOLD]).unwrap();
         assert_eq!((gold.quotes.bid, gold.quotes.ask, gold.quotes.venues[0].received_ms), (price("3900"), price("3901"), 1_000));
         assert_eq!(gold.basis.as_ref().unwrap_err().code, "externalBasisSamples");
         assert_eq!(ready.coins[GOLD].equity, Hip3SourceLeg::Unlisted);
-        assert_eq!(external(&ready.coins[ZHIPU]).as_ref().unwrap_err().code, "notQuoted", "ZHIPU never quoted on the connection");
+        assert_eq!(external(&ready.coins[ZHIPU]).unwrap_err().code, "notQuoted", "ZHIPU never quoted on the connection");
         assert_eq!(ready.coins[TSLA].external, Hip3SourceLeg::Unlisted);
         let Hip3SourceLeg::Listed(Err(off)) = &ready.coins[TSLA].equity else { panic!("{:?}", ready.coins[TSLA]) };
         assert_eq!(off.code, "equityOff");
         world.slot().record(epoch, 1_900, [(1, Some(quote("6.1", "6.2")), None)]);
         let later = world.tick(Instant::now(), 2_001, Some(&book), None);
-        let expired = external(&later.coins[GOLD]).as_ref().unwrap_err();
+        let expired = external(&later.coins[GOLD]).unwrap_err();
         assert_eq!(expired.code, "expired", "GOLD silent 1,001 ms, over the 1,000 ms limit");
         assert!(expired.detail.contains("the last received at 1000 ms"), "{}", expired.detail);
-        let zhipu = external(&later.coins[ZHIPU]).as_ref().unwrap();
+        let zhipu = external(&later.coins[ZHIPU]).unwrap();
         assert_eq!((zhipu.quotes.bid, zhipu.quotes.ask), (price("61"), price("62")), "× 10");
         world.slot().disconnected("EOF".to_string(), 2_100);
-        assert_eq!(external(&world.tick(Instant::now(), 2_200, Some(&book), None).coins[ZHIPU]).as_ref().unwrap_err().code, "notConnected");
+        assert_eq!(external(&world.tick(Instant::now(), 2_200, Some(&book), None).coins[ZHIPU]).unwrap_err().code, "notConnected");
         let epoch = world.slot().connected(2_300);
         let reconnected = world.tick(Instant::now(), 2_400, Some(&book), None);
-        assert_eq!(external(&reconnected.coins[ZHIPU]).as_ref().unwrap_err().code, "notQuoted", "reconnected, no first quote yet");
+        assert_eq!(external(&reconnected.coins[ZHIPU]).unwrap_err().code, "notQuoted", "reconnected, no first quote yet");
         world.slot().record(epoch, 2_500, [(1, None, None)]);
-        assert_eq!(external(&world.tick(Instant::now(), 2_600, Some(&book), None).coins[ZHIPU]).as_ref().unwrap_err().code, "noQuote");
+        assert_eq!(external(&world.tick(Instant::now(), 2_600, Some(&book), None).coins[ZHIPU]).unwrap_err().code, "noQuote");
     }
 
     /// Review 000672 P2: a quote received after the publish time - the wall clock stepped back - is withheld, its basis
@@ -373,10 +398,10 @@ mod tests {
         // a sampling interval apart: a sample the first tick took would show as a second one (review 000672 r2 P3)
         let start = Instant::now();
         let stepped_back = world.tick(start, 999, Some(&book), None);
-        let withheld = external(&stepped_back.coins[GOLD]).as_ref().unwrap_err();
+        let withheld = external(&stepped_back.coins[GOLD]).unwrap_err();
         assert_eq!(withheld.code, "receivedAfterPublish", "{}", withheld.detail);
         let at_publish = world.tick(start + SAMPLE_INTERVAL, 1_000, Some(&book), None);
-        let gold = external(&at_publish.coins[GOLD]).as_ref().unwrap();
+        let gold = external(&at_publish.coins[GOLD]).unwrap();
         assert_eq!(gold.quotes.venues[0].received_ms, 1_000);
         assert_eq!(gold.basis.as_ref().unwrap_err().detail, "1 of the 120 samples needed over the last 600 s", "the withheld tick sampled nothing");
     }
@@ -399,18 +424,18 @@ mod tests {
         };
         let below = u32::try_from(MIN_SAMPLES - 1).unwrap();
         let withheld = (0..below).map(|second| second_tick(&mut world, second)).last().unwrap();
-        let detail = &external(&withheld.coins[GOLD]).as_ref().unwrap().basis.as_ref().unwrap_err().detail;
+        let detail = &external(&withheld.coins[GOLD]).unwrap().basis.as_ref().unwrap_err().detail;
         assert!(detail.starts_with("119 of the 120 samples"), "{detail}");
         assert!(external(&withheld.coins[ZHIPU]).is_err());
         let published = second_tick(&mut world, below);
         let (at, now_ms) = (start + SAMPLE_INTERVAL * below, 10_000 + 1_000 * u64::from(below));
-        let basis = external(&published.coins[GOLD]).as_ref().unwrap().basis.clone().unwrap();
+        let basis = external(&published.coins[GOLD]).unwrap().basis.clone().unwrap();
         assert_eq!(basis.samples, MIN_SAMPLES);
         let expected = 3900.55 / 3900.5 - 1.0;
         assert!((basis.ratio - expected).abs() < 1e-12, "{} against {expected}", basis.ratio);
         let stopped = Withheld::unavailable("stopped", "the perp_binance task failed");
         let gone = world.tick(at + SAMPLE_INTERVAL, now_ms + 1_000, Some(&book), Some(&stopped));
-        assert!([GOLD, ZHIPU].iter().all(|index| external(&gone.coins[*index]).as_ref().unwrap_err().code == "stopped"));
+        assert!([GOLD, ZHIPU].iter().all(|index| external(&gone.coins[*index]).unwrap_err().code == "stopped"));
         assert_eq!(gone.coins[TSLA].external, Hip3SourceLeg::Unlisted);
     }
 }

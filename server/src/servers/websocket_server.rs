@@ -447,6 +447,9 @@ fn start_local_marks(
         if config.hip3_external_quote_max_age_ms.is_some() {
             return Err("--hip3-external-quotes needs --local-marks: the HIP-3 external quotes are computed by the local marks' owner".into());
         }
+        if config.basis_store_redis.is_some() {
+            return Err("--basis-store-redis needs --local-marks: the basis windows are the local marks' owner's".into());
+        }
         return Ok(None);
     }
     let accounts = accounts.ok_or("--local-marks needs --accounts: the local marks read the node replica of the account view")?;
@@ -467,7 +470,13 @@ fn start_local_marks(
         Ok::<_, String>(Hip3ExternalConfig { sources: Arc::new(sources), sip_sources: Arc::clone(&sip_sources), quote_max_age_ms })
     });
     let feeds = Arc::new(LocalMarkFeeds::start(Arc::new(sources), equity, hip3_external.transpose()?));
-    Ok(Some(LocalMarks::start(feeds, accounts.node_prices(), Arc::clone(listener))))
+    // a URL off its form refuses the start; a store unreachable only starts the windows empty (design 000741 r2)
+    let store = config.basis_store_redis.as_deref().map(redis::Client::open).transpose().map_err(|error| format!("--basis-store-redis: {error}"))?;
+    // the URL not logged: it may carry a password (review 000743 r1 P3)
+    if store.is_some() {
+        info!("Basis store: the basis windows' samples kept in the --basis-store-redis Redis across restarts");
+    }
+    Ok(Some(LocalMarks::start(feeds, accounts.node_prices(), Arc::clone(listener), store)))
 }
 
 /// Starts the account view when `--accounts` is set. Its owner ending leaves the view answering 503 (design 000419 r3
