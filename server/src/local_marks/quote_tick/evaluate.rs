@@ -24,9 +24,13 @@ use crate::local_marks::{
     subscriptions::FeedSubscriptions,
 };
 
-/// The oldest basis of the owner's the tick publishes: four of its 50 ms ticks (design 000673 r4 r3 P1). Past it the
-/// owner has stalled - waiting for the listener lock, say -, and a heartbeat must not carry its last basis as fresh.
-pub(crate) const BASIS_MAX_AGE: Duration = Duration::from_millis(200);
+/// The oldest basis of the owner's the tick publishes (design 000673 r4 r3 P1): past it the owner has stalled - waiting
+/// for the listener lock, say -, and a heartbeat must not carry its last basis as fresh. 10 s (hyperliquid-trade
+/// 2026-11-04, user: "基差这种东西快点慢点咋了"): a basis is the median of the last 10 minutes' samples, one a second
+/// (published from 120 of them), 10 s late its window moved by 10 samples; at four of the owner's 50 ms ticks (200 ms)
+/// its waits for the lock (202-204 ms) withheld every coin's Binance leg 6 times in 14 minutes, and with it every HIP-3
+/// quote of the trader's (its dryrun 11-04 14:02-14:16).
+pub(crate) const BASIS_MAX_AGE: Duration = Duration::from_secs(10);
 
 /// A feed whose partitions the tick copies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

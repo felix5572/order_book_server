@@ -8,7 +8,7 @@
 //! once, then takes one publish time and judges every leg at it by the owner's own rules - the slots' validity,
 //! `received_by`, the listings' multipliers, the main dex's weighted medians, the US stocks' sessions (`evaluate`). It
 //! reads no book and takes no lock but the slots'. The bases are the owner's, read from its snapshot and sampled by it
-//! only: one computed more than `BASIS_MAX_AGE` before is withheld (`basisStale`), its quote still published.
+//! only: one computed more than `BASIS_MAX_AGE` (10 s) before is withheld (`basisStale`), its quote still published.
 //!
 //! A coin's frame is serialized once and published with the tick's version when its decision fingerprint changed, on
 //! the first tick of a subscription epoch, and for every subscribed coin every `HEARTBEAT_TICKS` ticks (`publish`).
@@ -187,6 +187,7 @@ pub(crate) const RECEIPT_TO_PUBLISH: &str = "receipt_to_publish";
 
 #[cfg(test)]
 mod tests {
+    use super::evaluate::BASIS_MAX_AGE;
     use super::*;
     use crate::{
         listeners::order_book::BestPricesAt,
@@ -671,10 +672,12 @@ mod tests {
     }
 
     /// Review 000673 r3 P1, design 000673 r4: the owner's last snapshot standing - its channel open, its tick stalled -
-    /// while the slots quote on, each leg's basis holds 200 ms after the owner computed it and is `basisStale` from 201
-    /// ms, at once and at every heartbeat after, the quotes still published; the owner's next snapshot restores it.
+    /// while the slots quote on, each leg's basis holds `BASIS_MAX_AGE` (10 s) after the owner computed it and is
+    /// `basisStale` 1 ms past it, at once and at every heartbeat after, the quotes still published; the owner's next
+    /// snapshot restores it. The quotes received anew before each tick, as old against it as at the start: only the
+    /// basis ages.
     #[tokio::test]
-    async fn the_owners_basis_holds_200_ms_then_every_leg_is_basis_stale() {
+    async fn the_owners_basis_holds_its_max_age_then_every_leg_is_basis_stale() {
         let mut fixture = Fixture::new(true);
         fixture.btc_quotes(NOW_MS - 200_000);
         fixture.binance_quote(0, ("3900", "3901"), NOW_MS - 30);
@@ -690,16 +693,24 @@ mod tests {
             .unwrap();
         let computed_at = owner.computed_at;
         let guards = [BTC, GOLD, TSLA].map(|key| fixture.subscribe(key));
+        let max_ms = u64::try_from(BASIS_MAX_AGE.as_millis()).unwrap();
         let at = |offset_ms: u64| (NOW_MS + offset_ms, computed_at + Duration::from_millis(offset_ms));
-        let (published_ms, instant) = at(200);
+        let quotes_at = |fixture: &Fixture, published_ms: u64| {
+            fixture.btc_quotes(published_ms - 200_000);
+            fixture.binance_quote(0, ("3900", "3901"), published_ms - 30);
+            fixture.equity_quote(EquityFeed::Sip, 1, ("405.765", "405.775"), published_ms - 1_000, published_ms - 920);
+        };
+        let (published_ms, instant) = at(max_ms);
+        quotes_at(&fixture, published_ms);
         let held = fixture.quote_tick(&owner, published_ms, instant);
         let btc = data(&held, BTC)["external"].clone();
         assert_eq!((btc["externalBasis"]["status"].as_str(), btc["externalBasis"]["samples"].as_u64()), (Some("ready"), Some(120)));
         let venue_bases = |external: &serde_json::Value, field: &str| ["binance", "okx"].map(|venue| external["externalQuotes"][venue]["basis"][field].clone());
-        assert_eq!(venue_bases(&btc, "samples"), [120, 120], "each venue's own basis, held 200 ms too (design 000681)");
+        assert_eq!(venue_bases(&btc, "samples"), [120, 120], "each venue's own basis, held as long (design 000681)");
         assert_eq!(data(&held, GOLD)["external"]["externalBasis"]["reasonCode"], "externalBasisSamples");
         assert_eq!(data(&held, TSLA)["equity"]["basis"]["reasonCode"], "externalBasisSamples");
-        let (published_ms, instant) = at(201);
+        let (published_ms, instant) = at(max_ms + 1);
+        quotes_at(&fixture, published_ms);
         let stale = fixture.quote_tick(&owner, published_ms, instant);
         assert_eq!(causes(&stale), [(BTC, Cause::Changed), (GOLD, Cause::Changed), (TSLA, Cause::Changed)]);
         assert_eq!(stale.samples, [], "the basis' move is no quote's: not sampled");
@@ -710,23 +721,26 @@ mod tests {
             [&btc["external"]["externalBasis"], &gold["external"]["externalBasis"], &tsla["equity"]["basis"]].map(|basis| basis["reasonCode"].as_str().unwrap().to_string())
         };
         assert_eq!(stale_legs(&stale), ["basisStale"; 3]);
-        assert_eq!(venue_bases(&data(&stale, BTC)["external"], "reasonCode"), ["basisStale", "basisStale"], "each venue's from 201 ms");
-        assert!(data(&stale, BTC)["external"]["externalBasis"]["reason"].as_str().unwrap().contains("201 ms ago"));
+        assert_eq!(venue_bases(&data(&stale, BTC)["external"], "reasonCode"), ["basisStale", "basisStale"], "each venue's 1 ms past it");
+        assert!(data(&stale, BTC)["external"]["externalBasis"]["reason"].as_str().unwrap().contains(&format!("{} ms ago", max_ms + 1)));
         let later: Vec<_> = (2..=10_u64).map(|tick| {
-            let (published_ms, instant) = at(195 + 5 * tick);
+            let (published_ms, instant) = at(max_ms - 5 + 5 * tick);
+            quotes_at(&fixture, published_ms);
             fixture.quote_tick(&owner, published_ms, instant)
         }).collect();
         assert!(later[..8].iter().all(|tick| tick.published.is_empty()));
         assert_eq!(causes(&later[8]), [(BTC, Cause::Heartbeat), (GOLD, Cause::Heartbeat), (TSLA, Cause::Heartbeat)]);
         assert_eq!(stale_legs(&later[8]), ["basisStale"; 3], "the heartbeat restores no basis");
         assert_eq!(venue_bases(&data(&later[8], BTC)["external"], "reasonCode"), ["basisStale", "basisStale"], "nor a venue's");
-        let (published_ms, instant) = at(250);
+        let (published_ms, instant) = at(max_ms + 50);
+        quotes_at(&fixture, published_ms);
         let book = fixture.book(published_ms);
         let anew = fixture.owner(published_ms, instant, Some(&book));
         let restored = fixture.quote_tick(&anew, published_ms + 5, instant + QUOTE_TICK);
         assert!(causes(&restored).contains(&(BTC, Cause::Changed)));
-        assert_eq!(data(&restored, BTC)["external"]["externalBasis"]["samples"].as_u64(), Some(120));
-        assert_eq!(venue_bases(&data(&restored, BTC)["external"], "samples"), [120, 120]);
+        // the owner's tick 10 s on takes its next second's sample
+        assert_eq!(data(&restored, BTC)["external"]["externalBasis"]["samples"].as_u64(), Some(121));
+        assert_eq!(venue_bases(&data(&restored, BTC)["external"], "samples"), [121, 121]);
         drop(guards);
     }
 

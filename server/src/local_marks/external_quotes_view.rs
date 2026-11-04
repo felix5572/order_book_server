@@ -15,7 +15,7 @@
 //! decision field changed - the status and reason code, the venues taken, the external bid and ask, Binance's own bid
 //! and ask, the basis' and each venue's basis' status and ratio -, and every coin's every 50 ms (the heartbeat); its
 //! quotes copied before its publish time is taken, a quote received after it means the wall clock stepped back; a
-//! basis the owner computed more than 200 ms before reads `basisStale`. `GET /extExternalQuotes` reads the owner's
+//! basis the owner computed more than `BASIS_MAX_AGE` (10 s) before reads `basisStale`. `GET /extExternalQuotes` reads the owner's
 //! snapshot, every 50 ms, `intervalMs` 50: its quotes are `extMarkPrices`' of the same tick, read after the tick's
 //! time, so a quote received during that read withholds the row's leg (`receivedAfterPublish`, review 000676 r1 P2)
 //! where `extMarkPrices`' local leg, on its own time as before, carries it.
