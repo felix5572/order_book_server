@@ -67,7 +67,7 @@ impl FeedLosses {
 }
 
 /// Starts the watcher of `stream`, each line parsed by `parse`, `queue` events at most waiting; its events come in
-/// order on the feed, which closes when the watcher ends (its inotify watch not set up).
+/// order on the feed, which closes when the watcher ends.
 pub(crate) fn watch<T: Send + 'static>(
     stream: LineStream,
     queue: usize,

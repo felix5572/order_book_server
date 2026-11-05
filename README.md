@@ -38,7 +38,7 @@ The server runs co-located with a Hyperliquid node and is memory-light relative 
 
 Other requirements:
 
-- **OS:** Linux with inotify (kernel ≥ 2.6.13). Tested on Ubuntu 22.04 / 24.04.
+- **OS:** Linux. Tested on Ubuntu 22.04 / 24.04.
 - **Architecture:** x86_64 or aarch64.
 - **File descriptors:** raise `LimitNOFILE` in your service unit (the included one sets `1048576`). Each WebSocket client uses one fd.
 - **Disk:** negligible for the server itself (~10 MB binary). The Hyperliquid node's `*_streaming/` directories grow with traffic — size them per the node's documentation, not this server's.
@@ -113,7 +113,7 @@ A checkpoint is the node state after applying block `<height>`, and the node wri
 > 1. **Keep the copy fresh** - hl-visor auto-updates the node binary, and a stale copy may eventually fail to read a newer checkpoint. Re-copy after upgrades (a cron job or an `ExecStartPre=` in your systemd unit works).
 > 2. **Never put the string `hl-node` in the `--hlnode-binary` value** (or anywhere else in this server's command line / unit file) - it would sit in the server's own argv permanently and trip the same scan.
 
-After the initial snapshot, the server stays up to date by watching the node's `*_streaming/` directories for real-time order diffs, fills, and status updates via inotify.
+After the initial snapshot, the server stays up to date by polling the node's `*_streaming/` directories (every 1 ms) for real-time order diffs, fills, and status updates.
 
 The handoff from snapshot to live stream is **gapless** and **checkpoint-aligned**: a fetch targets the next checkpoint on the node's grid, opens a replay cache shortly before both book streams reach it (once both are tracking and neither has passed it), waits for the node to write it, dumps it, and replays every cached event above its height. After the install, book batches at or below that height (a lagging stream's backlog) are skipped - the snapshot already contains them. The cost is waiting for the next checkpoint: a fetch takes up to one checkpoint interval (~12 minutes, ~6 on average) plus the dump (startup: not ready until the first install). If the server ever detects that events were provably lost (a corrupt line, an oversized batch, watcher data loss, a New diff whose status never came), it marks the book out-of-sync, re-fetches a snapshot this way in the background, and **withholds** the book until a snapshot covering the loss is installed — see [Desync self-healing](#consistency-no-drift-guarantees) and `orderbook_desyncs_total` / `orderbook_book_trusted` in the metrics.
 
@@ -648,7 +648,7 @@ The Hyperliquid node must run with **all** of these flags enabled:
 │   (same host)        │     │                                             │
 │                      │     │  ┌──────────────────────────────┐           │
 │  writes to:          │     │  │ Parallel File Watchers       │           │
-│  - fills_streaming/  │─────▶  │ (3 inotify threads)          │           │
+│  - fills_streaming/  │─────▶  │ (polling threads, 1 ms)      │           │
 │  - order_statuses_   │     │  │  - order diffs (BBO-critical)│           │
 │    streaming/        │     │  │  - order statuses            │           │
 │  - book_diffs_       │     │  │  - fills                     │           │
@@ -675,7 +675,7 @@ The Hyperliquid node must run with **all** of these flags enabled:
 
 **Data flow:**
 1. The Hyperliquid node writes real-time events to `*_streaming/` directories as newline-delimited JSON
-2. Three parallel inotify file watchers detect changes immediately (one per event source)
+2. Parallel file watchers (one per event source) poll their stream every 1 ms, reading on at once while data keeps coming
 3. Watcher threads send events straight into a bounded tokio channel (backpressure parks the readers; data waits on disk)
 4. The OrderBook State applies diffs/statuses independently (no block-level batching) for lowest latency
 5. Changed BBOs and L2 snapshots are broadcast to subscribed WebSocket clients with deduplication
@@ -919,7 +919,7 @@ This fork processes every order diff, status, and fill **the instant it arrives*
 
 The original uses a single file watcher thread that handles all three event sources (order statuses, book diffs, fills) sequentially.
 
-This fork spawns **3 dedicated inotify threads** (one per event source) that feed a bounded tokio channel directly. Order diffs (the BBO-critical path) are never blocked by slow fill or status parsing. A watcher held back by its consumer queues only the notices it acts on - a stream file's creates and modifies, the kernel's overflow, errors: at most one modify (a read takes everything appended), one overflow and one error (the ones dropped behind it counted into its log line) at a time, and a create per new file. An overflow (notices lost, a create maybe among them, so the newest-file switch could pass over a file) is reported as a loss of the stream, counted found the moment the notice comes (the mempool's count), ahead of lines the held-back watcher reads after it; each `Lost` reports through the losses the watcher had flagged when it went out, never an overflow still queued.
+This fork spawns **a dedicated watcher thread per event source** that feeds a bounded tokio channel directly. Order diffs (the BBO-critical path) are never blocked by slow fill or status parsing. The watchers poll (design 000767, 2026-11-05): a read that found data is followed at once by the next, one that found nothing by a 1 ms sleep, and every 10 ms each watcher looks for its stream's next file, taking several new files one at a time in order. They used inotify before; each node write then woke them, about 100k times a second at the US open, and the node's writing thread paid for every wakeup (a third of its time in the kernel, its block apply falling behind).
 
 ### New Subscription Types
 

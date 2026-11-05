@@ -6,7 +6,6 @@ use crate::{
     types::node_data::{EventSource, array_line_local_time_unix_nanos, line_local_time_unix_nanos},
 };
 use log::{error, info, warn};
-use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -14,7 +13,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
     thread,
     time::{Duration, Instant},
@@ -50,6 +49,14 @@ const READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 /// How often a watcher asked for read-through proofs tries one (design 000433 r3): each try scans the stream's
 /// directory for a newer file.
 const READ_THROUGH_INTERVAL: Duration = Duration::from_millis(5);
+
+/// How long a watcher sleeps once a read finds nothing new. Pure polling (design 000767): inotify woke the readers on
+/// every node write, about 100k a second at the 2026-11-05 US open, and the node's writing thread paid for every
+/// wakeup (a third of its time in the kernel, its block apply falling behind).
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// How often a watcher looks for the stream's next file, or for the file to start from (design 000767).
+const FILE_CHECK_INTERVAL: Duration = Duration::from_millis(10);
 
 /// One read-through check (design 000433 r3, revision 1).
 #[derive(Debug, PartialEq, Eq)]
@@ -149,10 +156,10 @@ impl LineShape {
 /// How a stream lays out its files below its directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FileLayout {
-    /// `hourly/<YYYYMMDD>/<H>`: the newest day by name, then its most recently modified file.
+    /// `hourly/<YYYYMMDD>/<H>`: in order by day, then hour.
     Hourly,
     /// `<session>/<YYYYMMDD>/<first height>` (`replica_cmds`; a node restart opens a new session, named by its ISO start
-    /// time): the newest session and day by name, then the greatest first height.
+    /// time): in order by session and day by name, then first height.
     ReplicaSessions,
 }
 
@@ -166,8 +173,7 @@ impl FileLayout {
         let (Some(Component::Normal(first)), Some(Component::Normal(day)),
             Some(Component::Normal(leaf)), None) = (parts.next(), parts.next(), parts.next(), parts.next())
         else { return false; };
-        let Some(day) = day.to_str() else { return false; };
-        if day.len() != 8 || !day.bytes().all(|byte| byte.is_ascii_digit()) { return false; }
+        if !day.to_str().is_some_and(is_day_name) { return false; }
         let Some(leaf) = leaf.to_str() else { return false; };
         if leaf.is_empty() || !leaf.bytes().all(|byte| byte.is_ascii_digit()) { return false; }
         match self {
@@ -178,21 +184,111 @@ impl FileLayout {
 
 }
 
-/// The child directory with the greatest name.
-fn newest_child_dir(dir: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(dir).ok()?.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).max()
+/// A stream file's place in its stream: hourly files by (day, hour), replica files by (session, day, first height).
+/// The hourly layout's session part is empty.
+type FileKey = (String, String, u64);
+
+impl FileLayout {
+    fn order_key(self, base: &Path, path: &Path) -> Option<FileKey> {
+        if !self.contains_file(base, path) { return None; }
+        let mut parts = path.strip_prefix(base).ok()?.components().map(|part| part.as_os_str().to_str());
+        let (first, day, leaf) = (parts.next()??, parts.next()??, parts.next()??);
+        let session = match self { Self::Hourly => String::new(), Self::ReplicaSessions => first.to_owned() };
+        Some((session, day.to_owned(), leaf.parse().ok()?))
+    }
+
+    /// The directories holding day directories, in order, with the session part of their files' keys.
+    fn session_dirs(self, base: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
+        Ok(match self {
+            Self::Hourly => vec![(String::new(), base.join("hourly"))],
+            Self::ReplicaSessions => child_dirs(base)?.into_iter()
+                .filter_map(|dir| Some((dir.file_name()?.to_str()?.to_owned(), dir))).collect(),
+        })
+    }
+
+    /// A day directory's stream files, in order.
+    fn day_files(self, base: &Path, day_dir: &Path) -> std::io::Result<Vec<(FileKey, PathBuf)>> {
+        let mut files = Vec::new();
+        for path in dir_entries(day_dir)? {
+            let Some(key) = self.order_key(base, &path) else { continue };
+            if path_kind(&path)?.is_some_and(|kind| kind.is_file()) { files.push((key, path)); }
+        }
+        files.sort();
+        Ok(files)
+    }
+
+    /// The stream's first file after `after` in its order (its first file at all without one); `None` when there is none
+    /// yet. Several new files are taken one at a time, so none is passed over (design 000767). A directory that cannot
+    /// be read fails the listing: going on past its files would leave a silent gap.
+    fn next_file(self, base: &Path, after: Option<&FileKey>) -> std::io::Result<Option<PathBuf>> {
+        for (session, session_dir) in self.session_dirs(base)? {
+            if after.is_some_and(|after| session < after.0) { continue; }
+            for (day, day_dir) in day_dirs(&session_dir)? {
+                if after.is_some_and(|after| (&session, &day) < (&after.0, &after.1)) { continue; }
+                let next = self.day_files(base, &day_dir)?.into_iter()
+                    .find(|(key, _)| after.is_none_or(|after| key > after));
+                if let Some((_, path)) = next { return Ok(Some(path)); }
+            }
+        }
+        Ok(None)
+    }
+
+    /// The stream's last file in its order, from the newest day directory that holds one: an empty newer day or session
+    /// does not hide the files before it (review 000769 r1 P2-2). Following any earlier file from its end would have
+    /// the ordered switch read the files after it from their start.
+    fn last_file(self, base: &Path) -> std::io::Result<Option<PathBuf>> {
+        for (_, session_dir) in self.session_dirs(base)?.into_iter().rev() {
+            for (_, day_dir) in day_dirs(&session_dir)?.into_iter().rev() {
+                if let Some((_, path)) = self.day_files(base, &day_dir)?.pop() { return Ok(Some(path)); }
+            }
+        }
+        Ok(None)
+    }
 }
 
-/// See `FileLayout::ReplicaSessions`; names that are not a height are not stream files.
-fn latest_replica_file(base_dir: &Path) -> Option<PathBuf> {
-    let day_dir = newest_child_dir(&newest_child_dir(base_dir)?)?;
-    std::fs::read_dir(day_dir)
-        .ok()?
-        .flatten()
-        .filter_map(|entry| Some((entry.file_name().to_str()?.parse::<u64>().ok()?, entry.path())))
-        .filter(|(_, path)| FileLayout::ReplicaSessions.contains_file(base_dir, path) && path.is_file())
-        .max_by_key(|(first_height, _)| *first_height)
-        .map(|(_, path)| path)
+/// A day directory's name: `YYYYMMDD`.
+fn is_day_name(name: &str) -> bool {
+    name.len() == 8 && name.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// The paths in `dir`, sorted; none when it does not exist (not yet, or no longer). Any other failure is an error, not
+/// an empty directory.
+fn dir_entries(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let listing = std::fs::read_dir(dir)
+        .and_then(|entries| entries.map(|entry| entry.map(|entry| entry.path())).collect::<std::io::Result<Vec<_>>>());
+    let mut paths = match listing {
+        Ok(paths) => paths,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(std::io::Error::new(err.kind(), format!("listing {}: {err}", dir.display()))),
+    };
+    paths.sort();
+    Ok(paths)
+}
+
+/// The type of what `path` names, symlinks followed (as `Path::is_file` does); `None` when it is gone (removed after its
+/// directory was listed). Any other failure is an error, not "neither file nor directory" (review 000769 r2 P3).
+fn path_kind(path: &Path) -> std::io::Result<Option<std::fs::FileType>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata.file_type())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(std::io::Error::new(err.kind(), format!("inspecting {}: {err}", path.display()))),
+    }
+}
+
+/// The child directories of `dir`, sorted.
+fn child_dirs(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    for path in dir_entries(dir)? {
+        if path_kind(&path)?.is_some_and(|kind| kind.is_dir()) { dirs.push(path); }
+    }
+    Ok(dirs)
+}
+
+/// A session directory's day directories, sorted, with their days.
+fn day_dirs(session_dir: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
+    Ok(child_dirs(session_dir)?.into_iter()
+        .filter_map(|dir| Some((dir.file_name()?.to_str().filter(|day| is_day_name(day))?.to_owned(), dir)))
+        .collect())
 }
 
 /// What the periodic file check found.
@@ -200,7 +296,7 @@ fn latest_replica_file(base_dir: &Path) -> Option<PathBuf> {
 enum FileCheck {
     /// Nothing is tracked yet: follow this file from its end.
     Adopt(PathBuf),
-    /// A newer file than the tracked one: drain the tracked one, then read this one from its start.
+    /// The next file (or the tracked path recreated): drain the tracked one, then read this one from its start.
     Switch(PathBuf),
 }
 
@@ -232,6 +328,8 @@ struct FileReader {
     losses: Losses,
     // Failed opens and reads share an episode: reopening a bad reader is not recovery.
     io_failures: FileIoFailures,
+    // Failed directory listings, an episode of their own: a read of the tracked file does not end it.
+    listing_failures: FileIoFailures,
     // (dev, ino) of the file that file_position refers to. Catches same-path
     // recreation: node catch-up writes by BLOCK time, so after a long stop it
     // recreates the very hour file retention pruned - same path, new inode,
@@ -241,12 +339,15 @@ struct FileReader {
     max_line_bytes: usize,
     layout: FileLayout,
     shape: LineShape,
+    // A listing found no stream file while nothing was tracked: the stream's first file is read from its start. Until a
+    // listing has answered, the stream's last file is followed from its end.
+    started_empty: bool,
 }
 
 /// A stream's loss counts, for a consumer that must know of a loss before the lines after it (the pending book's
-/// mempool, review 000609 r1-r7): `found` the moment a loss is known - the reader finding one, the notice gate an
-/// overflow - and `flagged` as the watcher flags it for its next `desync`, which reports every loss flagged before it
-/// and no other (a loss found but not yet flagged, an overflow still queued, stays unreported).
+/// mempool, review 000609 r1-r7): `found` the moment a loss is known and `flagged` as the watcher flags it for its next
+/// `desync`, which reports every loss flagged before it and no other. The reader finds and flags its losses together;
+/// the mempool's own findings (`pending/mempool.rs`) count found only.
 #[derive(Clone, Default)]
 pub(crate) struct LossCounts {
     pub(crate) found: Arc<AtomicU64>,
@@ -263,16 +364,9 @@ struct Losses {
 impl Losses {
     /// A loss the reader found: found and flagged at once, its desync out after this read's lines.
     fn flag(&mut self) {
-        if let Some(counts) = &self.counts {
-            counts.found.fetch_add(1, AtomicOrdering::Release);
-        }
-        self.flag_found();
-    }
-
-    /// A loss found before (an overflow, counted found by the notice gate) flagged now: its desync goes out next.
-    fn flag_found(&mut self) {
         self.desynced = true;
         if let Some(counts) = &self.counts {
+            counts.found.fetch_add(1, AtomicOrdering::Release);
             counts.flagged.fetch_add(1, AtomicOrdering::Release);
         }
     }
@@ -294,7 +388,7 @@ impl FileIoFailures {
         }
         self.attempts += 1;
     }
-    fn read_succeeded(&mut self, path: &Path) {
+    fn succeeded(&mut self, path: &Path) {
         if let Some(failed) = self.path.take() {
             info!("node stream I/O available at {} after {} failed attempts (previous failure at {})",
                 path.display(), self.attempts, failed.display());
@@ -319,10 +413,12 @@ impl FileReader {
             base_dir,
             losses: Losses::default(),
             io_failures: FileIoFailures::default(),
+            listing_failures: FileIoFailures::default(),
             open_file_id: None,
             max_line_bytes,
             layout,
             shape: LineShape::Object,
+            started_empty: false,
         }
     }
 
@@ -343,100 +439,50 @@ impl FileReader {
         std::mem::take(&mut self.losses.desynced)
     }
 
-    /// Find the latest file in the streaming directory tree (see `FileLayout`).
-    fn find_latest_file(&self) -> Option<PathBuf> {
-        match self.layout {
-            FileLayout::Hourly => self.latest_hourly_file(),
-            FileLayout::ReplicaSessions => latest_replica_file(&self.base_dir),
-        }
+    /// The file check, every `FILE_CHECK_INTERVAL` (design 000767). Tracking: the tracked path recreated in place (node
+    /// catch-up writes by block time and recreates an hour file retention pruned: same path, new inode) comes before any
+    /// file after it (review 000769 r1 P2-1); otherwise the stream's next file in order, one at a time. A switch drains
+    /// the tracked file first; `on_create` decides whether the handoff is gapless or a loss (a vanished or recreated file
+    /// without a held handle).
+    fn check_files(&mut self) -> Option<FileCheck> {
+        let Some(current) = self.current_path.clone() else { return self.check_untracked(); };
+        let recreated = current.metadata().ok().zip(self.open_file_id).is_some_and(|(meta, open_id)| file_id(&meta) != open_id);
+        if recreated { return Some(FileCheck::Switch(current)); }
+        let key = self.layout.order_key(&self.base_dir, &current)?;
+        let next = self.layout.next_file(&self.base_dir, Some(&key));
+        self.listed(next)?.map(FileCheck::Switch)
     }
 
-    /// Scans hourly/YYYYMMDD/HH structure and returns the most recently modified file
-    fn latest_hourly_file(&self) -> Option<PathBuf> {
-        let day_dir = newest_child_dir(&self.base_dir.join("hourly"))?;
+    /// Nothing tracked. Until a listing answers, the stream's last file, followed from its end (`Adopt`; bm 2026-10-21:
+    /// re-reading a whole hour file as if created replayed 4,413 released blocks). Once a listing found no file at all,
+    /// the stream's first file, from its start. A failed listing knows neither: the next check asks again.
+    fn check_untracked(&mut self) -> Option<FileCheck> {
+        if self.started_empty {
+            let first = self.layout.next_file(&self.base_dir, None);
+            return self.listed(first)?.map(FileCheck::Switch);
+        }
+        let last = self.layout.last_file(&self.base_dir);
+        let last = self.listed(last)?;
+        self.started_empty = last.is_none();
+        last.map(FileCheck::Adopt)
+    }
 
-        // Find the latest hour file in this day
-        let mut latest_file: Option<PathBuf> = None;
-        let mut latest_mtime: Option<std::time::SystemTime> = None;
-
-        if let Ok(entries) = std::fs::read_dir(&day_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if self.layout.contains_file(&self.base_dir, &path) && path.is_file() {
-                    if let Ok(metadata) = path.metadata() {
-                        if let Ok(mtime) = metadata.modified() {
-                            if latest_mtime.is_none() || mtime > latest_mtime.unwrap() {
-                                latest_mtime = Some(mtime);
-                                latest_file = Some(path);
-                            }
-                        }
-                    }
-                }
+    /// A listing's answer, or `None` when it failed (the failure logged once per episode and counted).
+    fn listed<T>(&mut self, listing: std::io::Result<T>) -> Option<T> {
+        match listing {
+            Ok(found) => {
+                self.listing_failures.succeeded(&self.base_dir);
+                Some(found)
+            }
+            Err(err) => {
+                self.listing_failures.failed(&self.base_dir, "list", &err);
+                None
             }
         }
-
-        latest_file
     }
 
-    /// The periodic file check: with nothing tracked yet the newest file is adopted at its end, like at a first modify
-    /// event (bm 2026-10-21: misc events, quiet for the check's first 10 s, re-read a whole hour file as if created);
-    /// else a newer file to switch to.
-    fn periodic_check(&mut self) -> Option<FileCheck> {
-        if self.current_path.is_none() {
-            return self.find_latest_file().map(FileCheck::Adopt);
-        }
-        self.check_for_newer_file().map(FileCheck::Switch)
-    }
-
-    /// A newer file than the tracked one; `None` while nothing is tracked.
-    fn check_for_newer_file(&mut self) -> Option<PathBuf> {
-        let current = self.current_path.clone()?;
-        let latest = self.find_latest_file()?;
-        if latest == current {
-            // Same path is NOT the same file after a long stop: node catch-up
-            // writes by block time and recreates the very hour file retention
-            // pruned. If the inode on disk no longer matches the one our
-            // position refers to, force a switch. Deliberately NO desync flag
-            // here: on_create makes that call - a held handle is drained to
-            // EOF (gapless, no flag), a handle-less stale file flags desync.
-            // Don't "simplify" this into flagging (or never flagging) here.
-            let recreated = latest
-                .metadata()
-                .ok()
-                .zip(self.open_file_id)
-                .is_some_and(|(meta, open_id)| file_id(&meta) != open_id);
-            return recreated.then_some(latest);
-        }
-        let Ok(current_meta) = current.metadata() else {
-            // The tracked file vanished from disk (node down long enough for
-            // retention to prune it). This polling fallback is then the ONLY
-            // re-attach path - modify events don't adopt a file while
-            // current_path is set, and the mtime comparison below could never
-            // run again - so switch unconditionally. Jumping straight to the
-            // latest file may skip intermediate files wholesale; flag the loss
-            // so the book re-syncs from a covering snapshot instead of
-            // continuing with a hole.
-            warn!(
-                "Tracked file {} vanished; force-switching to {} and flagging desync",
-                current.display(),
-                latest.display()
-            );
-            self.losses.flag();
-            return Some(latest);
-        };
-        // Only switch when the new file has data (modification time is newer).
-        let latest_mtime = latest.metadata().and_then(|m| m.modified()).ok()?;
-        let current_mtime = current_meta.modified().ok()?;
-        (latest_mtime > current_mtime).then_some(latest)
-    }
-
-    /// Filter inotify hints before they can replace a live cursor. Missing paths that do name a data file still
-    /// reach the normal open/drain error handling, so a genuine lost file is not silently treated as harmless.
-    fn notified_file<'a>(&self, event: &'a Event) -> Option<&'a PathBuf> {
-        stream_file(self.layout, &self.base_dir, event)
-    }
-
-    /// Process file modification - read new data and return lines
+    /// One read's complete lines (tests; the watcher reads through `read_lines`, which also says what the read found).
+    #[cfg(test)]
     fn on_modify(&mut self) -> Vec<String> {
         self.read_lines().0
     }
@@ -488,7 +534,7 @@ impl FileReader {
                 return (lines, ReadStatus::NotRead);
             };
             let read = read_chunk(file, self.file_position);
-            if read.is_ok() { self.io_failures.read_succeeded(path); }
+            if read.is_ok() { self.io_failures.succeeded(path); }
             let buf = match read {
                 Ok(Some(buf)) if !buf.is_empty() => buf,
                 Ok(Some(_)) => return (lines, ReadStatus::NotRead),
@@ -680,19 +726,26 @@ impl FileReader {
     }
 
     /// Whether every line written before the check began has been returned (design 000433 r3, revision 1). The
-    /// instant is taken first; then the newest file must be the tracked one with the inode the position refers to, and
-    /// a read from the position must establish the end (the handle's size is the position: sizing, seeking or reading
-    /// that fails proves nothing), leave no partial line and flag no discard.
-    /// Anything appended before that instant is in the tracked file (the read would have returned it) or in a newer
-    /// file (the scan would have seen it), so a proof covers every line written before its instant. A read that
-    /// returns lines, or one cut at `READ_CHUNK_BYTES`, proves nothing yet.
+    /// instant is taken first; then the stream's last file in order must be the tracked one with the inode the position
+    /// refers to (a listing that fails proves nothing), and a read from the position must establish the end (the
+    /// handle's size is the position: sizing, seeking or reading that fails proves nothing), leave no partial line and
+    /// flag no discard.
+    /// The node appends to the tracked file or a file after it in order: anything appended before that instant is in the
+    /// tracked file (the read would have returned it) or in a file after it (the listing would have seen it), so a proof
+    /// covers every such line written before its instant. A file the reader has passed is not read again (design
+    /// 000767): lines the node writes back into one are not covered. A read that returns lines, or one cut at
+    /// `READ_CHUNK_BYTES`, proves nothing yet.
     fn read_through(&mut self) -> ReadThrough {
         let at = Instant::now();
         let Some(current) = self.current_path.clone() else {
             return ReadThrough::Unproven;
         };
         let recreated = current.metadata().ok().map(|meta| file_id(&meta)) != self.open_file_id;
-        if recreated || self.find_latest_file().as_ref() != Some(&current) {
+        if recreated {
+            return ReadThrough::Unproven;
+        }
+        let last = self.layout.last_file(&self.base_dir);
+        if self.listed(last).flatten().as_ref() != Some(&current) {
             return ReadThrough::Unproven;
         }
         match self.read_lines() {
@@ -733,7 +786,7 @@ impl FileReader {
                 self.file_position = position;
                 self.open_file_id = Some(id);
                 self.startup_boundary = if aligned { StartupBoundary::Aligned } else { StartupBoundary::AwaitingNewline };
-                self.io_failures.read_succeeded(path);
+                self.io_failures.succeeded(path);
                 info!("node stream startup positioning path={} inode={id:?} offset={position} awaiting_newline={}",
                     path.display(), !aligned);
                 true
@@ -746,8 +799,7 @@ impl FileReader {
     }
 }
 
-/// Spawn a file watcher thread for a single event source
-/// Uses polling with inotify hints for streaming files
+/// Spawn a file watcher thread for a single event source (pure polling, design 000767).
 pub(super) fn spawn_file_watcher(
     source: EventSource,
     dir: PathBuf,
@@ -800,8 +852,8 @@ pub(crate) struct LineStream {
     pub(crate) dir: PathBuf,
     /// Cap on one un-terminated line; a longer one is discarded and `desync` is sent.
     pub(crate) max_line_bytes: usize,
-    /// The watcher positions at the end of the current file on its first modify event, skipping the content written
-    /// before that moment (including the line that triggered it); when set, it sends `desync` right then.
+    /// The watcher positions at the end of the newest file at its first file check, skipping the content already on
+    /// disk; when set, it sends `desync` right then.
     pub(crate) start_skip_is_loss: bool,
     /// Which file below `dir` is the newest one.
     pub(crate) layout: FileLayout,
@@ -809,98 +861,6 @@ pub(crate) struct LineStream {
     pub(crate) shape: LineShape,
     /// The stream's loss counts (the pending book's mempool; `None` for the other streams).
     pub(crate) loss_counts: Option<LossCounts>,
-}
-
-/// The file a create or modify notice names in a stream laid out as `layout` below `base`; `None` for any other notice
-/// (accesses, removals, folders, other paths), which the watcher does nothing with.
-fn stream_file<'a>(layout: FileLayout, base: &Path, event: &'a Event) -> Option<&'a PathBuf> {
-    if !(event.kind.is_create() || event.kind.is_modify())
-        || matches!(event.kind, notify::EventKind::Create(notify::event::CreateKind::Folder))
-    { return None; }
-    let path = event.paths.first()?;
-    (layout.contains_file(base, path) && !path.is_dir()).then_some(path)
-}
-
-/// Which notices go into the watcher's queue (review 000609 r1-r2 P2-2: while a consumer held the watcher back, it grew
-/// by one per write, accesses included): only those the watcher acts on. A modify and an error wait one at a time: a
-/// modify only wakes the watcher to read on, and the read takes everything appended; an error is logged with the count
-/// of those dropped behind it. Every create goes in, as before: one per file the stream opens. The kernel's overflow
-/// (`Rescan`, notices lost) waits one at a time too; it is counted in the stream's loss count the moment it comes, the
-/// watcher may be held back behind lines read after it (review 000609 r6), and taken, reported as a loss.
-#[derive(Clone)]
-struct NoticeGate {
-    layout: FileLayout,
-    base: PathBuf,
-    /// The stream's count of losses found, an overflow raising it as it comes.
-    losses_found: Option<Arc<AtomicU64>>,
-    modify_waiting: Arc<AtomicBool>,
-    rescan_waiting: Arc<AtomicBool>,
-    error_waiting: Arc<AtomicBool>,
-    errors_dropped: Arc<AtomicU64>,
-}
-
-impl NoticeGate {
-    fn new(layout: FileLayout, base: PathBuf, losses_found: Option<Arc<AtomicU64>>) -> Self {
-        Self {
-            layout,
-            base,
-            losses_found,
-            modify_waiting: Arc::default(),
-            rescan_waiting: Arc::default(),
-            error_waiting: Arc::default(),
-            errors_dropped: Arc::default(),
-        }
-    }
-
-    fn admits(&self, notice: &notify::Result<Event>) -> bool {
-        match notice {
-            Err(_) => {
-                let first = !self.error_waiting.swap(true, AtomicOrdering::AcqRel);
-                if !first {
-                    self.errors_dropped.fetch_add(1, AtomicOrdering::Relaxed);
-                }
-                first
-            }
-            Ok(event) if event.need_rescan() => {
-                let first = !self.rescan_waiting.swap(true, AtomicOrdering::AcqRel);
-                if let Some(count) = self.losses_found.as_ref().filter(|_| first) {
-                    count.fetch_add(1, AtomicOrdering::Release);
-                }
-                first
-            }
-            Ok(event) if stream_file(self.layout, &self.base, event).is_none() => false,
-            Ok(event) if event.kind.is_modify() => !self.modify_waiting.swap(true, AtomicOrdering::AcqRel),
-            Ok(_) => true,
-        }
-    }
-
-    /// The waiting overflow taken: a later one is noticed anew.
-    fn rescan_taken(&self) {
-        self.rescan_waiting.store(false, AtomicOrdering::Release);
-    }
-
-    /// The waiting modify notice taken, before the read it wakes: a write after that is noticed anew.
-    fn modify_taken(&self) {
-        self.modify_waiting.store(false, AtomicOrdering::Release);
-    }
-
-    /// The waiting error taken: how many were dropped behind it.
-    fn error_taken(&self) -> u64 {
-        self.error_waiting.store(false, AtomicOrdering::Release);
-        self.errors_dropped.swap(0, AtomicOrdering::AcqRel)
-    }
-}
-
-/// The inotify callback: the notices `gate` admits go into `notices`.
-fn notice_sender(
-    notices: std::sync::mpsc::Sender<notify::Result<Event>>,
-    gate: NoticeGate,
-) -> impl Fn(notify::Result<Event>) + Send + 'static {
-    move |notice| {
-        if gate.admits(&notice) {
-            drop(notices.send(notice));
-        }
-    }
 }
 
 /// One read-through attempt: lines it read go out through `send`, a proven instant goes out as `mark(at)` after them.
@@ -921,8 +881,10 @@ fn send_read_through<E>(
 
 /// Watch one node stream from the end of its current file, sending every complete line wrapped by `wrap`
 /// (blocking on a full channel, so a slow consumer back-pressures the reader) and `desync()` whenever buffered data
-/// had to be discarded; `last_event` (unix ms of the last line sent) feeds the book's health monitor. The thread
-/// returns when the channel closes (checked every poll) or the inotify watch cannot be set up. With `read_through`,
+/// had to be discarded; `last_event` (unix ms of the last line sent) feeds the book's health monitor. Pure polling
+/// (design 000767): a read that found data is followed at once by the next, one that found nothing by a
+/// `POLL_INTERVAL` sleep; every `FILE_CHECK_INTERVAL` the reader looks for its next file (`FileReader::check_files`).
+/// The thread returns when the channel closes (checked every poll). With `read_through`,
 /// every `READ_THROUGH_INTERVAL` the reader tries a read-through proof (`FileReader::read_through`) and sends a proven
 /// instant in line with the data, after every line read before it (design 000433 r3).
 pub(crate) fn spawn_line_watcher<E, F, D>(
@@ -966,82 +928,39 @@ where
             !(start_skip_is_loss && tx.blocking_send(desync(WatchLoss::Positioning)).is_err())
         };
 
-        // Create watcher with callback
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
-        let gate = NoticeGate::new(layout, dir.clone(), loss_counts.map(|counts| counts.found));
-        let mut watcher = match recommended_watcher(notice_sender(event_tx, gate.clone())) {
-            Ok(w) => w,
-            Err(err) => {
-                error!("{} watcher failed to create: {}", name, err);
-                return;
-            }
-        };
-
-        if let Err(err) = watcher.watch(&dir, RecursiveMode::Recursive) {
-            error!("{} watcher failed to start: {}", name, err);
-            return;
-        }
-
-        // HFT CRITICAL: Use fast polling (1ms) for lowest latency
-        // inotify provides immediate notifications when available, but polling ensures we never wait
-        let poll_interval = Duration::from_millis(1);
-
-        // Main event loop - primarily event-driven with fallback polling
-        let mut poll_count = 0u64;
+        let mut polls = 0u64;
+        let mut last_file_check: Option<Instant> = None;
         let mut last_read_through: Option<Instant> = None;
         loop {
-            poll_count += 1;
+            polls += 1;
             // The consumer is gone: stop now rather than at the next line (a quiet stream may have none for long).
             if tx.is_closed() {
                 info!("{name} channel closed, exiting");
                 return;
             }
 
-            // Wait for inotify events (with fallback timeout)
-            match event_rx.recv_timeout(poll_interval) {
-                Ok(Ok(event)) if event.need_rescan() => {
-                    gate.rescan_taken();
-                    // Notices were lost, a create among them maybe: the newest-file check could then pass over a
-                    // file (review 000609 r3), so the loss is reported, never assumed away.
-                    warn!("{name} watcher: inotify overflow, notices lost; reporting a loss");
-                    reader.losses.flag_found();
-                }
-                Ok(Ok(event)) => {
-                    if event.kind.is_modify() {
-                        gate.modify_taken();
-                    }
-                    if let Some(path) = reader.notified_file(&event) {
-                        if event.kind.is_create() {
-                            info!("{} new file: {:?}", name, path.file_name());
-                            if !reader.on_create(path, &send) {
-                                return;
-                            }
-                        } else if reader.current_path.is_none() && !adopt_at_end(&mut reader, path) {
+            if last_file_check.is_none_or(|checked| checked.elapsed() >= FILE_CHECK_INTERVAL) {
+                last_file_check = Some(Instant::now());
+                match reader.check_files() {
+                    Some(FileCheck::Adopt(path)) => {
+                        if !adopt_at_end(&mut reader, &path) {
                             info!("{name} consumer closed, exiting");
                             return;
                         }
-
-                        // EVENT-DRIVEN: Read data when inotify fires modify event
-                        if !send(reader.on_modify()) {
+                    }
+                    Some(FileCheck::Switch(path)) => {
+                        info!("{} next file: {:?}", name, path.file_name());
+                        if !reader.on_create(&path, &send) {
                             return;
                         }
                     }
+                    None => {}
                 }
-                Ok(Err(err)) => {
-                    let dropped = gate.error_taken();
-                    error!("{name} watcher error: {err} ({dropped} more dropped behind it)");
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // Fallback polling - safety net for missed events
-                    // This runs every 500ms instead of every 10ms
-                    if !send(reader.on_modify()) {
-                        return;
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    error!("{} event channel closed, exiting", name);
-                    return;
-                }
+            }
+
+            let (lines, status) = reader.read_lines();
+            if !send(lines) {
+                return;
             }
 
             // If the reader had to discard buffered data, tell the listener so it
@@ -1060,41 +979,15 @@ where
                 }
             }
 
-            // Every 100000 polls, log status
-            if poll_count % 100_000 == 0 {
-                if let Some(ref path) = reader.current_path {
-                    if let Ok(file) = File::open(path) {
-                        if let Ok(metadata) = file.metadata() {
-                            log::debug!(
-                                "{} poll {} - pos {} / size {}",
-                                name,
-                                poll_count,
-                                reader.file_position,
-                                metadata.len()
-                            );
-                        }
-                    }
-                }
+            if polls.is_multiple_of(100_000)
+                && let Some(size) = reader.current_path.as_ref().and_then(|path| path.metadata().ok()).map(|meta| meta.len())
+            {
+                log::debug!("{} poll {} - pos {} / size {}", name, polls, reader.file_position, size);
             }
 
-            // Every 10000 polls (~10 seconds): adopt the newest file if no modify event came yet, else check for a
-            // newer file (handles day rotation)
-            if poll_count % 10_000 == 0 {
-                match reader.periodic_check() {
-                    Some(FileCheck::Adopt(path)) => {
-                        if !adopt_at_end(&mut reader, &path) {
-                            info!("{name} consumer closed, exiting");
-                            return;
-                        }
-                    }
-                    Some(FileCheck::Switch(newer_file)) => {
-                        info!("{} detected newer file (day rotation?): {:?}", name, newer_file.file_name());
-                        if !reader.on_create(&newer_file, &send) {
-                            return;
-                        }
-                    }
-                    None => {}
-                }
+            // Data keeps the reader going (a catch-up backlog comes in bounded chunks); an idle stream is polled.
+            if status != ReadStatus::Read {
+                thread::sleep(POLL_INTERVAL);
             }
         }
     })
@@ -1218,7 +1111,8 @@ mod tests {
         lines
     }
 
-    /// The skip of the content present at the first modify event is reported only when asked for (review 000422 r2).
+    /// The skip of the content on disk at the first file check is reported only when asked for (review 000422 r2); every
+    /// line written after it is read (design 000767: no longer skipped up to a first modify notice).
     #[test]
     fn test_line_watcher_reports_the_positioning_skip_only_when_asked() {
         for start_skip_is_loss in [true, false] {
@@ -1229,7 +1123,7 @@ mod tests {
             let stream = test_stream(dir, start_skip_is_loss);
             let _watcher = spawn_line_watcher(stream, tx, None, |line| line, |_| "DESYNC".to_string(), None);
             thread::sleep(Duration::from_millis(200));
-            append(&path, "{\"skipped\":1}\n");
+            append(&path, "{\"live\":1}\n");
             thread::sleep(Duration::from_millis(200));
             append(&path, "{\"read\":2}\n");
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -1240,8 +1134,8 @@ mod tests {
                     Err(_) => thread::sleep(Duration::from_millis(5)),
                 }
             }
-            let expected: Vec<String> =
-                if start_skip_is_loss { vec!["DESYNC".into(), "{\"read\":2}".into()] } else { vec!["{\"read\":2}".into()] };
+            let live = ["{\"live\":1}".to_string(), "{\"read\":2}".to_string()];
+            let expected: Vec<String> = if start_skip_is_loss { std::iter::once("DESYNC".to_string()).chain(live).collect() } else { live.to_vec() };
             assert_eq!(received, expected, "start_skip_is_loss = {start_skip_is_loss}");
         }
     }
@@ -1438,23 +1332,169 @@ mod tests {
     }
 
     /// bm 2026-10-21 00:54Z: the misc events watcher saw no modify event before its first periodic check, which treated
-    /// the newest hour file as created and re-read it (61 MB, 4,413 already released blocks). Untracked, the check adopts
-    /// the newest file at its end; once tracking, a newer file is a switch.
+    /// the newest hour file as created and re-read it (61 MB, 4,413 already released blocks). At the first check the
+    /// newest file is adopted at its end; once tracking, the next file is a switch.
     #[test]
-    fn test_periodic_check_adopts_an_untracked_file_at_its_end() {
+    fn test_first_file_check_adopts_the_newest_file_at_its_end() {
         let dir = test_dir("periodic_adopt");
         let current = hourly_file(&dir, "20261021", "0");
         append(&current, "{\"old\":0}\n");
         let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
-        assert_eq!(reader.periodic_check(), Some(FileCheck::Adopt(current.clone())));
+        assert_eq!(reader.check_files(), Some(FileCheck::Adopt(current.clone())));
         reader.start_tracking(&current);
         append(&current, "{\"new\":1}\n");
         assert_eq!(reader.on_modify(), vec!["{\"new\":1}".to_string()], "the content before adoption is not read");
-        assert_eq!(reader.periodic_check(), None);
-        thread::sleep(Duration::from_millis(20));
+        assert_eq!(reader.check_files(), None);
         let next = hourly_file(&dir, "20261021", "1");
         append(&next, "{\"next\":2}\n");
-        assert_eq!(reader.periodic_check(), Some(FileCheck::Switch(next)));
+        assert_eq!(reader.check_files(), Some(FileCheck::Switch(next)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Design 000767: a stream with no file when the watcher started reads its first file from the start, like the
+    /// create notice did.
+    #[test]
+    fn test_a_stream_without_files_at_start_reads_its_first_file_from_the_start() {
+        let dir = test_dir("started_empty");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        assert_eq!(reader.check_files(), None, "nothing to adopt");
+        let first = hourly_file(&dir, "20261105", "17");
+        append(&first, "{\"first\":1}\n");
+        assert_eq!(reader.check_files(), Some(FileCheck::Switch(first.clone())));
+        assert!(switch_collecting(&mut reader, &first).is_empty());
+        assert_eq!(reader.on_modify(), vec!["{\"first\":1}".to_string()], "read from its start");
+        assert!(!reader.take_desynced());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review 000769 r1 P2-2: an empty newer day or session directory does not make a stream with files look empty
+    /// (which would read its earlier file from the start: content written before the watcher started); the stream's
+    /// last file is followed from its end.
+    #[test]
+    fn test_first_file_check_adopts_the_last_file_past_empty_newer_directories() {
+        let dir = test_dir("adopt_past_empty_dirs");
+        let historical = hourly_file(&dir, "20261104", "23");
+        append(&historical, "{\"historical\":1}\n");
+        std::fs::create_dir_all(dir.join("hourly/20261105")).unwrap();
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        assert_eq!(reader.check_files(), Some(FileCheck::Adopt(historical.clone())));
+        reader.start_tracking(&historical);
+        assert!(reader.on_modify().is_empty(), "the content before startup is not read");
+        assert_eq!(reader.check_files(), None);
+        append(&historical, "{\"live\":2}\n");
+        assert_eq!(reader.on_modify(), vec!["{\"live\":2}".to_string()]);
+
+        let replica = test_dir("adopt_past_empty_replica_dirs");
+        let session = replica.join("2026-11-04T10:00:00Z");
+        let last = session.join("20261104").join("1000");
+        std::fs::create_dir_all(last.parent().unwrap()).unwrap();
+        append(&last, "{\"historical\":1}\n");
+        std::fs::create_dir_all(session.join("20261105")).unwrap();
+        std::fs::create_dir_all(replica.join("2026-11-05T09:00:00Z")).unwrap();
+        std::fs::create_dir_all(replica.join("2026-11-05T10:00:00Z").join("20261105")).unwrap();
+        let mut reader = FileReader::new(replica.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::ReplicaSessions);
+        assert_eq!(reader.check_files(), Some(FileCheck::Adopt(last)));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&replica).ok();
+    }
+
+    /// A listing that fails is not an empty stream: nothing is adopted or read from its start until a listing answers,
+    /// and then the last file is followed from its end.
+    #[test]
+    fn test_a_failed_listing_neither_adopts_nor_starts_empty() {
+        let dir = test_dir("failed_listing");
+        append(&dir.join("hourly"), ""); // a file where the hourly directory belongs: listing it fails (not NotFound)
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        assert_eq!(reader.check_files(), None);
+        assert_eq!(reader.check_files(), None);
+        assert!(!reader.started_empty);
+        assert_eq!(reader.listing_failures.attempts, 2);
+        std::fs::remove_file(dir.join("hourly")).unwrap();
+        let file = hourly_file(&dir, "20261105", "3");
+        append(&file, "{\"before\":1}\n");
+        assert_eq!(reader.check_files(), Some(FileCheck::Adopt(file)), "followed from its end, not read from its start");
+        assert_eq!(reader.listing_failures.path, None, "the episode ends with a listing that answers");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review 000769 r2 P3: a stream file whose type cannot be read (its day directory listable, not searchable) fails
+    /// the listing rather than counting as no file: the stream is not taken as empty (which would read the file from
+    /// its start once readable); once readable it is followed from its end.
+    #[test]
+    fn test_an_unreadable_file_type_fails_the_listing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_dir("unreadable_kind");
+        let file = hourly_file(&dir, "20261104", "23");
+        append(&file, "{\"historical\":1}\n");
+        let day = file.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&day, std::fs::Permissions::from_mode(0o400)).unwrap();
+        if std::fs::metadata(&file).is_ok() {
+            std::fs::set_permissions(&day, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+            eprintln!("skipped: the directory mode does not stop this user (root)");
+            return;
+        }
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        let first = reader.check_files();
+        std::fs::set_permissions(&day, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(first, None);
+        assert!(!reader.started_empty, "not an empty stream");
+        assert_eq!(reader.listing_failures.attempts, 1);
+        assert_eq!(reader.check_files(), Some(FileCheck::Adopt(file)), "followed from its end, not read from its start");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Review 000769 r1 P2-1: the tracked path recreated in place while the next file also exists. The recreated file
+    /// comes first: the held handle's tail, then the recreated file from its start, then the next file, each once.
+    #[test]
+    fn test_recreated_tracked_path_is_read_before_the_next_file() {
+        let dir = test_dir("recreated_then_next");
+        let path = hourly_file(&dir, "20261105", "12");
+        append(&path, "");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&path);
+        assert!(reader.on_modify().is_empty(), "opens and holds the handle");
+        append(&path, "{\"old_tail\":1}\n");
+        replace_file(&path, "{\"recreated\":2}\n");
+        let next = hourly_file(&dir, "20261105", "13");
+        append(&next, "{\"next\":3}\n");
+        let mut read = Vec::new();
+        for expected in [&path, &next] {
+            assert_eq!(reader.check_files(), Some(FileCheck::Switch(expected.clone())));
+            read.extend(switch_collecting(&mut reader, expected));
+            read.extend(reader.on_modify());
+        }
+        assert_eq!(reader.check_files(), None);
+        assert_eq!(read, ["{\"old_tail\":1}", "{\"recreated\":2}", "{\"next\":3}"]);
+        assert!(!reader.take_desynced(), "the held handle makes the handoff gapless");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Design 000767: several new files between two checks are taken one at a time in order (hour by number, then the
+    /// next day), each drained before the next; none is passed over the way the old newest-file switch could.
+    #[test]
+    fn test_file_check_switches_to_each_next_file_in_order() {
+        let dir = test_dir("next_in_order");
+        let current = hourly_file(&dir, "20261105", "9");
+        append(&current, "");
+        let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
+        reader.start_tracking(&current);
+        assert!(reader.on_modify().is_empty());
+        let (ten, eleven, next_day) = (hourly_file(&dir, "20261105", "10"), hourly_file(&dir, "20261105", "11"),
+            hourly_file(&dir, "20261106", "0"));
+        append(&current, "{\"h\":9}\n");
+        append(&ten, "{\"h\":10}\n");
+        append(&eleven, "{\"h\":11}\n");
+        append(&next_day, "{\"h\":24}\n");
+        let mut read = Vec::new();
+        for expected in [&ten, &eleven, &next_day] {
+            assert_eq!(reader.check_files(), Some(FileCheck::Switch(expected.clone())));
+            read.extend(switch_collecting(&mut reader, expected));
+            read.extend(reader.on_modify());
+        }
+        assert_eq!(reader.check_files(), None);
+        assert_eq!(read, ["{\"h\":9}", "{\"h\":10}", "{\"h\":11}", "{\"h\":24}"], "every file, in order, once");
+        assert!(!reader.take_desynced());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1654,7 +1694,7 @@ mod tests {
         let new = hourly_file(&dir, "20261021", "13");
         let lines: Vec<_> = (1_191_955_447..=1_191_955_451).map(bn_line).collect();
         append(&new, &(lines.join("\n") + "\n"));
-        assert_eq!(reader.periodic_check(), Some(FileCheck::Switch(new.clone())));
+        assert_eq!(reader.check_files(), Some(FileCheck::Switch(new.clone())));
         assert!(switch_collecting(&mut reader, &new).is_empty());
         assert_eq!(reader.on_modify(), lines);
         assert!(matches!(reader.read_through(), ReadThrough::Proven(_)));
@@ -1720,19 +1760,18 @@ mod tests {
 
         std::fs::remove_file(&old).unwrap();
         // Nothing to switch to yet: no crash, no desync, on_modify stays quiet.
-        assert_eq!(reader.check_for_newer_file(), None);
+        assert_eq!(reader.check_files(), None);
         assert!(reader.on_modify().is_empty());
         assert!(!reader.take_desynced());
 
-        // Node comes back and writes a new file: force-switch + desync flag.
+        // Node comes back and writes a new file: the check switches to it, and the switch flags the loss (no handle
+        // was held on the vanished file, so its unread tail is gone).
         let new = day.join("1");
         append(&new, &format!("{}\n", bn_line(20)));
-        assert_eq!(reader.check_for_newer_file(), Some(new.clone()));
-        assert!(reader.take_desynced(), "skipping over a vanished file is potential data loss");
-
-        // The switch itself works end-to-end: new file is read from the start.
+        assert_eq!(reader.check_files(), Some(FileCheck::Switch(new.clone())));
         switch_collecting(&mut reader, &new);
-        assert_eq!(reader.on_modify(), vec![bn_line(20)]);
+        assert!(reader.take_desynced(), "skipping over a vanished file is potential data loss");
+        assert_eq!(reader.on_modify(), vec![bn_line(20)], "the new file is read from the start");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1823,7 +1862,7 @@ mod tests {
 
         replace_file(&path, &format!("{}\n", bn_line(20)));
         assert!(reader.on_modify().is_empty(), "held fd still reads the drained old inode");
-        assert_eq!(reader.check_for_newer_file(), Some(path.clone()), "inode swap must force a switch");
+        assert_eq!(reader.check_files(), Some(FileCheck::Switch(path.clone())), "inode swap must force a switch");
         assert!(switch_collecting(&mut reader, &path).is_empty(), "old inode was already drained");
         assert!(!reader.take_desynced(), "a fully drained handoff must not force a re-sync");
         assert_eq!(reader.on_modify(), vec![bn_line(20)]);
@@ -1897,12 +1936,12 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
         let handle = spawn_line_watcher(test_stream(dir.clone(), false), tx, None, |line| line, |_| "DESYNC".to_string(), None);
         thread::sleep(Duration::from_millis(200));
-        append(&old, "{\"skipped\":0}\n");
+        append(&old, "{\"live\":0}\n");
         thread::sleep(Duration::from_millis(200));
         let backlog: Vec<String> = (0..40).map(|n| format!("{{\"n\":{n},\"x\":\"{}\"}}", "b".repeat(1 << 19))).collect();
         append(&old, &(backlog.join("\n") + "\n"));
         append(&hourly_file(&dir, "20261021", "1"), "{\"new\":1}\n");
-        let expected: Vec<String> = backlog.into_iter().chain(["{\"new\":1}".to_string()]).collect();
+        let expected: Vec<String> = std::iter::once("{\"live\":0}".to_string()).chain(backlog).chain(std::iter::once("{\"new\":1}".to_string())).collect();
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut received = Vec::new();
         while received.len() < expected.len() && Instant::now() < deadline {
@@ -1923,88 +1962,23 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Review 000609 r1-r2 P2-2: only the notices the watcher acts on queue; a modify, an overflow and an error one at a
-    /// time, every create of a stream file.
-    #[test]
-    fn test_notices_queue_bounded() {
-        let (notices, queue) = std::sync::mpsc::channel();
-        let losses = Arc::new(AtomicU64::new(0));
-        let gate = NoticeGate::new(FileLayout::Hourly, PathBuf::from("/d"), Some(Arc::clone(&losses)));
-        let send = notice_sender(notices, gate.clone());
-        let at = |kind, path: &str| Ok(Event::new(kind).add_path(PathBuf::from(path)));
-        let modify = || at(notify::EventKind::Modify(notify::event::ModifyKind::Any), "/d/hourly/20261031/9");
-        let create = |hour: &str| at(notify::EventKind::Create(notify::event::CreateKind::File), &format!("/d/hourly/20261031/{hour}"));
-        let overflow = || Ok(Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan));
-        for _ in 0..100 {
-            send(at(notify::EventKind::Access(notify::event::AccessKind::Open(notify::event::AccessMode::Any)), "/d/hourly/20261031/9"));
-            send(modify());
-            send(at(notify::EventKind::Access(notify::event::AccessKind::Close(notify::event::AccessMode::Write)), "/d/hourly/20261031/9"));
-        }
-        send(at(notify::EventKind::Modify(notify::event::ModifyKind::Any), "/d/elsewhere/9"));
-        send(at(notify::EventKind::Create(notify::event::CreateKind::Folder), "/d/hourly/20261101"));
-        send(create("10"));
-        send(create("11"));
-        send(overflow());
-        send(overflow());
-        for _ in 0..3 {
-            send(Err(notify::Error::generic("test")));
-        }
-        let kinds: Vec<String> = queue.try_iter().map(|notice| notice.map_or_else(|_| "error".into(), |event| format!("{:?}", event.kind))).collect();
-        assert_eq!(kinds, ["Modify(Any)", "Create(File)", "Create(File)", "Other", "error"]);
-        assert_eq!(losses.load(AtomicOrdering::Acquire), 1, "the overflow counted as it came, once for the two merged");
-        gate.modify_taken();
-        gate.rescan_taken();
-        send(modify());
-        send(modify());
-        send(overflow());
-        assert_eq!(gate.error_taken(), 2, "the errors dropped behind the waiting one");
-        send(Err(notify::Error::generic("test")));
-        let kinds: Vec<String> = queue.try_iter().map(|notice| notice.map_or_else(|_| "error".into(), |event| format!("{:?}", event.kind))).collect();
-        assert_eq!(kinds, ["Modify(Any)", "Other", "error"], "the next of each once the waiting one is taken");
-        assert_eq!(losses.load(AtomicOrdering::Acquire), 2);
-    }
 
-    /// Review 000609 r7: a loss the reader finds is found and flagged together; an overflow, found by the gate, is
-    /// flagged alone when the watcher takes it.
+    /// A loss the reader finds is found and flagged together (review 000609 r7).
     #[test]
     fn test_losses_count_found_and_flagged() {
         let counts = LossCounts::default();
         let mut losses = Losses { desynced: false, counts: Some(counts.clone()) };
-        let read = |counts: &LossCounts| (counts.found.load(AtomicOrdering::Acquire), counts.flagged.load(AtomicOrdering::Acquire));
         losses.flag();
-        assert_eq!(read(&counts), (1, 1));
-        counts.found.fetch_add(1, AtomicOrdering::Release);
-        assert_eq!(read(&counts), (2, 1), "an overflow found, not yet flagged");
-        losses.flag_found();
-        assert_eq!(read(&counts), (2, 2));
+        assert_eq!((counts.found.load(AtomicOrdering::Acquire), counts.flagged.load(AtomicOrdering::Acquire)), (1, 1));
         assert!(losses.desynced);
     }
 
-    /// The same on real inotify: 100 open-append-close cycles on a stream file and a new hour's file, nothing taken,
-    /// leave one modify and one create queued.
-    #[test]
-    fn test_notices_of_real_appends_queue_bounded() {
-        let dir = test_dir("notice_gate");
-        let path = hourly_file(&dir, "20261031", "9");
-        append(&path, "");
-        let (notices, queue) = std::sync::mpsc::channel();
-        let mut watcher = recommended_watcher(notice_sender(notices, NoticeGate::new(FileLayout::Hourly, dir.clone(), None))).unwrap();
-        watcher.watch(&dir, RecursiveMode::Recursive).unwrap();
-        thread::sleep(Duration::from_millis(100));
-        for n in 0..100 {
-            append(&path, &format!("{{\"n\":{n}}}\n"));
-        }
-        append(&hourly_file(&dir, "20261031", "10"), "{\"n\":100}\n");
-        thread::sleep(Duration::from_millis(300));
-        let kinds: Vec<bool> = queue.try_iter().map(|notice| notice.unwrap().kind.is_create()).collect();
-        assert_eq!(kinds, [false, true], "one modify, then the new file's create");
-        std::fs::remove_dir_all(&dir).ok();
-    }
 
-    /// Live restart sample: the ephemeral date path must not steal the hour cursor or discard a partial row.
+    /// Live restart sample: an ephemeral date directory (stream-looking but no data leaf) must not steal the hour cursor
+    /// or discard a partial row; the file check sees only stream files.
     #[test]
-    fn test_vanished_non_stream_notification_preserves_hourly_cursor() {
-        let dir = test_dir("vanished_notification");
+    fn test_ephemeral_non_stream_directories_preserve_hourly_cursor() {
+        let dir = test_dir("ephemeral_dirs");
         let path = hourly_file(&dir, "20261021", "14");
         append(&path, "{\"old\":0}\n");
         let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
@@ -2013,57 +1987,23 @@ mod tests {
         append(&path, "{\"next\":");
         assert!(reader.on_modify().is_empty());
         let position = reader.file_position;
-        for temporary in [dir.join("20261021"), dir.join("hourly/20261022")] {
+        for temporary in [dir.join("20261021"), dir.join("hourly/20261022"), dir.join("hourly/20261021/15.tmp")] {
             std::fs::create_dir_all(&temporary).unwrap();
-            std::fs::remove_dir(&temporary).unwrap();
-            assert!(!temporary.is_dir(), "reproduces the old metadata-only filter's false result");
-            for kind in [notify::EventKind::Create(notify::event::CreateKind::Any),
-                notify::EventKind::Modify(notify::event::ModifyKind::Any)]
-            {
-                let event = Event::new(kind).add_path(temporary.clone());
-                if let Some(path) = reader.notified_file(&event) { switch_collecting(&mut reader, path); }
-            }
+            assert_eq!(reader.check_files(), None, "{}", temporary.display());
+            std::fs::remove_dir_all(&temporary).unwrap();
         }
         assert_eq!(reader.current_path.as_ref(), Some(&path));
         assert_eq!(reader.file_position, position);
         assert_eq!(reader.partial_line, b"{\"next\":");
         assert!(!reader.take_desynced());
-        assert_eq!(reader.periodic_check(), None, "no fallback that replays the hour from zero");
         append(&path, "1}\n");
         assert_eq!(reader.on_modify(), vec!["{\"next\":1}".to_string()]);
         assert!(reader.on_modify().is_empty(), "each row is delivered once");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[test]
-    fn test_stream_notifications_retain_real_rotation_replacement_and_loss_paths() {
-        let dir = test_dir("notification_layout");
-        for (layout, relative) in [(FileLayout::Hourly, "hourly/20261021/14"),
-            (FileLayout::ReplicaSessions, "2026-10-21T14:02:07Z/20261021/1192000000")]
-        {
-            let reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, layout);
-            let path = dir.join(relative);
-            for kind in [notify::EventKind::Create(notify::event::CreateKind::File),
-                notify::EventKind::Modify(notify::event::ModifyKind::Any)]
-            {
-                let event = Event::new(kind).add_path(path.clone());
-                assert_eq!(reader.notified_file(&event), Some(&path), "even a vanished real leaf must report loss");
-            }
-            let event = Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder)).add_path(path);
-            assert_eq!(reader.notified_file(&event), None, "a known directory is never a data leaf");
-        }
-        let reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::Hourly);
-        for relative in ["hourly/20261021/24", "hourly/20261021/14.tmp", "hourly/bad/14", "other/20261021/14",
-            "hourly/20261021/14/child", "../hourly/20261021/14"]
-        {
-            let event = Event::new(notify::EventKind::Create(notify::event::CreateKind::Any)).add_path(dir.join(relative));
-            assert_eq!(reader.notified_file(&event), None, "{relative}");
-        }
-        assert_eq!(reader.notified_file(&Event::new(notify::EventKind::Any)), None);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
 
-    /// `replica_cmds`: the newest session and day by name, then the greatest first height (not the greatest name).
+    /// `replica_cmds`: in order by session and day by name, then first height (not by name).
     #[test]
     fn test_replica_layout_follows_files_and_sessions() {
         let dir = test_dir("replica_layout");
@@ -2074,21 +2014,21 @@ mod tests {
         append(&day.join("notes"), "");
         std::fs::create_dir(day.join("2000")).unwrap();
         let mut reader = FileReader::new(dir.clone(), MAX_PARTIAL_LINE_BYTES, FileLayout::ReplicaSessions);
-        assert_eq!(reader.find_latest_file(), Some(day.join("1000")), "heights compare as numbers");
+        assert_eq!(reader.check_files(), Some(FileCheck::Adopt(day.join("1000"))), "heights compare as numbers");
         reader.start_tracking(&day.join("1000"));
         thread::sleep(Duration::from_millis(20));
         append(&day.join("1010"), "{\"height\":1010}\n");
-        assert_eq!(reader.check_for_newer_file(), Some(day.join("1010")), "next file of the session");
+        assert_eq!(reader.check_files(), Some(FileCheck::Switch(day.join("1010"))), "next file of the session");
         assert_eq!(switch_collecting(&mut reader, &day.join("1010")), Vec::<String>::new());
 
         let session = dir.join("2026-10-19T21:00:00Z");
         std::fs::create_dir_all(&session).unwrap();
-        assert_eq!(reader.check_for_newer_file(), None, "a new session without files yet");
+        assert_eq!(reader.check_files(), None, "a new session without files yet");
         let restarted = session.join("20261019");
         std::fs::create_dir_all(&restarted).unwrap();
         thread::sleep(Duration::from_millis(20));
         append(&restarted.join("1020"), "{\"height\":1020}\n");
-        assert_eq!(reader.check_for_newer_file(), Some(restarted.join("1020")), "the newest session");
+        assert_eq!(reader.check_files(), Some(FileCheck::Switch(restarted.join("1020"))), "the next session");
         assert_eq!(switch_collecting(&mut reader, &restarted.join("1020")), vec!["{\"height\":1010}".to_string()]);
         assert_eq!(reader.on_modify(), vec!["{\"height\":1020}".to_string()]);
         assert!(!reader.take_desynced());

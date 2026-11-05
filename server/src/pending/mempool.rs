@@ -172,7 +172,7 @@ struct WireTx<'a> {
 }
 
 /// Starts the watcher of `<data_dir>/mempool_txs`; its events come in order on the feed, which closes when the
-/// watcher ends (its inotify watch not set up).
+/// watcher ends.
 pub(crate) fn watch_mempool(data_dir: &Path) -> (Feed<MempoolTx>, thread::JoinHandle<()>) {
     let stream = LineStream {
         name: "Mempool",
@@ -810,10 +810,8 @@ pub(crate) mod tests {
                 }
             }
         };
-        // let the watcher register its inotify watch: it takes the file at its first modify event, skipping what was
-        // written before
+        // let the watcher take its first file check: it follows the file from its end, skipping what was written before
         thread::sleep(Duration::from_millis(200));
-        append(format!("{}\n", line(&[CANCEL_BY_CLOID])));
         let positioning = next();
         assert!(matches!(positioning, FeedEvent::Lost { loss: WatchLoss::Positioning, through: 0 }));
         ingest.on_event(positioning);

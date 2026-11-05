@@ -1498,7 +1498,7 @@ mod tests {
             loss_counts: None,
         };
         let _watcher = spawn_line_watcher(stream, tx, None, misc_input, |cause| Input::Loss(Stream::MiscEvents, cause), None);
-        // let the watcher register its inotify watch before the first append
+        // let the watcher take its first file check: it follows the file from its end, skipping the line on disk
         thread::sleep(Duration::from_millis(200));
         let mut book = AccountBook::new(0);
         let mut marks = NodeMarks::new(TEST_GRID, 0);
@@ -1507,7 +1507,6 @@ mod tests {
         complete_through(&mut book, &mut marks, &mut assembler, 1_200..=1_201);
         book.install_anchor(empty_anchor(1_300, now_ms()));
 
-        append(&file, &ledger_line(1_500));
         let skipped = recv_within(&mut inputs, Duration::from_secs(2));
         assert!(matches!(skipped, Input::Loss(Stream::MiscEvents, WatchLoss::Positioning)), "the positioning skip is reported");
         apply_input(&mut AccountDiagnostics::default(), &mut book, &mut marks, &mut assembler, skipped);
