@@ -18,6 +18,9 @@ pub(crate) struct VenuePrice {
 }
 
 impl VenuePrice {
+    /// 1, as `parse("1")` gives it: HYPEUSDT's multiplier in the basis record (hyperliquid-trade design 000751 r2).
+    pub(crate) const ONE: Self = Self { mantissa: 1, scale: 0 };
+
     /// Digits with an optional fraction and exponent; signs on the value, `inf` or `NaN` are not prices.
     pub(crate) fn parse(text: &str) -> Result<Self, String> {
         let (number, exponent) = match text.split_once(['e', 'E']) {
@@ -154,6 +157,13 @@ mod tests {
     }
 
     /// A listing's multiplier: kPEPE is 1,000 PEPE; Bybit's 1000TURBOUSDT is 0.001 of HL's TURBO.
+    #[test]
+    fn one_is_the_parsed_one() {
+        assert_eq!(VenuePrice::ONE, price("1"));
+        assert_eq!(VenuePrice::ONE, price("1.000"));
+        assert_eq!(VenuePrice::ONE.to_string(), "1");
+    }
+
     #[test]
     fn multipliers_scale_without_rounding() {
         assert_eq!(price("0.000004507").scaled(price("1000")).unwrap().to_string(), "0.004507");

@@ -90,6 +90,13 @@ pub struct ServerConfig {
     /// The basis windows' samples store (hyperliquid-trade design 000741 r2; needs `local_marks`): a Redis URL of this
     /// host, each window's samples written as taken and restored at start. `None`: in memory only, as before.
     pub basis_store_redis: Option<String>,
+    /// The basis record's directory (hyperliquid-trade design 000751 r1-r3; needs `local_marks`, the days and the token
+    /// variable): every 10 s a line a coin of HL's and the venues' prices and the bases, for research. `None`: off.
+    pub basis_record_dir: Option<PathBuf>,
+    /// The basis record's days kept.
+    pub basis_record_days: Option<u32>,
+    /// The environment variable of the basis record's Pyth Hermes token.
+    pub basis_record_pyth_token_env: Option<String>,
     /// Run the pending book (hyperliquid-trade design 000604): a replica of the book on its own thread, fed by the
     /// listener, and the node's mempool read on the same thread (needs `accounts`, whose anchor names its asset ids).
     /// Refused with `no_resync` (its block alignment needs every stream's heights to only go up) and with `bbo_only`

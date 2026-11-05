@@ -139,17 +139,17 @@ async fn run_owner(
             owner_gone = true;
         }
         let node = if owner_gone { Err(OWNER_GONE.to_string()) } else { node_prices.borrow_and_update().clone() };
-        let best = book.best_prices(table.book_coins()).await;
+        let best = book.best_prices(table.book_coins()).await.map(Arc::new);
         let now_ms = now_ms();
         let readings = feeds.readings(now_ms);
         let equity = feeds.equity_readings(now_ms);
         let stopped = if owner_gone { Some(OWNER_GONE.to_string()) } else { feeds.stopped() };
         let external = hip3_external_reading(&feeds);
         let tick = Tick {
-            now_ms, instant: Instant::now(), stopped, node: &node, book: best.as_ref(), readings: &readings, equity: equity.as_ref(),
+            now_ms, instant: Instant::now(), stopped, node: &node, book: best.as_deref(), readings: &readings, equity: equity.as_ref(),
             hip3_external: external.as_ref(),
         };
-        let snapshot = assemble(&table, &tick, &mut state);
+        let snapshot = assemble(&table, &tick, &mut state).with_book_prices(best);
         drop(snapshots.send_replace(Arc::new(snapshot)));
         if let Some(writer) = &writer {
             writer.offer(series.entered(&mut state, now_ms));

@@ -41,7 +41,17 @@ impl RestClient {
     /// The body of a 200 answer to `method path`. A transport failure drops the connection (the next call reconnects);
     /// a status other than the transient ones is a contract error.
     pub(crate) async fn call(&mut self, method: Method, path: &str) -> Result<Bytes, FeedError> {
-        let result = tokio::time::timeout(TIMEOUT, self.call_once(method, path)).await;
+        self.call_with(method, path, None).await
+    }
+
+    /// The same with `Authorization: Bearer <bearer>` (the basis record's Pyth Hermes, hyperliquid-trade design 000751
+    /// r3). The token is in the header only: no error names it.
+    pub(crate) async fn call_authorized(&mut self, method: Method, path: &str, bearer: &str) -> Result<Bytes, FeedError> {
+        self.call_with(method, path, Some(bearer)).await
+    }
+
+    async fn call_with(&mut self, method: Method, path: &str, bearer: Option<&str>) -> Result<Bytes, FeedError> {
+        let result = tokio::time::timeout(TIMEOUT, self.call_once(method, path, bearer)).await;
         let result = result.unwrap_or_else(|_| Err(FeedError::Transient(format!("{} {path}: no answer within {TIMEOUT:?}", self.host))));
         if result.is_err() {
             self.sender = None;
@@ -49,20 +59,23 @@ impl RestClient {
         result
     }
 
-    async fn call_once(&mut self, method: Method, path: &str) -> Result<Bytes, FeedError> {
+    async fn call_once(&mut self, method: Method, path: &str, bearer: Option<&str>) -> Result<Bytes, FeedError> {
         let transient = |err: &dyn std::fmt::Display| FeedError::Transient(format!("{} {path}: {err}", self.host));
         if self.sender.as_ref().is_none_or(SendRequest::is_closed) {
             self.sender = Some(self.connect().await?);
         }
         let sender = self.sender.as_mut().unwrap_or_else(|| unreachable!("connected above"));
-        let request = Request::builder()
+        let mut request = Request::builder()
             .method(method)
             .uri(path)
             .header(header::HOST, self.host)
             .header(header::USER_AGENT, "orderbook-server-local-marks")
-            .header(header::CONTENT_LENGTH, 0)
-            .body(Empty::new())
-            .unwrap_or_else(|err| unreachable!("a request of a constant host and path: {err}"));
+            .header(header::CONTENT_LENGTH, 0);
+        if let Some(bearer) = bearer {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+        }
+        // a token that is no header value fails here, not named (it is the caller's environment's, checked at start)
+        let request = request.body(Empty::new()).map_err(|_| FeedError::Contract(format!("{} {path}: the request could not be built", self.host)))?;
         let response = sender.send_request(request).await.map_err(|err| transient(&err))?;
         let status = response.status();
         let body = response.into_body().collect().await.map_err(|err| transient(&err))?.to_bytes();

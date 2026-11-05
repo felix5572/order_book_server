@@ -34,7 +34,7 @@ use crate::{
         marks::{
             NativePriceSnapshot,
             native::{CoinPriceState, MarkUpdate},
-            seed::NativeEmas,
+            seed::{Hip3Coin, NativeEmas},
         },
         publish::NodePrices,
     },
@@ -268,6 +268,9 @@ pub(crate) struct LocalMarksSnapshot {
     pub(crate) book: Option<BookProgress>,
     /// The node prices the tick read, whose coins' reference cache members `GET /extMarkReferenceCaches` serves.
     node_prices: Option<Arc<NativePriceSnapshot>>,
+    /// The HL book's best prices the tick read, `CoinTable::book_coins`' order: the basis samples' book, the basis
+    /// record's (hyperliquid-trade design 000751 r2 rule 3); `None` before the book's first snapshot.
+    book_prices: Option<Arc<BestPricesAt>>,
     table: Arc<CoinTable>,
     coins: Vec<CoinMarks>,
     /// The HIP-3 SIP coins' (design 000535), in `CoinTable::hip3`'s order; none without `--hip3-sip-marks`.
@@ -286,6 +289,23 @@ impl LocalMarksSnapshot {
     /// The node state a ready node leg of `coin` reads.
     pub(crate) fn node_state(&self, coin: &str) -> Option<&CoinPriceState> {
         self.node_prices.as_ref()?.coins.get(coin)
+    }
+
+    /// The node state of the HIP-3 coin `coin` the tick read, whatever the local marks' sources list.
+    pub(crate) fn hip3_node_state(&self, coin: &str) -> Option<&Hip3Coin> {
+        self.node_prices.as_ref()?.hip3.get(coin)
+    }
+
+    /// The snapshot with the book prices its tick read (the owner's, hyperliquid-trade design 000751 r2 rule 3).
+    pub(crate) fn with_book_prices(mut self, book_prices: Option<Arc<BestPricesAt>>) -> Self {
+        self.book_prices = book_prices;
+        self
+    }
+
+    /// The HL book's best prices the tick read, in `CoinTable::book_coins`' order; `None` before the book's first
+    /// snapshot.
+    pub(crate) fn book_prices(&self) -> Option<&BestPricesAt> {
+        self.book_prices.as_deref()
     }
 
     /// `None` for a coin outside the sources.
@@ -510,6 +530,7 @@ pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, state: &mut Owne
         node: tick.node.as_ref().map(|prices| NodeProgress { seed_height: prices.seed_height, height: prices.height, block_time_ms: prices.block_time_ms }).map_err(Clone::clone),
         book: tick.book.map(|book| BookProgress { time_ms: book.time, height: book.height, trusted: book.trusted }),
         node_prices: tick.node.as_ref().ok().map(Arc::clone),
+        book_prices: None,
         table: Arc::clone(table),
         coins,
         hip3,

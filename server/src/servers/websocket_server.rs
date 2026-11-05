@@ -25,6 +25,7 @@ use crate::{
         triggers::TriggerAvailability,
     },
     local_marks::{
+        basis_record::{self, BasisRecordConfig},
         feeds::{EquityFeedsConfig, Hip3ExternalConfig, LocalMarkFeeds},
         hip3::{external_sources::Hip3ExternalSources, protocol::AlpacaCredentials, sources::Hip3SipSources},
         owner::LocalMarks,
@@ -450,6 +451,9 @@ fn start_local_marks(
         if config.basis_store_redis.is_some() {
             return Err("--basis-store-redis needs --local-marks: the basis windows are the local marks' owner's".into());
         }
+        if config.basis_record_dir.is_some() {
+            return Err("--basis-record-dir needs --local-marks: the basis record reads the local marks".into());
+        }
         return Ok(None);
     }
     let accounts = accounts.ok_or("--local-marks needs --accounts: the local marks read the node replica of the account view")?;
@@ -476,7 +480,27 @@ fn start_local_marks(
     if store.is_some() {
         info!("Basis store: the basis windows' samples kept in the --basis-store-redis Redis across restarts");
     }
-    Ok(Some(LocalMarks::start(feeds, accounts.node_prices(), Arc::clone(listener), store)))
+    // the record's configuration checked before anything starts: a wrong one refuses the start
+    let record = basis_record_config(config)?;
+    let marks = LocalMarks::start(feeds, accounts.node_prices(), Arc::clone(listener), store);
+    if let Some(record) = record {
+        basis_record::start(record, &marks, Arc::clone(listener))?;
+    }
+    Ok(Some(marks))
+}
+
+/// The basis record's configuration (hyperliquid-trade design 000751 r2 rule 1, r3): the directory, the days and the
+/// token's variable all given or none; the token read from the environment, never logged.
+fn basis_record_config(config: &ServerConfig) -> Result<Option<BasisRecordConfig>> {
+    let (dir, days, token_env) = match (&config.basis_record_dir, config.basis_record_days, &config.basis_record_pyth_token_env) {
+        (None, None, None) => return Ok(None),
+        (Some(dir), Some(days), Some(token_env)) => (dir, days, token_env),
+        _ => return Err("--basis-record-dir, --basis-record-days and --basis-record-pyth-token-env go together".into()),
+    };
+    let pyth_token = std::env::var(token_env).map_err(|err| format!("--basis-record-pyth-token-env {token_env}: {err}"))?;
+    let record = BasisRecordConfig { dir: dir.clone(), days, pyth_token };
+    record.check()?;
+    Ok(Some(record))
 }
 
 /// Starts the account view when `--accounts` is set. Its owner ending leaves the view answering 503 (design 000419 r3

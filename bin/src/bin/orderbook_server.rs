@@ -145,6 +145,23 @@ struct Args {
     #[arg(long, requires = "local_marks")]
     basis_store_redis: Option<String>,
 
+    /// The basis record (hyperliquid-trade design 000751 r1-r3; needs --local-marks, with --basis-record-days and
+    /// --basis-record-pyth-token-env): every 10 s, a JSON line a coin to `<dir>/basis_record.<UTC date>.jsonl` - HL's
+    /// book, oracle and mark, every venue's native quotes, Binance's mark/index/funding, the published bases, USDC/USDT
+    /// and Pyth's USDT/USD and USDC/USD -, each earlier day compressed to `.jsonl.zst`. For research: read by nothing.
+    /// The directory must exist and be writable.
+    #[arg(long, requires_all = ["local_marks", "basis_record_days", "basis_record_pyth_token_env"])]
+    basis_record_dir: Option<PathBuf>,
+
+    /// The basis record's days kept (at least 1): files of an earlier day are deleted.
+    #[arg(long, requires = "basis_record_dir")]
+    basis_record_days: Option<u32>,
+
+    /// The environment variable holding the Pyth Hermes token the basis record polls USDT/USD and USDC/USD with (the
+    /// trading system's `LAZER_TOKEN`); its value is never logged.
+    #[arg(long, requires = "basis_record_dir")]
+    basis_record_pyth_token_env: Option<String>,
+
     /// The pending book (hyperliquid-trade design 000604): a replica of the book on its own thread, block-aligned,
     /// fed by the listener (a fork of its book, then a copy of each book batch it applies), and the node's mempool
     /// (`<data-dir>/mempool_txs`) read on the same thread, its asset ids named by the account view's anchor. Needs
@@ -261,6 +278,9 @@ async fn main() -> Result<()> {
         hip3_sip_marks: args.hip3_sip_marks,
         hip3_external_quote_max_age_ms: args.hip3_external_quote_max_age_ms.filter(|_| args.hip3_external_quotes),
         basis_store_redis: args.basis_store_redis,
+        basis_record_dir: args.basis_record_dir,
+        basis_record_days: args.basis_record_days,
+        basis_record_pyth_token_env: args.basis_record_pyth_token_env,
         pending_book: args.pending_book,
         pending_backlog_events: args.pending_backlog_events,
         pending_expiry_ms: args.pending_expiry_ms,

@@ -233,7 +233,7 @@ async fn send(ws: &mut TcpWebSocket, label: &str, frame: Frame, within: Duration
     }
 }
 
-fn connect_error(label: &str, err: &yawc::WebSocketError) -> FeedError {
+pub(crate) fn connect_error(label: &str, err: &yawc::WebSocketError) -> FeedError {
     match err {
         yawc::WebSocketError::InvalidStatusCode(code) if [408, 429, 500, 502, 503, 504].contains(code) => {
             FeedError::Transient(format!("{label}: handshake HTTP {code}"))
@@ -247,7 +247,7 @@ fn connect_error(label: &str, err: &yawc::WebSocketError) -> FeedError {
 
 /// A failed read, with yawc's error as it gave it: the network failing or the stream ending is transient; a frame that
 /// breaks the WebSocket protocol, or one over `MAX_PAYLOAD`, is the venue's contract.
-fn read_error(label: &str, err: &yawc::WebSocketError) -> FeedError {
+pub(crate) fn read_error(label: &str, err: &yawc::WebSocketError) -> FeedError {
     match err {
         yawc::WebSocketError::IoError(io) => FeedError::Transient(format!("{label}: read: {io} (kind {:?})", io.kind())),
         yawc::WebSocketError::ConnectionClosed => FeedError::Transient(format!("{label}: read: {err}")),
@@ -255,7 +255,7 @@ fn read_error(label: &str, err: &yawc::WebSocketError) -> FeedError {
     }
 }
 
-fn close_error(label: &str, frame: &Frame) -> FeedError {
+pub(crate) fn close_error(label: &str, frame: &Frame) -> FeedError {
     let code = frame.close_code().map(u16::from);
     let reason = match frame.close_reason() {
         Ok(reason) => format!("{:?}", reason.unwrap_or("")),

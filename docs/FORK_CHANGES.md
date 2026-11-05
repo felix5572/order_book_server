@@ -2096,3 +2096,21 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - 存储：两个序列错开取样后恢复，样本数和中位数都和内存一致；格式、过期时间、读取范围；队列满丢弃；Redis 不可达；
   - 用真实币种表跑 300 s、恢复后继续跑，结果一致；
   - 真实 Redis 往返测试默认跳过，设 `OB_BASIS_STORE_TEST_REDIS` 才跑。
+
+## 2026-11-05 基差录制：每 10 s 每个币一行，长期落盘（hyperliquid-trade 设计 000751 r1–r3，用户 11-05 定）
+
+- 用户：“我们也扩展下 orderbook 这块吧，也录一下这些：bn 和 hl 口径的 oracle、mark、指数、标记，以及我们自己口径算的中点的 10 min / 1 h / 4 h 基差”；“主站币也录吧，完整哈”；“HYPE 这个币也录一下吧”；“还有当时 usdc usdt 汇率”“当时 pyth 的 usdt/usd、usdc/usd”；“新增 zstd 依赖吧”。
+- 新模块 `local_marks/basis_record/`，只录不发布，开关 `--basis-record-dir`、`--basis-record-days`、`--basis-record-pyth-token-env`（三个一起给）：
+  - `mod.rs`：启动校验（目录可写、天数 ≥ 1、令牌非空，令牌不进日志和 `Debug`）；每 10 s 墙钟对齐的取样任务：短暂借用快照、复制 `Arc` 后释放，读各交易所行情读数、HYPE 盘口，组好一拍的行交给写入线程。
+  - `row.rs`：一行一个币（主站全部、HIP-3 外部报价频道全部、HYPE）。各交易所价格一律原生尺度加 `px_multiplier`（r1 P2，直接取行情读数，不从快照的 HL 尺度倒推）；没有的值记 `{"code","detail"}`，不用 0 或旧值；每个值带自己的时间。
+  - `binance.rs`：录制自己的连接：`/market/stream` 的 `@markPrice`（266 个合约，每连接 100 路）、HYPEUSDT 永续和 USDCUSDT 现货 `bookTicker`。断线按 local marks 的退避重连、保留上一份；契约错误停这一路、此后记 `stopped`。不进 local marks 的行情监督。
+  - `pyth.rs`：每 10 s 请求一次 Hermes `latest`（USDT/USD、USDC/USD），Bearer 只放请求头；瞬时失败计数、每分钟最多一条 WARN；其他状态和契约错误停掉（r3 P3）。
+  - `writer.rs`：单独线程，队列 3 拍，满了丢弃并计数；按 `t_ms` 的 UTC 日期写 `.jsonl`；启动和换日时把更早的天压成 `.jsonl.zst.tmp`（zstd 9）、解压逐字节比对一致后改名 `.jsonl.zst`、再删原文件，失败保留原件下次再收尾（r1 P2）；保留期外的 `.zst` 和遗留 `.jsonl` 删掉。
+- 其他改动：
+  - 快照带上这一拍 owner 读到的 `BestPricesAt`（`with_book_prices`，基差样本就从它取），新增 `hip3_node_state`；
+  - `RestClient::call_authorized`（Bearer 头，错误信息不含令牌）；
+  - `connection.rs` 的 `connect_error`、`read_error`、`close_error` 和 `feeds.rs` 的退避常量改为 `pub(crate)` 供录制复用；
+  - `VenuePrice::ONE`；
+  - 指标 `orderbook_basis_record_{ticks_total,dropped_total,errors_total,stream_disconnects_total,stream_stopped,pyth_errors_total}`；
+  - 新依赖 `zstd = "0.13"`（交易系统同版本）。
+- 测试：标记价 / bookTicker / Hermes 帧解析与契约错误；倍率还原（kNEIRO 1000）；主站、HIP-3、HYPE 三类行的字段与缺失记法；分天写、换日收尾、跨午夜停机后启动收尾、压缩失败后再收尾、保留期、崩溃遗留 `.tmp`；队列满丢弃不阻塞；启动校验与令牌不外泄。

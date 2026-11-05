@@ -1190,6 +1190,35 @@ lazy_static! {
         Opts::new("orderbook_basis_store_errors_total", "Basis store writes and restores that failed"),
         &["operation"]
     ).expect("metric can be created");
+
+    // The basis record (hyperliquid-trade design 000751 r2-r3): every 10 s, a line a coin to this host's files.
+    pub static ref BASIS_RECORD_TICKS_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_basis_record_ticks_total", "Basis record ticks sampled and queued to the writer"
+    ).expect("metric can be created");
+
+    pub static ref BASIS_RECORD_DROPPED_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_basis_record_dropped_total", "Basis record ticks dropped before the writer"),
+        &["cause"]
+    ).expect("metric can be created");
+
+    pub static ref BASIS_RECORD_ERRORS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_basis_record_errors_total", "Basis record file writes, finishings and removals that failed"),
+        &["operation"]
+    ).expect("metric can be created");
+
+    pub static ref BASIS_RECORD_STREAM_DISCONNECTS_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new("orderbook_basis_record_stream_disconnects_total", "Basis record Binance stream connections lost and retried"),
+        &["stream"]
+    ).expect("metric can be created");
+
+    pub static ref BASIS_RECORD_STREAM_STOPPED: IntGaugeVec = IntGaugeVec::new(
+        Opts::new("orderbook_basis_record_stream_stopped", "Basis record source stopped by a contract error until restart"),
+        &["stream"]
+    ).expect("metric can be created");
+
+    pub static ref BASIS_RECORD_PYTH_ERRORS_TOTAL: IntCounter = IntCounter::new(
+        "orderbook_basis_record_pyth_errors_total", "Basis record Pyth Hermes polls that failed transiently"
+    ).expect("metric can be created");
 }
 
 /// Register all metrics with the registry
@@ -1198,6 +1227,12 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(WS_CONNECTIONS_ACTIVE.clone())).ok();
     REGISTRY.register(Box::new(BASIS_STORE_DROPPED_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(BASIS_STORE_ERRORS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(BASIS_RECORD_TICKS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(BASIS_RECORD_DROPPED_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(BASIS_RECORD_ERRORS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(BASIS_RECORD_STREAM_DISCONNECTS_TOTAL.clone())).ok();
+    REGISTRY.register(Box::new(BASIS_RECORD_STREAM_STOPPED.clone())).ok();
+    REGISTRY.register(Box::new(BASIS_RECORD_PYTH_ERRORS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(WS_CONNECTIONS_TOTAL.clone())).ok();
     REGISTRY.register(Box::new(WS_SUBSCRIPTIONS_ACTIVE.clone())).ok();
 

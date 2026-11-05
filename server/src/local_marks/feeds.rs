@@ -39,10 +39,10 @@ use crate::{
     metrics::{LOCAL_MARKS_FEED_DISCONNECTS_TOTAL, LOCAL_MARKS_FEED_FRAMES_TOTAL, LOCAL_MARKS_FEED_STOPPED, LOCAL_MARKS_CONNECTION_DISCONNECTS_TOTAL},
 };
 
-const BACKOFF_MIN: Duration = Duration::from_millis(500);
-const BACKOFF_MAX: Duration = Duration::from_secs(10);
+pub(crate) const BACKOFF_MIN: Duration = Duration::from_millis(500);
+pub(crate) const BACKOFF_MAX: Duration = Duration::from_secs(10);
 /// A connection that lasted this long resets the backoff.
-const HEALTHY_FOR: Duration = Duration::from_secs(30);
+pub(crate) const HEALTHY_FOR: Duration = Duration::from_secs(30);
 /// MEXC spot is polled at this cadence; its slot owns quote expiry.
 const MEXC_SPOT_POLL: Duration = Duration::from_millis(250);
 /// Alpaca 406 (the account's sessions in use) is retried this long from the first refusal of a failure that no
