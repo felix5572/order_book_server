@@ -48,10 +48,21 @@ use crate::{
 /// HL's book prices are 1e-8 (`order_book::types`).
 const BOOK_DECIMALS: u32 = 8;
 pub(crate) const HYPE: &str = "HYPE";
-/// The quote currency of HL's prices: the main dex's coins of the sources are USDT-denominated, USDC-margined (HL's
-/// contract specifications); HYPE, priced on HL's own USDC spot, and the HIP-3 dexes' are USDC.
+/// The unit of HL's price numbers in a row: the main dex's coins of the sources are USDT-denominated, USDC-margined
+/// (HL's contract specifications); HYPE is priced on HL's own USDC spot. Settlement is USDC throughout.
 const MAIN_UNIT: &str = "USDT";
 const USDC_UNIT: &str = "USDC";
+/// A HIP-3 dex's oracle unit is the deployer's: `xyz` relays prices of USD markets (US equities, commodities), the
+/// same decision as hyperliquid-trade's Fair (`HYPERLIQUID_HIP3_PRICE_UNITS`). Measured 2026-11-06 on this record
+/// (11-05 12Z - 11-06 16Z, node lag <= 2 s): the 92 xyz coins' median oracle-vs-Binance-index basis is +0.2 bp with the
+/// oracle taken as USD (Pyth USDT/USD) and -2.0 bp as USDC (Binance USDC/USDT); until then the record wrote USDC.
+const HIP3_PRICE_UNITS: [(&str, &str); 1] = [("xyz", "USD")];
+/// A dex not in [`HIP3_PRICE_UNITS`]: its unit is not decided, so a reader must not convert its prices.
+const UNDECIDED_UNIT: &str = "undecided";
+
+fn hip3_price_unit(dex: &str) -> &'static str {
+    HIP3_PRICE_UNITS.iter().find_map(|(registered, unit)| (*registered == dex).then_some(*unit)).unwrap_or(UNDECIDED_UNIT)
+}
 
 /// A value, or why there is none.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -354,7 +365,7 @@ fn hip3_row(inputs: &Inputs<'_>, common: &Common, (coin, equity): (&str, &Hip3So
         equity: Some(equity_view(equity)),
         bases: out,
         binance: binance_view(inputs.binance, inputs.hip3_binance.get(coin)),
-        ..row(inputs, common, coin, dex, USDC_UNIT)
+        ..row(inputs, common, coin, dex, hip3_price_unit(dex))
     }
 }
 
@@ -707,7 +718,8 @@ mod tests {
             pyth_usdc_usd: Field::missing("notReceived", ""),
         };
         let row = json(&hip3_row(&inputs, &common, ("xyz:SNDK", &Hip3SourceLeg::Unlisted), &bases, Vec::new()));
-        assert_eq!((row["dex"].as_str(), row["hl_price_unit"].as_str()), (Some("xyz"), Some("USDC")));
+        assert_eq!((row["dex"].as_str(), row["hl_price_unit"].as_str()), (Some("xyz"), Some("USD")));
+        assert_eq!((hip3_price_unit("xyz"), hip3_price_unit("flx")), ("USD", "undecided"), "an unregistered dex is not guessed");
         assert_eq!(
             row["bases"],
             serde_json::json!({

@@ -2143,3 +2143,12 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - 指标沿用 `orderbook_basis_record_stream_{disconnects_total,stopped}`，`stream="hl_official"`。
 - 其他：`connection.rs` 的 `send`、`binance.rs` 的 `positive`/`signed_decimal` 供复用。范围外：录制自己的币安流断线后保留旧值（现状，靠 `received_ms` 离线判断）未改。
 - 测试：节点 5,000 ms 照写、5,001 ms 写 `nodeProgress`（`node_progress` 仍在）；盘口同理、HYPE 盘口同理；`equity` 的三种写法；官方腿用 bm 实测帧（BTC、无 `midPx` 的 xyz:SOXL、回显、拒订阅）解析、拒订阅只影响该币且跨重连保持、各类契约错误停流、状态矩阵（未连接、未收到、5,000/5,001 ms、断线不写旧值、停止）；277 个币分 100/100/77；节拍器在暂停时钟下 3 片 10 分钟反复快速断线、首片握手 9 s：相邻订阅批 ≥ 7 s、任意 60 s ≤ 900 条。`cargo test -p server --lib` 全部通过，`cargo clippy --all-targets` 对本批新代码无告警。没有运行 `cargo fmt`。
+
+## 2026-11-06 基差录制: HIP-3 行的价格单位按 dex 登记(xyz = USD)
+
+- 问题: 录制把所有 HIP-3 行的 `hl_price_unit` 写成 USDC。xyz 的预言机取美股、商品的美元价, 下游按 USDC 用币安 USDC/USDT
+  换算会多出约 2 bp 的假偏差(11-05 12Z – 11-06 16Z 实测 92 个 xyz 币对币安指数的基差中位: 按 USD(Pyth USDT/USD) +0.2 bp,
+  按 USDC −2.0 bp)。
+- 改法: `HIP3_PRICE_UNITS` 按 dex 登记单位, xyz = USD, 与 hyperliquid-trade Fair 的 `HYPERLIQUID_HIP3_PRICE_UNITS` 同一决定;
+  没登记的 dex 写 `undecided`, 读者不得换算, 不再猜 USDC。主站(USDT)、HYPE(USDC)不变。
+- 此前的录制文件里 xyz 行仍标 USDC, 按 USD 读。OB 的本地标记价与外部基差不做币种换算(基差是滚动估的比值), 不受影响。
