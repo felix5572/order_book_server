@@ -2130,3 +2130,16 @@ book 一直缺 HIP-2 流动性**。修复:`NodeDataOrderDiff` 增 `side` 字段(
   - read-through 证明（000433）：“跟踪的是最新文件”改为“跟踪的是按顺序最后一个文件”，列目录失败不证明。读取和按行切分、行格式检查、残行上限、丢失与重新同步、通道背压都不变。
 - 代价（估算）：读到数据平均晚约 0.5 ms，空闲时最多晚 1 ms；新小时文件的第一批行最多晚 10 ms；OB 空闲时每个线程每秒读 1000 次、每 10 ms 扫一次目录。
 - 测试：去掉通知闸门和真实 inotify 的测试；第一次检查跳到末尾、较新目录为空时仍跳到最后一个文件末尾（小时和 replica）、列目录失败不算空流、没有文件时第一个文件从头读、多个新文件按顺序逐个读完（含跨天）、同一路径重建和后继同时出现时依次读旧尾、重建文件、后继、replica 按会话切换、临时目录不抢游标、跟踪的文件被删时由切换记丢失；跟读线程端到端的测试改为启动后写入的行会读到。`accounts/runtime.rs`、`pending/mempool.rs` 两个依赖旧定位方式的测试同步去掉了用来触发定位的那一行。
+
+## 2026-11-06 基差录制加强：过期标记、时段报价、HL 官方腿（hyperliquid-trade 设计 000782 r1–r2，用户 11-06 定）
+
+- 起因：11-05 约 14:40–19:00Z bm 节点落后 25–60 分钟，录制照写半小时前的 HL 预言机、mark、盘口，与当下的币安指数、SIP 同行（SOXL 当天跌约 28%，“HL 预言机 − 币安指数”算出 ±800–1500 bp）；SIP 收盘后槽位仍是 `valid`，报价停在收盘时。用户：“我们这块服务要不要加强之类的哈。避免消费方误解。”“以及实时性不强的优先用和订阅官方api？而不是我们的”“好的你加强下吧”。
+- 节点与盘口（规则 1）：`snapshot.rs` 的进度规则抽成纯函数 `node_progress_withheld`、`book_progress_withheld`，快照的 `node_withheld`、`book_withheld_at` 改为调用它们，边界与文本不变。录制在行时刻（快照的 `computed_ms`）用同一规则：节点落后超过 `MAX_PROGRESS_LAG_MS`（5 s）时本拍所有行的 `node` 写 `{"code":"nodeProgress"}`，`node_progress` 照写；盘口（含录制自读的 HYPE 盘口）不可信或落后超过上限写对应 code。
+- 美股报价（规则 2）：HIP-3 行新增 `equity`，取 owner 快照在其发布时刻判定的美股腿（`session_quote` 的结果）：`{feed, bid, ask, quote_ms, received_ms}`，或 owner 的 code（`noSession`、`quoteOutsideSession`、`notConnected` 等）、`unlisted`。它与 HTTP `GET /extHip3ExternalQuotes` 共用 owner 的结果；WS `extHip3ExternalQuotes` 由独立的 5 ms quote tick 重新复制槽位、按自己的发布时刻判定，规则相同但不保证是同一份报价或状态（例如开盘前后 20 ms 内两边可能一边有效、一边 `quoteOutsideSession`，代码审查 000785 r1 P3），研究时不能把 `equity` 当作当时 WS 发出的事实。`venues` 里 SIP、BOATS 的原始读数不变、不做时段判定，且是稍后在 `read_ms` 判定的副本，不与 `equity` 同次采样。设计 r2 原写在录制里对自己的读数副本再调一次 `session_quote`；实现改读 owner 已判定的腿，规则与 code 相同，少一次判定。
+- 读数时刻（r1 P3）：采样器先复制本拍所有槽位（`LocalMarkFeeds::copies`、`FeedSubscriptions::copy`）和官方腿，再取 `read_ms`，在这一时刻判定 `venues` 与 `hl_official`。
+- HL 官方腿（规则 3）：新模块 `basis_record/hl_official.rs`，录制自有连接 `wss://api.hyperliquid.xyz/ws`，每个录制币订阅 `activeAssetCtx`（277 个，每连接 100 个，3 条连接）。
+  - 每行新增 `hl_official`：`{oracle, mark, mid, funding, received_ms}`（HL 原文，`midPx` 缺省记 null），或 `subscriptionRejected`（HL 的 `Invalid subscription` 原文，到重启，不再订阅）、`stopped`（契约错误，到重启）、`notConnected`（断线后不写旧连接的值，等节拍期间同样）、`notReceived`、`expired`（距最后一帧超过 5 s；实测约每秒一帧）。
+  - 节拍器 `ConnectPacer`：各分片共用，一次只建一条连接，上一次的订阅发完（或失败）后至少 7 s 才开始下一次，任意 60 s 至多 9 次建连、900 条订阅消息，低于 HL 每 IP 每分钟 2,000 条（r1 P2、r2 P3）。退避照旧叠加；不发 JSON ping，30 s 无帧重连。
+  - 指标沿用 `orderbook_basis_record_stream_{disconnects_total,stopped}`，`stream="hl_official"`。
+- 其他：`connection.rs` 的 `send`、`binance.rs` 的 `positive`/`signed_decimal` 供复用。范围外：录制自己的币安流断线后保留旧值（现状，靠 `received_ms` 离线判断）未改。
+- 测试：节点 5,000 ms 照写、5,001 ms 写 `nodeProgress`（`node_progress` 仍在）；盘口同理、HYPE 盘口同理；`equity` 的三种写法；官方腿用 bm 实测帧（BTC、无 `midPx` 的 xyz:SOXL、回显、拒订阅）解析、拒订阅只影响该币且跨重连保持、各类契约错误停流、状态矩阵（未连接、未收到、5,000/5,001 ms、断线不写旧值、停止）；277 个币分 100/100/77；节拍器在暂停时钟下 3 片 10 分钟反复快速断线、首片握手 9 s：相邻订阅批 ≥ 7 s、任意 60 s ≤ 900 条。`cargo test -p server --lib` 全部通过，`cargo clippy --all-targets` 对本批新代码无告警。没有运行 `cargo fmt`。

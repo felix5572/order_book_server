@@ -540,14 +540,18 @@ pub(crate) fn assemble(table: &Arc<CoinTable>, tick: &Tick<'_>, state: &mut Owne
 
 /// The node prices unavailable, or behind.
 fn node_withheld(tick: &Tick<'_>) -> Option<Withheld> {
-    let prices = match tick.node {
-        Ok(prices) => prices,
-        Err(reason) => return Some(Withheld::unavailable("node", reason.clone())),
-    };
-    let lag_ms = tick.now_ms.saturating_sub(prices.block_time_ms);
-    (lag_ms > MAX_PROGRESS_LAG_MS).then(|| {
-        Withheld::stale("nodeProgress", format!("the node state's block {} is {lag_ms} ms behind the local clock", prices.height))
-    })
+    match tick.node {
+        Ok(prices) => node_progress_withheld(prices.height, prices.block_time_ms, tick.now_ms),
+        Err(reason) => Some(Withheld::unavailable("node", reason.clone())),
+    }
+}
+
+/// The node state at block `height`, of block time `block_time_ms`, more than `MAX_PROGRESS_LAG_MS` behind the local
+/// clock at `now_ms`: the node leg's one rule, the basis record's too (hyperliquid-trade design 000782 r2 rule 1).
+pub(crate) fn node_progress_withheld(height: u64, block_time_ms: u64, now_ms: u64) -> Option<Withheld> {
+    let lag_ms = now_ms.saturating_sub(block_time_ms);
+    (lag_ms > MAX_PROGRESS_LAG_MS)
+        .then(|| Withheld::stale("nodeProgress", format!("the node state's block {height} is {lag_ms} ms behind the local clock")))
 }
 
 /// The book not yet read, withheld after a data loss, or behind the local clock at `now_ms`.
@@ -555,12 +559,18 @@ fn book_withheld_at(tick: &Tick<'_>, now_ms: u64) -> Option<Withheld> {
     let Some(book) = tick.book else {
         return Some(Withheld::unavailable("hlBook", "the HL book has no snapshot yet"));
     };
-    if !book.trusted {
-        return Some(Withheld::unavailable("hlBook", format!("the HL book is withheld after a data loss (height {})", book.height)));
+    book_progress_withheld(book.time, book.height, book.trusted, now_ms)
+}
+
+/// The book read at block `height`, of time `time_ms`, withheld after a data loss, or more than `MAX_PROGRESS_LAG_MS`
+/// behind the local clock at `now_ms`: the book's one rule, the basis record's too (design 000782 r2 rule 1).
+pub(crate) fn book_progress_withheld(time_ms: u64, height: u64, trusted: bool, now_ms: u64) -> Option<Withheld> {
+    if !trusted {
+        return Some(Withheld::unavailable("hlBook", format!("the HL book is withheld after a data loss (height {height})")));
     }
-    let lag_ms = now_ms.saturating_sub(book.time);
+    let lag_ms = now_ms.saturating_sub(time_ms);
     (lag_ms > MAX_PROGRESS_LAG_MS)
-        .then(|| Withheld::stale("bookProgress", format!("the HL book's block {} is {lag_ms} ms behind the local clock", book.height)))
+        .then(|| Withheld::stale("bookProgress", format!("the HL book's block {height} is {lag_ms} ms behind the local clock")))
 }
 
 /// What gates every main-dex coin's legs at this tick.

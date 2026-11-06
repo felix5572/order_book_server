@@ -319,13 +319,13 @@ fn subscribed(stream: &Stream, symbol: &str) -> Result<(), String> {
     if stream.symbols.contains(symbol) { Ok(()) } else { Err(format!("symbol {symbol} not subscribed")) }
 }
 
-fn positive(text: &str, what: &str) -> Result<VenuePrice, String> {
+pub(super) fn positive(text: &str, what: &str) -> Result<VenuePrice, String> {
     let price = VenuePrice::parse(text).map_err(|err| format!("{what} {text:?}: {err}"))?;
     if price.is_positive() { Ok(price) } else { Err(format!("{what} {text:?} not positive")) }
 }
 
 /// A decimal with an optional minus sign, as written.
-fn signed_decimal(text: &str, what: &str) -> Result<String, String> {
+pub(super) fn signed_decimal(text: &str, what: &str) -> Result<String, String> {
     VenuePrice::parse(text.strip_prefix('-').unwrap_or(text)).map_err(|err| format!("{what} {text:?}: {err}"))?;
     Ok(text.to_string())
 }

@@ -225,7 +225,7 @@ fn heartbeat_frame(heartbeat: &Heartbeat) -> Frame {
     }
 }
 
-async fn send(ws: &mut TcpWebSocket, label: &str, frame: Frame, within: Duration) -> Result<(), FeedError> {
+pub(crate) async fn send(ws: &mut TcpWebSocket, label: &str, frame: Frame, within: Duration) -> Result<(), FeedError> {
     match timeout(within, ws.send(frame)).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(err)) => Err(FeedError::Transient(format!("{label}: send: {err}"))),

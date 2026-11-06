@@ -4,14 +4,15 @@
 //! spot and Pyth's USDT/USD and USDC/USD - for research only: nothing reads it back, nothing is published.
 //!
 //! A sidecar: it reads the local marks' snapshots (a brief borrow, then a copy of the `Arc`) and feeds' readings, the
-//! HL book for HYPE alone, and its own Binance streams and Pyth poller; the files are written on a thread of their own
-//! behind a bounded queue. Whatever fails in it - a stream stopped, the disk full - fails the record only: the local
+//! HL book for HYPE alone, and its own Binance streams, HL official stream (`activeAssetCtx`, design 000782 r2) and
+//! Pyth poller; the files are written on a thread of their own behind a bounded queue. Whatever fails in it - a stream stopped, the disk full - fails the record only: the local
 //! marks, the quote tick and the book serve on.
 //!
 //! The 60- and 240-minute bases of the main dex are not windows here (no reader): the 10 s rows hold the books they
 //! are the medians of (design 000751 r2).
 
 pub(crate) mod binance;
+pub(crate) mod hl_official;
 pub(crate) mod pyth;
 pub(crate) mod row;
 pub(crate) mod writer;
@@ -30,6 +31,7 @@ use tokio::sync::watch;
 
 use self::{
     binance::{BinanceLatest, HYPE_SYMBOL},
+    hl_official::HlOfficialLatest,
     pyth::PythLatest,
     row::{GroupReading, HYPE, Inputs, Listed, Row},
     writer::{RecordWriter, Tick},
@@ -94,6 +96,8 @@ struct Plan {
     hip3_binance: FxHashMap<String, Listed>,
     /// The HIP-3 feeds' markets in their readings' order: Binance's `TradFi` contracts, then the SIP's and BOATS'.
     hip3_groups: Vec<(Feed, Markets)>,
+    /// Every recorded coin, whose `activeAssetCtx` HL's API streams: the sources', the HIP-3 channel's, HYPE.
+    official_coins: BTreeSet<String>,
 }
 
 /// A feed's markets in its reading's order (its partitions' markets, one after another).
@@ -127,8 +131,10 @@ impl Plan {
             .collect();
         let mut hip3_groups = Vec::new();
         let mut hip3_binance = FxHashMap::default();
+        let mut official_coins: BTreeSet<String> = feeds.sources.coins().map(str::to_string).chain([HYPE.to_string()]).collect();
         if let (Some(external), Some(group)) = (&feeds.hip3_external, feeds.hip3_external_feed()) {
             let markets = Markets::of(group);
+            official_coins.extend(external.coins.names().iter().cloned());
             for (index, coin) in external.coins.names().iter().enumerate() {
                 if let Some(listing) = external.coins.binance(index) {
                     hip3_binance.insert(coin.clone(), Listed { symbol: markets.symbols[listing.market].clone(), multiplier: listing.multiplier });
@@ -141,7 +147,7 @@ impl Plan {
                 hip3_groups.push((group.feed, Markets::of(group)));
             }
         }
-        Self { main_binance, hip3_binance, hip3_groups }
+        Self { main_binance, hip3_binance, hip3_groups, official_coins }
     }
 
     /// Every contract whose mark stream the record subscribes to: the sources' Binance perps and HYPEUSDT.
@@ -157,23 +163,25 @@ pub(crate) fn start(config: BasisRecordConfig, marks: &LocalMarks, book: impl Bo
     let plan = Plan::new(&marks.feeds);
     let mark_symbols = plan.mark_symbols();
     info!(
-        "Basis record: {} main-dex coins ({} with a Binance perp), {} HIP-3 Binance contracts and HYPE, every {} s to {} ({} days kept); {} Binance mark streams",
+        "Basis record: {} main-dex coins ({} with a Binance perp), {} HIP-3 Binance contracts and HYPE, every {} s to {} ({} days kept); {} Binance mark streams, {} HL activeAssetCtx subscriptions",
         marks.feeds.sources.coins().count(),
         plan.main_binance.len(),
         plan.hip3_binance.len(),
         TICK_MS / 1_000,
         config.dir.display(),
         config.days,
-        mark_symbols.len()
+        mark_symbols.len(),
+        plan.official_coins.len()
     );
     let writer = RecordWriter::spawn(config.dir, config.days, now_ms()).map_err(|err| format!("basis record writer thread: {err}"))?;
-    let sources = Sources { binance: binance::start(&mark_symbols), pyth: pyth::start(config.pyth_token) };
+    let sources = Sources { binance: binance::start(&mark_symbols), hl_official: hl_official::start(&plan.official_coins), pyth: pyth::start(config.pyth_token) };
     tokio::spawn(run_sampler(plan, Arc::clone(&marks.feeds), marks.subscribe(), book, sources, writer));
     Ok(())
 }
 
 struct Sources {
     binance: Arc<BinanceLatest>,
+    hl_official: Arc<HlOfficialLatest>,
     pyth: Arc<PythLatest>,
 }
 
@@ -192,19 +200,27 @@ async fn run_sampler(plan: Plan, feeds: Arc<LocalMarkFeeds>, mut snapshots: watc
             snapshot.table().book_coins().iter().enumerate().map(|(index, coin)| (coin.value(), index)).collect()
         });
         let hype_book = book.best_prices(&hype).await;
-        let now = now_ms();
-        let main_readings = feeds.readings(now);
-        let main_feeds = main_readings
-            .into_iter()
-            .map(|(feed, markets, projection)| GroupReading { feed, symbols: &markets.symbols, coins: &markets.coins, projection })
-            .collect();
-        let hip3_feeds = plan
+        // every source copied first, then judged at one time after (design 000782 r2): no value read after that time
+        let main_copies = feeds.copies();
+        // collected, not chained: each copy is taken before `read_ms`
+        #[allow(clippy::needless_collect)]
+        let hip3_copies: Vec<_> = plan
             .hip3_groups
             .iter()
             .filter_map(|(feed, markets)| {
                 let group = if *feed == Feed::HIP3_EXTERNAL { feeds.hip3_external_feed() } else { feeds.equity_feed(equity_feed(*feed)) }?;
-                Some(GroupReading { feed: *feed, symbols: &markets.symbols, coins: &markets.coins, projection: group.read(now) })
+                Some((*feed, markets, group.copy()))
             })
+            .collect();
+        let hl_official = sources.hl_official.copy();
+        let read_ms = now_ms();
+        let main_feeds = main_copies
+            .into_iter()
+            .map(|(feed, markets, copy)| GroupReading { feed, symbols: &markets.symbols, coins: &markets.coins, projection: copy.projection(read_ms) })
+            .collect();
+        let hip3_feeds = hip3_copies
+            .into_iter()
+            .map(|(feed, markets, copy)| GroupReading { feed, symbols: &markets.symbols, coins: &markets.coins, projection: copy.projection(read_ms) })
             .collect();
         let inputs = Inputs {
             snapshot: &snapshot,
@@ -216,6 +232,8 @@ async fn run_sampler(plan: Plan, feeds: Arc<LocalMarkFeeds>, mut snapshots: watc
             hype_book: hype_book.as_ref(),
             binance: &sources.binance,
             pyth: &sources.pyth,
+            hl_official: &hl_official,
+            read_ms,
         };
         let rows = row::rows(&inputs);
         BASIS_RECORD_TICKS_TOTAL.inc();
@@ -256,6 +274,7 @@ mod tests {
             main_binance: FxHashMap::from_iter([("BTC".to_string(), Listed { symbol: "BTCUSDT".into(), multiplier: VenuePrice::ONE })]),
             hip3_binance: FxHashMap::from_iter([("xyz:SNDK".to_string(), Listed { symbol: "SNDKUSDT".into(), multiplier: VenuePrice::ONE })]),
             hip3_groups: Vec::new(),
+            official_coins: BTreeSet::new(),
         };
         assert_eq!(plan.mark_symbols().into_iter().collect::<Vec<_>>(), ["BTCUSDT", "HYPEUSDT", "SNDKUSDT"]);
     }

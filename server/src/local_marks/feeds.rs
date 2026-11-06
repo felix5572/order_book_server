@@ -255,13 +255,20 @@ impl LocalMarkFeeds {
 
     /// Every feed's reading now, with its markets.
     pub(crate) fn readings(&self, now_ms: u64) -> Vec<(Feed, &FeedMarkets, FeedProjection)> {
-        self.subscriptions
-            .iter()
-            .map(|group| {
-                let markets = self.sources.markets(group.feed).unwrap_or_else(|| unreachable!("a subscription group per feed of the sources"));
-                (group.feed, markets, group.read(now_ms))
-            })
-            .collect()
+        self.groups().map(|(group, markets)| (group.feed, markets, group.read(now_ms))).collect()
+    }
+
+    /// Every feed's partitions as they stand, with its markets, their validity judged later (`FeedCopy::projection`):
+    /// the basis record's, copied before the time it judges them at (hyperliquid-trade design 000782 r2).
+    pub(crate) fn copies(&self) -> Vec<(Feed, &FeedMarkets, FeedCopy)> {
+        self.groups().map(|(group, markets)| (group.feed, markets, group.copy())).collect()
+    }
+
+    fn groups(&self) -> impl Iterator<Item = (&FeedSubscriptions, &FeedMarkets)> {
+        self.subscriptions.iter().map(|group| {
+            let markets = self.sources.markets(group.feed).unwrap_or_else(|| unreachable!("a subscription group per feed of the sources"));
+            (group, markets)
+        })
     }
 }
 

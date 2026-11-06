@@ -4,9 +4,16 @@
 //! Prices are decimal texts. A venue's prices are its own contract's, native - straight from the feeds' readings, as
 //! the venue wrote them - beside the listing's `px_multiplier` (HL price = multiplier × venue price; review 000751 r1
 //! P2): a reader multiplies to compare with HL, and the file explains itself without a later build's tables. HL's are
-//! its own: the book's best prices of the tick (1e-8) and the node's in the coin's price units. A value there is none
-//! of is `{"code", "detail"}` - why: withheld by the local marks, not received, a stopped source - never a zero or an
-//! older value; each value carries its own time, judged offline (the record only records).
+//! its own: the book's best prices of the tick (1e-8), the node's in the coin's price units, and HL's API's
+//! (`hl_official`). A value there is none of is `{"code", "detail"}` - why: withheld by the local marks, not received,
+//! a stopped source - never a zero or an older value.
+//!
+//! Where the local marks have a rule for a value's use, the record judges with that rule (hyperliquid-trade design
+//! 000782 r2; user 2026-11-06 "避免消费方误解"): the node's prices and the HL book are withheld past the snapshot's
+//! progress limit (`node_progress_withheld`, `book_progress_withheld`); a HIP-3 coin's `equity` is the US stock quote
+//! of the session as the owner's snapshot judged it at its publish time (`session_quote`; `GET /extHip3ExternalQuotes`'
+//! result, not the WS quote tick's, which judges its own copy at its own time), beside the SIP's and BOATS's raw
+//! readings in `venues`, judged later at `read_ms`. Other values carry their own times, judged offline.
 
 use std::collections::BTreeMap;
 
@@ -16,6 +23,7 @@ use serde::Serialize;
 use super::{
     Latest,
     binance::{BinanceLatest, BookTicker, HYPE_SYMBOL, MarkPrice, USDC_USDT_SYMBOL},
+    hl_official::{Absent, AssetCtx, HlOfficialCopy},
     pyth::{PythLatest, PythPrice},
 };
 use crate::{
@@ -23,11 +31,15 @@ use crate::{
     listeners::order_book::BestPricesAt,
     local_marks::{
         external_basis::ExternalBasis,
-        hip3::{external::Hip3ExternalBases, protocol::EquityFeed},
+        hip3::{
+            external::{Hip3ExternalBases, Hip3SourceLeg},
+            external_equity::Hip3EquityLeg,
+            protocol::EquityFeed,
+        },
         price::VenuePrice,
         prices_view::price,
         slot::{Entry, Validity},
-        snapshot::{CoinMarks, LocalLeg, LocalMarksSnapshot, Withheld},
+        snapshot::{CoinMarks, LocalLeg, LocalMarksSnapshot, Withheld, book_progress_withheld, node_progress_withheld},
         sources::Feed,
         subscriptions::FeedProjection,
     },
@@ -56,6 +68,10 @@ impl<T> Field<T> {
 
     fn withheld(withheld: &Withheld) -> Self {
         Self::missing(withheld.code, withheld.detail.clone())
+    }
+
+    fn absent(absent: Absent) -> Self {
+        Self::Missing { code: absent.code, detail: absent.detail }
     }
 
     fn of<S>(latest: Latest<S>, view: impl FnOnce(S) -> T) -> Self {
@@ -121,6 +137,27 @@ pub(crate) struct VenueView {
     event_ms: Option<u64>,
 }
 
+/// A HIP-3 coin's US stock quote of the session now (native, as Alpaca sent it): its feed, Alpaca's exchange time, our
+/// receipt time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct EquityView {
+    feed: &'static str,
+    bid: String,
+    ask: String,
+    quote_ms: u64,
+    received_ms: u64,
+}
+
+/// HL's API's `activeAssetCtx` of the coin, as HL wrote it (`midPx` `null` when HL leaves it out), our receipt time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct HlOfficialView {
+    oracle: String,
+    mark: String,
+    mid: Option<String>,
+    funding: String,
+    received_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub(crate) struct BasisView {
     ratio: f64,
@@ -166,9 +203,12 @@ pub(crate) struct Row {
     node_progress: Field<NodeProgressView>,
     hl_book: Field<BookView>,
     node: Field<NodeView>,
+    hl_official: Field<HlOfficialView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     local_mark: Option<Field<LocalMarkView>>,
     venues: Vec<VenueView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    equity: Option<Field<EquityView>>,
     bases: BTreeMap<String, Field<BasisView>>,
     binance: Field<BinanceView>,
     usdc_usdt: Field<SpotBookView>,
@@ -204,12 +244,18 @@ pub(crate) struct Inputs<'a> {
     pub(crate) hype_book: Option<&'a BestPricesAt>,
     pub(crate) binance: &'a BinanceLatest,
     pub(crate) pyth: &'a PythLatest,
+    /// HL's API's values, copied before `read_ms`.
+    pub(crate) hl_official: &'a HlOfficialCopy,
+    /// When the feeds' copies and `hl_official` are judged: taken after they were copied (design 000782 r2).
+    pub(crate) read_ms: u64,
 }
 
 /// The values every row carries.
 struct Common {
     t_ms: u64,
     node_progress: Field<NodeProgressView>,
+    /// The node state behind the progress limit at `t_ms`: every row's node prices withheld.
+    node_behind: Option<Withheld>,
     usdc_usdt: Field<SpotBookView>,
     pyth_usdt_usd: Field<PythView>,
     pyth_usdc_usd: Field<PythView>,
@@ -223,6 +269,7 @@ pub(crate) fn rows(inputs: &Inputs<'_>) -> Vec<Row> {
             Ok(progress) => Field::Known(NodeProgressView { height: progress.height, block_time_ms: progress.block_time_ms }),
             Err(reason) => Field::missing("node", reason.clone()),
         },
+        node_behind: snapshot.node.as_ref().ok().and_then(|progress| node_progress_withheld(progress.height, progress.block_time_ms, snapshot.computed_ms)),
         usdc_usdt: Field::of(inputs.binance.book(USDC_USDT_SYMBOL), |book: BookTicker| SpotBookView {
             bid: book.bid.to_string(),
             ask: book.ask.to_string(),
@@ -235,15 +282,15 @@ pub(crate) fn rows(inputs: &Inputs<'_>) -> Vec<Row> {
     let mut hip3_venues = venues_by_coin(&inputs.hip3_feeds);
     let mut rows: Vec<Row> = snapshot.coins().map(|(coin, marks)| main_row(inputs, &common, coin, marks, main_venues.remove(coin).unwrap_or_default())).collect();
     if let Some(external) = snapshot.hip3_external() {
-        for ((coin, _), bases) in snapshot.hip3_external_coins().zip(&external.bases) {
-            rows.push(hip3_row(inputs, &common, coin, bases, hip3_venues.remove(coin).unwrap_or_default()));
+        for ((coin, legs), bases) in snapshot.hip3_external_coins().zip(&external.bases) {
+            rows.push(hip3_row(inputs, &common, (coin, &legs.equity), bases, hip3_venues.remove(coin).unwrap_or_default()));
         }
     }
     rows.push(hype_row(inputs, &common));
     rows
 }
 
-fn row(common: &Common, coin: &str, dex: &str, hl_price_unit: &'static str) -> Row {
+fn row(inputs: &Inputs<'_>, common: &Common, coin: &str, dex: &str, hl_price_unit: &'static str) -> Row {
     Row {
         t_ms: common.t_ms,
         coin: coin.to_string(),
@@ -252,8 +299,10 @@ fn row(common: &Common, coin: &str, dex: &str, hl_price_unit: &'static str) -> R
         node_progress: common.node_progress.clone(),
         hl_book: Field::missing("unset", ""),
         node: Field::missing("unset", ""),
+        hl_official: inputs.hl_official.reading(coin, inputs.read_ms).map_or_else(Field::absent, |ctx| Field::Known(hl_official_view(ctx))),
         local_mark: None,
         venues: Vec::new(),
+        equity: None,
         bases: BTreeMap::new(),
         binance: Field::missing("noBinancePerp", "no Binance perp contract of the coin in the sources"),
         usdc_usdt: common.usdc_usdt.clone(),
@@ -269,17 +318,18 @@ fn main_row(inputs: &Inputs<'_>, common: &Common, coin: &str, marks: &CoinMarks,
         bases.insert(format!("perp_{}_10m", venue.venue.name()), basis(&venue.basis));
     }
     Row {
-        hl_book: book_view(snapshot.book_prices(), inputs.book_index.get(coin).copied()),
-        node: main_node(snapshot, coin),
+        hl_book: book_view(snapshot.book_prices(), inputs.book_index.get(coin).copied(), common.t_ms),
+        node: gated_node(common, || main_node(snapshot, coin)),
         local_mark: Some(marks.local.as_ref().map_or_else(Field::withheld, |leg| Field::Known(local_view(leg)))),
         venues,
         bases,
         binance: binance_view(inputs.binance, inputs.main_binance.get(coin)),
-        ..row(common, coin, "main", MAIN_UNIT)
+        ..row(inputs, common, coin, "main", MAIN_UNIT)
     }
 }
 
-fn hip3_row(inputs: &Inputs<'_>, common: &Common, coin: &str, bases: &Hip3ExternalBases, venues: Vec<VenueView>) -> Row {
+/// A HIP-3 coin's row; `coin` its name and the owner's US stock leg of it.
+fn hip3_row(inputs: &Inputs<'_>, common: &Common, (coin, equity): (&str, &Hip3SourceLeg<Hip3EquityLeg>), bases: &Hip3ExternalBases, venues: Vec<VenueView>) -> Row {
     let snapshot = inputs.snapshot;
     let unlisted = || Field::missing("unlisted", "the source's table lists no market of the coin");
     let mut out = BTreeMap::new();
@@ -298,12 +348,13 @@ fn hip3_row(inputs: &Inputs<'_>, common: &Common, coin: &str, bases: &Hip3Extern
     }
     let dex = coin.split_once(':').map_or(coin, |(dex, _)| dex);
     Row {
-        hl_book: book_view(snapshot.book_prices(), inputs.book_index.get(coin).copied()),
-        node: snapshot.hip3_node_state(coin).map_or_else(|| no_node(snapshot), |state| Field::Known(hip3_node(state))),
+        hl_book: book_view(snapshot.book_prices(), inputs.book_index.get(coin).copied(), common.t_ms),
+        node: gated_node(common, || snapshot.hip3_node_state(coin).map_or_else(|| no_node(snapshot), |state| Field::Known(hip3_node(state)))),
         venues,
+        equity: Some(equity_view(equity)),
         bases: out,
         binance: binance_view(inputs.binance, inputs.hip3_binance.get(coin)),
-        ..row(common, coin, dex, USDC_UNIT)
+        ..row(inputs, common, coin, dex, USDC_UNIT)
     }
 }
 
@@ -321,11 +372,11 @@ fn hype_row(inputs: &Inputs<'_>, common: &Common) -> Row {
         Latest::Stopped(_) => hype_venue("stopped"),
     };
     Row {
-        hl_book: book_view(inputs.hype_book, Some(0)),
-        node: main_node(inputs.snapshot, HYPE),
+        hl_book: book_view(inputs.hype_book, Some(0), common.t_ms),
+        node: gated_node(common, || main_node(inputs.snapshot, HYPE)),
         venues: vec![venue],
         binance: binance_view(inputs.binance, Some(&listed)),
-        ..row(common, HYPE, "main", USDC_UNIT)
+        ..row(inputs, common, HYPE, "main", USDC_UNIT)
     }
 }
 
@@ -374,11 +425,45 @@ fn basis(basis: &Result<ExternalBasis, Withheld>) -> Field<BasisView> {
     basis.as_ref().map_or_else(Field::withheld, |basis| Field::Known(BasisView { ratio: basis.ratio, samples: basis.samples }))
 }
 
-fn book_view(book: Option<&BestPricesAt>, index: Option<usize>) -> Field<BookView> {
+/// The coin's best prices in `book`, unless the book is withheld at `now_ms` by the snapshot's rule (design 000782 r2).
+fn book_view(book: Option<&BestPricesAt>, index: Option<usize>, now_ms: u64) -> Field<BookView> {
     let Some(book) = book else { return Field::missing("hlBook", "no book snapshot yet") };
+    if let Some(withheld) = book_progress_withheld(book.time, book.height, book.trusted, now_ms) {
+        return Field::withheld(&withheld);
+    }
     let Some((bid, ask)) = index.and_then(|index| book.prices.get(index)) else { return Field::missing("hlBook", "the coin is not in the book read") };
     let px = |side: &Option<crate::order_book::Px>| side.map(|px| ExactDecimal::from_units(px.value(), BOOK_DECIMALS).to_string());
     Field::Known(BookView { bid: px(bid), ask: px(ask), time_ms: book.time, height: book.height, trusted: book.trusted })
+}
+
+/// The coin's node prices, unless the node state is behind the progress limit (design 000782 r2 rule 1).
+fn gated_node(common: &Common, node: impl FnOnce() -> Field<NodeView>) -> Field<NodeView> {
+    common.node_behind.as_ref().map_or_else(node, Field::withheld)
+}
+
+/// The owner's US stock leg of the coin: the session's quote, or why there is none (the owner's codes).
+fn equity_view(leg: &Hip3SourceLeg<Hip3EquityLeg>) -> Field<EquityView> {
+    match leg {
+        Hip3SourceLeg::Unlisted => Field::missing("unlisted", "the SIP table lists no market of the coin"),
+        Hip3SourceLeg::Listed(Err(withheld)) => Field::withheld(withheld),
+        Hip3SourceLeg::Listed(Ok(leg)) => Field::Known(EquityView {
+            feed: leg.quote.feed.name(),
+            bid: leg.quote.quote.bid.to_string(),
+            ask: leg.quote.quote.ask.to_string(),
+            quote_ms: leg.quote.quote_ms,
+            received_ms: leg.quote.received_ms,
+        }),
+    }
+}
+
+fn hl_official_view(ctx: AssetCtx) -> HlOfficialView {
+    HlOfficialView {
+        oracle: ctx.oracle.to_string(),
+        mark: ctx.mark.to_string(),
+        mid: ctx.mid.map(|mid| mid.to_string()),
+        funding: ctx.funding,
+        received_ms: ctx.received_ms,
+    }
 }
 
 fn no_node(snapshot: &LocalMarksSnapshot) -> Field<NodeView> {
@@ -456,7 +541,10 @@ mod tests {
     use super::*;
     use crate::local_marks::{
         slot::Quote,
-        snapshot::tests::{NOW_MS, World},
+        snapshot::{
+            MAX_PROGRESS_LAG_MS,
+            tests::{NOW_MS, World},
+        },
         sources::{Kind, Venue},
     };
 
@@ -527,6 +615,7 @@ mod tests {
         binance.set_mark_for_test("BTCUSDT", mark("100002", "100001.5"));
         let pyth = PythLatest::new();
         let empty = FxHashMap::default();
+        let official = HlOfficialCopy::empty();
         let inputs = Inputs {
             snapshot: &snapshot,
             book_index: &book_index,
@@ -537,6 +626,8 @@ mod tests {
             hype_book: None,
             binance: &binance,
             pyth: &pyth,
+            hl_official: &official,
+            read_ms: NOW_MS,
         };
         let rows = rows(&inputs);
         assert_eq!(rows.iter().map(|row| row.coin.as_str()).collect::<Vec<_>>(), ["BTC", "ETH", "HYPE"]);
@@ -593,6 +684,7 @@ mod tests {
         binance.set_mark_for_test("SNDKUSDT", mark("1008.69584924", "1008.16911533"));
         let hip3_binance = FxHashMap::from_iter([("xyz:SNDK".to_string(), Listed { symbol: "SNDKUSDT".into(), multiplier: VenuePrice::ONE })]);
         let pyth = PythLatest::new();
+        let official = HlOfficialCopy::empty();
         let inputs = Inputs {
             snapshot: &snapshot,
             book_index: &empty,
@@ -603,9 +695,18 @@ mod tests {
             hype_book: None,
             binance: &binance,
             pyth: &pyth,
+            hl_official: &official,
+            read_ms: 1,
         };
-        let common = Common { t_ms: 1, node_progress: Field::missing("node", "x"), usdc_usdt: Field::missing("notReceived", ""), pyth_usdt_usd: Field::missing("notReceived", ""), pyth_usdc_usd: Field::missing("notReceived", "") };
-        let row = json(&hip3_row(&inputs, &common, "xyz:SNDK", &bases, Vec::new()));
+        let common = Common {
+            t_ms: 1,
+            node_progress: Field::missing("node", "x"),
+            node_behind: None,
+            usdc_usdt: Field::missing("notReceived", ""),
+            pyth_usdt_usd: Field::missing("notReceived", ""),
+            pyth_usdc_usd: Field::missing("notReceived", ""),
+        };
+        let row = json(&hip3_row(&inputs, &common, ("xyz:SNDK", &Hip3SourceLeg::Unlisted), &bases, Vec::new()));
         assert_eq!((row["dex"].as_str(), row["hl_price_unit"].as_str()), (Some("xyz"), Some("USDC")));
         assert_eq!(
             row["bases"],
@@ -621,5 +722,74 @@ mod tests {
         assert_eq!(row["hl_book"]["code"], "hlBook");
         assert_eq!(row["binance"]["index"], "1008.16911533");
         assert!(row.get("local_mark").is_none());
+    }
+
+    /// The rows of a tick at `now_ms` over the test world (BTC's node state, its book), HL's API's BTC as given.
+    fn world_rows(now_ms: u64, official: &HlOfficialCopy) -> Vec<serde_json::Value> {
+        let world = World::new();
+        let snapshot = world.snapshot(now_ms).with_book_prices(world.book.clone().map(Arc::new));
+        let book_index: FxHashMap<String, usize> = snapshot.table().book_coins().iter().enumerate().map(|(index, coin)| (coin.value(), index)).collect();
+        let (binance, pyth, empty) = (BinanceLatest::default(), PythLatest::new(), FxHashMap::default());
+        let inputs = Inputs {
+            snapshot: &snapshot,
+            book_index: &book_index,
+            main_feeds: Vec::new(),
+            hip3_feeds: Vec::new(),
+            main_binance: &empty,
+            hip3_binance: &empty,
+            hype_book: world.book.as_ref(),
+            binance: &binance,
+            pyth: &pyth,
+            hl_official: official,
+            read_ms: now_ms,
+        };
+        rows(&inputs).iter().map(json).collect()
+    }
+
+    /// Design 000782 r2 rule 1: the node's prices past the snapshot's progress limit are withheld in every row, the
+    /// progress itself still recorded; the book likewise by its own time (the test world: node block 500 ms, book 400 ms
+    /// behind `NOW_MS`).
+    #[test]
+    fn the_node_and_the_book_past_the_progress_limit_are_withheld() {
+        let official = HlOfficialCopy::empty();
+        let at_limit = world_rows(NOW_MS - 500 + MAX_PROGRESS_LAG_MS, &official);
+        assert!(at_limit[0]["node"]["oracle"].is_string(), "{}", at_limit[0]["node"]);
+        assert!(at_limit[0]["hl_book"]["bid"].is_string(), "{}", at_limit[0]["hl_book"]);
+        let behind = world_rows(NOW_MS - 500 + MAX_PROGRESS_LAG_MS + 1, &official);
+        for row in &behind {
+            assert_eq!(row["node"]["code"], "nodeProgress", "{}: {}", row["coin"], row["node"]);
+            assert_eq!(row["node_progress"], serde_json::json!({"height": 1_000, "block_time_ms": NOW_MS - 500}), "the progress itself recorded");
+        }
+        assert!(behind[0]["node"]["detail"].as_str().unwrap().contains("5001 ms behind"), "{}", behind[0]["node"]);
+        assert!(behind[0]["hl_book"]["bid"].is_string(), "the book 4,901 ms behind: still read");
+        let book_behind = world_rows(NOW_MS - 400 + MAX_PROGRESS_LAG_MS + 1, &official);
+        let (btc, hype) = (&book_behind[0], book_behind.last().unwrap());
+        assert_eq!((btc["hl_book"]["code"].as_str(), hype["hl_book"]["code"].as_str()), (Some("bookProgress"), Some("bookProgress")), "HYPE's own book too");
+    }
+
+    /// Design 000782 r2 rule 3: every row carries HL's API's values of its coin, or why there are none.
+    #[test]
+    fn every_row_carries_the_official_values() {
+        let ctx = AssetCtx { oracle: price("76247.2"), mark: price("76230.0"), mid: None, funding: "-0.0000125".into(), received_ms: NOW_MS - 900 };
+        let rows = world_rows(NOW_MS, &HlOfficialCopy::with("BTC", ctx));
+        assert_eq!(rows[0]["hl_official"], serde_json::json!({"oracle": "76247.2", "mark": "76230", "mid": null, "funding": "-0.0000125", "received_ms": NOW_MS - 900}));
+        assert_eq!(rows[1]["hl_official"]["code"], "notSubscribed", "{}", rows[1]["coin"]);
+        assert!(rows.iter().all(|row| row.get("equity").is_none()), "no US stock leg on the main dex");
+    }
+
+    /// Design 000782 r2 rule 2: a HIP-3 coin's `equity` is the owner's leg as it is: the session's quote, the owner's code
+    /// why not, or `unlisted`.
+    #[test]
+    fn the_equity_leg_is_the_owners() {
+        use crate::local_marks::{
+            hip3::external_equity::EquityQuote,
+            snapshot::Status,
+        };
+        let quote = EquityQuote { feed: EquityFeed::Boats, quote: Quote { bid: price("47.13"), ask: price("47.14") }, received_ms: 20, quote_ms: 19 };
+        let ready = Hip3SourceLeg::Listed(Ok(Hip3EquityLeg { quote, basis: Err(Withheld { status: Status::Unavailable, code: "externalBasisSamples", detail: "x".into() }) }));
+        assert_eq!(json(&equity_view(&ready)), serde_json::json!({"feed": "boats", "bid": "47.13", "ask": "47.14", "quote_ms": 19, "received_ms": 20}));
+        let outside = Withheld { status: Status::Unavailable, code: "quoteOutsideSession", detail: "the sip quote of xyz:SOXL stamped 1 ms is of Post".into() };
+        assert_eq!(json(&equity_view(&Hip3SourceLeg::Listed(Err(outside)))), serde_json::json!({"code": "quoteOutsideSession", "detail": "the sip quote of xyz:SOXL stamped 1 ms is of Post"}));
+        assert_eq!(json(&equity_view(&Hip3SourceLeg::Unlisted))["code"], "unlisted");
     }
 }
