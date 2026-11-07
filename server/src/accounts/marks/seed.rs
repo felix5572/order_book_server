@@ -207,7 +207,9 @@ struct WireNativeBook {
 #[derive(Debug, Deserialize)]
 struct WireUserState {
     /// (oid, order): every untriggered order of the user on the book (bm 1205940000: 92,750 stops, 289 trailing stops).
-    #[serde(rename = "U")]
+    /// Absent when there is none: from hardfork 111 a user state writes only its non-empty fields (bm 1212440000:
+    /// 47,376 main-dex states `U` alone, 25,260 `b` alone, 4,362 none).
+    #[serde(rename = "U", default)]
     untriggered: Vec<(u64, WireUntriggered)>,
 }
 
@@ -1110,6 +1112,21 @@ pub(crate) mod tests {
         let mut checkpoint: serde_json::Value = rmp_serde::from_slice(&fixture()).unwrap();
         edit(&mut checkpoint);
         MarkSeed::from_checkpoint(parse_checkpoint_bytes(&rmp_serde::to_vec(&checkpoint).unwrap()).unwrap()).unwrap()
+    }
+
+    /// Hardfork 111 (bm 1212440000): a user state writes only its non-empty fields; one without `U` has no untriggered
+    /// order, and a state with no field at all reads.
+    #[test]
+    fn a_user_state_without_untriggered_orders_omits_them() {
+        let omitted = seed_with(|checkpoint| {
+            let states = checkpoint["exchange"]["perp_dexs"][0]["books"][0]["user_states"].as_array_mut().unwrap();
+            for pair in states.iter_mut() {
+                pair[1].as_object_mut().unwrap().remove("U");
+            }
+            states.push(json!(["0x0000000000000000000000000000000000000001", {}]));
+        });
+        assert_eq!(omitted.native.trailing_stops, []);
+        assert_eq!(omitted.native.trailing_unread, []);
     }
 
     /// Batch 2n-1: the fixture's BTC book holds a stop (not read) and a trailing stop; a waiting one carries its
