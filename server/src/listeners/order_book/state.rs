@@ -116,7 +116,7 @@ impl UnprovenLevels {
             return;
         }
         let Some(levels) = self.levels.get_mut(coin) else { return };
-        levels.retain(|(side, px)| book.has_level(coin, *side, *px));
+        Self::keep_on_book(levels, book.as_ref().get(coin));
         if levels.is_empty() {
             self.levels.remove(coin);
         }
@@ -124,10 +124,22 @@ impl UnprovenLevels {
 
     /// Every coin's, at the cleanup's cadence: a level emptied by a crossing order's match too.
     fn forget_emptied(&mut self, book: &OrderBooks<InnerL4Order>) {
+        let books = book.as_ref();
         self.levels.retain(|coin, levels| {
-            levels.retain(|(side, px)| book.has_level(coin, *side, *px));
+            Self::keep_on_book(levels, books.get(coin));
             !levels.is_empty()
         });
+    }
+
+    /// Keeps the levels the coin's book still has, none without a book. The coin's book is found once, not for each
+    /// level: the search among the books compares coin names, and with thousands of levels marked it was most of both
+    /// passes (bm 2026-11-11: 7,382 levels over 1,221 books, the listener's cleanup about 0.8 ms each 1000 lines and
+    /// `has_level` its top symbol; the listener's one task tops out near 125k lines a second).
+    fn keep_on_book(levels: &mut Vec<(crate::order_book::Side, Px)>, coin_book: Option<&crate::order_book::OrderBook<InnerL4Order>>) {
+        match coin_book {
+            Some(coin_book) => levels.retain(|(side, px)| coin_book.has_level(*side, *px)),
+            None => levels.clear(),
+        }
     }
 
     /// The adds no waiting New diff came before: none can overtake it any more.
@@ -934,6 +946,37 @@ mod tests {
         state.unproven.mark((Coin::new("BTC"), crate::order_book::Side::Ask, Px::new(101)));
         assert_eq!(state.unproven_levels(), 1);
         assert!(!state.cleanup_stale_pending(), "nothing live cleared");
+        assert_eq!(state.unproven_levels(), 0);
+    }
+
+    /// The passes over the unproven levels find each coin's book once: a level stays while its book has it, and a
+    /// coin without a book keeps none - as each level asked of the books said before.
+    #[test]
+    fn unproven_levels_stay_only_while_their_coins_book_has_them() {
+        use crate::order_book::Side;
+        let mut state = empty_state();
+        state.track_unproven_levels();
+        // BTC rests a bid at 100.0; ETH has no book
+        state.apply_order_statuses_hft(status_batch_at(10, vec![make_order_status("BTC", 1, "open")])).unwrap();
+        state.apply_order_diffs_hft(diff_batch_at(10, vec![new_diff("BTC", 1)])).unwrap();
+        let resting = Px::parse_from_str("100.0").unwrap();
+        let marks = |state: &mut OrderBookState| {
+            for (coin, side, px) in [("BTC", Side::Bid, resting), ("BTC", Side::Ask, resting), ("BTC", Side::Bid, Px::new(7)), ("ETH", Side::Bid, resting)] {
+                state.unproven.mark((Coin::new(coin), side, px));
+            }
+        };
+        marks(&mut state);
+        state.unproven.forget_emptied_in(&state.order_book, &Coin::new("BTC"));
+        assert_eq!(state.unproven_in(&Coin::new("BTC")), [(Side::Bid, resting)], "the other side and the other price are not on the book");
+        assert_eq!(state.unproven_in(&Coin::new("ETH")), [(Side::Bid, resting)], "another coin's pass does not look at ETH");
+        state.unproven.forget_emptied_in(&state.order_book, &Coin::new("ETH"));
+        assert!(!state.unproven.holds(&Coin::new("ETH")), "no book: no level, the coin's entry gone");
+        marks(&mut state);
+        state.unproven.forget_emptied(&state.order_book);
+        assert_eq!(state.unproven_levels(), 1);
+        assert!(state.level_unproven("BTC", Side::Bid, resting) && !state.unproven.holds(&Coin::new("ETH")));
+        // the last order leaves: the book is evicted, its coin keeps no level
+        state.apply_order_diffs_hft(diff_batch_at(11, vec![make_order_diff("BTC", 1, OrderDiff::Remove)])).unwrap();
         assert_eq!(state.unproven_levels(), 0);
     }
 
